@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, and Stage 2.3 are complete. Stage 2.4 (lower ordinary expressions and control flow) is next.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, Stage 2.3, and all of Stage 2.4 are complete. Stage 2.5 (lower calls, trait evidence, and closures) is next.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -130,7 +130,7 @@ Completed:
 - Added focused coverage for every parameter pattern form, pattern-binding items (including at and propagation), all place operations, captured-cell and resource places, module binding/assignment/statement metadata, function body/result normalization, compile-time-only rejection, dangling-reference validation, and deterministic repeated lowering.
 - Verified after the `main` merge with `cargo fmt --all -- --check`, focused nominal-pattern and slice-iteration tests, `cargo test --workspace` (989 tests), and `git diff --check`.
 
-## Stage 2.4 - Lower Ordinary Expressions and Control Flow
+## Stage 2.4 - Lower Ordinary Expressions and Control Flow (Done)
 
 The focused implementation sequence is maintained in [STAGE_2_4_EXPRESSION_CONTROL_FLOW_PLAN.md](STAGE_2_4_EXPRESSION_CONTROL_FLOW_PLAN.md).
 
@@ -158,6 +158,8 @@ Progress:
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (63 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 - Step 7 lowered string templates and formatting selections. The checker now retains per-interpolation formatting metadata (checked value type, trait, method) and the standard formatter helper function IDs; `LoweredStringTemplate` preserves ordered decoded literals and lowers interpolations left-to-right with their checked selections. Lowering and validation diagnose missing formatter helpers or trait/method selections instead of allowing name-based rediscovery. Focused tests cover mixed display/debug templates, escapes, nominal and nested interpolations, generic interpolation types, helper resolution, and unreachable templates.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (65 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
+- Step 8 removed the transitional `Pending` kind and completed validation. Occurrence-lookup cardinality, logical true-index range, product step replay, repeated-product shape, literal payload validity, index dispatch completeness, interpolation trait/method ownership, and formatter helper catalog membership all diagnose. A new ownership traversal from every initializer and function body reports arena nodes unreachable through typed edges while treating memoized sharing as intentional. Added a complete coverage fixture for every owned and deferred family, consolidated checked-side-table transition comparisons, orphan-detection coverage, and formatter selections in the normalized repeated-lowering snapshot.
+- **Stage 2.4 is complete.** `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (68 tests), `cargo test --workspace` (1016 tests), and `git diff --check` pass. Stage 2.5 (lower calls, trait evidence, and closures) is next.
 
 Lower expression families in dependency order:
 

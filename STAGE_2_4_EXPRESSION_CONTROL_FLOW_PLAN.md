@@ -239,7 +239,7 @@ Completed:
 - New focused tests cover message templates with mixed display/debug and escaped literals, nominal and nested interpolation expressions, generic interpolation type parameters, helper selection resolution, and unreachable templates.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (65 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
-### Step 8 - Complete Validation, Coverage, and Transition Checks
+### Step 8 - Complete Validation, Coverage, and Transition Checks (Done)
 
 Expand validation to check:
 
@@ -259,7 +259,14 @@ Add a traversal that starts from every initializer and function body, visits eve
 
 Gate: focused tests and the complete workspace suite pass; every accepted ordinary expression is concrete, every later-stage family is explicitly deferred, and no accepted runtime expression is represented only by the legacy payload.
 
-After this step, mark Stage 2.4 complete in both plan files and identify Stage 2.5 as next.
+Completed:
+
+- The transitional `Pending` kind was removed entirely: every Stage 2.4 family now has a concrete lowered payload, and a family/expression mismatch is a defensive diagnostic. `classify_expression` plus the coverage classifier test keep the partition exhaustive.
+- Validation now checks occurrence-lookup cardinality (no aliased keys), logical true-index range, product step replay against the final layout with slot/name/expected-type agreement, repeated-product count/collapse/result-shape agreement, literal payload validity (integer range, finite/exact floats, C-string trailing NUL with no interior NUL), index dispatch method-type presence, interpolation trait/method catalog ownership, and formatter helper catalog membership.
+- Added an ownership traversal from every initializer and function body that visits every expression, pattern, place, block, and item through typed arena edges and reports nodes unreachable from any runtime root. Deliberate sharing through the occurrence memo is visited once, not reported.
+- New focused tests: a complete coverage fixture lowering every owned and deferred family concretely, consolidated transition comparisons of every payload against its checked side table, orphan detection, and the expanded normalized repeated-lowering snapshot including formatter selections.
+- `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (68 tests), `cargo test --workspace` (1016 tests), and `git diff --check` pass.
+- **Stage 2.4 is complete. Stage 2.5 (calls, trait evidence, and closures) is next.**
 
 ## Testing Matrix
 

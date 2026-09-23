@@ -244,9 +244,7 @@ pub(crate) struct ExpressionKey {
 }
 
 /// A Stage 2.4-owned expression family. Every ordinary syntax variant maps to
-/// exactly one family, and a family reaches its concrete lowered form no later
-/// than the step that owns it. `Pending` is the transitional marker for
-/// families whose concrete payload has not landed yet.
+/// exactly one family, and every family has a concrete lowered payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stage24Family {
     Block,
@@ -302,10 +300,6 @@ pub(crate) struct LoweredExpression {
 
 #[derive(Debug, Clone)]
 pub(crate) enum LoweredExpressionKind {
-    /// A Stage 2.4-owned family awaiting its concrete payload. Every ordinary
-    /// expression is classified explicitly, so no ambiguous `Unlowered`
-    /// placeholder exists; validation rejects leftovers once Stage 2.4 ends.
-    Pending(Stage24Family),
     /// Explicitly deferred to Stage 2.5 or Stage 2.6 with its owning family.
     Deferred(DeferredExpressionFamily),
     Block(BlockId),
@@ -570,7 +564,7 @@ pub(crate) struct LoweredAccess {
     pub kind: LoweredAccessKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LoweredAccessKind {
     /// Distinct representation or single-element distinct access.
     Representation { dereference: Vec<CheckedType> },
@@ -2264,9 +2258,8 @@ impl LoweredProgram {
     }
 
     /// Lowers the children and payload of one Stage 2.4-owned expression
-    /// family. Families whose concrete payload has not landed yet lower their
-    /// children and then stay `Pending` so traversal still visits every
-    /// reachable ordinary occurrence.
+    /// family. Every family has a concrete payload; a family/expression
+    /// mismatch is a defensive diagnostic.
     fn lower_ordinary_expression(
         &mut self,
         module: &TypedModule,
@@ -2275,7 +2268,6 @@ impl LoweredProgram {
         family: Stage24Family,
         expression: &Expression,
     ) -> Result<LoweredExpressionKind, Diagnostic> {
-        let pending = |family| LoweredExpressionKind::Pending(family);
         match (family, expression) {
             (Stage24Family::Block, Expression::Block(block)) => Ok(LoweredExpressionKind::Block(
                 self.lower_block(module, owner, context, block)?,
@@ -2334,7 +2326,13 @@ impl LoweredProgram {
             (Stage24Family::StringTemplate, Expression::StringTemplate(template)) => self
                 .lower_string_template(module, owner, context, template)
                 .map(LoweredExpressionKind::StringTemplate),
-            (family, _) => Ok(pending(family)),
+            _ => Err(Diagnostic::new(
+                expression.syntax().span.clone(),
+                format!(
+                    "lowered expression family {} does not match its syntax variant",
+                    family_name(family)
+                ),
+            )),
         }
     }
 
@@ -3266,7 +3264,9 @@ impl LoweredProgram {
         diagnostics.extend(self.types.validate("type"));
         diagnostics.extend(self.traits.validate("trait"));
         diagnostics.extend(self.trait_methods.validate("trait method"));
+        diagnostics.extend(self.validate_occurrence_lookups());
         diagnostics.extend(self.validate_arena_references());
+        diagnostics.extend(self.validate_ownership());
         diagnostics.extend(self.validate_modules_and_initializers());
         diagnostics.extend(self.validate_functions());
         diagnostics.extend(self.validate_symbols());
@@ -3320,12 +3320,56 @@ impl LoweredProgram {
                 ));
             }
             match &expression.kind {
-                LoweredExpressionKind::Pending(_)
-                | LoweredExpressionKind::Deferred(_)
-                | LoweredExpressionKind::Integer(_)
-                | LoweredExpressionKind::Float(_)
-                | LoweredExpressionKind::String(_)
-                | LoweredExpressionKind::CString(_) => {}
+                LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::String(_) => {}
+                LoweredExpressionKind::Integer(integer) => {
+                    let width = integer_literal_bit_width(integer.integer_type);
+                    let value_bits = if integer.integer_type.is_signed() {
+                        width - 1
+                    } else {
+                        width
+                    };
+                    if value_bits < 64 && integer.value > ((1_u64 << value_bits) - 1) {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            format!(
+                                "lowered integer payload {} does not fit in `{}`",
+                                integer.value,
+                                integer.integer_type.name()
+                            ),
+                        ));
+                    }
+                }
+                LoweredExpressionKind::Float(float) => {
+                    if !float.value.is_finite() {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "lowered float payload is not finite",
+                        ));
+                    }
+                    if float.float_type == FloatType::F32
+                        && f64::from(float.value as f32) != float.value
+                    {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "lowered F32 payload is not exactly representable",
+                        ));
+                    }
+                }
+                LoweredExpressionKind::CString(c_string) => {
+                    let trailing_nul = c_string.bytes.last() == Some(&0);
+                    if !trailing_nul {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "lowered C string payload has no trailing NUL",
+                        ));
+                    }
+                    if c_string.bytes[..c_string.bytes.len().saturating_sub(1)].contains(&0) {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "lowered C string payload contains an interior NUL",
+                        ));
+                    }
+                }
                 LoweredExpressionKind::Block(id) if !self.blocks.contains(*id) => diagnostics.push(
                     invalid_reference(&expression.origin, "expression", "block", id.index()),
                 ),
@@ -3388,6 +3432,7 @@ impl LoweredProgram {
                             ));
                         }
                     }
+                    self.validate_product_plan(expression, product, &mut diagnostics);
                 }
                 LoweredExpressionKind::RepeatedProduct(repeated) => {
                     if !self.expressions.contains(repeated.expression) {
@@ -3396,6 +3441,26 @@ impl LoweredProgram {
                             "repeated product",
                             "expression",
                             repeated.expression.index(),
+                        ));
+                    }
+                    if repeated.collapsed != (repeated.count == 1) {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "repeated product collapse marker disagrees with its count",
+                        ));
+                    }
+                    if !repeated.collapsed
+                        && let CheckedType::Product(product_type) = &expression.value_type
+                        && !product_type.variadic
+                        && product_type.elements.len() != repeated.count
+                    {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            format!(
+                                "repeated product count {} disagrees with its {} element result type",
+                                repeated.count,
+                                product_type.elements.len()
+                            ),
                         ));
                     }
                 }
@@ -3419,6 +3484,18 @@ impl LoweredProgram {
                                 child.index(),
                             ));
                         }
+                    }
+                    if let CheckedType::Sum(sum) = &logical.bool_type
+                        && logical.true_index >= sum.alternatives.len()
+                    {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            format!(
+                                "logical true alternative index {} is out of range for {} alternatives",
+                                logical.true_index,
+                                sum.alternatives.len()
+                            ),
+                        ));
                     }
                 }
                 LoweredExpressionKind::StringTemplate(template) => {
@@ -3477,6 +3554,12 @@ impl LoweredProgram {
                         diagnostics.push(Diagnostic::new(
                             expression.origin.span.clone(),
                             "index dispatch method does not belong to its recorded trait",
+                        ));
+                    }
+                    if index.method_type.is_none() {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "index dispatch has no instantiated method type for Stage 2.5",
                         ));
                     }
                     let base_type = self
@@ -3799,6 +3882,397 @@ impl LoweredProgram {
         diagnostics
     }
 
+    /// Checks that the occurrence lookup has exactly one entry per expression
+    /// node, so no two nodes alias the same occurrence key.
+    fn validate_occurrence_lookups(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let nodes = self.expressions.iter().count();
+        if self.expression_lookup.len() != nodes {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!(
+                    "expression occurrence lookup has {} entries for {nodes} nodes",
+                    self.expression_lookup.len()
+                ),
+            ));
+        }
+        diagnostics
+    }
+
+    /// Walks every arena node through typed arena edges starting from module
+    /// initializers and function bodies, and reports nodes that are not
+    /// reachable from any root. Deliberate sharing through the occurrence
+    /// memo is expected; the traversal visits each node once.
+    fn validate_ownership(&self) -> Vec<Diagnostic> {
+        let mut reached = Reachability::default();
+        for (_, initializer) in self.initializers.iter() {
+            self.visit_owned_block(initializer.body, &mut reached);
+        }
+        for (_, _, function) in self.functions.iter() {
+            self.visit_owned_pattern(function.parameter_pattern, &mut reached);
+            if let Some(body) = function.body {
+                self.visit_owned_block(body, &mut reached);
+            }
+            // A function body that is itself an expression (for example a
+            // block) was allocated through the dispatcher; the expression node
+            // is a root in its own right even though `LoweredFunction` only
+            // records the body block.
+            let key = ExpressionKey {
+                syntax: function.body_syntax,
+                owner: ExpressionOwner::Function(function.semantic_id),
+                context: ExpressionContext::Primary,
+            };
+            if let Some(body) = self.expression_lookup.get(&key) {
+                self.visit_owned_expression(*body, &mut reached);
+            }
+        }
+        let mut diagnostics = Vec::new();
+        for (id, expression) in self.expressions.iter() {
+            if !reached.expressions.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    format!(
+                        "lowered expression {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, pattern) in self.patterns.iter() {
+            if !reached.patterns.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    pattern.origin.span.clone(),
+                    format!(
+                        "lowered pattern {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, place) in self.places.iter() {
+            if !reached.places.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    place.origin.span.clone(),
+                    format!(
+                        "lowered place {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, block) in self.blocks.iter() {
+            if !reached.blocks.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    block.origin.span.clone(),
+                    format!(
+                        "lowered block {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, item) in self.items.iter() {
+            if !reached.items.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    item.origin.span.clone(),
+                    format!(
+                        "lowered item {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        diagnostics
+    }
+
+    fn visit_owned_block(&self, id: BlockId, reached: &mut Reachability) {
+        if !reached.blocks.insert(id) {
+            return;
+        }
+        let Some(block) = self.blocks.get(id) else {
+            return;
+        };
+        for item in &block.items {
+            self.visit_owned_item(*item, reached);
+        }
+        if let Some(result) = block.result {
+            self.visit_owned_expression(result, reached);
+        }
+    }
+
+    fn visit_owned_item(&self, id: ItemId, reached: &mut Reachability) {
+        if !reached.items.insert(id) {
+            return;
+        }
+        let Some(item) = self.items.get(id) else {
+            return;
+        };
+        match &item.kind {
+            LoweredItemKind::Binding(binding) => {
+                if let Some(value) = binding.value {
+                    self.visit_owned_expression(value, reached);
+                }
+            }
+            LoweredItemKind::PatternBinding(binding) => {
+                self.visit_owned_pattern(binding.pattern, reached);
+                self.visit_owned_expression(binding.value, reached);
+            }
+            LoweredItemKind::Assignment(assignment) => {
+                self.visit_owned_place(assignment.target, reached);
+                self.visit_owned_expression(assignment.value, reached);
+            }
+            LoweredItemKind::Return(item) => self.visit_owned_expression(item.value, reached),
+            LoweredItemKind::Break(item) => {
+                if let Some(value) = item.value {
+                    self.visit_owned_expression(value, reached);
+                }
+            }
+            LoweredItemKind::Continue(_) => {}
+            LoweredItemKind::Expression(statement) => {
+                self.visit_owned_expression(statement.expression, reached);
+            }
+        }
+    }
+
+    fn visit_owned_expression(&self, id: ExpressionId, reached: &mut Reachability) {
+        if !reached.expressions.insert(id) {
+            return;
+        }
+        let Some(expression) = self.expressions.get(id) else {
+            return;
+        };
+        match &expression.kind {
+            LoweredExpressionKind::Block(block) => self.visit_owned_block(*block, reached),
+            LoweredExpressionKind::Satisfies(satisfies) => {
+                self.visit_owned_expression(satisfies.value, reached);
+            }
+            LoweredExpressionKind::Logical(logical) => {
+                self.visit_owned_expression(logical.left, reached);
+                self.visit_owned_expression(logical.right, reached);
+            }
+            LoweredExpressionKind::Loop(loop_) => self.visit_owned_block(loop_.body, reached),
+            LoweredExpressionKind::Match(match_) => {
+                self.visit_owned_expression(match_.subject, reached);
+                for arm in &match_.arms {
+                    self.visit_owned_pattern(arm.pattern, reached);
+                    self.visit_owned_expression(arm.body, reached);
+                }
+            }
+            LoweredExpressionKind::Product(product) => {
+                for step in &product.steps {
+                    let child = match step {
+                        LoweredProductStep::Positional { expression, .. }
+                        | LoweredProductStep::Designated { expression, .. }
+                        | LoweredProductStep::PositionalSpread { expression, .. }
+                        | LoweredProductStep::NamedSpread { expression, .. }
+                        | LoweredProductStep::Default { expression, .. } => *expression,
+                    };
+                    self.visit_owned_expression(child, reached);
+                }
+            }
+            LoweredExpressionKind::RepeatedProduct(repeated) => {
+                self.visit_owned_expression(repeated.expression, reached);
+            }
+            LoweredExpressionKind::Access(access) => {
+                self.visit_owned_expression(access.base, reached);
+            }
+            LoweredExpressionKind::Index(index) => {
+                self.visit_owned_expression(index.base, reached);
+                self.visit_owned_expression(index.index, reached);
+            }
+            LoweredExpressionKind::StringTemplate(template) => {
+                for part in &template.parts {
+                    if let LoweredStringTemplatePart::Interpolation(interpolation) = part {
+                        self.visit_owned_expression(interpolation.expression, reached);
+                    }
+                }
+            }
+            LoweredExpressionKind::Deferred(_)
+            | LoweredExpressionKind::Name(_)
+            | LoweredExpressionKind::Integer(_)
+            | LoweredExpressionKind::Float(_)
+            | LoweredExpressionKind::String(_)
+            | LoweredExpressionKind::CString(_) => {}
+        }
+    }
+
+    fn visit_owned_pattern(&self, id: PatternId, reached: &mut Reachability) {
+        if !reached.patterns.insert(id) {
+            return;
+        }
+        let Some(pattern) = self.patterns.get(id) else {
+            return;
+        };
+        match &pattern.kind {
+            LoweredPatternKind::Wildcard | LoweredPatternKind::Literal { .. } => {}
+            LoweredPatternKind::Binding { .. } => {}
+            LoweredPatternKind::Product { elements, .. } => {
+                for element in elements {
+                    self.visit_owned_pattern(*element, reached);
+                }
+            }
+            LoweredPatternKind::Nominal { argument, .. } => {
+                self.visit_owned_pattern(*argument, reached);
+            }
+            LoweredPatternKind::At { binding, pattern } => {
+                self.visit_owned_pattern(*binding, reached);
+                self.visit_owned_pattern(*pattern, reached);
+            }
+        }
+    }
+
+    fn visit_owned_place(&self, id: PlaceId, reached: &mut Reachability) {
+        if !reached.places.insert(id) {
+            return;
+        }
+        let Some(place) = self.places.get(id) else {
+            return;
+        };
+        match &place.kind {
+            LoweredPlaceKind::Temporary { expression } => {
+                self.visit_owned_expression(*expression, reached);
+            }
+            LoweredPlaceKind::Dereference { reference, .. } => {
+                self.visit_owned_expression(*reference, reached);
+            }
+            LoweredPlaceKind::ProductElement { base, .. }
+            | LoweredPlaceKind::Representation { base } => {
+                self.visit_owned_place(*base, reached);
+            }
+            LoweredPlaceKind::Indexed { base, index } => {
+                self.visit_owned_place(*base, reached);
+                self.visit_owned_expression(*index, reached);
+            }
+            LoweredPlaceKind::Symbol { .. }
+            | LoweredPlaceKind::CapturedCell { .. }
+            | LoweredPlaceKind::Resource { .. } => {}
+        }
+    }
+
+    /// Replays a product's evaluation steps and checks that they fill exactly
+    /// the final checked slots with slot/name agreement.
+    fn validate_product_plan(
+        &self,
+        expression: &LoweredExpression,
+        product: &LoweredProduct,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let slots = product.final_type.elements.len();
+        if product.fields.len() != slots {
+            diagnostics.push(Diagnostic::new(
+                expression.origin.span.clone(),
+                format!(
+                    "product final layout has {} fields for {slots} slots",
+                    product.fields.len()
+                ),
+            ));
+        }
+        let mut replayed = vec![None; slots];
+        let check_slot = |diagnostics: &mut Vec<Diagnostic>, slot: usize| -> bool {
+            if slot >= slots {
+                diagnostics.push(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    format!("product step targets out-of-range slot {slot} of {slots}"),
+                ));
+                false
+            } else {
+                true
+            }
+        };
+        for step in &product.steps {
+            match step {
+                LoweredProductStep::Positional {
+                    expression: child,
+                    slot,
+                } => {
+                    if check_slot(diagnostics, *slot) {
+                        replayed[*slot] = Some(*child);
+                    }
+                }
+                LoweredProductStep::Designated {
+                    name,
+                    expression: child,
+                    slot,
+                } => {
+                    if check_slot(diagnostics, *slot) {
+                        if product.final_type.elements[*slot].name.as_deref() != Some(name.as_str())
+                        {
+                            diagnostics.push(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                format!(
+                                    "designated product step `{name}` targets a slot named `{:?}`",
+                                    product.final_type.elements[*slot].name
+                                ),
+                            ));
+                        }
+                        replayed[*slot] = Some(*child);
+                    }
+                }
+                LoweredProductStep::PositionalSpread {
+                    expression: child,
+                    mappings,
+                } => {
+                    for mapping in mappings {
+                        if check_slot(diagnostics, mapping.slot) {
+                            replayed[mapping.slot] = Some(*child);
+                        }
+                    }
+                }
+                LoweredProductStep::NamedSpread {
+                    expression: child,
+                    mappings,
+                } => {
+                    for mapping in mappings {
+                        if check_slot(diagnostics, mapping.slot) {
+                            if product.final_type.elements[mapping.slot].name.as_deref()
+                                != Some(mapping.name.as_str())
+                            {
+                                diagnostics.push(Diagnostic::new(
+                                    expression.origin.span.clone(),
+                                    format!(
+                                        "named product spread `{}` targets a slot named `{:?}`",
+                                        mapping.name,
+                                        product.final_type.elements[mapping.slot].name
+                                    ),
+                                ));
+                            }
+                            replayed[mapping.slot] = Some(*child);
+                        }
+                    }
+                }
+                LoweredProductStep::Default {
+                    slot,
+                    expression: child,
+                    expected,
+                } => {
+                    if check_slot(diagnostics, *slot) {
+                        let slot_type = &product.final_type.elements[*slot].value_type;
+                        if !types_agree(expected, slot_type) {
+                            diagnostics.push(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                format!(
+                                    "product default for slot {slot} expects `{expected}` but the slot is `{slot_type}`"
+                                ),
+                            ));
+                        }
+                        replayed[*slot] = Some(*child);
+                    }
+                }
+            }
+        }
+        if replayed.len() == product.fields.len()
+            && replayed
+                .iter()
+                .zip(&product.fields)
+                .any(|(replayed, field)| replayed != &Some(*field))
+        {
+            diagnostics.push(Diagnostic::new(
+                expression.origin.span.clone(),
+                "product final layout disagrees with its replayed evaluation steps",
+            ));
+        }
+    }
+
     /// Checks that an expression's checked coercion agrees with the node and,
     /// where statically available, with the child it coerces. Contextual
     /// default occurrences may carry a checked type from a different
@@ -4093,8 +4567,7 @@ impl LoweredProgram {
                     }
                 }
             }
-            LoweredExpressionKind::Pending(_)
-            | LoweredExpressionKind::Deferred(_)
+            LoweredExpressionKind::Deferred(_)
             | LoweredExpressionKind::Name(_)
             | LoweredExpressionKind::Integer(_)
             | LoweredExpressionKind::Float(_)
@@ -4684,6 +5157,27 @@ fn classify_expression(expression: &Expression) -> ExpressionDisposition {
     }
 }
 
+/// The stable name of a Stage 2.4 expression family.
+fn family_name(family: Stage24Family) -> &'static str {
+    match family {
+        Stage24Family::Block => "Block",
+        Stage24Family::Satisfies => "Satisfies",
+        Stage24Family::Match => "Match",
+        Stage24Family::Loop => "Loop",
+        Stage24Family::Product => "Product",
+        Stage24Family::RepeatedProduct => "RepeatedProduct",
+        Stage24Family::Access => "Access",
+        Stage24Family::Index => "Index",
+        Stage24Family::Logical => "Logical",
+        Stage24Family::Name => "Name",
+        Stage24Family::String => "String",
+        Stage24Family::StringTemplate => "StringTemplate",
+        Stage24Family::CString => "CString",
+        Stage24Family::Integer => "Integer",
+        Stage24Family::Float => "Float",
+    }
+}
+
 /// The stable name of an expression variant, used by coverage tests and
 /// diagnostics. The exhaustive match is the compile-time half of the
 /// coverage gate: adding an `Expression` variant fails to compile until it
@@ -4889,6 +5383,16 @@ fn integer_literal_bit_width(integer_type: IntegerType) -> u32 {
         IntegerType::I32 | IntegerType::U32 => 32,
         IntegerType::I64 | IntegerType::U64 | IntegerType::ISize | IntegerType::USize => 64,
     }
+}
+
+/// Nodes reached by the ownership traversal from runtime roots.
+#[derive(Default)]
+struct Reachability {
+    expressions: HashSet<ExpressionId>,
+    patterns: HashSet<PatternId>,
+    places: HashSet<PlaceId>,
+    blocks: HashSet<BlockId>,
+    items: HashSet<ItemId>,
 }
 
 /// Whether a checked dispatch argument and a lowered operand type agree well
@@ -5238,7 +5742,8 @@ mod tests {
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        assert!(program.validate().is_empty());
+        let validation = program.validate();
+        assert!(validation.is_empty(), "{validation:?}");
         program
     }
 
@@ -6468,6 +6973,7 @@ mod tests {
             lines.push(format!("item {item:?}"));
         }
         lines.push(format!("semantic ids {:?}", program.semantic_ids));
+        lines.push(format!("string formatting {:?}", program.string_formatting));
         lines
     }
 
@@ -6607,11 +7113,17 @@ mod tests {
         });
         program.expression_lookup.insert(key, id);
         let diagnostics = program.validate();
-        assert_eq!(diagnostics.len(), 1);
         assert!(
-            diagnostics[0]
-                .message
-                .contains("dangling block reference 4")
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("dangling block reference 4")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("not reachable")),
+            "the hand-built expression is unreachable"
         );
     }
 
@@ -6923,17 +7435,6 @@ mod tests {
             .collect()
     }
 
-    fn pending_families(program: &LoweredProgram) -> Vec<Stage24Family> {
-        program
-            .expressions
-            .iter()
-            .filter_map(|(_, expression)| match expression.kind {
-                LoweredExpressionKind::Pending(family) => Some(family),
-                _ => None,
-            })
-            .collect()
-    }
-
     #[test]
     fn dispatcher_defers_later_stage_families_explicitly() {
         let module = checked_program(concat!(
@@ -6959,12 +7460,6 @@ mod tests {
         assert!(deferred.contains(&DeferredExpressionFamily::Callable));
         assert!(deferred.contains(&DeferredExpressionFamily::Resource));
         assert!(deferred.contains(&DeferredExpressionFamily::Coroutine));
-        assert!(
-            !pending_families(&program)
-                .iter()
-                .any(|family| matches!(family, Stage24Family::Block)),
-            "blocks are lowered, not pending"
-        );
     }
 
     #[test]
@@ -8296,6 +8791,272 @@ mod tests {
             LoweredStringTemplatePart::Interpolation(interpolation)
                 if interpolation.value_type == CheckedType::I32
         )));
+    }
+
+    /// A fixture exercising every Stage 2.4-owned family, every later-stage
+    /// deferral, and the shared checked metadata the transition comparisons
+    /// read back.
+    fn complete_coverage_source() -> &'static str {
+        concat!(
+            "use std.cinterop.*\n",
+            "use std.coroutine.(Coroutine)\n",
+            "use std.fmt.Formatter\n",
+            "type Counter = ctor (value: I32)\n",
+            "type Ok T = ctor T\n",
+            "type IOError = ctor String\n",
+            "let integer: I32 = 42\n",
+            "let float: F64 = 1.5\n",
+            "let string: String = \"text\"\n",
+            "let cstring = c_string \"c\"\n",
+            "let named: I32 = integer\n",
+            "let product = (left: 1, right: 2)\n",
+            "let left = product.left\n",
+            "let values: (I32; 2) = (1, 2)\n",
+            "let element = values[0]\n",
+            "def logical = (flag: Bool) => flag && flag\n",
+            "def looping = () => loop { break 1 }\n",
+            "def matching = (value: Ok I32 | IOError) => match value {\n",
+            "  Ok inner => inner,\n",
+            "  other => 0,\n",
+            "}\n",
+            "def blocked = () => { let local: I32 = 1; local }\n",
+            "let coerced: I8 = 42 satisfies I8\n",
+            "let repeated: (I32; 3) = (7; 3)\n",
+            "let template: String = \"value=${integer}\"\n",
+            "def callable = (value: I32) => value\n",
+            "let applied = callable 1\n",
+            "let closure = callable\n",
+            "def task: () -> Coroutine{} I32 = () => coro { 7 }\n",
+            "def driver: () -> Coroutine{} I32 = () => coro { await (task ()) }\n",
+            "def increment: () ->{mut Counter} () = () => {\n",
+            "  (resource Counter).value = (resource Counter).value + 1\n",
+            "}\n",
+            "let mut counter = Counter (value: 0)\n",
+            "with mut Counter = counter { increment () }\n",
+        )
+    }
+
+    fn expression_kind_name(kind: &LoweredExpressionKind) -> String {
+        match kind {
+            LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable) => {
+                "deferred.callable".to_owned()
+            }
+            LoweredExpressionKind::Deferred(DeferredExpressionFamily::Resource) => {
+                "deferred.resource".to_owned()
+            }
+            LoweredExpressionKind::Deferred(DeferredExpressionFamily::Coroutine) => {
+                "deferred.coroutine".to_owned()
+            }
+            LoweredExpressionKind::Block(_) => "block".to_owned(),
+            LoweredExpressionKind::Name(_) => "name".to_owned(),
+            LoweredExpressionKind::Integer(_) => "integer".to_owned(),
+            LoweredExpressionKind::Float(_) => "float".to_owned(),
+            LoweredExpressionKind::String(_) => "string".to_owned(),
+            LoweredExpressionKind::CString(_) => "cstring".to_owned(),
+            LoweredExpressionKind::Access(_) => "access".to_owned(),
+            LoweredExpressionKind::Product(_) => "product".to_owned(),
+            LoweredExpressionKind::RepeatedProduct(_) => "repeated-product".to_owned(),
+            LoweredExpressionKind::Satisfies(_) => "satisfies".to_owned(),
+            LoweredExpressionKind::Logical(_) => "logical".to_owned(),
+            LoweredExpressionKind::Loop(_) => "loop".to_owned(),
+            LoweredExpressionKind::Match(_) => "match".to_owned(),
+            LoweredExpressionKind::Index(_) => "index".to_owned(),
+            LoweredExpressionKind::StringTemplate(_) => "string-template".to_owned(),
+        }
+    }
+
+    #[test]
+    fn coverage_fixture_lowers_every_family_concretely() {
+        let module = checked_program(complete_coverage_source());
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let mut kinds = program
+            .expressions
+            .iter()
+            .map(|(_, expression)| expression_kind_name(&expression.kind))
+            .collect::<Vec<_>>();
+        kinds.sort_unstable();
+        kinds.dedup();
+        for expected in [
+            "access",
+            "block",
+            "cstring",
+            "deferred.callable",
+            "deferred.coroutine",
+            "deferred.resource",
+            "float",
+            "index",
+            "integer",
+            "logical",
+            "loop",
+            "match",
+            "name",
+            "product",
+            "repeated-product",
+            "satisfies",
+            "string",
+            "string-template",
+        ] {
+            assert!(
+                kinds.iter().any(|kind| kind == expected),
+                "the coverage fixture should lower a `{expected}` expression; have {kinds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lowered_payloads_agree_with_checked_side_tables() {
+        let module = checked_program(complete_coverage_source());
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let formatting = module.string_formatting();
+        for (_, expression) in program.expressions.iter() {
+            let syntax = expression.key.syntax;
+            match &expression.kind {
+                LoweredExpressionKind::Integer(integer) => assert_eq!(
+                    module
+                        .type_of_expression(syntax)
+                        .and_then(CheckedType::integer_type),
+                    Some(integer.integer_type)
+                ),
+                LoweredExpressionKind::Float(float) => assert_eq!(
+                    module
+                        .type_of_expression(syntax)
+                        .and_then(CheckedType::float_type),
+                    Some(float.float_type)
+                ),
+                LoweredExpressionKind::Name(name) => assert_eq!(
+                    name.requires_initialization_check,
+                    module.resolved().requires_initialization_check(syntax)
+                ),
+                LoweredExpressionKind::Access(access) => {
+                    let checked = module
+                        .access_for(syntax)
+                        .expect("checked access metadata")
+                        .clone();
+                    let expected = match checked {
+                        CheckedAccess::Representation { dereference } => {
+                            LoweredAccessKind::Representation { dereference }
+                        }
+                        CheckedAccess::Product {
+                            index,
+                            dereference,
+                            slice,
+                            scalar,
+                        } => {
+                            if scalar {
+                                LoweredAccessKind::Scalar { dereference }
+                            } else if slice {
+                                LoweredAccessKind::Slice { index, dereference }
+                            } else {
+                                LoweredAccessKind::Product { index, dereference }
+                            }
+                        }
+                    };
+                    assert_eq!(access.kind, expected);
+                }
+                LoweredExpressionKind::Logical(logical) => assert_eq!(
+                    module.logical_for(syntax).map(|checked| &checked.bool_type),
+                    Some(&logical.bool_type)
+                ),
+                LoweredExpressionKind::Match(match_) => assert_eq!(
+                    module.match_for(syntax).map(|checked| &checked.source),
+                    Some(&match_.source)
+                ),
+                LoweredExpressionKind::Index(index) => {
+                    assert_eq!(module.trait_dispatch_for(syntax), Some(&index.dispatch))
+                }
+                LoweredExpressionKind::StringTemplate(template) => {
+                    for part in &template.parts {
+                        let LoweredStringTemplatePart::Interpolation(interpolation) = part else {
+                            continue;
+                        };
+                        let interpolation_syntax = program
+                            .expressions
+                            .get(interpolation.expression)
+                            .expect("interpolation value")
+                            .key
+                            .syntax;
+                        let checked = formatting
+                            .interpolations
+                            .get(&interpolation_syntax)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "interpolation {} has checked formatting metadata",
+                                    interpolation.expression.index()
+                                )
+                            });
+                        assert_eq!(interpolation.trait_id, checked.trait_id);
+                        assert_eq!(interpolation.method, checked.method);
+                        assert_eq!(interpolation.value_type, checked.value_type);
+                    }
+                }
+                LoweredExpressionKind::Product(product) => {
+                    if let Some(CheckedType::Product(checked)) = module.type_of_expression(syntax) {
+                        if !checked.variadic {
+                            assert_eq!(product.final_type.elements.len(), checked.elements.len());
+                        }
+                    }
+                }
+                LoweredExpressionKind::RepeatedProduct(repeated) => {
+                    let expected = match module.type_of_expression(syntax) {
+                        Some(CheckedType::Product(product)) if !product.variadic => {
+                            product.elements.len()
+                        }
+                        _ => 1,
+                    };
+                    assert_eq!(repeated.count, expected);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn validator_rejects_orphaned_arena_nodes() {
+        let module = checked_program("let value: I32 = 1\n");
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let key = ExpressionKey {
+            syntax: SyntaxId(99_999),
+            owner: ExpressionOwner::Module(ModuleId(99_999)),
+            context: ExpressionContext::Primary,
+        };
+        let id = program.expressions.push(LoweredExpression {
+            key,
+            origin: Origin::compiler(),
+            value_type: CheckedType::I32,
+            effects: CheckedEffectSet::default(),
+            coercion: None,
+            moved_symbols: Vec::new(),
+            kind: LoweredExpressionKind::Name(LoweredName {
+                symbol: SymbolId(0),
+                storage: SymbolStorage::ImmutableValue,
+                requires_initialization_check: false,
+                mutable: false,
+                captured_cell: false,
+                moved: false,
+                move_parameter: false,
+                singleton: None,
+            }),
+        });
+        program.expression_lookup.insert(key, id);
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("is not reachable from any runtime root")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
     }
 
     #[test]
