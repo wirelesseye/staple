@@ -499,13 +499,19 @@ pub(crate) struct LoweredNamedSpreadMapping {
 }
 
 /// A repeated product `(value; count)`. The element is evaluated exactly once;
-/// `collapsed` marks the `count == 1` representation that is the element
+/// `collapsed` marks the fixed `count == 1` representation that is the element
 /// itself rather than a single-field product.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredRepeatedProduct {
     pub expression: ExpressionId,
-    pub count: usize,
+    pub count: LoweredRepeatCount,
     pub collapsed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoweredRepeatCount {
+    Fixed(usize),
+    Symbolic(CheckedType),
 }
 
 /// An ordinary value read. The symbol catalog supplies the storage
@@ -3189,14 +3195,20 @@ impl LoweredProgram {
         repeated: &staple_syntax::RepeatedProductExpression,
     ) -> Result<LoweredRepeatedProduct, Diagnostic> {
         let expression = self.lower_expression(module, owner, context, &repeated.value)?;
-        let count = match module.type_of_expression(repeated.syntax.id).cloned() {
-            Some(CheckedType::Product(product)) if !product.variadic => product.elements.len(),
-            _ => 1,
+        let count = match module.type_of_expression(repeated.syntax.id) {
+            Some(CheckedType::Product(product)) if !product.variadic => {
+                LoweredRepeatCount::Fixed(product.elements.len())
+            }
+            Some(CheckedType::Array { count, .. }) => {
+                LoweredRepeatCount::Symbolic(count.as_ref().clone())
+            }
+            _ => LoweredRepeatCount::Fixed(1),
         };
+        let collapsed = count == LoweredRepeatCount::Fixed(1);
         Ok(LoweredRepeatedProduct {
             expression,
             count,
-            collapsed: count == 1,
+            collapsed,
         })
     }
 
@@ -3443,25 +3455,48 @@ impl LoweredProgram {
                             repeated.expression.index(),
                         ));
                     }
-                    if repeated.collapsed != (repeated.count == 1) {
+                    if repeated.collapsed != (repeated.count == LoweredRepeatCount::Fixed(1)) {
                         diagnostics.push(Diagnostic::new(
                             expression.origin.span.clone(),
                             "repeated product collapse marker disagrees with its count",
                         ));
                     }
-                    if !repeated.collapsed
-                        && let CheckedType::Product(product_type) = &expression.value_type
-                        && !product_type.variadic
-                        && product_type.elements.len() != repeated.count
-                    {
-                        diagnostics.push(Diagnostic::new(
-                            expression.origin.span.clone(),
-                            format!(
-                                "repeated product count {} disagrees with its {} element result type",
-                                repeated.count,
-                                product_type.elements.len()
-                            ),
-                        ));
+                    match (&repeated.count, &expression.value_type) {
+                        (LoweredRepeatCount::Fixed(count), CheckedType::Product(product_type))
+                            if !product_type.variadic && product_type.elements.len() != *count =>
+                        {
+                            diagnostics.push(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                format!(
+                                    "repeated product count {count} disagrees with its {} element result type",
+                                    product_type.elements.len()
+                                ),
+                            ));
+                        }
+                        (LoweredRepeatCount::Fixed(_), CheckedType::Array { .. }) => {
+                            diagnostics.push(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                "repeated product fixed count disagrees with its symbolic array result type",
+                            ));
+                        }
+                        (
+                            LoweredRepeatCount::Symbolic(count),
+                            CheckedType::Array { count: checked, .. },
+                        ) if count != checked.as_ref() => {
+                            diagnostics.push(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                "repeated product symbolic count disagrees with its result type",
+                            ));
+                        }
+                        (LoweredRepeatCount::Symbolic(_), ty)
+                            if !matches!(ty, CheckedType::Array { .. }) =>
+                        {
+                            diagnostics.push(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                "repeated product symbolic count requires an array result type",
+                            ));
+                        }
+                        _ => {}
                     }
                 }
                 LoweredExpressionKind::Satisfies(satisfies) => {
@@ -8088,17 +8123,65 @@ mod tests {
         assert_eq!(repeated.len(), 2);
         let three = repeated
             .iter()
-            .find(|repeated| repeated.count == 3)
+            .find(|repeated| repeated.count == LoweredRepeatCount::Fixed(3))
             .expect("count-three repeated product");
         assert!(!three.collapsed);
         let single = repeated
             .iter()
-            .find(|repeated| repeated.count == 1)
+            .find(|repeated| repeated.count == LoweredRepeatCount::Fixed(1))
             .expect("count-one repeated product");
         assert!(single.collapsed);
         for repeated in &repeated {
             assert!(program.expressions.contains(repeated.expression));
         }
+    }
+
+    #[test]
+    fn generic_repeated_product_retains_symbolic_count() {
+        let module = checked_program(concat!(
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+            "let repeated: (I32; 3) = repeat 7 3\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let (symbolic_id, symbolic) = program
+            .expressions
+            .iter()
+            .filter_map(|(id, expression)| match &expression.kind {
+                LoweredExpressionKind::RepeatedProduct(repeated) => {
+                    Some((id, expression, repeated))
+                }
+                _ => None,
+            })
+            .find(|(_, expression, _)| matches!(expression.value_type, CheckedType::Array { .. }))
+            .map(|(id, expression, repeated)| (id, (expression, repeated)))
+            .expect("generic repeated product");
+        let CheckedType::Array { count, .. } = &symbolic.0.value_type else {
+            unreachable!()
+        };
+        assert_eq!(
+            symbolic.1.count,
+            LoweredRepeatCount::Symbolic(count.as_ref().clone())
+        );
+        assert!(!symbolic.1.collapsed);
+
+        let expression = program
+            .expressions
+            .values
+            .get_mut(symbolic_id.index())
+            .unwrap();
+        let LoweredExpressionKind::RepeatedProduct(repeated) = &mut expression.kind else {
+            unreachable!()
+        };
+        repeated.count = LoweredRepeatCount::Fixed(1);
+        repeated.collapsed = true;
+        assert!(program.validate().iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("fixed count disagrees with its symbolic array result type")
+        }));
     }
 
     #[test]
@@ -9007,9 +9090,12 @@ mod tests {
                 LoweredExpressionKind::RepeatedProduct(repeated) => {
                     let expected = match module.type_of_expression(syntax) {
                         Some(CheckedType::Product(product)) if !product.variadic => {
-                            product.elements.len()
+                            LoweredRepeatCount::Fixed(product.elements.len())
                         }
-                        _ => 1,
+                        Some(CheckedType::Array { count, .. }) => {
+                            LoweredRepeatCount::Symbolic(count.as_ref().clone())
+                        }
+                        _ => LoweredRepeatCount::Fixed(1),
                     };
                     assert_eq!(repeated.count, expected);
                 }
