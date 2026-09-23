@@ -159,7 +159,7 @@ Completed:
 - New focused tests cover positional spread mappings plus contextual defaults and occurrence keys, designated slot resolution with later-wins overrides, named-spread field remapping and overrides, and repeated-product count/collapse.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (56 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
-### Step 4 - Finish Blocks, `satisfies`, and Coercion Boundaries
+### Step 4 - Finish Blocks, `satisfies`, and Coercion Boundaries (Done)
 
 - Recursively finalize every expression referenced by the `LoweredBlock` structures created in Stage 2.3.
 - Preserve block item order, tail-result identity, divergence, and cleanup boundaries.
@@ -169,7 +169,13 @@ Completed:
 
 Gate: no ordinary child reachable through a block or `satisfies` node remains generic `Unlowered`, and cleanup-relevant values retain the same ownership behavior as the legacy path.
 
-After this step, update both plan files.
+Completed:
+
+- `LoweredSatisfies` wraps the lowered value transparently; the parent header keeps the checked coercion.
+- Block results, expression statements, and all ordinary children are already finalized through the recursive dispatcher; block memoization keeps nested and function-body blocks shared.
+- Validation additions: a block result may never also appear as an expression-statement item; every expression statement's discard/drop fact must agree with its checked value type; `satisfies` coercion targets must agree with the parent checked type; `satisfies` and block coercion sources must agree with the coerced child type. (Block target comparison is skipped because a block may be re-checked while inference converges and can retain an earlier coercion.)
+- New focused tests cover the `satisfies` wrapper, integer widening, sum-injection and `Ref`-to-`Slice` coercions on deferred headers, nested block results, early return divergence, propagation-generated exits, and drop facts for discarded owned values.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (58 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
 ### Step 5 - Lower Logical Operators, Loops, and Matches
 

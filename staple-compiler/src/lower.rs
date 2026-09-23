@@ -321,6 +321,14 @@ pub(crate) enum LoweredExpressionKind {
     Access(LoweredAccess),
     Product(LoweredProduct),
     RepeatedProduct(LoweredRepeatedProduct),
+    /// `value satisfies Type`: a transparent wrapper. The parent expression
+    /// header remains authoritative for the checked coercion.
+    Satisfies(LoweredSatisfies),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredSatisfies {
+    pub value: ExpressionId,
 }
 
 /// A product construction plan. `steps` preserve source evaluation order
@@ -896,6 +904,7 @@ impl LoweredProgram {
         diagnostics.extend(self.snapshot_types(module));
         diagnostics.extend(self.snapshot_traits(module));
         diagnostics.extend(self.snapshot_semantic_ids(module));
+        diagnostics.extend(self.validate_runtime_metadata(module));
         diagnostics
     }
 
@@ -2138,8 +2147,8 @@ impl LoweredProgram {
                 self.lower_block(module, owner, context, block)?,
             )),
             (Stage24Family::Satisfies, Expression::Satisfies(satisfies)) => {
-                self.lower_expression(module, owner, context, &satisfies.value)?;
-                Ok(pending(Stage24Family::Satisfies))
+                let value = self.lower_expression(module, owner, context, &satisfies.value)?;
+                Ok(LoweredExpressionKind::Satisfies(LoweredSatisfies { value }))
             }
             (Stage24Family::Match, Expression::Match(match_)) => {
                 self.lower_expression(module, owner, context, &match_.subject)?;
@@ -2914,7 +2923,18 @@ impl LoweredProgram {
                         ));
                     }
                 }
+                LoweredExpressionKind::Satisfies(satisfies) => {
+                    if !self.expressions.contains(satisfies.value) {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "satisfies",
+                            "expression",
+                            satisfies.value.index(),
+                        ));
+                    }
+                }
             }
+            self.validate_expression_coercion(expression, &mut diagnostics);
         }
         for (_, pattern) in self.patterns.iter() {
             match &pattern.kind {
@@ -3152,6 +3172,99 @@ impl LoweredProgram {
                         self.expressions.contains(item.expression),
                     );
                 }
+            }
+        }
+        diagnostics
+    }
+
+    /// Checks that an expression's checked coercion agrees with the node and,
+    /// where statically available, with the child it coerces. Contextual
+    /// default occurrences may carry a checked type from a different
+    /// instantiation, so the child relation is only enforced for primary
+    /// occurrences.
+    fn validate_expression_coercion(
+        &self,
+        expression: &LoweredExpression,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let Some(coercion) = &expression.coercion else {
+            return;
+        };
+        if !matches!(expression.key.context, ExpressionContext::Primary) {
+            return;
+        }
+        // A block can be checked more than once while inference converges, so
+        // a recorded coercion may target a type the final expression pass
+        // replaced. `satisfies` is single-pass, so its target is authoritative.
+        if let LoweredExpressionKind::Satisfies(_) = expression.kind
+            && coercion.target != expression.value_type
+        {
+            diagnostics.push(Diagnostic::new(
+                expression.origin.span.clone(),
+                format!(
+                    "expression coercion target `{}` disagrees with its checked type `{}`",
+                    coercion.target, expression.value_type
+                ),
+            ));
+        }
+        let coerced_child = match &expression.kind {
+            LoweredExpressionKind::Satisfies(satisfies) => Some(satisfies.value),
+            LoweredExpressionKind::Block(block) => {
+                self.blocks.get(*block).and_then(|block| block.result)
+            }
+            _ => None,
+        };
+        if let Some(child) = coerced_child
+            && let Some(child) = self.expressions.get(child)
+            && child.value_type != coercion.source
+            && child.value_type != CheckedType::Never
+            && coercion.source != CheckedType::Never
+        {
+            diagnostics.push(Diagnostic::new(
+                expression.origin.span.clone(),
+                format!(
+                    "expression coercion source `{}` disagrees with its child type `{}`",
+                    coercion.source, child.value_type
+                ),
+            ));
+        }
+    }
+
+    /// Checks runtime metadata that requires the checked module: block results
+    /// are never also statement items, and expression-statement discard/drop
+    /// facts agree with the checked value type.
+    fn validate_runtime_metadata(&self, module: &TypedModule) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (_, block) in self.blocks.iter() {
+            let Some(result) = block.result else {
+                continue;
+            };
+            let duplicated = block.items.iter().any(|item| {
+                matches!(
+                    self.items.get(*item).map(|item| &item.kind),
+                    Some(LoweredItemKind::Expression(statement))
+                        if statement.expression == result
+                )
+            });
+            if duplicated {
+                diagnostics.push(Diagnostic::new(
+                    block.origin.span.clone(),
+                    "lowered block result is also present as a statement item",
+                ));
+            }
+        }
+        for (_, item) in self.items.iter() {
+            let LoweredItemKind::Expression(statement) = &item.kind else {
+                continue;
+            };
+            let Some(expression) = self.expressions.get(statement.expression) else {
+                continue;
+            };
+            if statement.drop_result != module.type_needs_drop(&expression.value_type) {
+                diagnostics.push(Diagnostic::new(
+                    item.origin.span.clone(),
+                    "expression statement discard/drop fact disagrees with its checked type",
+                ));
             }
         }
         diagnostics
@@ -6615,6 +6728,172 @@ mod tests {
     }
 
     #[test]
+    fn satisfies_lowers_as_wrapper_and_keeps_checked_coercions() {
+        let module = checked_program(concat!(
+            "use std.slice.Slice\n",
+            "let widened = 42 satisfies I8\n",
+            "let text: String = \"literal\"\n",
+            "type Ok T = ctor T\n",
+            "type IOError = ctor String\n",
+            "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
+            "let sum: Ok I32 | IOError = Ok (41)\n",
+            "let slice: Slice I32 = Ref 8\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let (expression, satisfies) = program
+            .expressions
+            .iter()
+            .find_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Satisfies(satisfies) => program
+                    .expressions
+                    .get(satisfies.value)
+                    .filter(|child| child.value_type == CheckedType::I8)
+                    .map(|_| (expression, satisfies)),
+                _ => None,
+            })
+            .expect("`42 satisfies I8` lowers as a wrapper");
+        assert_eq!(expression.value_type, CheckedType::I8);
+        let child = program
+            .expressions
+            .get(satisfies.value)
+            .expect("satisfies child");
+        assert_eq!(child.value_type, CheckedType::I8);
+        assert_eq!(
+            child.value_type,
+            module
+                .type_of_expression(child.key.syntax)
+                .cloned()
+                .expect("checked child type")
+        );
+
+        // Coercions recorded on deferred call headers (sum injection and
+        // `Ref` to `Slice`) are retained for Stage 2.5.
+        let coercions = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| expression.coercion.clone())
+            .collect::<Vec<_>>();
+        assert!(coercions.iter().any(|coercion| matches!(
+            &coercion.target,
+            CheckedType::Sum(sum) if sum.alternatives.len() == 2
+        )));
+        assert!(coercions.iter().any(|coercion| matches!(
+            (&coercion.source, &coercion.target),
+            (CheckedType::Ref(_), CheckedType::Slice(_))
+        )));
+    }
+
+    #[test]
+    fn blocks_preserve_nested_results_divergence_and_drop_facts() {
+        let module = checked_program(concat!(
+            "type Handle = ctor I32\n",
+            "impl Drop Handle { def drop = Handle value => () }\n",
+            "def nested = () => {\n",
+            "  let outer: I32 = { let inner: I32 = 1; inner + 2 }\n",
+            "  outer\n",
+            "}\n",
+            "def early = () => { return 1; 0 }\n",
+            "def discards = () => {\n",
+            "  Handle 1\n",
+            "  ()\n",
+            "}\n",
+            "type Ok T = ctor T\n",
+            "type IOError = ctor String\n",
+            "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
+            "def propagates = () => {\n",
+            "  let Ok(value)? = read()\n",
+            "  value\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        // A nested block is a reachable block expression whose items and
+        // result were lowered through the same arena.
+        let nested_blocks = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Block(block) => program
+                    .blocks
+                    .get(*block)
+                    .filter(|block| block.items.len() == 1 && block.result.is_some())
+                    .map(|_| ()),
+                _ => None,
+            })
+            .count();
+        assert!(nested_blocks >= 2, "function and nested blocks lower");
+
+        let (_, early) = lowered_function(&program, "early");
+        let block = body_block(&program, early);
+        assert!(block.items.iter().any(|item| matches!(
+            program.items.get(*item).map(|item| &item.kind),
+            Some(LoweredItemKind::Return(_))
+        )));
+        let result = block.result.expect("unreachable tail keeps its result");
+        assert!(!block.items.iter().any(|item| matches!(
+            program.items.get(*item).map(|item| &item.kind),
+            Some(LoweredItemKind::Expression(statement)) if statement.expression == result
+        )));
+
+        let (_, discards) = lowered_function(&program, "discards");
+        let block = body_block(&program, discards);
+        let discard = block
+            .items
+            .iter()
+            .find_map(
+                |item| match program.items.get(*item).map(|item| &item.kind) {
+                    Some(LoweredItemKind::Expression(statement)) => Some(statement),
+                    _ => None,
+                },
+            )
+            .expect("the discarded value lowers as an expression statement");
+        assert!(discard.drop_result, "owned discarded values need a drop");
+        let discarded = program
+            .expressions
+            .get(discard.expression)
+            .expect("discarded expression");
+        assert!(module.type_needs_drop(&discarded.value_type));
+
+        let (_, propagates) = lowered_function(&program, "propagates");
+        let block = body_block(&program, propagates);
+        let binding = block
+            .items
+            .iter()
+            .find_map(
+                |item| match program.items.get(*item).map(|item| &item.kind) {
+                    Some(LoweredItemKind::PatternBinding(binding)) => Some(binding),
+                    _ => None,
+                },
+            )
+            .expect("the propagation binding lowers");
+        assert!(binding.propagating);
+        assert!(binding.propagation.is_some());
+
+        // Every expression statement's discard/drop fact agrees with its
+        // checked value type.
+        for (_, item) in program.items.iter() {
+            let LoweredItemKind::Expression(statement) = &item.kind else {
+                continue;
+            };
+            let expression = program
+                .expressions
+                .get(statement.expression)
+                .expect("statement expression");
+            assert_eq!(
+                statement.drop_result,
+                module.type_needs_drop(&expression.value_type)
+            );
+        }
+    }
+
+    #[test]
     fn invalid_literal_payloads_are_lowering_diagnostics() {
         let module = checked_program("use std.cinterop.*\nlet value = c_string \"bad\\0value\"\n");
         let mut program = LoweredProgram::default();
@@ -6786,7 +7065,8 @@ mod tests {
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        assert!(program.validate().is_empty());
+        let validation = program.validate();
+        assert!(validation.is_empty(), "{validation:?}");
 
         let (_, patterns) = lowered_function(&program, "patterns");
         let items = body_items(&program, patterns);
