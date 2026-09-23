@@ -17,9 +17,9 @@ use staple_syntax::{Diagnostic, Expression, Item, Pattern, Span, SyntaxId};
 use crate::{
     BuiltinType, CheckedAccess, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
     CheckedFunctionalDependency, CheckedPropagation, CheckedResource, CheckedTraitBound,
-    CheckedTraitDispatch, CheckedType, DefinitionId, FunctionId, ModuleId, RecursiveConstruction,
-    ResolvedFunction, ResolvedModule, SourceModule, SymbolId, TraitId, TraitMethodId, TypeId,
-    TypeParameterId, TypedModule,
+    CheckedTraitDispatch, CheckedType, DefinitionId, FloatType, FunctionId, IntegerType, ModuleId,
+    RecursiveConstruction, ResolvedFunction, ResolvedModule, SourceModule, SymbolId, TraitId,
+    TraitMethodId, TypeId, TypeParameterId, TypedModule,
 };
 
 macro_rules! arena_id {
@@ -309,6 +309,90 @@ pub(crate) enum LoweredExpressionKind {
     /// Explicitly deferred to Stage 2.5 or Stage 2.6 with its owning family.
     Deferred(DeferredExpressionFamily),
     Block(BlockId),
+    /// An ordinary value read: a local, parameter, global, mutable cell,
+    /// captured cell, or singleton. Callable-valued names and constructors are
+    /// deferred instead of appearing here.
+    Name(LoweredName),
+    Integer(LoweredInteger),
+    Float(LoweredFloat),
+    String(LoweredString),
+    CString(LoweredCString),
+    /// A structural representation, product, slice, or scalar access.
+    Access(LoweredAccess),
+}
+
+/// An ordinary value read. The symbol catalog supplies the storage
+/// classification; initialization checking, movement, and singleton identity
+/// are copied from the checked occurrence.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredName {
+    pub symbol: SymbolId,
+    pub storage: SymbolStorage,
+    pub requires_initialization_check: bool,
+    /// The symbol's storage is mutable and reads must go through its cell.
+    pub mutable: bool,
+    /// The symbol is reached through a shared capture cell.
+    pub captured_cell: bool,
+    /// This occurrence transfers the symbol's value.
+    pub moved: bool,
+    /// The symbol is a `move`-marked parameter.
+    pub move_parameter: bool,
+    /// Singleton type identity when the name denotes a singleton value.
+    pub singleton: Option<TypeId>,
+}
+
+/// A checked integer literal. The magnitude is parsed once and validated
+/// against the selected scalar type at lowering time.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredInteger {
+    pub value: u64,
+    pub integer_type: IntegerType,
+}
+
+/// A checked float literal with the exact finite value selected by checking.
+/// `F32` literals are stored widened to `f64` exactly as the backend does.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredFloat {
+    pub value: f64,
+    pub float_type: FloatType,
+}
+
+/// A string literal decoded to UTF-8 once during lowering.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredString {
+    pub value: String,
+}
+
+/// A C string literal decoded once. `bytes` includes the required trailing
+/// NUL and never contains an interior NUL.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredCString {
+    pub bytes: Vec<u8>,
+}
+
+/// A structural access with its base expression and checked dereference path.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredAccess {
+    pub base: ExpressionId,
+    pub kind: LoweredAccessKind,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LoweredAccessKind {
+    /// Distinct representation or single-element distinct access.
+    Representation { dereference: Vec<CheckedType> },
+    /// Element `index` of a fixed product, optionally behind `Ref` payloads.
+    Product {
+        index: usize,
+        dereference: Vec<CheckedType>,
+    },
+    /// Element `index` of a `Slice`, bounds-checked at runtime.
+    Slice {
+        index: usize,
+        dereference: Vec<CheckedType>,
+    },
+    /// The single-element shortcut, read directly after any dereference.
+    Scalar { dereference: Vec<CheckedType> },
 }
 
 /// A source pattern with its checked type and lowered children. Patterns are
@@ -730,10 +814,12 @@ pub(crate) struct LoweredProgram {
 
 impl LoweredProgram {
     /// Copies deterministic declaration metadata out of checked compiler state.
+    /// Symbols are snapshotted first so expression lowering can read storage
+    /// facts from the catalog instead of the resolver.
     fn snapshot(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
-        let mut diagnostics = self.snapshot_modules(module);
+        let mut diagnostics = self.snapshot_symbols(module);
+        diagnostics.extend(self.snapshot_modules(module));
         diagnostics.extend(self.snapshot_functions(module));
-        diagnostics.extend(self.snapshot_symbols(module));
         diagnostics.extend(self.snapshot_types(module));
         diagnostics.extend(self.snapshot_traits(module));
         diagnostics.extend(self.snapshot_semantic_ids(module));
@@ -1986,9 +2072,34 @@ impl LoweredProgram {
                 Ok(pending(Stage24Family::RepeatedProduct))
             }
             (Stage24Family::Access, Expression::Access(access)) => {
-                self.lower_expression(module, owner, context, &access.value)?;
-                Ok(pending(Stage24Family::Access))
+                self.lower_access(module, owner, context, access)
             }
+            (Stage24Family::Name, Expression::Name(name)) => {
+                let Some(symbol) = module.symbol_for(name.syntax.id) else {
+                    return Err(Diagnostic::new(
+                        name.syntax.span.clone(),
+                        format!(
+                            "cannot lower name `{}` without a resolved symbol",
+                            name.name
+                        ),
+                    ));
+                };
+                self.lower_name(module, name.syntax.id, name.syntax.span.clone(), symbol)
+            }
+            (Stage24Family::Integer, Expression::Integer(integer)) => self
+                .lower_integer(module, integer)
+                .map(LoweredExpressionKind::Integer),
+            (Stage24Family::Float, Expression::Float(float)) => self
+                .lower_float(module, float)
+                .map(LoweredExpressionKind::Float),
+            (Stage24Family::String, Expression::String(string)) => {
+                let value = staple_syntax::string_literal::decode(&string.literal)
+                    .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
+                Ok(LoweredExpressionKind::String(LoweredString { value }))
+            }
+            (Stage24Family::CString, Expression::CString(string)) => self
+                .lower_c_string(string)
+                .map(LoweredExpressionKind::CString),
             (Stage24Family::Index, Expression::Index(index)) => {
                 self.lower_expression(module, owner, context, &index.value)?;
                 self.lower_expression(module, owner, context, &index.index)?;
@@ -2009,6 +2120,184 @@ impl LoweredProgram {
             }
             (family, _) => Ok(pending(family)),
         }
+    }
+
+    /// Lowers a symbol-selected name occurrence. Functions, constructors, and
+    /// other callable values are explicitly deferred to Stage 2.5; singleton
+    /// values record their identity and remain ordinary reads.
+    fn lower_name(
+        &mut self,
+        module: &TypedModule,
+        syntax: SyntaxId,
+        span: Span,
+        symbol: SymbolId,
+    ) -> Result<LoweredExpressionKind, Diagnostic> {
+        let resolved = module.resolved();
+        // A name or companion selector that the checker resolved to a trait
+        // method is a first-class callable value; Stage 2.5 owns its closure
+        // construction and evidence.
+        if module.trait_dispatch_for(syntax).is_some() {
+            return Ok(LoweredExpressionKind::Deferred(
+                DeferredExpressionFamily::Callable,
+            ));
+        }
+        if compile_time_only_symbol(module, symbol) {
+            return Err(Diagnostic::new(
+                span,
+                format!("compile-time-only symbol {symbol:?} reached lowering as a runtime value"),
+            ));
+        }
+        if resolved.constructor_type(symbol).is_some()
+            || module.function_for_symbol(symbol).is_some()
+        {
+            return Ok(LoweredExpressionKind::Deferred(
+                DeferredExpressionFamily::Callable,
+            ));
+        }
+        let Some(catalog) = self.symbols.get(symbol) else {
+            return Err(Diagnostic::new(
+                span,
+                format!("symbol {symbol:?} is missing from the lowered symbol catalog"),
+            ));
+        };
+        Ok(LoweredExpressionKind::Name(LoweredName {
+            symbol,
+            storage: catalog.storage,
+            requires_initialization_check: resolved.requires_initialization_check(syntax),
+            mutable: module.has_mutable_storage(symbol),
+            captured_cell: catalog.captured_cell,
+            moved: module.moved_symbols(syntax).any(|moved| moved == symbol),
+            move_parameter: catalog.move_parameter,
+            singleton: resolved.singleton_type(symbol),
+        }))
+    }
+
+    /// Lowers a structural access. A symbol-selected access (a singleton or a
+    /// companion/function value) lowers like a name instead of reading a base
+    /// expression, matching the checked access metadata.
+    fn lower_access(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        access: &staple_syntax::AccessExpression,
+    ) -> Result<LoweredExpressionKind, Diagnostic> {
+        if module.trait_dispatch_for(access.syntax.id).is_some() {
+            return Ok(LoweredExpressionKind::Deferred(
+                DeferredExpressionFamily::Callable,
+            ));
+        }
+        if let Some(symbol) = module.symbol_for(access.syntax.id) {
+            return self.lower_name(module, access.syntax.id, access.syntax.span.clone(), symbol);
+        }
+        let Some(checked) = module.access_for(access.syntax.id).cloned() else {
+            return Err(Diagnostic::new(
+                access.syntax.span.clone(),
+                "cannot lower an access without checked access metadata",
+            ));
+        };
+        let base = self.lower_expression(module, owner, context, &access.value)?;
+        let kind = match checked {
+            CheckedAccess::Representation { dereference } => {
+                LoweredAccessKind::Representation { dereference }
+            }
+            CheckedAccess::Product {
+                index,
+                dereference,
+                slice,
+                scalar,
+            } => {
+                if scalar {
+                    LoweredAccessKind::Scalar { dereference }
+                } else if slice {
+                    LoweredAccessKind::Slice { index, dereference }
+                } else {
+                    LoweredAccessKind::Product { index, dereference }
+                }
+            }
+        };
+        Ok(LoweredExpressionKind::Access(LoweredAccess { base, kind }))
+    }
+
+    fn lower_integer(
+        &self,
+        module: &TypedModule,
+        integer: &staple_syntax::IntegerExpression,
+    ) -> Result<LoweredInteger, Diagnostic> {
+        let value = integer.literal.parse::<u64>().map_err(|_| {
+            Diagnostic::new(
+                integer.syntax.span.clone(),
+                format!("integer literal `{}` is too large", integer.literal),
+            )
+        })?;
+        let integer_type = module
+            .type_of_expression(integer.syntax.id)
+            .and_then(CheckedType::integer_type)
+            .unwrap_or(IntegerType::I32);
+        let width = integer_literal_bit_width(integer_type);
+        let value_bits = if integer_type.is_signed() {
+            width - 1
+        } else {
+            width
+        };
+        if value_bits < 64 && value > ((1_u64 << value_bits) - 1) {
+            return Err(Diagnostic::new(
+                integer.syntax.span.clone(),
+                format!(
+                    "integer literal `{}` does not fit in `{}`",
+                    integer.literal,
+                    integer_type.name()
+                ),
+            ));
+        }
+        Ok(LoweredInteger {
+            value,
+            integer_type,
+        })
+    }
+
+    fn lower_float(
+        &self,
+        module: &TypedModule,
+        float: &staple_syntax::FloatExpression,
+    ) -> Result<LoweredFloat, Diagnostic> {
+        let float_type = module
+            .type_of_expression(float.syntax.id)
+            .and_then(CheckedType::float_type)
+            .unwrap_or(FloatType::F64);
+        let value = match float_type {
+            FloatType::F32 => float.literal.parse::<f32>().map(f64::from),
+            FloatType::F64 => float.literal.parse::<f64>(),
+        }
+        .map_err(|_| Diagnostic::new(float.syntax.span.clone(), "invalid float literal"))?;
+        if !value.is_finite() {
+            return Err(Diagnostic::new(
+                float.syntax.span.clone(),
+                format!(
+                    "float literal `{}` does not fit in `{}`",
+                    float.literal,
+                    float_type.name()
+                ),
+            ));
+        }
+        Ok(LoweredFloat { value, float_type })
+    }
+
+    fn lower_c_string(
+        &self,
+        string: &staple_syntax::CStringExpression,
+    ) -> Result<LoweredCString, Diagnostic> {
+        let value = staple_syntax::string_literal::decode(&string.literal)
+            .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
+        if value.as_bytes().contains(&0) {
+            return Err(Diagnostic::new(
+                string.syntax.span.clone(),
+                "C string literals cannot contain an interior NUL byte",
+            ));
+        }
+        let mut bytes = value.into_bytes();
+        bytes.push(0);
+        Ok(LoweredCString { bytes })
     }
 
     fn expression_needs_drop(&self, module: &TypedModule, expression: ExpressionId) -> bool {
@@ -2050,12 +2339,47 @@ impl LoweredProgram {
                     ),
                 ));
             }
-            match expression.kind {
-                LoweredExpressionKind::Pending(_) | LoweredExpressionKind::Deferred(_) => {}
-                LoweredExpressionKind::Block(id) if !self.blocks.contains(id) => diagnostics.push(
+            match &expression.kind {
+                LoweredExpressionKind::Pending(_)
+                | LoweredExpressionKind::Deferred(_)
+                | LoweredExpressionKind::Integer(_)
+                | LoweredExpressionKind::Float(_)
+                | LoweredExpressionKind::String(_)
+                | LoweredExpressionKind::CString(_) => {}
+                LoweredExpressionKind::Block(id) if !self.blocks.contains(*id) => diagnostics.push(
                     invalid_reference(&expression.origin, "expression", "block", id.index()),
                 ),
                 LoweredExpressionKind::Block(_) => {}
+                LoweredExpressionKind::Name(name) => {
+                    if self.symbols.get(name.symbol).is_none() {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "name",
+                            "symbol",
+                            name.symbol.0,
+                        ));
+                    }
+                    if let Some(singleton) = name.singleton
+                        && self.types.get(singleton).is_none()
+                    {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "name",
+                            "type",
+                            singleton.0,
+                        ));
+                    }
+                }
+                LoweredExpressionKind::Access(access) => {
+                    if !self.expressions.contains(access.base) {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "access",
+                            "expression",
+                            access.base.index(),
+                        ));
+                    }
+                }
             }
         }
         for (_, pattern) in self.patterns.iter() {
@@ -3001,14 +3325,16 @@ fn nominal_type_id(value_type: &CheckedType) -> Option<TypeId> {
     }
 }
 
-/// Compile-time-only symbols stay out of the runtime catalog: `const`
-/// bindings, and constructors of compiler-owned syntax types.
+/// Compile-time-only symbols stay out of the runtime catalog: constructors of
+/// compiler-owned syntax types. `const` bindings are *not* compile-time-only:
+/// their values are folded during checking but the backend still materializes
+/// and reads a module global for every runtime reference, so they are ordinary
+/// global-storage symbols here.
 fn compile_time_only_symbol(module: &TypedModule, symbol: SymbolId) -> bool {
     let resolved = module.resolved();
-    resolved.is_const_symbol(symbol)
-        || resolved.constructor_type(symbol).is_some_and(|id| {
-            resolved.recursive_construction(id) == Some(crate::RecursiveConstruction::Syntax)
-        })
+    resolved.constructor_type(symbol).is_some_and(|id| {
+        resolved.recursive_construction(id) == Some(crate::RecursiveConstruction::Syntax)
+    })
 }
 
 /// Primary storage classification, in documented precedence order. Facts
@@ -3040,6 +3366,17 @@ fn symbol_storage(
         SymbolStorage::MutableCell
     } else {
         SymbolStorage::ImmutableValue
+    }
+}
+
+/// The storage width used to validate integer literal magnitudes. `ISize`
+/// and `USize` match the backend's pointer-sized integers.
+fn integer_literal_bit_width(integer_type: IntegerType) -> u32 {
+    match integer_type {
+        IntegerType::I8 | IntegerType::U8 => 8,
+        IntegerType::I16 | IntegerType::U16 => 16,
+        IntegerType::I32 | IntegerType::U32 => 32,
+        IntegerType::I64 | IntegerType::U64 | IntegerType::ISize | IntegerType::USize => 64,
     }
 }
 
@@ -3943,7 +4280,15 @@ mod tests {
         let resolved = module.resolved();
         let const_symbol = binding_symbol(&module, "answer");
         assert!(resolved.is_const_symbol(const_symbol));
-        assert!(program.symbols.get(const_symbol).is_none());
+        // Non-generic `const` bindings materialize a module global, so they
+        // stay in the runtime symbol catalog as global storage.
+        assert_eq!(
+            program
+                .symbols
+                .get(const_symbol)
+                .map(|symbol| symbol.storage),
+            Some(SymbolStorage::GlobalStorage)
+        );
         let expected = resolved
             .symbols_in_id_order()
             .into_iter()
@@ -5090,6 +5435,9 @@ mod tests {
         };
         let owner = ExpressionOwner::Function(function.id);
         let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let lowered_blocks = program.blocks.iter().count();
+        let lowered_expressions = program.expressions.iter().count();
 
         let first = program
             .lower_block(&module, owner, ExpressionContext::Primary, block)
@@ -5098,7 +5446,8 @@ mod tests {
             .lower_block(&module, owner, ExpressionContext::Primary, block)
             .expect("block should lower again");
         assert_eq!(first, second);
-        assert_eq!(program.blocks.iter().count(), 1);
+        assert_eq!(program.blocks.iter().count(), lowered_blocks);
+        assert_eq!(program.expressions.iter().count(), lowered_expressions);
 
         let first_expression = program
             .lower_expression(&module, owner, ExpressionContext::Primary, &function.body)
@@ -5111,6 +5460,298 @@ mod tests {
             program.expressions.get(first_expression).unwrap().kind,
             LoweredExpressionKind::Block(id) if id == first
         ));
+    }
+
+    #[test]
+    fn scalar_literals_decode_once_with_checked_payloads() {
+        let module = checked_program(concat!(
+            "use std.cinterop.*\n",
+            "let small: U8 = 200\n",
+            "let wide: I64 = 42\n",
+            "let ratio: F32 = 1.5\n",
+            "let precise: F64 = 2.25\n",
+            "let text = \"hello\\n\"\n",
+            "let ctext = c_string \"ok\"\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let integers = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Integer(integer) => {
+                    Some((integer.value, integer.integer_type))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(integers.contains(&(200, IntegerType::U8)));
+        assert!(integers.contains(&(42, IntegerType::I64)));
+
+        let floats = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Float(float) => Some((float.value, float.float_type)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(floats.iter().any(|(value, ty)| *ty == FloatType::F32
+            && (*value - f64::from(1.5_f32)).abs() < f64::EPSILON));
+        assert!(floats.contains(&(2.25, FloatType::F64)));
+
+        let strings = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::String(string) => Some(string.value.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(strings.contains(&"hello\n".to_owned()));
+
+        let c_strings = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::CString(string) => Some(string.bytes.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(c_strings.contains(&b"ok\0".to_vec()));
+
+        // Transition comparison: every scalar payload agrees with the checked
+        // scalar type recorded for the same syntax occurrence.
+        for (_, expression) in program.expressions.iter() {
+            match &expression.kind {
+                LoweredExpressionKind::Integer(integer) => assert_eq!(
+                    module
+                        .type_of_expression(expression.key.syntax)
+                        .and_then(CheckedType::integer_type),
+                    Some(integer.integer_type)
+                ),
+                LoweredExpressionKind::Float(float) => assert_eq!(
+                    module
+                        .type_of_expression(expression.key.syntax)
+                        .and_then(CheckedType::float_type),
+                    Some(float.float_type)
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_names_record_storage_and_defer_callable_values() {
+        let module = checked_program(concat!(
+            "let global: I32 = 7\n",
+            "let mut counter: I32 = 0\n",
+            "let yes: Bool = True\n",
+            "let copy: I32 = global\n",
+            "let current: I32 = counter\n",
+            "let truth: Bool = yes\n",
+            "def identity = (value: I32) => value\n",
+            "type Wrapper = ctor (value: I32)\n",
+            "type MyString = ctor String\n",
+            "companion MyString { pub def make = value: String => MyString (value) }\n",
+            "let built = Wrapper (value: 1)\n",
+            "let callable = identity\n",
+            "let constructor = Wrapper\n",
+            "let maker = MyString.make\n",
+            "def capture = () => {\n",
+            "  let mut count: I32 = 0\n",
+            "  let reader = () => { count = count + 1; count }\n",
+            "  reader\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let names = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Name(name) => Some(name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let global = binding_symbol(&module, "global");
+        let counter = binding_symbol(&module, "counter");
+        assert!(names.iter().any(|name| {
+            name.symbol == global && name.storage == SymbolStorage::GlobalStorage && !name.mutable
+        }));
+        assert!(names.iter().any(|name| {
+            name.symbol == counter && name.storage == SymbolStorage::GlobalStorage && name.mutable
+        }));
+        assert!(
+            names.iter().any(|name| name.singleton.is_some()),
+            "singleton values keep their identity on the lowered name"
+        );
+        assert!(
+            names.iter().any(|name| name.captured_cell),
+            "mutable captures lower as captured-cell reads"
+        );
+        for (_, expression) in program.expressions.iter() {
+            if let LoweredExpressionKind::Name(name) = &expression.kind {
+                assert!(program.symbols.get(name.symbol).is_some());
+                assert_eq!(
+                    name.requires_initialization_check,
+                    module
+                        .resolved()
+                        .requires_initialization_check(expression.key.syntax)
+                );
+            }
+        }
+
+        let deferred = program
+            .expressions
+            .iter()
+            .filter(|(_, expression)| {
+                matches!(
+                    expression.kind,
+                    LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable)
+                )
+            })
+            .count();
+        assert!(
+            deferred >= 3,
+            "function, constructor, and companion-method values defer to Stage 2.5"
+        );
+    }
+
+    #[test]
+    fn structural_access_lowers_representation_product_slice_and_scalar() {
+        let module = checked_program(concat!(
+            "use std.slice.Slice\n",
+            "type MyString = ctor String\n",
+            "type Pair = ctor (left: I32, right: I32)\n",
+            "type Scalar = ctor (value: I32)\n",
+            "let pair = Pair (left: 1, right: 2)\n",
+            "let named = pair.left\n",
+            "let other = pair.right\n",
+            "let indexed = pair.0\n",
+            "let text: MyString = MyString \"x\"\n",
+            "let inner = text.*\n",
+            "let scalar = Scalar (value: 5)\n",
+            "let shortcut = scalar.value\n",
+            "def slice_field: Ref (Slice I32) -> I32 = values => values.0\n",
+            "def through_ref: Ref Pair -> I32 = reference => reference.left\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let accesses = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Access(access) => Some(access),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            accesses
+                .iter()
+                .any(|access| matches!(access.kind, LoweredAccessKind::Representation { .. }))
+        );
+        assert!(
+            accesses
+                .iter()
+                .any(|access| matches!(access.kind, LoweredAccessKind::Product { index: 0, .. }))
+        );
+        assert!(
+            accesses
+                .iter()
+                .any(|access| matches!(access.kind, LoweredAccessKind::Product { index: 1, .. }))
+        );
+        assert!(
+            accesses
+                .iter()
+                .any(|access| matches!(access.kind, LoweredAccessKind::Slice { index: 0, .. }))
+        );
+        assert!(
+            accesses
+                .iter()
+                .any(|access| matches!(access.kind, LoweredAccessKind::Scalar { .. }))
+        );
+        assert!(
+            accesses.iter().any(|access| match &access.kind {
+                LoweredAccessKind::Product { dereference, .. }
+                | LoweredAccessKind::Slice { dereference, .. }
+                | LoweredAccessKind::Scalar { dereference } => !dereference.is_empty(),
+                LoweredAccessKind::Representation { dereference } => !dereference.is_empty(),
+            }),
+            "access through `Ref` records its crossed payloads"
+        );
+
+        // Transition comparison: every access agrees with `CheckedAccess`.
+        for (_, expression) in program.expressions.iter() {
+            let LoweredExpressionKind::Access(access) = &expression.kind else {
+                continue;
+            };
+            let checked = module
+                .access_for(expression.key.syntax)
+                .expect("lowered access has checked metadata");
+            match (&access.kind, checked) {
+                (
+                    LoweredAccessKind::Representation { dereference },
+                    CheckedAccess::Representation {
+                        dereference: checked,
+                    },
+                ) => assert_eq!(dereference, checked),
+                (
+                    LoweredAccessKind::Product { index, dereference },
+                    CheckedAccess::Product {
+                        index: checked_index,
+                        dereference: checked_dereference,
+                        slice: false,
+                        scalar: false,
+                    },
+                ) => {
+                    assert_eq!(index, checked_index);
+                    assert_eq!(dereference, checked_dereference);
+                }
+                (
+                    LoweredAccessKind::Slice { index, dereference },
+                    CheckedAccess::Product {
+                        index: checked_index,
+                        dereference: checked_dereference,
+                        slice: true,
+                        scalar: false,
+                    },
+                ) => {
+                    assert_eq!(index, checked_index);
+                    assert_eq!(dereference, checked_dereference);
+                }
+                (
+                    LoweredAccessKind::Scalar { dereference },
+                    CheckedAccess::Product {
+                        dereference: checked_dereference,
+                        scalar: true,
+                        ..
+                    },
+                ) => assert_eq!(dereference, checked_dereference),
+                (kind, checked) => panic!("access mismatch: {kind:?} vs {checked:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_literal_payloads_are_lowering_diagnostics() {
+        let module = checked_program("use std.cinterop.*\nlet value = c_string \"bad\\0value\"\n");
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("interior NUL byte")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
     }
 
     #[test]
@@ -5582,14 +6223,17 @@ mod tests {
         let LoweredItemKind::Binding(binding) = &items[0].kind else {
             panic!("the const binding should lower");
         };
-        assert!(binding.compile_time_only);
-        assert!(binding.symbol.is_some());
+        // `const` values are folded, but every runtime reference still reads a
+        // module global, so the binding is an ordinary runtime binding.
+        assert!(!binding.compile_time_only);
+        let const_symbol = binding.symbol.expect("the const binding symbol");
         assert!(binding.value.is_some());
-        assert!(
-            binding
-                .symbol
-                .is_none_or(|symbol| program.symbols.get(symbol).is_none()),
-            "compile-time-only bindings stay outside the runtime symbol catalog"
+        assert_eq!(
+            program
+                .symbols
+                .get(const_symbol)
+                .map(|symbol| symbol.storage),
+            Some(SymbolStorage::GlobalStorage)
         );
 
         let LoweredItemKind::Binding(binding) = &items[1].kind else {

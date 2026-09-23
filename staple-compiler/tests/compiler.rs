@@ -5149,10 +5149,9 @@ fn c_string_rejects_non_literal_arguments() {
 #[test]
 fn c_string_rejects_interior_nul_bytes() {
     let module = type_check("use std.cinterop.*\nc_string \"bad\\0value\"\n");
-    let context = Context::create();
-    let diagnostics = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
-        .expect_err_diagnostics("interior NUL should fail code generation");
+    let diagnostics = Lowerer::new()
+        .lower(&module)
+        .expect_err_diagnostics("interior NUL should fail lowering");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "C string literals cannot contain an interior NUL byte"
     }));

@@ -141,6 +141,11 @@ Progress:
 - Ordinary children are lowered recursively before their parent is allocated, so a diagnostic never leaves a partially initialized node. Loop bodies, match subjects and arm bodies, product elements, spreads, access bases, index operands, logical operands, and template interpolations are all visited.
 - Added a coverage classifier test with one constructed representative per syntax variant; the exhaustive classifier match and variant-name match fail compilation when a new variant appears without a decision.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (48 tests), `cargo test --workspace`, and `git diff --check`.
+- Step 2 replaced the scalar, name, and access `Pending` markers with concrete payloads. Integer/float literals parse once with range/finiteness validation, strings and C strings decode once (interior NULs diagnose at lowering), ordinary names carry catalog storage, initialization-check, mutable/captured-cell, movement, move-parameter, and singleton facts, and structural access copies `CheckedAccess` into representation/product/slice/scalar forms with base expressions, indices, and dereference payloads.
+- Callable-valued names and selectors (functions, constructors, companion methods, and trait-method selectors such as `MutateIndex.mutate_index`) are explicitly deferred to Stage 2.5 instead of being lowered as loads.
+- Discovery: non-generic `const` bindings are runtime globals in the backend (module initialization stores the folded value and every reference loads it), so they now enter the symbol catalog as `GlobalStorage`; the symbol catalog is populated before initializer/function-body lowering. Interior-NUL C strings now diagnose at lowering rather than code generation.
+- Added transition comparisons against `symbol_for`, `requires_initialization_check`, and `access_for` plus literal decoding, and moved the interior-NUL integration test to the lowering boundary.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (52 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
 Lower expression families in dependency order:
 

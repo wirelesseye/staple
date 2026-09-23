@@ -113,7 +113,7 @@ Completed:
 - New tests `dispatcher_defers_later_stage_families_explicitly` and `occurrence_keys_deduplicate_ordinary_expressions_and_blocks` cover deferral classification and occurrence reuse.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (48 tests), `cargo test --workspace`, and `git diff --check`.
 
-### Step 2 - Lower Scalars, Ordinary Names, and Structural Access
+### Step 2 - Lower Scalars, Ordinary Names, and Structural Access (Done)
 
 - Parse and validate integer and float literals once, retaining their selected checked scalar type.
 - Decode strings and C strings once; diagnose invalid encodings/ranges at their source origins.
@@ -125,7 +125,16 @@ Completed:
 
 Gate: literals, locals/globals, mutable/captured values, singletons, representation access, product fields, scalar shortcuts, and fixed slice positions lower without resolver or type-side-table lookup afterward.
 
-After this step, update both plan files.
+Completed:
+
+- `LoweredExpressionKind` gained concrete `Name`, `Integer`, `Float`, `String`, `CString`, and `Access` payloads; the corresponding Stage 2.4 family arms no longer produce `Pending` markers.
+- `LoweredInteger`/`LoweredFloat` store the parsed magnitude/value with the checked `IntegerType`/`FloatType`, validating range and finiteness at the source origin. `LoweredString` stores decoded UTF-8 and `LoweredCString` stores decoded bytes with the trailing NUL and no interior NUL.
+- `LoweredName` records the catalog storage class, per-occurrence initialization checking, mutable/captured-cell access, movement, move-parameter status, and singleton identity. Function, constructor, and trait-dispatch callable values (including `Trait.method` selectors and companion methods) become explicit `Deferred(Callable)` nodes.
+- `LoweredAccess` copies `CheckedAccess` into `Representation`, `Product`, `Slice`, and `Scalar` forms with the base expression, selected index, and ordered dereference payloads.
+- Discovery: non-generic `const` bindings are ordinary runtime globals (the backend materializes and reads a module global for every reference), so they now enter the symbol catalog as `GlobalStorage` instead of being treated as compile-time-only. `snapshot` populates the symbol catalog before module initializers and function bodies so name lowering reads catalog facts.
+- Two integration tests moved from codegen-time to lowering-time rejection: interior-NUL C strings now diagnose during lowering.
+- New focused tests: scalar payload decoding plus checked-type transition comparisons, ordinary name storage/singleton/captured-cell facts with callable deferral, all four access forms with `CheckedAccess` comparisons, and invalid literal diagnostics.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (52 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
 ### Step 3 - Lower Products, Spreads, Defaults, and Repeated Products
 
