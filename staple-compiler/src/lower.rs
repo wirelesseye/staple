@@ -324,11 +324,62 @@ pub(crate) enum LoweredExpressionKind {
     /// `value satisfies Type`: a transparent wrapper. The parent expression
     /// header remains authoritative for the checked coercion.
     Satisfies(LoweredSatisfies),
+    Logical(LoweredLogical),
+    Loop(LoweredLoop),
+    Match(LoweredMatch),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredSatisfies {
     pub value: ExpressionId,
+}
+
+/// A short-circuiting logical operator with its checked `Bool` selection.
+/// Operands are always evaluated left-to-right and `right` only when the
+/// short-circuit does not determine the result.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredLogical {
+    pub operator: staple_syntax::LogicalOperator,
+    pub left: ExpressionId,
+    pub right: ExpressionId,
+    pub bool_type: CheckedType,
+    /// Resolved `True` alternative of the checked `Bool` sum.
+    pub true_index: usize,
+}
+
+/// A loop with its lowered body block and cleanup metadata. `break`/`continue`
+/// items reference the enclosing loop through the recorded nesting depth.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredLoop {
+    pub body: BlockId,
+    pub result_type: CheckedType,
+    /// The body result must be dropped before the back edge.
+    pub drops_body_result: bool,
+    /// The body can complete normally; a body whose tail diverges exits only
+    /// through `break` or an enclosing return.
+    pub body_falls_through: bool,
+    /// One-based nesting depth of this loop, matching the `loop_depth`
+    /// recorded on the break/continue items it owns.
+    pub depth: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredMatch {
+    pub subject: ExpressionId,
+    /// Checked subject type copied from `CheckedMatch`.
+    pub source: CheckedType,
+    pub arms: Vec<LoweredMatchArm>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredMatchArm {
+    pub origin: Origin,
+    pub pattern: PatternId,
+    pub body: ExpressionId,
+    /// Symbols the pattern binds, in source order. The arm's cleanup boundary
+    /// is the enclosing ownership state plus these bindings; a divergent arm
+    /// (a `Never` body) never contributes a runtime value.
+    pub bound_symbols: Vec<SymbolId>,
 }
 
 /// A product construction plan. `steps` preserve source evaluation order
@@ -587,7 +638,7 @@ pub(crate) enum LoweredItemKind {
     Assignment(LoweredAssignmentItem),
     Return(LoweredReturnItem),
     Break(LoweredBreakItem),
-    Continue,
+    Continue(LoweredContinueItem),
     Expression(LoweredExpressionStatementItem),
 }
 
@@ -642,6 +693,14 @@ pub(crate) struct LoweredReturnItem {
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredBreakItem {
     pub value: Option<ExpressionId>,
+    /// One-based nesting depth of the loop this break targets.
+    pub loop_depth: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredContinueItem {
+    /// One-based nesting depth of the loop this continue targets.
+    pub loop_depth: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -891,6 +950,10 @@ pub(crate) struct LoweredProgram {
     trait_implementations: Arena<LoweredTraitImplementationMetadata, LoweredTraitImplementationId>,
     initializers: Arena<LoweredInitializer, InitializerId>,
     semantic_ids: LoweredSemanticIds,
+    /// Transient lowering state: the number of currently enclosing loops,
+    /// recorded on break/continue items and loop nodes so validation can tie
+    /// exits to the loop that owns them. Not part of the lowered program.
+    loop_depth: usize,
 }
 
 impl LoweredProgram {
@@ -1586,8 +1649,11 @@ impl LoweredProgram {
                     Some(value) => Some(self.lower_expression(module, owner, context, value)?),
                     None => None,
                 },
+                loop_depth: self.loop_depth,
             }),
-            Item::Continue(_) => LoweredItemKind::Continue,
+            Item::Continue(_) => LoweredItemKind::Continue(LoweredContinueItem {
+                loop_depth: self.loop_depth,
+            }),
             Item::Expression(expression) => {
                 let expression = self.lower_expression(module, owner, context, expression)?;
                 let drop_result = self.expression_needs_drop(module, expression);
@@ -2150,17 +2216,12 @@ impl LoweredProgram {
                 let value = self.lower_expression(module, owner, context, &satisfies.value)?;
                 Ok(LoweredExpressionKind::Satisfies(LoweredSatisfies { value }))
             }
-            (Stage24Family::Match, Expression::Match(match_)) => {
-                self.lower_expression(module, owner, context, &match_.subject)?;
-                for arm in &match_.arms {
-                    self.lower_expression(module, owner, context, &arm.body)?;
-                }
-                Ok(pending(Stage24Family::Match))
-            }
-            (Stage24Family::Loop, Expression::Loop(loop_)) => {
-                self.lower_block(module, owner, context, &loop_.body)?;
-                Ok(pending(Stage24Family::Loop))
-            }
+            (Stage24Family::Match, Expression::Match(match_)) => self
+                .lower_match(module, owner, context, match_)
+                .map(LoweredExpressionKind::Match),
+            (Stage24Family::Loop, Expression::Loop(loop_)) => self
+                .lower_loop(module, owner, context, loop_)
+                .map(LoweredExpressionKind::Loop),
             (Stage24Family::Product, Expression::Product(product)) => self
                 .lower_product(module, owner, context, product)
                 .map(LoweredExpressionKind::Product),
@@ -2201,11 +2262,9 @@ impl LoweredProgram {
                 self.lower_expression(module, owner, context, &index.index)?;
                 Ok(pending(Stage24Family::Index))
             }
-            (Stage24Family::Logical, Expression::Logical(logical)) => {
-                self.lower_expression(module, owner, context, &logical.left)?;
-                self.lower_expression(module, owner, context, &logical.right)?;
-                Ok(pending(Stage24Family::Logical))
-            }
+            (Stage24Family::Logical, Expression::Logical(logical)) => self
+                .lower_logical(module, owner, context, logical)
+                .map(LoweredExpressionKind::Logical),
             (Stage24Family::StringTemplate, Expression::StringTemplate(template)) => {
                 for part in &template.parts {
                     if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
@@ -2783,6 +2842,135 @@ impl LoweredProgram {
         })
     }
 
+    /// Lowers `&&`/`||` operands left-to-right and copies the checked `Bool`
+    /// selection, resolving the `True` alternative index the backend needs.
+    fn lower_logical(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        logical: &staple_syntax::LogicalExpression,
+    ) -> Result<LoweredLogical, Diagnostic> {
+        let left = self.lower_expression(module, owner, context, &logical.left)?;
+        let right = self.lower_expression(module, owner, context, &logical.right)?;
+        let checked = module.logical_for(logical.syntax.id).cloned();
+        // Missing metadata means checking diverged before the logical was
+        // recorded, so the expression is unreachable and never emitted.
+        let bool_type = match checked {
+            Some(checked) => checked.bool_type,
+            None => module
+                .type_of_expression(logical.syntax.id)
+                .cloned()
+                .unwrap_or(CheckedType::Never),
+        };
+        let true_index = match &bool_type {
+            CheckedType::Sum(sum) => sum
+                .alternatives
+                .iter()
+                .position(|alternative| {
+                    matches!(alternative, CheckedType::Distinct { name, .. } if name == "True")
+                })
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        logical.syntax.span.clone(),
+                        "`Bool` has no `True` alternative",
+                    )
+                })?,
+            CheckedType::Never => 0,
+            _ => {
+                return Err(Diagnostic::new(
+                    logical.syntax.span.clone(),
+                    "`&&`/`||` require `Bool` to be a sum type",
+                ));
+            }
+        };
+        Ok(LoweredLogical {
+            operator: logical.operator,
+            left,
+            right,
+            bool_type,
+            true_index,
+        })
+    }
+
+    /// Lowers a loop body into the existing block/item arenas, tracks loop
+    /// nesting for break/continue validation, and records the body-result drop
+    /// requirement and fall-through fact.
+    fn lower_loop(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        loop_: &staple_syntax::LoopExpression,
+    ) -> Result<LoweredLoop, Diagnostic> {
+        let body_type = module.type_of_expression(loop_.body.syntax.id).cloned();
+        let result_type = module
+            .type_of_expression(loop_.syntax.id)
+            .cloned()
+            .unwrap_or(CheckedType::Never);
+        self.loop_depth += 1;
+        let body = self.lower_block(module, owner, context, &loop_.body);
+        self.loop_depth -= 1;
+        let body = body?;
+        let drops_body_result = body_type
+            .as_ref()
+            .is_some_and(|body_type| module.type_needs_drop(body_type));
+        let body_falls_through = self.block_falls_through(body);
+        Ok(LoweredLoop {
+            body,
+            result_type,
+            drops_body_result,
+            body_falls_through,
+            depth: self.loop_depth + 1,
+        })
+    }
+
+    /// Lowers a match subject first, then arms in source order, reusing the
+    /// Stage 2.3 pattern lowering and copying the checked subject type.
+    fn lower_match(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        match_: &staple_syntax::MatchExpression,
+    ) -> Result<LoweredMatch, Diagnostic> {
+        let subject = self.lower_expression(module, owner, context, &match_.subject)?;
+        let Some(checked) = module.match_for(match_.syntax.id).cloned() else {
+            // The checker diverged before recording the match (for example
+            // when the subject returns), so the whole match is unreachable and
+            // code generation never emits its arms.
+            let source = self
+                .expressions
+                .get(subject)
+                .map(|subject| subject.value_type.clone())
+                .unwrap_or(CheckedType::Never);
+            return Ok(LoweredMatch {
+                subject,
+                source,
+                arms: Vec::new(),
+            });
+        };
+        let mut arms = Vec::with_capacity(match_.arms.len());
+        for arm in &match_.arms {
+            let pattern = self.lower_pattern(module, &arm.pattern)?;
+            let body = self.lower_expression(module, owner, context, &arm.body)?;
+            arms.push(LoweredMatchArm {
+                origin: Origin {
+                    syntax: arm.syntax.id,
+                    span: arm.syntax.span.clone(),
+                },
+                pattern,
+                body,
+                bound_symbols: pattern_symbols(module.resolved(), &arm.pattern),
+            });
+        }
+        Ok(LoweredMatch {
+            subject,
+            source: checked.source,
+            arms,
+        })
+    }
+
     /// Lowers `(value; count)`: the checked result type gives the repetition
     /// count and whether the single-element representation collapses.
     fn lower_repeated_product(
@@ -2802,6 +2990,57 @@ impl LoweredProgram {
             count,
             collapsed: count == 1,
         })
+    }
+
+    /// Whether control can reach the end of a lowered block: a `return`,
+    /// `break`, `continue`, or unconditionally diverging (`Never`) expression
+    /// stops the sequence, matching the backend's `did_return` handling.
+    fn block_falls_through(&self, block: BlockId) -> bool {
+        let Some(block) = self.blocks.get(block) else {
+            return false;
+        };
+        for item in &block.items {
+            let Some(item) = self.items.get(*item) else {
+                return false;
+            };
+            match &item.kind {
+                LoweredItemKind::Return(_)
+                | LoweredItemKind::Break(_)
+                | LoweredItemKind::Continue(_) => return false,
+                LoweredItemKind::Binding(binding) => {
+                    if binding
+                        .value
+                        .is_some_and(|value| self.expression_diverges(value))
+                    {
+                        return false;
+                    }
+                }
+                LoweredItemKind::PatternBinding(binding) => {
+                    if self.expression_diverges(binding.value) {
+                        return false;
+                    }
+                }
+                LoweredItemKind::Assignment(assignment) => {
+                    if self.expression_diverges(assignment.value) {
+                        return false;
+                    }
+                }
+                LoweredItemKind::Expression(statement) => {
+                    if self.expression_diverges(statement.expression) {
+                        return false;
+                    }
+                }
+            }
+        }
+        block
+            .result
+            .is_none_or(|result| !self.expression_diverges(result))
+    }
+
+    fn expression_diverges(&self, expression: ExpressionId) -> bool {
+        self.expressions
+            .get(expression)
+            .is_some_and(|expression| expression.value_type == CheckedType::Never)
     }
 
     fn expression_needs_drop(&self, module: &TypedModule, expression: ExpressionId) -> bool {
@@ -2933,9 +3172,70 @@ impl LoweredProgram {
                         ));
                     }
                 }
+                LoweredExpressionKind::Logical(logical) => {
+                    for child in [logical.left, logical.right] {
+                        if !self.expressions.contains(child) {
+                            diagnostics.push(invalid_reference(
+                                &expression.origin,
+                                "logical",
+                                "expression",
+                                child.index(),
+                            ));
+                        }
+                    }
+                }
+                LoweredExpressionKind::Loop(loop_) => {
+                    if !self.blocks.contains(loop_.body) {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "loop",
+                            "block",
+                            loop_.body.index(),
+                        ));
+                    }
+                }
+                LoweredExpressionKind::Match(match_) => {
+                    if !self.expressions.contains(match_.subject) {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "match",
+                            "expression",
+                            match_.subject.index(),
+                        ));
+                    }
+                    for arm in &match_.arms {
+                        if !self.patterns.contains(arm.pattern) {
+                            diagnostics.push(invalid_reference(
+                                &arm.origin,
+                                "match arm",
+                                "pattern",
+                                arm.pattern.index(),
+                            ));
+                        }
+                        if !self.expressions.contains(arm.body) {
+                            diagnostics.push(invalid_reference(
+                                &arm.origin,
+                                "match arm",
+                                "expression",
+                                arm.body.index(),
+                            ));
+                        }
+                        for symbol in &arm.bound_symbols {
+                            if self.symbols.get(*symbol).is_none() {
+                                diagnostics.push(invalid_reference(
+                                    &arm.origin,
+                                    "match arm",
+                                    "symbol",
+                                    symbol.0,
+                                ));
+                            }
+                        }
+                    }
+                }
             }
             self.validate_expression_coercion(expression, &mut diagnostics);
         }
+        diagnostics.extend(self.validate_loop_exits());
         for (_, pattern) in self.patterns.iter() {
             match &pattern.kind {
                 LoweredPatternKind::Wildcard | LoweredPatternKind::Literal { .. } => {}
@@ -3164,7 +3464,7 @@ impl LoweredProgram {
                         );
                     }
                 }
-                LoweredItemKind::Continue => {}
+                LoweredItemKind::Continue(_) => {}
                 LoweredItemKind::Expression(item) => {
                     check(
                         "expression",
@@ -3268,6 +3568,186 @@ impl LoweredProgram {
             }
         }
         diagnostics
+    }
+
+    /// Traverses every lowered loop body once and checks that each
+    /// break/continue item is owned by an enclosing loop at the depth it
+    /// recorded. Orphaned exits and inconsistent nested depths diagnose.
+    fn validate_loop_exits(&self) -> Vec<Diagnostic> {
+        let mut reached = HashMap::<ItemId, usize>::new();
+        let mut diagnostics = Vec::new();
+        for (_, expression) in self.expressions.iter() {
+            if let LoweredExpressionKind::Loop(loop_) = &expression.kind {
+                self.collect_loop_items(loop_.body, loop_.depth, &mut reached, &mut diagnostics);
+            }
+        }
+        for (item_id, item) in self.items.iter() {
+            let recorded = match &item.kind {
+                LoweredItemKind::Break(item) => Some(item.loop_depth),
+                LoweredItemKind::Continue(item) => Some(item.loop_depth),
+                _ => None,
+            };
+            let Some(recorded) = recorded else {
+                continue;
+            };
+            match reached.get(&item_id) {
+                Some(depth) if *depth == recorded => {}
+                Some(depth) => diagnostics.push(Diagnostic::new(
+                    item.origin.span.clone(),
+                    format!(
+                        "break/continue targets loop depth {recorded} but is inside loop depth {depth}"
+                    ),
+                )),
+                None => diagnostics.push(Diagnostic::new(
+                    item.origin.span.clone(),
+                    "break/continue item is not owned by an enclosing lowered loop",
+                )),
+            }
+        }
+        diagnostics
+    }
+
+    fn collect_loop_items(
+        &self,
+        block: BlockId,
+        depth: usize,
+        reached: &mut HashMap<ItemId, usize>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let Some(block) = self.blocks.get(block) else {
+            return;
+        };
+        for item in &block.items {
+            let item_id = *item;
+            let Some(lowered) = self.items.get(item_id) else {
+                continue;
+            };
+            match &lowered.kind {
+                LoweredItemKind::Break(_) | LoweredItemKind::Continue(_) => {
+                    reached.entry(item_id).or_insert(depth);
+                }
+                LoweredItemKind::Binding(binding) => {
+                    if let Some(value) = binding.value {
+                        self.collect_loop_expression(value, depth, reached, diagnostics);
+                    }
+                }
+                LoweredItemKind::PatternBinding(binding) => {
+                    self.collect_loop_expression(binding.value, depth, reached, diagnostics);
+                }
+                LoweredItemKind::Assignment(assignment) => {
+                    self.collect_loop_place(assignment.target, depth, reached, diagnostics);
+                    self.collect_loop_expression(assignment.value, depth, reached, diagnostics);
+                }
+                LoweredItemKind::Return(item) => {
+                    self.collect_loop_expression(item.value, depth, reached, diagnostics);
+                }
+                LoweredItemKind::Expression(statement) => {
+                    self.collect_loop_expression(statement.expression, depth, reached, diagnostics);
+                }
+            }
+        }
+        if let Some(result) = block.result {
+            self.collect_loop_expression(result, depth, reached, diagnostics);
+        }
+    }
+
+    fn collect_loop_expression(
+        &self,
+        expression: ExpressionId,
+        depth: usize,
+        reached: &mut HashMap<ItemId, usize>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let Some(expression) = self.expressions.get(expression) else {
+            return;
+        };
+        match &expression.kind {
+            LoweredExpressionKind::Loop(inner) => {
+                if inner.depth != depth + 1 {
+                    diagnostics.push(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        format!(
+                            "nested loop records depth {} instead of {}",
+                            inner.depth,
+                            depth + 1
+                        ),
+                    ));
+                }
+                self.collect_loop_items(inner.body, inner.depth, reached, diagnostics);
+            }
+            LoweredExpressionKind::Block(block) => {
+                self.collect_loop_items(*block, depth, reached, diagnostics);
+            }
+            LoweredExpressionKind::Satisfies(satisfies) => {
+                self.collect_loop_expression(satisfies.value, depth, reached, diagnostics);
+            }
+            LoweredExpressionKind::Logical(logical) => {
+                self.collect_loop_expression(logical.left, depth, reached, diagnostics);
+                self.collect_loop_expression(logical.right, depth, reached, diagnostics);
+            }
+            LoweredExpressionKind::Match(match_) => {
+                self.collect_loop_expression(match_.subject, depth, reached, diagnostics);
+                for arm in &match_.arms {
+                    self.collect_loop_expression(arm.body, depth, reached, diagnostics);
+                }
+            }
+            LoweredExpressionKind::Product(product) => {
+                for step in &product.steps {
+                    let child = match step {
+                        LoweredProductStep::Positional { expression, .. }
+                        | LoweredProductStep::Designated { expression, .. }
+                        | LoweredProductStep::PositionalSpread { expression, .. }
+                        | LoweredProductStep::NamedSpread { expression, .. }
+                        | LoweredProductStep::Default { expression, .. } => *expression,
+                    };
+                    self.collect_loop_expression(child, depth, reached, diagnostics);
+                }
+            }
+            LoweredExpressionKind::RepeatedProduct(repeated) => {
+                self.collect_loop_expression(repeated.expression, depth, reached, diagnostics);
+            }
+            LoweredExpressionKind::Access(access) => {
+                self.collect_loop_expression(access.base, depth, reached, diagnostics);
+            }
+            LoweredExpressionKind::Pending(_)
+            | LoweredExpressionKind::Deferred(_)
+            | LoweredExpressionKind::Name(_)
+            | LoweredExpressionKind::Integer(_)
+            | LoweredExpressionKind::Float(_)
+            | LoweredExpressionKind::String(_)
+            | LoweredExpressionKind::CString(_) => {}
+        }
+    }
+
+    fn collect_loop_place(
+        &self,
+        place: PlaceId,
+        depth: usize,
+        reached: &mut HashMap<ItemId, usize>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let Some(place) = self.places.get(place) else {
+            return;
+        };
+        match &place.kind {
+            LoweredPlaceKind::Temporary { expression } => {
+                self.collect_loop_expression(*expression, depth, reached, diagnostics);
+            }
+            LoweredPlaceKind::Dereference { reference, .. } => {
+                self.collect_loop_expression(*reference, depth, reached, diagnostics);
+            }
+            LoweredPlaceKind::ProductElement { base, .. }
+            | LoweredPlaceKind::Representation { base } => {
+                self.collect_loop_place(*base, depth, reached, diagnostics);
+            }
+            LoweredPlaceKind::Indexed { base, index } => {
+                self.collect_loop_place(*base, depth, reached, diagnostics);
+                self.collect_loop_expression(*index, depth, reached, diagnostics);
+            }
+            LoweredPlaceKind::Symbol { .. }
+            | LoweredPlaceKind::CapturedCell { .. }
+            | LoweredPlaceKind::Resource { .. } => {}
+        }
     }
 
     fn validate_modules_and_initializers(&self) -> Vec<Diagnostic> {
@@ -4378,7 +4858,7 @@ mod tests {
             LoweredItemKind::Assignment(_) => "assignment",
             LoweredItemKind::Return(_) => "return",
             LoweredItemKind::Break(_) => "break",
-            LoweredItemKind::Continue => "continue",
+            LoweredItemKind::Continue(_) => "continue",
             LoweredItemKind::Expression(_) => "expression",
         }
     }
@@ -6891,6 +7371,225 @@ mod tests {
                 module.type_needs_drop(&expression.value_type)
             );
         }
+    }
+
+    fn expression_body<'a>(program: &'a LoweredProgram, name: &str) -> &'a LoweredExpression {
+        let (_, function) = lowered_function(program, name);
+        let block = body_block(program, function);
+        program
+            .expressions
+            .get(block.result.expect("function body result"))
+            .expect("lowered body expression")
+    }
+
+    #[test]
+    fn logical_operators_copy_checked_bool_and_operand_order() {
+        let module = checked_program(concat!(
+            "def both = (left: Bool, right: Bool) => left && right\n",
+            "def either = (left: Bool, right: Bool) => left || right\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let both = expression_body(&program, "both");
+        let LoweredExpressionKind::Logical(logical) = &both.kind else {
+            panic!("`&&` lowers to a logical node");
+        };
+        assert_eq!(logical.operator, staple_syntax::LogicalOperator::And);
+        assert!(program.expressions.contains(logical.left));
+        assert!(program.expressions.contains(logical.right));
+        let CheckedType::Sum(sum) = &logical.bool_type else {
+            panic!("`Bool` is a sum type");
+        };
+        let expected_true = sum
+            .alternatives
+            .iter()
+            .position(|alternative| {
+                matches!(alternative, CheckedType::Distinct { name, .. } if name == "True")
+            })
+            .expect("`Bool` has a `True` alternative");
+        assert_eq!(logical.true_index, expected_true);
+        for operand in [logical.left, logical.right] {
+            assert_eq!(
+                program.expressions.get(operand).unwrap().value_type,
+                logical.bool_type
+            );
+        }
+
+        let either = expression_body(&program, "either");
+        let LoweredExpressionKind::Logical(logical) = &either.kind else {
+            panic!("`||` lowers to a logical node");
+        };
+        assert_eq!(logical.operator, staple_syntax::LogicalOperator::Or);
+    }
+
+    #[test]
+    fn loops_record_drop_facts_depth_and_owned_exits() {
+        let module = checked_program(concat!(
+            "type Handle = ctor I32\n",
+            "impl Drop Handle { def drop = Handle value => () }\n",
+            "def select: Bool -> I32 = condition => loop {\n",
+            "  match condition { True() => { break 9 }, False() => { continue } }\n",
+            "}\n",
+            "def nested = () => loop { loop { break () }; break 7 }\n",
+            "def forever: () -> () = () => loop { continue }\n",
+            "def drop_body: () -> Never = () => loop { Handle 1 }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let select = expression_body(&program, "select");
+        let LoweredExpressionKind::Loop(loop_) = &select.kind else {
+            panic!("`loop` lowers to a loop node");
+        };
+        assert_eq!(loop_.depth, 1);
+        assert_eq!(loop_.result_type, CheckedType::I32);
+        assert!(program.blocks.contains(loop_.body));
+        let (break_depth, continue_depth) =
+            program
+                .items
+                .iter()
+                .fold(
+                    (None, None),
+                    |(break_depth, continue_depth), (_, item)| match &item.kind {
+                        LoweredItemKind::Break(item) => (Some(item.loop_depth), continue_depth),
+                        LoweredItemKind::Continue(item) => (break_depth, Some(item.loop_depth)),
+                        _ => (break_depth, continue_depth),
+                    },
+                );
+        assert_eq!(break_depth, Some(1));
+        assert_eq!(continue_depth, Some(1));
+
+        let nested = expression_body(&program, "nested");
+        let LoweredExpressionKind::Loop(outer) = &nested.kind else {
+            panic!("`loop` lowers to a loop node");
+        };
+        assert_eq!(outer.depth, 1);
+        let loops = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Loop(loop_) => Some(loop_),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            loops.iter().any(|loop_| loop_.depth == 2),
+            "the nested loop records depth 2"
+        );
+        let depths = program
+            .items
+            .iter()
+            .filter_map(|(_, item)| match &item.kind {
+                LoweredItemKind::Break(item) => Some(item.loop_depth),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(depths.contains(&1), "outer `break 7` targets depth 1");
+        assert!(depths.contains(&2), "inner `break ()` targets depth 2");
+
+        let drop_body = expression_body(&program, "drop_body");
+        let LoweredExpressionKind::Loop(loop_) = &drop_body.kind else {
+            panic!("`loop` lowers to a loop node");
+        };
+        assert!(
+            loop_.drops_body_result,
+            "owned loop bodies drop their result"
+        );
+        assert!(loop_.body_falls_through);
+        assert_eq!(loop_.result_type, CheckedType::Never);
+
+        let forever = expression_body(&program, "forever");
+        let LoweredExpressionKind::Loop(loop_) = &forever.kind else {
+            panic!("`loop` lowers to a loop node");
+        };
+        assert!(
+            !loop_.body_falls_through,
+            "a diverging body has no back edge"
+        );
+    }
+
+    #[test]
+    fn matches_lower_subject_arms_patterns_and_bound_symbols() {
+        let module = checked_program(concat!(
+            "type Ok T = ctor T\n",
+            "type IOError = ctor String\n",
+            "def pick = (value: Ok I32 | IOError) => match value {\n",
+            "  Ok payload => payload,\n",
+            "  other => 0,\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let pick = expression_body(&program, "pick");
+        let LoweredExpressionKind::Match(match_) = &pick.kind else {
+            panic!("`match` lowers to a match node");
+        };
+        assert!(program.expressions.contains(match_.subject));
+        assert_eq!(match_.arms.len(), 2);
+        for arm in &match_.arms {
+            assert!(program.patterns.contains(arm.pattern));
+            assert!(program.expressions.contains(arm.body));
+            for symbol in &arm.bound_symbols {
+                assert!(program.symbols.get(*symbol).is_some());
+            }
+        }
+        assert_eq!(match_.arms[0].bound_symbols.len(), 1);
+        assert_eq!(match_.arms[1].bound_symbols.len(), 1);
+        let subject_type = program
+            .expressions
+            .get(match_.subject)
+            .expect("match subject")
+            .value_type
+            .clone();
+        assert_eq!(match_.source, subject_type);
+    }
+
+    #[test]
+    fn validator_rejects_orphaned_and_misdepth_loop_exits() {
+        let module = checked_program("def value: () -> () = () => { loop { break }; () }\n");
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        for entry in program.items.values.iter_mut() {
+            if let LoweredItemKind::Break(item) = &mut entry.kind {
+                item.loop_depth = 2;
+            }
+        }
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("targets loop depth 2")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        program.items.push(LoweredItem {
+            origin: Origin::compiler(),
+            kind: LoweredItemKind::Break(LoweredBreakItem {
+                value: None,
+                loop_depth: 1,
+            }),
+        });
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("not owned by an enclosing lowered loop")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
     }
 
     #[test]

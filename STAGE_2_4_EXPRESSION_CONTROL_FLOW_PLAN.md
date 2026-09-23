@@ -177,7 +177,7 @@ Completed:
 - New focused tests cover the `satisfies` wrapper, integer widening, sum-injection and `Ref`-to-`Slice` coercions on deferred headers, nested block results, early return divergence, propagation-generated exits, and drop facts for discarded owned values.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (58 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
-### Step 5 - Lower Logical Operators, Loops, and Matches
+### Step 5 - Lower Logical Operators, Loops, and Matches (Done)
 
 - Lower logical operands in left-to-right order and copy `CheckedLogical`.
 - Resolve and store the true-alternative index during lowering; reject malformed checked Bool metadata with a source diagnostic.
@@ -190,7 +190,14 @@ Completed:
 
 Gate: short-circuiting, loop result joins, nested loop exits, exhaustive sum/product/literal matches, at-patterns, nominal destructuring, divergent arms, and cleanup-sensitive branches are fully represented without source AST traversal.
 
-After this step, update both plan files.
+Completed:
+
+- `LoweredLogical` stores the operator, lowered left/right operands, the checked `Bool` sum type, and the resolved `True` alternative index. Missing checked metadata (a diverged expression) falls back to the `Never` convention instead of diagnosing, matching the backend's early return.
+- `LoweredLoop` stores the body block, loop result type, body-result drop requirement, a fall-through fact derived from the item sequence (return/break/continue/Never stop it, matching the backend's `did_return`), and a one-based nesting depth. Break/continue items record the depth of the loop they target.
+- `LoweredMatch` stores the subject, checked source type, and arms; each `LoweredMatchArm` records its origin, lowered pattern, body, and bound symbols in source order as its cleanup boundary. A match whose subject diverged before `CheckedMatch` was recorded lowers as unreachable with no arms.
+- New validation walks every loop body once and rejects orphaned break/continue items, mismatched depths, and inconsistent nested-loop depths.
+- New focused tests cover logical operator ordering/`Bool` selection, loop drop facts/depth/exits (including nested loops and diverging bodies), match subject/pattern/bound-symbol lowering, and the loop-exit validator corruptions.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (62 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
 ### Step 6 - Lower Index Reads and Checked Mutation-Adjacent Facts
 
