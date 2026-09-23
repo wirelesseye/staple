@@ -134,6 +134,14 @@ Completed:
 
 The focused implementation sequence is maintained in [STAGE_2_4_EXPRESSION_CONTROL_FLOW_PLAN.md](STAGE_2_4_EXPRESSION_CONTROL_FLOW_PLAN.md).
 
+Progress:
+
+- Step 1 added a single `classify_expression` dispatcher that assigns every `Expression` variant exactly one decision: a Stage 2.4 family, an explicit Stage 2.5/2.6 deferral (`Callable`, `Resource`, `Coroutine`), or a compile-time-only rejection. `Unlowered` is gone; families whose concrete payload has not landed yet are explicit per-family `Pending` markers.
+- Expression memoization is now occurrence-aware: `ExpressionKey { syntax, owner, context }` distinguishes module initializers from function templates and gives contextual/default occurrences distinct keys through the consuming product and destination slot. Block allocations are memoized with the same key so loop bodies and function bodies reuse one arena node.
+- Ordinary children are lowered recursively before their parent is allocated, so a diagnostic never leaves a partially initialized node. Loop bodies, match subjects and arm bodies, product elements, spreads, access bases, index operands, logical operands, and template interpolations are all visited.
+- Added a coverage classifier test with one constructed representative per syntax variant; the exhaustive classifier match and variant-name match fail compilation when a new variant appears without a decision.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (48 tests), `cargo test --workspace`, and `git diff --check`.
+
 Lower expression families in dependency order:
 
 1. Literals, names, resources, and representation/product access.

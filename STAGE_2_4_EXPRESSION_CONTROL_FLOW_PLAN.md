@@ -92,7 +92,7 @@ Extend the private lowered schema with the following concepts. Exact Rust names 
 
 ## Implementation Sequence
 
-### Step 1 - Establish Exhaustive Expression Dispatch and Occurrence Identity
+### Step 1 - Establish Exhaustive Expression Dispatch and Occurrence Identity (Done)
 
 - Add a single lowering dispatcher covering every `Expression` variant.
 - Introduce explicit Stage 2.5 and Stage 2.6 deferred kinds.
@@ -103,7 +103,15 @@ Extend the private lowered schema with the following concepts. Exact Rust names 
 
 Gate: all Stage 2.3 fixtures traverse recursively with no ambiguous `Unlowered` nodes, and duplicate ordinary references still reuse their arena ID.
 
-After this step, update `TYPED_LOWERING_PLAN.md` with general progress and `STAGE_2_LOWERING_BREAKDOWN.md` with detailed progress.
+Completed:
+
+- `classify_expression` is an exhaustive match returning `Ordinary(Stage24Family)`, `Deferred({Callable, Resource, Coroutine})`, or `Rejected`; `Unlowered` was removed and not-yet-lowered families carry explicit `Pending(family)` markers instead.
+- `ExpressionKey { syntax, owner: ExpressionOwner, context: ExpressionContext }` replaces the syntax-only memo. `ContextualDefault { consumer, slot }` gives shared default AST nodes distinct keys; block lookups use the same key so a block reached again reuses its arena node.
+- `lower_expression` lowers children before allocating the parent and rejects compile-time-only survivors with source diagnostics.
+- Recursive traversal covers blocks, satisfies values, match subjects and arm bodies, loop bodies, product/spread elements, repeated-product elements, access bases, index operands, logical operands, and template interpolations. Loop/match payload structures land in Step 5.
+- `coverage_classifier_decides_every_expression_variant` constructs one representative per variant and checks the decision table; `expression_variant_name` keeps the enumeration compile-time exhaustive.
+- New tests `dispatcher_defers_later_stage_families_explicitly` and `occurrence_keys_deduplicate_ordinary_expressions_and_blocks` cover deferral classification and occurrence reuse.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (48 tests), `cargo test --workspace`, and `git diff --check`.
 
 ### Step 2 - Lower Scalars, Ordinary Names, and Structural Access
 

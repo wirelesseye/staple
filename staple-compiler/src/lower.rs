@@ -213,8 +213,85 @@ impl Origin {
     }
 }
 
+/// The runtime owner of a lowered expression occurrence. Every reachable
+/// runtime expression belongs to exactly one function template or module
+/// initializer, and the owner participates in the expression memo key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ExpressionOwner {
+    Module(ModuleId),
+    Function(FunctionId),
+}
+
+/// Additional occurrence identity for contextual expressions. A product
+/// type's declared default expression is one shared AST node that may be
+/// evaluated at many construction sites with different checked types, so the
+/// consuming product expression and destination slot must distinguish those
+/// occurrences. Ordinary source occurrences are `Primary`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ExpressionContext {
+    Primary,
+    ContextualDefault { consumer: SyntaxId, slot: usize },
+}
+
+/// Occurrence-aware expression memo key. Ordinary occurrences deduplicate by
+/// source syntax and owner; contextual defaults additionally carry the
+/// consuming product and destination slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ExpressionKey {
+    pub syntax: SyntaxId,
+    pub owner: ExpressionOwner,
+    pub context: ExpressionContext,
+}
+
+/// A Stage 2.4-owned expression family. Every ordinary syntax variant maps to
+/// exactly one family, and a family reaches its concrete lowered form no later
+/// than the step that owns it. `Pending` is the transitional marker for
+/// families whose concrete payload has not landed yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stage24Family {
+    Block,
+    Satisfies,
+    Match,
+    Loop,
+    Product,
+    RepeatedProduct,
+    Access,
+    Index,
+    Logical,
+    Name,
+    String,
+    StringTemplate,
+    CString,
+    Integer,
+    Float,
+}
+
+/// An expression family explicitly deferred to a later lowering stage.
+/// Deferred nodes are not silently unlowered: later stages own them whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeferredExpressionFamily {
+    /// Stage 2.5 owns function values and calls.
+    Callable,
+    /// Stage 2.6 owns `with` and resource access.
+    Resource,
+    /// Stage 2.6 owns coroutine construction and `await`.
+    Coroutine,
+}
+
+/// The single lowering decision for a syntax variant. Exhaustiveness is
+/// enforced by a match, and the coverage classifier test fails when a new
+/// variant is missing from the enumerated list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExpressionDisposition {
+    Ordinary(Stage24Family),
+    Deferred(DeferredExpressionFamily),
+    /// Compile-time-only survivors that earlier phases must eliminate.
+    Rejected,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredExpression {
+    pub key: ExpressionKey,
     pub origin: Origin,
     pub value_type: CheckedType,
     pub effects: CheckedEffectSet,
@@ -225,11 +302,12 @@ pub(crate) struct LoweredExpression {
 
 #[derive(Debug, Clone)]
 pub(crate) enum LoweredExpressionKind {
-    /// A runtime expression whose family is lowered in Stage 2.4. Stage 2.3
-    /// allocates the header (origin, checked type, effects, coercion, moved
-    /// symbols) for every runtime-item payload and place base; Stage 2.4
-    /// replaces every `Unlowered` kind with its concrete form.
-    Unlowered,
+    /// A Stage 2.4-owned family awaiting its concrete payload. Every ordinary
+    /// expression is classified explicitly, so no ambiguous `Unlowered`
+    /// placeholder exists; validation rejects leftovers once Stage 2.4 ends.
+    Pending(Stage24Family),
+    /// Explicitly deferred to Stage 2.5 or Stage 2.6 with its owning family.
+    Deferred(DeferredExpressionFamily),
     Block(BlockId),
 }
 
@@ -629,11 +707,16 @@ pub(crate) struct LoweredProgram {
     modules: Catalog<ModuleId, LoweredModuleInfo, LoweredModuleId>,
     expressions: Arena<LoweredExpression, ExpressionId>,
     /// Lookup only; traversal always uses the expression arena. Repeated
-    /// lowering of the same syntax node returns the first allocated ID.
-    expression_lookup: HashMap<SyntaxId, ExpressionId>,
+    /// lowering of the same occurrence key returns the first allocated ID.
+    /// Contextual defaults use distinct keys so shared default syntax does not
+    /// alias incompatible node types.
+    expression_lookup: HashMap<ExpressionKey, ExpressionId>,
     patterns: Arena<LoweredPattern, PatternId>,
     places: Arena<LoweredPlace, PlaceId>,
     blocks: Arena<LoweredBlock, BlockId>,
+    /// Lookup only; traversal always uses the block arena. Repeated lowering
+    /// of the same block occurrence returns the first allocated ID.
+    block_lookup: HashMap<ExpressionKey, BlockId>,
     items: Arena<LoweredItem, ItemId>,
     functions: Catalog<FunctionId, LoweredFunction, LoweredFunctionId>,
     symbols: Catalog<SymbolId, LoweredSymbol, LoweredSymbolId>,
@@ -1165,7 +1248,12 @@ impl LoweredProgram {
                 continue;
             }
             let is_entry = executable_entry == Some(module_id);
-            let items = self.lower_items(module, &source.syntax.items, &mut diagnostics);
+            let items = self.lower_items(
+                module,
+                ExpressionOwner::Module(module_id),
+                &source.syntax.items,
+                &mut diagnostics,
+            );
             let body = self.blocks.push(LoweredBlock {
                 origin: origin.clone(),
                 items,
@@ -1201,12 +1289,24 @@ impl LoweredProgram {
 
     /// Lowers one runtime block's item sequence, preserving source order. The
     /// trailing expression becomes the block result rather than an item, so a
-    /// block's value is never also a statement.
+    /// block's value is never also a statement. The block occurrence is
+    /// memoized so loop bodies and function bodies reached again later reuse
+    /// the same arena node.
     fn lower_block(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
         block: &staple_syntax::BlockExpression,
     ) -> Result<BlockId, Diagnostic> {
+        let key = ExpressionKey {
+            syntax: block.syntax.id,
+            owner,
+            context,
+        };
+        if let Some(existing) = self.block_lookup.get(&key) {
+            return Ok(*existing);
+        }
         let origin = Origin {
             syntax: block.syntax.id,
             span: block.syntax.span.clone(),
@@ -1218,18 +1318,20 @@ impl LoweredProgram {
             if Some(index) == last
                 && let Item::Expression(expression) = item
             {
-                result = Some(self.lower_expression_header(module, expression)?);
+                result = Some(self.lower_expression(module, owner, context, expression)?);
                 continue;
             }
-            if let Some(item) = self.lower_item(module, item)? {
+            if let Some(item) = self.lower_item(module, owner, context, item)? {
                 items.push(item);
             }
         }
-        Ok(self.blocks.push(LoweredBlock {
+        let id = self.blocks.push(LoweredBlock {
             origin,
             items,
             result,
-        }))
+        });
+        self.block_lookup.insert(key, id);
+        Ok(id)
     }
 
     /// Lowers a function template's body into exactly one block. A non-block
@@ -1240,7 +1342,9 @@ impl LoweredProgram {
         module: &TypedModule,
         function: &ResolvedFunction,
     ) -> Result<BlockId, Diagnostic> {
-        let body = self.lower_expression_header(module, &function.body)?;
+        let owner = ExpressionOwner::Function(function.id);
+        let body =
+            self.lower_expression(module, owner, ExpressionContext::Primary, &function.body)?;
         if let Some(LoweredExpressionKind::Block(block)) = self
             .expressions
             .get(body)
@@ -1265,12 +1369,13 @@ impl LoweredProgram {
     fn lower_items(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
         items: &[Item],
         diagnostics: &mut Vec<Diagnostic>,
     ) -> Vec<ItemId> {
         let mut lowered = Vec::new();
         for item in items {
-            match self.lower_item(module, item) {
+            match self.lower_item(module, owner, ExpressionContext::Primary, item) {
                 Ok(Some(item)) => lowered.push(item),
                 Ok(None) => {}
                 Err(diagnostic) => diagnostics.push(diagnostic),
@@ -1286,6 +1391,8 @@ impl LoweredProgram {
     fn lower_item(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
         item: &Item,
     ) -> Result<Option<ItemId>, Diagnostic> {
         let syntax = item.syntax();
@@ -1295,26 +1402,26 @@ impl LoweredProgram {
         };
         let kind = match item {
             Item::Binding(binding) => {
-                LoweredItemKind::Binding(self.lower_binding_item(module, binding)?)
+                LoweredItemKind::Binding(self.lower_binding_item(module, owner, context, binding)?)
             }
-            Item::PatternBinding(binding) => {
-                LoweredItemKind::PatternBinding(self.lower_pattern_binding_item(module, binding)?)
-            }
-            Item::Assignment(assignment) => {
-                LoweredItemKind::Assignment(self.lower_assignment_item(module, assignment)?)
-            }
+            Item::PatternBinding(binding) => LoweredItemKind::PatternBinding(
+                self.lower_pattern_binding_item(module, owner, context, binding)?,
+            ),
+            Item::Assignment(assignment) => LoweredItemKind::Assignment(
+                self.lower_assignment_item(module, owner, context, assignment)?,
+            ),
             Item::Return(item) => LoweredItemKind::Return(LoweredReturnItem {
-                value: self.lower_expression_header(module, &item.value)?,
+                value: self.lower_expression(module, owner, context, &item.value)?,
             }),
             Item::Break(item) => LoweredItemKind::Break(LoweredBreakItem {
                 value: match &item.value {
-                    Some(value) => Some(self.lower_expression_header(module, value)?),
+                    Some(value) => Some(self.lower_expression(module, owner, context, value)?),
                     None => None,
                 },
             }),
             Item::Continue(_) => LoweredItemKind::Continue,
             Item::Expression(expression) => {
-                let expression = self.lower_expression_header(module, expression)?;
+                let expression = self.lower_expression(module, owner, context, expression)?;
                 let drop_result = self.expression_needs_drop(module, expression);
                 LoweredItemKind::Expression(LoweredExpressionStatementItem {
                     expression,
@@ -1353,6 +1460,8 @@ impl LoweredProgram {
     fn lower_binding_item(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
         binding: &staple_syntax::Binding,
     ) -> Result<LoweredBindingItem, Diagnostic> {
         let resolved = module.resolved();
@@ -1366,7 +1475,7 @@ impl LoweredProgram {
             ));
         };
         let value = match &binding.value {
-            Some(value) => Some(self.lower_expression_header(module, value)?),
+            Some(value) => Some(self.lower_expression(module, owner, context, value)?),
             None => None,
         };
         Ok(LoweredBindingItem {
@@ -1384,10 +1493,12 @@ impl LoweredProgram {
     fn lower_pattern_binding_item(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
         binding: &staple_syntax::PatternBinding,
     ) -> Result<LoweredPatternBindingItem, Diagnostic> {
         let pattern = self.lower_pattern(module, &binding.pattern)?;
-        let value = self.lower_expression_header(module, &binding.value)?;
+        let value = self.lower_expression(module, owner, context, &binding.value)?;
         let propagating = binding.kind == staple_syntax::PatternBindingKind::Propagating;
         let propagation = module.propagation_for(binding.syntax.id).cloned();
         if propagating && propagation.is_none() {
@@ -1407,11 +1518,13 @@ impl LoweredProgram {
     fn lower_assignment_item(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
         assignment: &staple_syntax::Assignment,
     ) -> Result<LoweredAssignmentItem, Diagnostic> {
         if let Expression::Index(index) = &assignment.target {
-            let target = self.lower_indexed_place(module, index)?;
-            let value = self.lower_expression_header(module, &assignment.value)?;
+            let target = self.lower_indexed_place(module, owner, context, index)?;
+            let value = self.lower_expression(module, owner, context, &assignment.value)?;
             let mutate_index = module.trait_dispatch_for(assignment.syntax.id).cloned();
             if mutate_index.is_none() {
                 return Err(Diagnostic::new(
@@ -1428,8 +1541,8 @@ impl LoweredProgram {
                 signal: false,
             });
         }
-        let target = self.lower_place(module, &assignment.target)?;
-        let value = self.lower_expression_header(module, &assignment.value)?;
+        let target = self.lower_place(module, owner, context, &assignment.target)?;
+        let value = self.lower_expression(module, owner, context, &assignment.value)?;
         let target_type = self
             .places
             .get(target)
@@ -1474,6 +1587,8 @@ impl LoweredProgram {
     fn lower_indexed_place(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
         index: &staple_syntax::IndexExpression,
     ) -> Result<PlaceId, Diagnostic> {
         let syntax = &index.syntax;
@@ -1484,7 +1599,7 @@ impl LoweredProgram {
             ));
         };
         let base = if expression_has_place_root(module.resolved(), &index.value) {
-            self.lower_place(module, &index.value)?
+            self.lower_place(module, owner, context, &index.value)?
         } else {
             let value_syntax = index.value.syntax();
             let Some(base_type) = module.type_of_expression(value_syntax.id).cloned() else {
@@ -1493,7 +1608,7 @@ impl LoweredProgram {
                     "cannot lower an indexed base without a checked type",
                 ));
             };
-            let expression = self.lower_expression_header(module, &index.value)?;
+            let expression = self.lower_expression(module, owner, context, &index.value)?;
             self.places.push(LoweredPlace {
                 origin: Origin {
                     syntax: value_syntax.id,
@@ -1503,7 +1618,7 @@ impl LoweredProgram {
                 kind: LoweredPlaceKind::Temporary { expression },
             })
         };
-        let position = self.lower_expression_header(module, &index.index)?;
+        let position = self.lower_expression(module, owner, context, &index.index)?;
         Ok(self.places.push(LoweredPlace {
             origin: Origin {
                 syntax: syntax.id,
@@ -1521,6 +1636,8 @@ impl LoweredProgram {
     fn lower_place(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
         expression: &Expression,
     ) -> Result<PlaceId, Diagnostic> {
         let syntax = expression.syntax();
@@ -1548,10 +1665,10 @@ impl LoweredProgram {
         }
         let kind = match expression {
             Expression::Product(product) if product.elements.len() == 1 => {
-                return self.lower_place(module, &product.elements[0].value);
+                return self.lower_place(module, owner, context, &product.elements[0].value);
             }
             Expression::Satisfies(satisfies) => {
-                return self.lower_place(module, &satisfies.value);
+                return self.lower_place(module, owner, context, &satisfies.value);
             }
             Expression::Resource(resource) => {
                 let Some(resource) = module.resource_for_expression(resource.syntax.id).cloned()
@@ -1563,9 +1680,11 @@ impl LoweredProgram {
                 };
                 LoweredPlaceKind::Resource { resource }
             }
-            Expression::Access(access) => self.lower_access_place(module, access)?,
+            Expression::Access(access) => {
+                self.lower_access_place(module, owner, context, access)?
+            }
             Expression::Index(index) => {
-                return self.lower_indexed_place(module, index);
+                return self.lower_indexed_place(module, owner, context, index);
             }
             other => {
                 return Err(Diagnostic::new(
@@ -1584,6 +1703,8 @@ impl LoweredProgram {
     fn lower_access_place(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
         access: &staple_syntax::AccessExpression,
     ) -> Result<LoweredPlaceKind, Diagnostic> {
         let Some(checked) = module.access_for(access.syntax.id).cloned() else {
@@ -1594,7 +1715,8 @@ impl LoweredProgram {
         };
         match checked {
             CheckedAccess::Representation { dereference } => {
-                let base = self.lower_access_base(module, &access.value, dereference)?;
+                let base =
+                    self.lower_access_base(module, owner, context, &access.value, dereference)?;
                 Ok(LoweredPlaceKind::Representation { base })
             }
             CheckedAccess::Product {
@@ -1603,7 +1725,8 @@ impl LoweredProgram {
                 slice,
                 scalar,
             } => {
-                let base = self.lower_access_base(module, &access.value, dereference)?;
+                let base =
+                    self.lower_access_base(module, owner, context, &access.value, dereference)?;
                 if scalar {
                     Ok(LoweredPlaceKind::Representation { base })
                 } else {
@@ -1618,11 +1741,13 @@ impl LoweredProgram {
     fn lower_access_base(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
         value: &Expression,
         dereference: Vec<CheckedType>,
     ) -> Result<PlaceId, Diagnostic> {
         if dereference.is_empty() {
-            return self.lower_place(module, value);
+            return self.lower_place(module, owner, context, value);
         }
         let syntax = value.syntax();
         let Some(value_type) = dereference.last().cloned() else {
@@ -1631,7 +1756,7 @@ impl LoweredProgram {
                 "cannot lower an empty dereference chain",
             ));
         };
-        let reference = self.lower_expression_header(module, value)?;
+        let reference = self.lower_expression(module, owner, context, value)?;
         Ok(self.places.push(LoweredPlace {
             origin: Origin {
                 syntax: syntax.id,
@@ -1753,20 +1878,33 @@ impl LoweredProgram {
         }))
     }
 
-    /// Allocates the header of a runtime expression, returning the existing
-    /// ID when the same syntax node was already lowered. Stage 2.4 replaces
-    /// the `Unlowered` kind with the expression family's concrete form; block
-    /// expressions are lowered here because their items are runtime items.
-    fn lower_expression_header(
+    /// Lowers one runtime expression occurrence. The occurrence key memoizes
+    /// repeated visits; children are lowered before the node is allocated so a
+    /// diagnostic never leaves a partially initialized arena node.
+    fn lower_expression(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
         expression: &Expression,
     ) -> Result<ExpressionId, Diagnostic> {
         let syntax = expression.syntax();
-        if let Some(existing) = self.expression_lookup.get(&syntax.id) {
+        let key = ExpressionKey {
+            syntax: syntax.id,
+            owner,
+            context,
+        };
+        if let Some(existing) = self.expression_lookup.get(&key) {
             return Ok(*existing);
         }
-        reject_compile_time_expression(expression)?;
+        let disposition = classify_expression(expression);
+        if disposition == ExpressionDisposition::Rejected {
+            reject_compile_time_expression(expression)?;
+            return Err(Diagnostic::new(
+                syntax.span.clone(),
+                "compile-time-only expression reached lowering",
+            ));
+        }
         let value_type = match module.type_of_expression(syntax.id).cloned() {
             Some(value_type) => value_type,
             // The checker stops recording a type once control flow diverges
@@ -1782,13 +1920,15 @@ impl LoweredProgram {
         let coercion = module.coercion_for(syntax.id).cloned();
         let mut moved_symbols = module.moved_symbols(syntax.id).collect::<Vec<_>>();
         moved_symbols.sort_by_key(|symbol| symbol.0);
-        let kind = match expression {
-            Expression::Block(block) => {
-                LoweredExpressionKind::Block(self.lower_block(module, block)?)
+        let kind = match disposition {
+            ExpressionDisposition::Ordinary(family) => {
+                self.lower_ordinary_expression(module, owner, context, family, expression)?
             }
-            _ => LoweredExpressionKind::Unlowered,
+            ExpressionDisposition::Deferred(family) => LoweredExpressionKind::Deferred(family),
+            ExpressionDisposition::Rejected => unreachable!("rejected above"),
         };
         let id = self.expressions.push(LoweredExpression {
+            key,
             origin: Origin {
                 syntax: syntax.id,
                 span: syntax.span.clone(),
@@ -1799,8 +1939,76 @@ impl LoweredProgram {
             moved_symbols,
             kind,
         });
-        self.expression_lookup.insert(syntax.id, id);
+        self.expression_lookup.insert(key, id);
         Ok(id)
+    }
+
+    /// Lowers the children and payload of one Stage 2.4-owned expression
+    /// family. Families whose concrete payload has not landed yet lower their
+    /// children and then stay `Pending` so traversal still visits every
+    /// reachable ordinary occurrence.
+    fn lower_ordinary_expression(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        family: Stage24Family,
+        expression: &Expression,
+    ) -> Result<LoweredExpressionKind, Diagnostic> {
+        let pending = |family| LoweredExpressionKind::Pending(family);
+        match (family, expression) {
+            (Stage24Family::Block, Expression::Block(block)) => Ok(LoweredExpressionKind::Block(
+                self.lower_block(module, owner, context, block)?,
+            )),
+            (Stage24Family::Satisfies, Expression::Satisfies(satisfies)) => {
+                self.lower_expression(module, owner, context, &satisfies.value)?;
+                Ok(pending(Stage24Family::Satisfies))
+            }
+            (Stage24Family::Match, Expression::Match(match_)) => {
+                self.lower_expression(module, owner, context, &match_.subject)?;
+                for arm in &match_.arms {
+                    self.lower_expression(module, owner, context, &arm.body)?;
+                }
+                Ok(pending(Stage24Family::Match))
+            }
+            (Stage24Family::Loop, Expression::Loop(loop_)) => {
+                self.lower_block(module, owner, context, &loop_.body)?;
+                Ok(pending(Stage24Family::Loop))
+            }
+            (Stage24Family::Product, Expression::Product(product)) => {
+                for element in &product.elements {
+                    self.lower_expression(module, owner, context, &element.value)?;
+                }
+                Ok(pending(Stage24Family::Product))
+            }
+            (Stage24Family::RepeatedProduct, Expression::RepeatedProduct(repeated)) => {
+                self.lower_expression(module, owner, context, &repeated.value)?;
+                Ok(pending(Stage24Family::RepeatedProduct))
+            }
+            (Stage24Family::Access, Expression::Access(access)) => {
+                self.lower_expression(module, owner, context, &access.value)?;
+                Ok(pending(Stage24Family::Access))
+            }
+            (Stage24Family::Index, Expression::Index(index)) => {
+                self.lower_expression(module, owner, context, &index.value)?;
+                self.lower_expression(module, owner, context, &index.index)?;
+                Ok(pending(Stage24Family::Index))
+            }
+            (Stage24Family::Logical, Expression::Logical(logical)) => {
+                self.lower_expression(module, owner, context, &logical.left)?;
+                self.lower_expression(module, owner, context, &logical.right)?;
+                Ok(pending(Stage24Family::Logical))
+            }
+            (Stage24Family::StringTemplate, Expression::StringTemplate(template)) => {
+                for part in &template.parts {
+                    if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
+                        self.lower_expression(module, owner, context, &interpolation.expression)?;
+                    }
+                }
+                Ok(pending(Stage24Family::StringTemplate))
+            }
+            (family, _) => Ok(pending(family)),
+        }
     }
 
     fn expression_needs_drop(&self, module: &TypedModule, expression: ExpressionId) -> bool {
@@ -1832,9 +2040,18 @@ impl LoweredProgram {
 
     fn validate_arena_references(&self) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
-        for (_, expression) in self.expressions.iter() {
+        for (id, expression) in self.expressions.iter() {
+            if self.expression_lookup.get(&expression.key) != Some(&id) {
+                diagnostics.push(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    format!(
+                        "expression occurrence {:?} disagrees with its lookup entry",
+                        expression.key
+                    ),
+                ));
+            }
             match expression.kind {
-                LoweredExpressionKind::Unlowered => {}
+                LoweredExpressionKind::Pending(_) | LoweredExpressionKind::Deferred(_) => {}
                 LoweredExpressionKind::Block(id) if !self.blocks.contains(id) => diagnostics.push(
                     invalid_reference(&expression.origin, "expression", "block", id.index()),
                 ),
@@ -2597,6 +2814,77 @@ fn module_origin(module: &SourceModule) -> Origin {
     }
 }
 
+/// The single, exhaustive lowering decision for a syntax variant. A new
+/// `Expression` variant fails to compile here until it has an explicit
+/// owned/deferred/rejected decision, and the coverage classifier test keeps
+/// the enumerated variant list in agreement.
+fn classify_expression(expression: &Expression) -> ExpressionDisposition {
+    use DeferredExpressionFamily::{Callable, Coroutine, Resource};
+    use ExpressionDisposition::{Deferred, Ordinary, Rejected};
+    use Stage24Family as Family;
+    match expression {
+        Expression::Function(_) | Expression::Call(_) => Deferred(Callable),
+        Expression::Satisfies(_) => Ordinary(Family::Satisfies),
+        Expression::Match(_) => Ordinary(Family::Match),
+        Expression::Loop(_) => Ordinary(Family::Loop),
+        Expression::Coro(_) | Expression::Await(_) => Deferred(Coroutine),
+        Expression::Resource(_) | Expression::With(_) => Deferred(Resource),
+        Expression::Block(_) => Ordinary(Family::Block),
+        Expression::Product(_) => Ordinary(Family::Product),
+        Expression::RepeatedProduct(_) => Ordinary(Family::RepeatedProduct),
+        Expression::Access(_) => Ordinary(Family::Access),
+        Expression::Index(_) => Ordinary(Family::Index),
+        Expression::Unary(_) | Expression::Binary(_) => Rejected,
+        Expression::Logical(_) => Ordinary(Family::Logical),
+        Expression::SyntaxArgument(_)
+        | Expression::VisibilityArgument(_)
+        | Expression::Quote(_)
+        | Expression::Splice(_) => Rejected,
+        Expression::Name(_) => Ordinary(Family::Name),
+        Expression::String(_) => Ordinary(Family::String),
+        Expression::StringTemplate(_) => Ordinary(Family::StringTemplate),
+        Expression::CString(_) => Ordinary(Family::CString),
+        Expression::Integer(_) => Ordinary(Family::Integer),
+        Expression::Float(_) => Ordinary(Family::Float),
+    }
+}
+
+/// The stable name of an expression variant, used by coverage tests and
+/// diagnostics. The exhaustive match is the compile-time half of the
+/// coverage gate: adding an `Expression` variant fails to compile until it
+/// is named here and classified by `classify_expression`.
+fn expression_variant_name(expression: &Expression) -> &'static str {
+    match expression {
+        Expression::Function(_) => "Function",
+        Expression::Satisfies(_) => "Satisfies",
+        Expression::Match(_) => "Match",
+        Expression::Loop(_) => "Loop",
+        Expression::Coro(_) => "Coro",
+        Expression::Await(_) => "Await",
+        Expression::Resource(_) => "Resource",
+        Expression::With(_) => "With",
+        Expression::Block(_) => "Block",
+        Expression::Product(_) => "Product",
+        Expression::RepeatedProduct(_) => "RepeatedProduct",
+        Expression::Call(_) => "Call",
+        Expression::Access(_) => "Access",
+        Expression::Index(_) => "Index",
+        Expression::Unary(_) => "Unary",
+        Expression::Binary(_) => "Binary",
+        Expression::Logical(_) => "Logical",
+        Expression::SyntaxArgument(_) => "SyntaxArgument",
+        Expression::VisibilityArgument(_) => "VisibilityArgument",
+        Expression::Quote(_) => "Quote",
+        Expression::Splice(_) => "Splice",
+        Expression::Name(_) => "Name",
+        Expression::String(_) => "String",
+        Expression::StringTemplate(_) => "StringTemplate",
+        Expression::CString(_) => "CString",
+        Expression::Integer(_) => "Integer",
+        Expression::Float(_) => "Float",
+    }
+}
+
 /// Rejects compile-time-only expression nodes that earlier phases must have
 /// eliminated. These are lowering diagnostics rather than backend panics.
 fn reject_compile_time_expression(expression: &Expression) -> Result<(), Diagnostic> {
@@ -2872,6 +3160,8 @@ fn validate_checked_module(module: &TypedModule) -> Vec<Diagnostic> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    use staple_syntax::{Syntax, Type};
 
     use crate::{NameResolver, ProgramLoader, TypeChecker};
 
@@ -4411,7 +4701,13 @@ mod tests {
     #[test]
     fn validator_rejects_dangling_arena_references() {
         let mut program = LoweredProgram::default();
-        program.expressions.push(LoweredExpression {
+        let key = ExpressionKey {
+            syntax: SyntaxId(4),
+            owner: ExpressionOwner::Module(ModuleId(0)),
+            context: ExpressionContext::Primary,
+        };
+        let id = program.expressions.push(LoweredExpression {
+            key,
             origin: Origin::compiler(),
             value_type: CheckedType::I32,
             effects: CheckedEffectSet::default(),
@@ -4419,6 +4715,7 @@ mod tests {
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Block(BlockId::from_index(4)),
         });
+        program.expression_lookup.insert(key, id);
         let diagnostics = program.validate();
         assert_eq!(diagnostics.len(), 1);
         assert!(
@@ -4426,6 +4723,394 @@ mod tests {
                 .message
                 .contains("dangling block reference 4")
         );
+    }
+
+    fn compiler_syntax() -> Syntax {
+        Syntax::compiler()
+    }
+
+    fn wildcard_pattern() -> Pattern {
+        Pattern::Wildcard(staple_syntax::WildcardPattern {
+            syntax: compiler_syntax(),
+            ty: Type::Inferred(staple_syntax::InferredType::new()),
+        })
+    }
+
+    fn name_expression(name: &str) -> Expression {
+        Expression::Name(staple_syntax::NameExpression {
+            syntax: compiler_syntax(),
+            name: name.to_owned(),
+        })
+    }
+
+    fn empty_block() -> staple_syntax::BlockExpression {
+        staple_syntax::BlockExpression {
+            syntax: compiler_syntax(),
+            items: Vec::new(),
+        }
+    }
+
+    fn inferred_type() -> Type {
+        Type::Inferred(staple_syntax::InferredType::new())
+    }
+
+    fn representative_expressions() -> Vec<(&'static str, Expression)> {
+        use staple_syntax::*;
+        let syntax = compiler_syntax();
+        let mut expressions = Vec::new();
+        expressions.push((
+            "Function",
+            Expression::Function(Box::new(FunctionExpression {
+                syntax: syntax.clone(),
+                parameter_style: FunctionParameterStyle::Single,
+                pattern: wildcard_pattern(),
+                body: Box::new(name_expression("value")),
+            })),
+        ));
+        expressions.push((
+            "Satisfies",
+            Expression::Satisfies(Box::new(SatisfiesExpression {
+                syntax: syntax.clone(),
+                value: Box::new(name_expression("value")),
+                ty: inferred_type(),
+            })),
+        ));
+        expressions.push((
+            "Match",
+            Expression::Match(MatchExpression {
+                syntax: syntax.clone(),
+                subject: Box::new(name_expression("value")),
+                arms: vec![MatchArm {
+                    syntax: syntax.clone(),
+                    pattern: wildcard_pattern(),
+                    body: name_expression("value"),
+                }],
+            }),
+        ));
+        expressions.push((
+            "Loop",
+            Expression::Loop(LoopExpression {
+                syntax: syntax.clone(),
+                body: empty_block(),
+            }),
+        ));
+        expressions.push((
+            "Coro",
+            Expression::Coro(CoroExpression {
+                syntax: syntax.clone(),
+                body: empty_block(),
+            }),
+        ));
+        expressions.push((
+            "Await",
+            Expression::Await(AwaitExpression {
+                syntax: syntax.clone(),
+                operand: Box::new(name_expression("value")),
+            }),
+        ));
+        expressions.push((
+            "Resource",
+            Expression::Resource(Box::new(ResourceExpression {
+                syntax: syntax.clone(),
+                resource: inferred_type(),
+            })),
+        ));
+        expressions.push((
+            "With",
+            Expression::With(Box::new(WithResourceExpression {
+                syntax: syntax.clone(),
+                resource: inferred_type(),
+                mutable: false,
+                value: Box::new(name_expression("value")),
+                body: empty_block(),
+            })),
+        ));
+        expressions.push(("Block", Expression::Block(empty_block())));
+        expressions.push((
+            "Product",
+            Expression::Product(ProductExpression {
+                syntax: syntax.clone(),
+                elements: vec![ProductElement {
+                    syntax: syntax.clone(),
+                    name: None,
+                    designated: false,
+                    value: name_expression("value"),
+                    spread: false,
+                    named_spread: false,
+                }],
+            }),
+        ));
+        expressions.push((
+            "RepeatedProduct",
+            Expression::RepeatedProduct(RepeatedProductExpression {
+                syntax: syntax.clone(),
+                value: Box::new(name_expression("value")),
+                count: Box::new(inferred_type()),
+            }),
+        ));
+        expressions.push((
+            "Call",
+            Expression::Call(CallExpression {
+                syntax: syntax.clone(),
+                callee: Box::new(name_expression("value")),
+                argument: Box::new(name_expression("value")),
+            }),
+        ));
+        expressions.push((
+            "Access",
+            Expression::Access(AccessExpression {
+                syntax: syntax.clone(),
+                value: Box::new(name_expression("value")),
+                accessor: Accessor::Name("field".to_owned()),
+            }),
+        ));
+        expressions.push((
+            "Index",
+            Expression::Index(IndexExpression {
+                syntax: syntax.clone(),
+                value: Box::new(name_expression("value")),
+                index: Box::new(name_expression("position")),
+            }),
+        ));
+        expressions.push((
+            "Unary",
+            Expression::Unary(UnaryExpression {
+                syntax: syntax.clone(),
+                operator_syntax: syntax.clone(),
+                operator: UnaryOperator::Negate,
+                operand: Box::new(name_expression("value")),
+            }),
+        ));
+        expressions.push((
+            "Binary",
+            Expression::Binary(BinaryExpression {
+                syntax: syntax.clone(),
+                operator_syntax: syntax.clone(),
+                operator: BinaryOperator::Add,
+                left: Box::new(name_expression("value")),
+                right: Box::new(name_expression("value")),
+            }),
+        ));
+        expressions.push((
+            "Logical",
+            Expression::Logical(LogicalExpression {
+                syntax: syntax.clone(),
+                operator: LogicalOperator::And,
+                left: Box::new(name_expression("value")),
+                right: Box::new(name_expression("value")),
+                bool_type: inferred_type(),
+            }),
+        ));
+        expressions.push((
+            "SyntaxArgument",
+            Expression::SyntaxArgument(SyntaxArgumentExpression {
+                syntax: syntax.clone(),
+            }),
+        ));
+        expressions.push((
+            "VisibilityArgument",
+            Expression::VisibilityArgument(VisibilitySyntax {
+                syntax: syntax.clone(),
+                kind: VisibilityKind::Private,
+            }),
+        ));
+        expressions.push((
+            "Quote",
+            Expression::Quote(QuoteExpression {
+                syntax: syntax.clone(),
+                kind: QuoteKind::Quote,
+                path: Vec::new(),
+                contents: syntax.clone(),
+                template: QuoteTemplate::Raw,
+            }),
+        ));
+        expressions.push((
+            "Splice",
+            Expression::Splice(SpliceExpression {
+                syntax: syntax.clone(),
+                name: "value".to_owned(),
+                repeated: false,
+            }),
+        ));
+        expressions.push(("Name", name_expression("value")));
+        expressions.push((
+            "String",
+            Expression::String(StringExpression {
+                syntax: syntax.clone(),
+                literal: "\"value\"".to_owned(),
+            }),
+        ));
+        expressions.push((
+            "StringTemplate",
+            Expression::StringTemplate(StringTemplateExpression {
+                syntax: syntax.clone(),
+                parts: vec![
+                    StringTemplatePart::Literal("value ".to_owned()),
+                    StringTemplatePart::Interpolation(StringInterpolation {
+                        expression: Box::new(name_expression("value")),
+                        format: StringInterpolationFormat::Display,
+                    }),
+                ],
+            }),
+        ));
+        expressions.push((
+            "CString",
+            Expression::CString(CStringExpression {
+                syntax: syntax.clone(),
+                literal: "c\"value\"".to_owned(),
+            }),
+        ));
+        expressions.push((
+            "Integer",
+            Expression::Integer(IntegerExpression {
+                syntax: syntax.clone(),
+                literal: "1".to_owned(),
+            }),
+        ));
+        expressions.push((
+            "Float",
+            Expression::Float(FloatExpression {
+                syntax,
+                literal: "1.0".to_owned(),
+            }),
+        ));
+        expressions
+    }
+
+    #[test]
+    fn coverage_classifier_decides_every_expression_variant() {
+        use ExpressionDisposition::{Deferred, Ordinary, Rejected};
+        let representatives = representative_expressions();
+        let mut names = representatives
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            representatives.len(),
+            "representative expressions must cover each variant exactly once"
+        );
+
+        for (name, expression) in &representatives {
+            assert_eq!(expression_variant_name(expression), *name);
+            let expected = match *name {
+                "Function" | "Call" => Deferred(DeferredExpressionFamily::Callable),
+                "Resource" | "With" => Deferred(DeferredExpressionFamily::Resource),
+                "Coro" | "Await" => Deferred(DeferredExpressionFamily::Coroutine),
+                "Unary" | "Binary" | "SyntaxArgument" | "VisibilityArgument" | "Quote"
+                | "Splice" => Rejected,
+                "Satisfies" => Ordinary(Stage24Family::Satisfies),
+                "Match" => Ordinary(Stage24Family::Match),
+                "Loop" => Ordinary(Stage24Family::Loop),
+                "Block" => Ordinary(Stage24Family::Block),
+                "Product" => Ordinary(Stage24Family::Product),
+                "RepeatedProduct" => Ordinary(Stage24Family::RepeatedProduct),
+                "Access" => Ordinary(Stage24Family::Access),
+                "Index" => Ordinary(Stage24Family::Index),
+                "Logical" => Ordinary(Stage24Family::Logical),
+                "Name" => Ordinary(Stage24Family::Name),
+                "String" => Ordinary(Stage24Family::String),
+                "StringTemplate" => Ordinary(Stage24Family::StringTemplate),
+                "CString" => Ordinary(Stage24Family::CString),
+                "Integer" => Ordinary(Stage24Family::Integer),
+                "Float" => Ordinary(Stage24Family::Float),
+                other => panic!("unclassified expression variant {other}"),
+            };
+            assert_eq!(classify_expression(expression), expected, "{name}");
+        }
+    }
+
+    fn deferred_families(program: &LoweredProgram) -> Vec<DeferredExpressionFamily> {
+        program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match expression.kind {
+                LoweredExpressionKind::Deferred(family) => Some(family),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn pending_families(program: &LoweredProgram) -> Vec<Stage24Family> {
+        program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match expression.kind {
+                LoweredExpressionKind::Pending(family) => Some(family),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dispatcher_defers_later_stage_families_explicitly() {
+        let module = checked_program(concat!(
+            "use std.coroutine.(Coroutine)\n",
+            "type Counter = ctor (value: I32)\n",
+            "def increment: () ->{mut Counter} () = () => {\n",
+            "  (resource Counter).value = (resource Counter).value + 1\n",
+            "}\n",
+            "def task: () -> Coroutine{} I32 = () => coro { 42 }\n",
+            "def driver: () -> Coroutine{} I32 = () => coro {\n",
+            "  let value = await (task ()); value\n",
+            "}\n",
+            "let closure = (value: I32) => value\n",
+            "let applied = task ()\n",
+            "let mut counter = Counter (value: 0)\n",
+            "with mut Counter = counter { increment () }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let deferred = deferred_families(&program);
+        assert!(deferred.contains(&DeferredExpressionFamily::Callable));
+        assert!(deferred.contains(&DeferredExpressionFamily::Resource));
+        assert!(deferred.contains(&DeferredExpressionFamily::Coroutine));
+        assert!(
+            !pending_families(&program)
+                .iter()
+                .any(|family| matches!(family, Stage24Family::Block)),
+            "blocks are lowered, not pending"
+        );
+    }
+
+    #[test]
+    fn occurrence_keys_deduplicate_ordinary_expressions_and_blocks() {
+        let module = checked_program("def block_body = () => { let value: I32 = 1; value }\n");
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name == "block_body")
+            .expect("block_body function");
+        let Expression::Block(block) = &function.body else {
+            panic!("expected a block body");
+        };
+        let owner = ExpressionOwner::Function(function.id);
+        let mut program = LoweredProgram::default();
+
+        let first = program
+            .lower_block(&module, owner, ExpressionContext::Primary, block)
+            .expect("block should lower");
+        let second = program
+            .lower_block(&module, owner, ExpressionContext::Primary, block)
+            .expect("block should lower again");
+        assert_eq!(first, second);
+        assert_eq!(program.blocks.iter().count(), 1);
+
+        let first_expression = program
+            .lower_expression(&module, owner, ExpressionContext::Primary, &function.body)
+            .expect("block expression should lower");
+        let second_expression = program
+            .lower_expression(&module, owner, ExpressionContext::Primary, &function.body)
+            .expect("block expression should lower again");
+        assert_eq!(first_expression, second_expression);
+        assert!(matches!(
+            program.expressions.get(first_expression).unwrap().kind,
+            LoweredExpressionKind::Block(id) if id == first
+        ));
     }
 
     #[test]
@@ -5023,8 +5708,9 @@ mod tests {
             syntax: staple_syntax::Syntax::compiler(),
             name: "items".to_owned(),
         });
+        let owner = ExpressionOwner::Module(ModuleId(0));
         let diagnostic = program
-            .lower_item(&module, &splice)
+            .lower_item(&module, owner, ExpressionContext::Primary, &splice)
             .expect_err("a repeated item splice should be rejected");
         assert!(diagnostic.message.contains("repeated item splice"));
 
@@ -5039,7 +5725,7 @@ mod tests {
             ))),
         });
         let diagnostic = program
-            .lower_item(&module, &splice)
+            .lower_item(&module, owner, ExpressionContext::Primary, &splice)
             .expect_err("a visibility splice should be rejected");
         assert!(diagnostic.message.contains("visibility splice"));
 

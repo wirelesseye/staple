@@ -17,7 +17,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - The initial validator rejects functions or implicit thunks that have no checked function type.
 - All CLI and compiler code-generation tests now pass through `Lowerer`.
 - `cargo check --workspace` and `cargo test --workspace` pass. The workspace test run covers 937 tests.
-- **Stage 2 is in progress.** Stage 2.1, all of Stage 2.2, and Stage 2.3 are complete. Lowering now owns validated declaration catalogs plus lowered patterns, assignment places, runtime items, function bodies, and module initializer bodies, with deterministic validation and transition comparisons. Stage 2.4 (lower ordinary expressions and control flow) is next. Stage 5 still removes the temporary legacy payload after migrating the backend.
+- **Stage 2 is in progress.** Stage 2.1, all of Stage 2.2, and Stage 2.3 are complete, and Stage 2.4 Step 1 has landed. Lowering now owns validated declaration catalogs plus lowered patterns, assignment places, runtime items, function bodies, and module initializer bodies, with deterministic validation and transition comparisons. Stage 2.4 (lower ordinary expressions and control flow) is in progress: every `Expression` variant now has one exhaustive owned/deferred/rejected decision, expression identity is occurrence-aware, and block/function/initializer ownership is explicit. Stage 5 still removes the temporary legacy payload after migrating the backend.
 - The detailed Stage 2 implementation sequence is maintained in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md).
 
 ## Public Interfaces
@@ -152,6 +152,7 @@ Progress:
 - After Stage 2.2 Step 2, `cargo test --workspace` passes 943 tests, including the default-stack regression for block-scoped module initialization.
 - Stage 2.2 Steps 3-8 added focused lowering coverage for module/initializer catalogs, function templates and thunks, symbol storage classes, compact type/trait metadata, subsystem semantic IDs, validation, and repeated-lowering determinism.
 - Stage 2.3 added focused coverage for every function parameter pattern form, pattern-binding items (including at patterns and checked propagation), all assignment place operations, captured-cell and resource places, module binding/assignment/statement metadata, function body/result normalization, compile-time-only rejection, dangling pattern/place/item validation, and deterministic repeated lowering over the expanded arenas. After merging `main` and adding nominal-`move` transition coverage, the complete `cargo test --workspace` regression passes 989 tests.
+- Stage 2.4 Step 1 replaced the syntax-only expression memo with an occurrence-aware key (syntax, owner, primary/contextual identity) and a single `classify_expression` dispatcher. Every syntax variant now maps to exactly one Stage 2.4 family, one explicit Stage 2.5/2.6 deferral (`Callable`, `Resource`, `Coroutine`), or a compile-time-only rejection; blocks allocate, memoize, and reuse their arena nodes, and loop bodies, match subjects/arms, products, spreads, access, indexing, logicals, and template interpolations are traversed recursively. A coverage classifier test constructs one representative per variant and is kept exhaustive by compile-time matches.
 
 ### Remaining Verification
 
