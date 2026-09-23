@@ -146,6 +146,9 @@ Progress:
 - Discovery: non-generic `const` bindings are runtime globals in the backend (module initialization stores the folded value and every reference loads it), so they now enter the symbol catalog as `GlobalStorage`; the symbol catalog is populated before initializer/function-body lowering. Interior-NUL C strings now diagnose at lowering rather than code generation.
 - Added transition comparisons against `symbol_for`, `requires_initialization_check`, and `access_for` plus literal decoding, and moved the interior-NUL integration test to the lowering boundary.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (52 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
+- Step 3 replaced the product markers with owned construction plans: `LoweredProduct` keeps the final checked shape, ordered evaluation steps, and one expression per slot. Designated fields resolve to checked slots, positional spreads expand through the operand type, named spreads remap by name with source-order overrides, and contextual defaults lower in final slot order under occurrence-aware keys using the plan's slot type. `LoweredRepeatedProduct` records the checked count and the count-one collapse. Invalid layouts (variadic, missing, out-of-range, duplicate) diagnose during lowering.
+- New focused tests replay the evaluation steps against the final layout for positional spreads and defaults, designated overrides, named-spread remapping, and repeated-product count/collapse.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (56 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
 Lower expression families in dependency order:
 

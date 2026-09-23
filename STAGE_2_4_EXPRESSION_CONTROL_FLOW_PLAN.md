@@ -136,7 +136,7 @@ Completed:
 - New focused tests: scalar payload decoding plus checked-type transition comparisons, ordinary name storage/singleton/captured-cell facts with callable deferral, all four access forms with `CheckedAccess` comparisons, and invalid literal diagnostics.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (52 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
-### Step 3 - Lower Products, Spreads, Defaults, and Repeated Products
+### Step 3 - Lower Products, Spreads, Defaults, and Repeated Products (Done)
 
 - Lower explicit product elements left-to-right and build a separate final-layout plan.
 - Resolve designated fields to final checked slots during lowering.
@@ -149,7 +149,15 @@ Completed:
 
 Gate: anonymous/named products, contextual designated fields, positional and named spreads, defaults, overrides, empty/singleton products, and repeated products can be reconstructed and evaluated solely from lowered plans.
 
-After this step, update both plan files.
+Completed:
+
+- `LoweredProduct` stores the final checked shape, ordered `LoweredProductStep` evaluations (`Positional`, `Designated`, `PositionalSpread`, `NamedSpread`, `Default`), and one expression per final slot. Replaying the steps reproduces the final layout, so later overrides win while every source element keeps its evaluation position.
+- Positional and designated products expand spreads through the operand's checked product type into explicit source-index/destination-slot mappings; named spreads expand into name/source-index/destination-slot mappings preserving source-order overrides. `...=` products reject missing, unknown, or non-fixed operand fields as lowering diagnostics.
+- Contextual defaults copy `CheckedProductDefaultPlan`, lower in final slot order under `ContextualDefault { consumer, slot }` occurrence keys with the plan's slot type as the root override, and only fill slots no explicit or spread value initialized.
+- `LoweredRepeatedProduct` records the checked count and the `count == 1` representation collapse; the element is evaluated exactly once.
+- Unreachable (diverged) products still lower every element with a positional fallback shape so no child is dropped.
+- New focused tests cover positional spread mappings plus contextual defaults and occurrence keys, designated slot resolution with later-wins overrides, named-spread field remapping and overrides, and repeated-product count/collapse.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (56 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
 ### Step 4 - Finish Blocks, `satisfies`, and Coercion Boundaries
 

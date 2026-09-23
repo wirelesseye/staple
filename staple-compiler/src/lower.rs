@@ -16,10 +16,10 @@ use staple_syntax::{Diagnostic, Expression, Item, Pattern, Span, SyntaxId};
 
 use crate::{
     BuiltinType, CheckedAccess, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
-    CheckedFunctionalDependency, CheckedPropagation, CheckedResource, CheckedTraitBound,
-    CheckedTraitDispatch, CheckedType, DefinitionId, FloatType, FunctionId, IntegerType, ModuleId,
-    RecursiveConstruction, ResolvedFunction, ResolvedModule, SourceModule, SymbolId, TraitId,
-    TraitMethodId, TypeId, TypeParameterId, TypedModule,
+    CheckedFunctionalDependency, CheckedProductType, CheckedPropagation, CheckedResource,
+    CheckedTraitBound, CheckedTraitDispatch, CheckedType, DefinitionId, FloatType, FunctionId,
+    IntegerType, ModuleId, RecursiveConstruction, ResolvedFunction, ResolvedModule, SourceModule,
+    SymbolId, TraitId, TraitMethodId, TypeId, TypeParameterId, TypedModule,
 };
 
 macro_rules! arena_id {
@@ -319,6 +319,79 @@ pub(crate) enum LoweredExpressionKind {
     CString(LoweredCString),
     /// A structural representation, product, slice, or scalar access.
     Access(LoweredAccess),
+    Product(LoweredProduct),
+    RepeatedProduct(LoweredRepeatedProduct),
+}
+
+/// A product construction plan. `steps` preserve source evaluation order
+/// (including spread expansion and default evaluation); `fields` is the final
+/// checked layout, where later steps override earlier values for a slot.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredProduct {
+    /// The final checked product shape, defaults cleared.
+    pub final_type: CheckedProductType,
+    /// Ordered source evaluation steps.
+    pub steps: Vec<LoweredProductStep>,
+    /// Final layout: exactly one expression per slot.
+    pub fields: Vec<ExpressionId>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LoweredProductStep {
+    /// A positional element placed at the next positional slot.
+    Positional {
+        expression: ExpressionId,
+        slot: usize,
+    },
+    /// A named element (designator or named-spread entry).
+    Designated {
+        name: String,
+        expression: ExpressionId,
+        slot: usize,
+    },
+    /// A positional spread expanded against the operand's checked product.
+    PositionalSpread {
+        expression: ExpressionId,
+        mappings: Vec<LoweredSpreadMapping>,
+    },
+    /// A named spread expanded against the operand's checked product.
+    NamedSpread {
+        expression: ExpressionId,
+        mappings: Vec<LoweredNamedSpreadMapping>,
+    },
+    /// A missing contextual default evaluated in final slot order.
+    Default {
+        slot: usize,
+        expression: ExpressionId,
+        expected: CheckedType,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LoweredSpreadMapping {
+    /// Element position inside the spread operand.
+    pub source: usize,
+    /// Destination slot in the final product layout.
+    pub slot: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoweredNamedSpreadMapping {
+    pub name: String,
+    /// Element position inside the spread operand.
+    pub source: usize,
+    /// Destination slot in the final product layout.
+    pub slot: usize,
+}
+
+/// A repeated product `(value; count)`. The element is evaluated exactly once;
+/// `collapsed` marks the `count == 1` representation that is the element
+/// itself rather than a single-field product.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredRepeatedProduct {
+    pub expression: ExpressionId,
+    pub count: usize,
+    pub collapsed: bool,
 }
 
 /// An ordinary value read. The symbol catalog supplies the storage
@@ -1974,6 +2047,21 @@ impl LoweredProgram {
         context: ExpressionContext,
         expression: &Expression,
     ) -> Result<ExpressionId, Diagnostic> {
+        self.lower_expression_occurrence(module, owner, context, expression, None)
+    }
+
+    /// Lowers one expression occurrence with an optional root type override.
+    /// Contextual product defaults use it because the shared default syntax
+    /// node may have been checked last for a different instantiation; the
+    /// consumer's checked slot type is authoritative for the root.
+    fn lower_expression_occurrence(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        expression: &Expression,
+        type_override: Option<CheckedType>,
+    ) -> Result<ExpressionId, Diagnostic> {
         let syntax = expression.syntax();
         let key = ExpressionKey {
             syntax: syntax.id,
@@ -1991,13 +2079,16 @@ impl LoweredProgram {
                 "compile-time-only expression reached lowering",
             ));
         }
-        let value_type = match module.type_of_expression(syntax.id).cloned() {
+        let value_type = match type_override {
             Some(value_type) => value_type,
-            // The checker stops recording a type once control flow diverges
-            // (`return`, `break`, `continue`, or a `Never` sub-expression), so
-            // an expression with no recorded type is unreachable and its
-            // value is `Never`.
-            None => CheckedType::Never,
+            None => match module.type_of_expression(syntax.id).cloned() {
+                Some(value_type) => value_type,
+                // The checker stops recording a type once control flow
+                // diverges (`return`, `break`, `continue`, or a `Never`
+                // sub-expression), so an expression with no recorded type is
+                // unreachable and its value is `Never`.
+                None => CheckedType::Never,
+            },
         };
         let effects = module
             .effects_of_expression(syntax.id)
@@ -2061,16 +2152,12 @@ impl LoweredProgram {
                 self.lower_block(module, owner, context, &loop_.body)?;
                 Ok(pending(Stage24Family::Loop))
             }
-            (Stage24Family::Product, Expression::Product(product)) => {
-                for element in &product.elements {
-                    self.lower_expression(module, owner, context, &element.value)?;
-                }
-                Ok(pending(Stage24Family::Product))
-            }
-            (Stage24Family::RepeatedProduct, Expression::RepeatedProduct(repeated)) => {
-                self.lower_expression(module, owner, context, &repeated.value)?;
-                Ok(pending(Stage24Family::RepeatedProduct))
-            }
+            (Stage24Family::Product, Expression::Product(product)) => self
+                .lower_product(module, owner, context, product)
+                .map(LoweredExpressionKind::Product),
+            (Stage24Family::RepeatedProduct, Expression::RepeatedProduct(repeated)) => self
+                .lower_repeated_product(module, owner, context, repeated)
+                .map(LoweredExpressionKind::RepeatedProduct),
             (Stage24Family::Access, Expression::Access(access)) => {
                 self.lower_access(module, owner, context, access)
             }
@@ -2300,6 +2387,414 @@ impl LoweredProgram {
         Ok(LoweredCString { bytes })
     }
 
+    /// Lowers a product construction into ordered evaluation steps plus a
+    /// final layout. Designated fields resolve to checked slots, spreads
+    /// expand to explicit source/destination mappings, and contextual defaults
+    /// fill the remaining slots in final order. Explicit values override
+    /// earlier spread values exactly as the checked plan permits.
+    fn lower_product(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        product: &staple_syntax::ProductExpression,
+    ) -> Result<LoweredProduct, Diagnostic> {
+        let checked = module.type_of_expression(product.syntax.id).cloned();
+        let plan = module.product_default_plan(product.syntax.id).cloned();
+        let final_type = match &plan {
+            Some(plan) => Some(plan.final_type.clone()),
+            None => match &checked {
+                Some(CheckedType::Product(product_type)) if !product_type.variadic => {
+                    Some(product_type.clone())
+                }
+                _ => None,
+            },
+        };
+        let Some(final_type) = final_type else {
+            // The checker diverged before recording a product shape, so the
+            // product is unreachable. Lower every element in source order and
+            // record it positionally; later stages never emit this value.
+            let mut steps = Vec::new();
+            let mut elements = Vec::new();
+            for element in &product.elements {
+                let expression = self.lower_expression(module, owner, context, &element.value)?;
+                let value_type = self
+                    .expressions
+                    .get(expression)
+                    .map(|expression| expression.value_type.clone())
+                    .unwrap_or(CheckedType::Never);
+                elements.push(crate::CheckedTypeElement {
+                    name: element.name.clone(),
+                    value_type,
+                    default: None,
+                });
+                steps.push(LoweredProductStep::Positional {
+                    expression,
+                    slot: elements.len() - 1,
+                });
+            }
+            return Ok(LoweredProduct {
+                final_type: CheckedProductType {
+                    elements,
+                    variadic: false,
+                },
+                fields: steps
+                    .iter()
+                    .map(|step| match step {
+                        LoweredProductStep::Positional { expression, .. } => *expression,
+                        _ => unreachable!("fallback products are positional"),
+                    })
+                    .collect(),
+                steps,
+            });
+        };
+
+        if product.elements.iter().any(|element| element.designated) {
+            self.lower_designated_product(module, owner, context, product, &final_type)
+        } else if product.elements.iter().any(|element| element.named_spread) {
+            self.lower_named_spread_product(module, owner, context, product, &final_type)
+        } else {
+            self.lower_positional_product(module, owner, context, product, &final_type)
+        }
+    }
+
+    fn lower_positional_product(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        product: &staple_syntax::ProductExpression,
+        final_type: &CheckedProductType,
+    ) -> Result<LoweredProduct, Diagnostic> {
+        let mut steps = Vec::new();
+        let mut fields = vec![None; final_type.elements.len()];
+        let mut positioned = 0usize;
+        for element in &product.elements {
+            let expression = self.lower_expression(module, owner, context, &element.value)?;
+            if element.spread {
+                let mappings =
+                    self.expand_positional_spread(element, expression, positioned, final_type)?;
+                for mapping in &mappings {
+                    fields[mapping.slot] = Some(expression);
+                }
+                positioned += mappings.len();
+                steps.push(LoweredProductStep::PositionalSpread {
+                    expression,
+                    mappings,
+                });
+            } else {
+                if positioned >= final_type.elements.len() {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "too many positional elements in product",
+                    ));
+                }
+                fields[positioned] = Some(expression);
+                steps.push(LoweredProductStep::Positional {
+                    expression,
+                    slot: positioned,
+                });
+                positioned += 1;
+            }
+        }
+        self.fill_product_defaults(module, owner, product, final_type, &mut steps, &mut fields)?;
+        self.finish_product(product, final_type, steps, fields)
+    }
+
+    fn lower_designated_product(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        product: &staple_syntax::ProductExpression,
+        final_type: &CheckedProductType,
+    ) -> Result<LoweredProduct, Diagnostic> {
+        let mut steps = Vec::new();
+        let mut fields = vec![None; final_type.elements.len()];
+        let mut positioned = 0usize;
+        for element in &product.elements {
+            let expression = self.lower_expression(module, owner, context, &element.value)?;
+            if element.designated {
+                let name = element
+                    .name
+                    .clone()
+                    .expect("designators always have a name");
+                let Some(slot) = final_type
+                    .elements
+                    .iter()
+                    .position(|field| field.name.as_deref() == Some(name.as_str()))
+                else {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        format!("unknown designated product field `{name}`"),
+                    ));
+                };
+                fields[slot] = Some(expression);
+                steps.push(LoweredProductStep::Designated {
+                    name,
+                    expression,
+                    slot,
+                });
+                continue;
+            }
+            if element.spread {
+                let mappings =
+                    self.expand_positional_spread(element, expression, positioned, final_type)?;
+                for mapping in &mappings {
+                    fields[mapping.slot] = Some(expression);
+                }
+                positioned += mappings.len();
+                steps.push(LoweredProductStep::PositionalSpread {
+                    expression,
+                    mappings,
+                });
+                continue;
+            }
+            if positioned >= final_type.elements.len() {
+                return Err(Diagnostic::new(
+                    element.syntax.span.clone(),
+                    "too many positional elements in designated product initializer",
+                ));
+            }
+            fields[positioned] = Some(expression);
+            steps.push(LoweredProductStep::Positional {
+                expression,
+                slot: positioned,
+            });
+            positioned += 1;
+        }
+        self.fill_product_defaults(module, owner, product, final_type, &mut steps, &mut fields)?;
+        self.finish_product(product, final_type, steps, fields)
+    }
+
+    fn lower_named_spread_product(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        product: &staple_syntax::ProductExpression,
+        final_type: &CheckedProductType,
+    ) -> Result<LoweredProduct, Diagnostic> {
+        let mut steps = Vec::new();
+        let mut fields = vec![None; final_type.elements.len()];
+        for element in &product.elements {
+            let expression = self.lower_expression(module, owner, context, &element.value)?;
+            if element.spread {
+                let operand = self
+                    .expressions
+                    .get(expression)
+                    .map(|expression| expression.value_type.clone())
+                    .unwrap_or(CheckedType::Never);
+                let CheckedType::Product(operand_type) = operand else {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "product spread operand does not have a fixed product type",
+                    ));
+                };
+                let mut mappings = Vec::new();
+                for (source, field) in operand_type.elements.iter().enumerate() {
+                    let Some(name) = field.name.clone() else {
+                        return Err(Diagnostic::new(
+                            element.syntax.span.clone(),
+                            "a named spread operand must have every element named",
+                        ));
+                    };
+                    let Some(slot) = final_type
+                        .elements
+                        .iter()
+                        .position(|final_field| final_field.name.as_deref() == Some(name.as_str()))
+                    else {
+                        return Err(Diagnostic::new(
+                            element.syntax.span.clone(),
+                            format!("unknown field `{name}` in named product spread"),
+                        ));
+                    };
+                    fields[slot] = Some(expression);
+                    mappings.push(LoweredNamedSpreadMapping { name, source, slot });
+                }
+                steps.push(LoweredProductStep::NamedSpread {
+                    expression,
+                    mappings,
+                });
+                continue;
+            }
+            let Some(name) = element.name.clone() else {
+                return Err(Diagnostic::new(
+                    element.syntax.span.clone(),
+                    "every element must be named when the product contains a named spread",
+                ));
+            };
+            let Some(slot) = final_type
+                .elements
+                .iter()
+                .position(|field| field.name.as_deref() == Some(name.as_str()))
+            else {
+                return Err(Diagnostic::new(
+                    element.syntax.span.clone(),
+                    format!("unknown field `{name}` in named product spread"),
+                ));
+            };
+            fields[slot] = Some(expression);
+            steps.push(LoweredProductStep::Designated {
+                name,
+                expression,
+                slot,
+            });
+        }
+        // Named spreads are checked complete: every final field must be
+        // provided, and defaults are not part of this construction path.
+        for (slot, field) in fields.iter().enumerate() {
+            if field.is_none() {
+                return Err(missing_product_slot_error(
+                    final_type,
+                    slot,
+                    &product.syntax.span,
+                ));
+            }
+        }
+        self.finish_product(product, final_type, steps, fields)
+    }
+
+    /// Expands a positional spread operand into explicit source-index to
+    /// destination-slot mappings, rejecting operands the checker should have
+    /// rejected and destinations outside the final shape.
+    fn expand_positional_spread(
+        &self,
+        element: &staple_syntax::ProductElement,
+        expression: ExpressionId,
+        positioned: usize,
+        final_type: &CheckedProductType,
+    ) -> Result<Vec<LoweredSpreadMapping>, Diagnostic> {
+        let operand = self
+            .expressions
+            .get(expression)
+            .map(|expression| expression.value_type.clone())
+            .unwrap_or(CheckedType::Never);
+        let CheckedType::Product(operand_type) = operand else {
+            return Err(Diagnostic::new(
+                element.syntax.span.clone(),
+                "product spread operand does not have a fixed product type",
+            ));
+        };
+        if operand_type.variadic {
+            return Err(Diagnostic::new(
+                element.syntax.span.clone(),
+                "cannot spread a variadic product",
+            ));
+        }
+        let mut mappings = Vec::new();
+        for source in 0..operand_type.elements.len() {
+            let Some(_) = final_type.elements.get(positioned + source) else {
+                return Err(Diagnostic::new(
+                    element.syntax.span.clone(),
+                    "too many positional elements in product",
+                ));
+            };
+            mappings.push(LoweredSpreadMapping {
+                source,
+                slot: positioned + source,
+            });
+        }
+        Ok(mappings)
+    }
+
+    /// Evaluates missing contextual defaults in final slot order using
+    /// occurrence-aware keys and the plan's contextual element type.
+    fn fill_product_defaults(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        product: &staple_syntax::ProductExpression,
+        final_type: &CheckedProductType,
+        steps: &mut Vec<LoweredProductStep>,
+        fields: &mut [Option<ExpressionId>],
+    ) -> Result<(), Diagnostic> {
+        let plan = module.product_default_plan(product.syntax.id).cloned();
+        for slot in 0..final_type.elements.len() {
+            if fields[slot].is_some() {
+                continue;
+            }
+            let default = plan
+                .as_ref()
+                .and_then(|plan| plan.defaults.get(slot))
+                .and_then(|default| default.as_ref());
+            let Some(default) = default else {
+                return Err(missing_product_slot_error(
+                    final_type,
+                    slot,
+                    &product.syntax.span,
+                ));
+            };
+            let expected = final_type.elements[slot].value_type.clone();
+            let default_context = ExpressionContext::ContextualDefault {
+                consumer: product.syntax.id,
+                slot,
+            };
+            let expression = self.lower_expression_occurrence(
+                module,
+                owner,
+                default_context,
+                default,
+                Some(expected.clone()),
+            )?;
+            fields[slot] = Some(expression);
+            steps.push(LoweredProductStep::Default {
+                slot,
+                expression,
+                expected,
+            });
+        }
+        Ok(())
+    }
+
+    fn finish_product(
+        &self,
+        product: &staple_syntax::ProductExpression,
+        final_type: &CheckedProductType,
+        steps: Vec<LoweredProductStep>,
+        fields: Vec<Option<ExpressionId>>,
+    ) -> Result<LoweredProduct, Diagnostic> {
+        let mut final_fields = Vec::with_capacity(fields.len());
+        for (slot, field) in fields.into_iter().enumerate() {
+            match field {
+                Some(field) => final_fields.push(field),
+                None => {
+                    return Err(missing_product_slot_error(
+                        final_type,
+                        slot,
+                        &product.syntax.span,
+                    ));
+                }
+            }
+        }
+        Ok(LoweredProduct {
+            final_type: final_type.clone(),
+            steps,
+            fields: final_fields,
+        })
+    }
+
+    /// Lowers `(value; count)`: the checked result type gives the repetition
+    /// count and whether the single-element representation collapses.
+    fn lower_repeated_product(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        repeated: &staple_syntax::RepeatedProductExpression,
+    ) -> Result<LoweredRepeatedProduct, Diagnostic> {
+        let expression = self.lower_expression(module, owner, context, &repeated.value)?;
+        let count = match module.type_of_expression(repeated.syntax.id).cloned() {
+            Some(CheckedType::Product(product)) if !product.variadic => product.elements.len(),
+            _ => 1,
+        };
+        Ok(LoweredRepeatedProduct {
+            expression,
+            count,
+            collapsed: count == 1,
+        })
+    }
+
     fn expression_needs_drop(&self, module: &TypedModule, expression: ExpressionId) -> bool {
         self.expressions
             .get(expression)
@@ -2377,6 +2872,45 @@ impl LoweredProgram {
                             "access",
                             "expression",
                             access.base.index(),
+                        ));
+                    }
+                }
+                LoweredExpressionKind::Product(product) => {
+                    for step in &product.steps {
+                        let child = match step {
+                            LoweredProductStep::Positional { expression, .. }
+                            | LoweredProductStep::Designated { expression, .. }
+                            | LoweredProductStep::PositionalSpread { expression, .. }
+                            | LoweredProductStep::NamedSpread { expression, .. }
+                            | LoweredProductStep::Default { expression, .. } => *expression,
+                        };
+                        if !self.expressions.contains(child) {
+                            diagnostics.push(invalid_reference(
+                                &expression.origin,
+                                "product step",
+                                "expression",
+                                child.index(),
+                            ));
+                        }
+                    }
+                    for field in &product.fields {
+                        if !self.expressions.contains(*field) {
+                            diagnostics.push(invalid_reference(
+                                &expression.origin,
+                                "product field",
+                                "expression",
+                                field.index(),
+                            ));
+                        }
+                    }
+                }
+                LoweredExpressionKind::RepeatedProduct(repeated) => {
+                    if !self.expressions.contains(repeated.expression) {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "repeated product",
+                            "expression",
+                            repeated.expression.index(),
                         ));
                     }
                 }
@@ -3378,6 +3912,25 @@ fn integer_literal_bit_width(integer_type: IntegerType) -> u32 {
         IntegerType::I32 | IntegerType::U32 => 32,
         IntegerType::I64 | IntegerType::U64 | IntegerType::ISize | IntegerType::USize => 64,
     }
+}
+
+/// A source diagnostic for a final product slot that no explicit element or
+/// contextual default filled.
+fn missing_product_slot_error(
+    final_type: &CheckedProductType,
+    slot: usize,
+    span: &Span,
+) -> Diagnostic {
+    Diagnostic::new(
+        span.clone(),
+        match final_type.elements.get(slot) {
+            Some(field) => match &field.name {
+                Some(name) => format!("missing product field `{name}`"),
+                None => format!("missing product element at position {slot}"),
+            },
+            None => format!("missing product element at position {slot}"),
+        },
+    )
 }
 
 /// Checks that every top-level runtime binding symbol reached the catalog.
@@ -5738,6 +6291,326 @@ mod tests {
                 ) => assert_eq!(dereference, checked_dereference),
                 (kind, checked) => panic!("access mismatch: {kind:?} vs {checked:?}"),
             }
+        }
+    }
+
+    fn replay_product_steps(product: &LoweredProduct) -> Vec<ExpressionId> {
+        let mut fields = vec![None; product.final_type.elements.len()];
+        for step in &product.steps {
+            match step {
+                LoweredProductStep::Positional { expression, slot } => {
+                    fields[*slot] = Some(*expression)
+                }
+                LoweredProductStep::Designated {
+                    expression, slot, ..
+                } => fields[*slot] = Some(*expression),
+                LoweredProductStep::PositionalSpread {
+                    expression,
+                    mappings,
+                } => {
+                    for mapping in mappings {
+                        fields[mapping.slot] = Some(*expression);
+                    }
+                }
+                LoweredProductStep::NamedSpread {
+                    expression,
+                    mappings,
+                } => {
+                    for mapping in mappings {
+                        fields[mapping.slot] = Some(*expression);
+                    }
+                }
+                LoweredProductStep::Default {
+                    slot, expression, ..
+                } => fields[*slot] = Some(*expression),
+            }
+        }
+        fields
+            .into_iter()
+            .map(|field| field.expect("every slot is filled"))
+            .collect()
+    }
+
+    #[test]
+    fn positional_products_expand_spreads_and_defaults() {
+        let module = checked_program(concat!(
+            "let pair = (left: 2, right: 3)\n",
+            "let expanded = (prefix: \"value\", ...pair, suffix: False)\n",
+            "let point: (x: I32 = 1, y: I32 = 2) = ()\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let products = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Product(product) => Some(product),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let spread = products
+            .iter()
+            .find(|product| {
+                product
+                    .steps
+                    .iter()
+                    .any(|step| matches!(step, LoweredProductStep::PositionalSpread { .. }))
+            })
+            .expect("the spread product should lower");
+        assert_eq!(spread.final_type.elements.len(), 4);
+        assert_eq!(spread.fields.len(), 4);
+        let mut kinds = spread
+            .steps
+            .iter()
+            .map(|step| match step {
+                LoweredProductStep::Positional { .. } => "positional",
+                LoweredProductStep::Designated { .. } => "designated",
+                LoweredProductStep::PositionalSpread { .. } => "spread",
+                LoweredProductStep::NamedSpread { .. } => "named-spread",
+                LoweredProductStep::Default { .. } => "default",
+            })
+            .collect::<Vec<_>>();
+        kinds.sort_unstable();
+        assert_eq!(kinds, vec!["positional", "positional", "spread"]);
+        let LoweredProductStep::PositionalSpread { mappings, .. } = spread
+            .steps
+            .iter()
+            .find(|step| matches!(step, LoweredProductStep::PositionalSpread { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            mappings,
+            &vec![
+                LoweredSpreadMapping { source: 0, slot: 1 },
+                LoweredSpreadMapping { source: 1, slot: 2 },
+            ]
+        );
+        assert_eq!(replay_product_steps(spread), spread.fields);
+
+        let defaulted = products
+            .iter()
+            .find(|product| {
+                product
+                    .steps
+                    .iter()
+                    .any(|step| matches!(step, LoweredProductStep::Default { .. }))
+            })
+            .expect("the default product should lower");
+        assert_eq!(defaulted.final_type.elements.len(), 2);
+        let defaults = defaulted
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                LoweredProductStep::Default {
+                    slot,
+                    expression,
+                    expected,
+                } => Some((*slot, *expression, expected.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults[0].0, 0);
+        assert_eq!(defaults[1].0, 1);
+        for (slot, expression, expected) in &defaults {
+            assert_eq!(expected, &CheckedType::I32);
+            let lowered = program.expressions.get(*expression).expect("default value");
+            assert_eq!(lowered.value_type, CheckedType::I32);
+            assert!(
+                matches!(
+                    lowered.key.context,
+                    ExpressionContext::ContextualDefault { slot: lowered_slot, .. }
+                        if lowered_slot == *slot
+                ),
+                "defaults use occurrence-aware keys"
+            );
+        }
+        assert_ne!(
+            defaults[0].1, defaults[1].1,
+            "one default declaration used twice must not alias"
+        );
+        assert_eq!(replay_product_steps(defaulted), defaulted.fields);
+    }
+
+    #[test]
+    fn designated_products_resolve_slots_and_overrides() {
+        let module = checked_program(concat!(
+            "let value: (I32, I32, a: I32, b: I32) = (1, 2, .b: 4, .a: 3)\n",
+            "let overridden: (a: I32, b: I32) = (1, 2, .a: 10, .a: 30)\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let designated = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Product(product)
+                    if product
+                        .steps
+                        .iter()
+                        .any(|step| matches!(step, LoweredProductStep::Designated { .. })) =>
+                {
+                    Some(product)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(designated.len(), 2);
+
+        let slots = |product: &LoweredProduct| {
+            product
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    LoweredProductStep::Designated { name, slot, .. } => {
+                        Some((name.clone(), *slot))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            slots(designated[0]),
+            vec![("b".to_owned(), 3), ("a".to_owned(), 2)]
+        );
+        for product in &designated {
+            assert_eq!(replay_product_steps(product), product.fields);
+        }
+
+        // `(1, 2, .a: 10, .a: 30)` keeps the last designator in the final
+        // layout while evaluating every source element in order.
+        let overridden = &designated[1];
+        assert_eq!(overridden.steps.len(), 4);
+        assert_eq!(overridden.fields.len(), 2);
+        let last = overridden
+            .steps
+            .iter()
+            .rev()
+            .find_map(|step| match step {
+                LoweredProductStep::Designated {
+                    expression, name, ..
+                } if name == "a" => Some(*expression),
+                _ => None,
+            })
+            .expect("last `a` designator");
+        assert_eq!(overridden.fields[0], last);
+    }
+
+    #[test]
+    fn named_spreads_expand_fields_and_override_in_source_order() {
+        let module = checked_program(concat!(
+            "let dimensions = (height: 600, width: 800)\n",
+            "let config: (width: I32, height: I32, title: String) = (\n",
+            "    ...=dimensions,\n",
+            "    title: \"Staple\",\n",
+            ")\n",
+            "let overridden: (width: I32, height: I32) = (\n",
+            "    ...=dimensions,\n",
+            "    width: 900,\n",
+            ")\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let named = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Product(product)
+                    if product
+                        .steps
+                        .iter()
+                        .any(|step| matches!(step, LoweredProductStep::NamedSpread { .. })) =>
+                {
+                    Some(product)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(named.len(), 2);
+
+        let config = &named[0];
+        assert_eq!(config.final_type.elements.len(), 3);
+        let LoweredProductStep::NamedSpread { mappings, .. } = &config.steps[0] else {
+            panic!("the named spread is the first step");
+        };
+        assert_eq!(
+            mappings,
+            &vec![
+                LoweredNamedSpreadMapping {
+                    name: "height".to_owned(),
+                    source: 0,
+                    slot: 1,
+                },
+                LoweredNamedSpreadMapping {
+                    name: "width".to_owned(),
+                    source: 1,
+                    slot: 0,
+                },
+            ]
+        );
+        assert!(matches!(
+            config.steps[1],
+            LoweredProductStep::Designated { ref name, slot: 2, .. } if name == "title"
+        ));
+        assert_eq!(replay_product_steps(config), config.fields);
+
+        // The later `width: 900` overrides the spread's `width` value.
+        let overridden = &named[1];
+        assert!(matches!(
+            overridden.steps[1],
+            LoweredProductStep::Designated { ref name, slot: 0, .. } if name == "width"
+        ));
+        assert_eq!(replay_product_steps(overridden), overridden.fields);
+        assert_eq!(
+            overridden.fields[0],
+            match overridden.steps[1] {
+                LoweredProductStep::Designated { expression, .. } => expression,
+                _ => unreachable!(),
+            }
+        );
+    }
+
+    #[test]
+    fn repeated_products_record_count_and_collapse() {
+        let module = checked_program(concat!(
+            "type Count = alias 3\n",
+            "let repeated: (I32; 3) = (9; Count)\n",
+            "let single: (I32; 1) = (9; 1)\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let repeated = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::RepeatedProduct(repeated) => Some(repeated),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(repeated.len(), 2);
+        let three = repeated
+            .iter()
+            .find(|repeated| repeated.count == 3)
+            .expect("count-three repeated product");
+        assert!(!three.collapsed);
+        let single = repeated
+            .iter()
+            .find(|repeated| repeated.count == 1)
+            .expect("count-one repeated product");
+        assert!(single.collapsed);
+        for repeated in &repeated {
+            assert!(program.expressions.contains(repeated.expression));
         }
     }
 
