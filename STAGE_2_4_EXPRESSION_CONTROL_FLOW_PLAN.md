@@ -199,7 +199,7 @@ Completed:
 - New focused tests cover logical operator ordering/`Bool` selection, loop drop facts/depth/exits (including nested loops and diverging bodies), match subject/pattern/bound-symbol lowering, and the loop-exit validator corruptions.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (62 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
-### Step 6 - Lower Index Reads and Checked Mutation-Adjacent Facts
+### Step 6 - Lower Index Reads and Checked Mutation-Adjacent Facts (Done)
 
 - Lower index base before index operand.
 - Copy the selected `CheckedTraitDispatch`, owning trait/method IDs, checked arguments, instantiated method type, ordered effects/resources, mutation/move masks, and temporary-cleanup requirements available at this stage.
@@ -209,7 +209,14 @@ Completed:
 
 Gate: Stage 3/5 can determine index argument evaluation, resource ordering, mutation behavior, and evidence inputs without consulting the source `IndexExpression` or type-checker maps.
 
-After this step, update both plan files.
+Completed:
+
+- `LoweredIndex` lowers the base before the index operand and copies the checked recipe: the raw `CheckedTraitDispatch`, the owning `TraitId`, functional-dependency-completed argument types, the instantiated method type (mutation/move masks, effects, resources, result), and temporary-materialization facts for operands that are not place roots.
+- No implementation or instance is selected: arguments and method type are exactly the checked recipe Stage 2.5 converts into callable evidence.
+- Validation agrees index dispatch arguments with the lowered base, position, and result types, verifies the dispatch method belongs to its recorded trait and the trait-method catalog, and cross-checks every `MutateIndex` assignment dispatch against its lowered indexed place (base, position, element type).
+- Loop-exit traversal now descends through index children so exits nested in index operands are still owned correctly.
+- New focused tests cover direct, temporary-base, structural product, slice, and ref reads; `MutateIndex` assignments including a non-place temporary base; and dispatch argument agreement.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (63 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
 ### Step 7 - Lower String Templates and Formatting Selections
 

@@ -16,10 +16,10 @@ use staple_syntax::{Diagnostic, Expression, Item, Pattern, Span, SyntaxId};
 
 use crate::{
     BuiltinType, CheckedAccess, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
-    CheckedFunctionalDependency, CheckedProductType, CheckedPropagation, CheckedResource,
-    CheckedTraitBound, CheckedTraitDispatch, CheckedType, DefinitionId, FloatType, FunctionId,
-    IntegerType, ModuleId, RecursiveConstruction, ResolvedFunction, ResolvedModule, SourceModule,
-    SymbolId, TraitId, TraitMethodId, TypeId, TypeParameterId, TypedModule,
+    CheckedFunctionalDependency, CheckedMutation, CheckedProductType, CheckedPropagation,
+    CheckedResource, CheckedTraitBound, CheckedTraitDispatch, CheckedType, DefinitionId, FloatType,
+    FunctionId, IntegerType, ModuleId, RecursiveConstruction, ResolvedFunction, ResolvedModule,
+    SourceModule, SymbolId, TraitId, TraitMethodId, TypeId, TypeParameterId, TypedModule,
 };
 
 macro_rules! arena_id {
@@ -327,6 +327,33 @@ pub(crate) enum LoweredExpressionKind {
     Logical(LoweredLogical),
     Loop(LoweredLoop),
     Match(LoweredMatch),
+    Index(LoweredIndex),
+}
+
+/// A checked index read: `base[index]`. The complete checked `Index` dispatch
+/// recipe is copied here; Stage 2.5 converts it into explicit callable
+/// evidence without consulting the type checker. The operands are lowered in
+/// source evaluation order (base before index).
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredIndex {
+    pub base: ExpressionId,
+    pub index: ExpressionId,
+    /// The checked `Index` dispatch as recorded by the type checker.
+    pub dispatch: CheckedTraitDispatch,
+    /// Owning trait of the dispatched method.
+    pub trait_id: TraitId,
+    /// Functional-dependency-completed trait arguments.
+    pub arguments: Vec<CheckedType>,
+    /// Instantiated method type, carrying mutation/move masks, effects,
+    /// resources, and the result type.
+    pub method_type: Option<CheckedFunctionType>,
+    /// The whole `(base, index)` argument is materialized into a temporary so
+    /// a whole-argument mutation/move can be passed by address.
+    pub whole_temporary: bool,
+    /// The base operand is materialized into a temporary for a mutation.
+    pub base_temporary: bool,
+    /// The index operand is materialized into a temporary for a mutation.
+    pub index_temporary: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2257,11 +2284,9 @@ impl LoweredProgram {
             (Stage24Family::CString, Expression::CString(string)) => self
                 .lower_c_string(string)
                 .map(LoweredExpressionKind::CString),
-            (Stage24Family::Index, Expression::Index(index)) => {
-                self.lower_expression(module, owner, context, &index.value)?;
-                self.lower_expression(module, owner, context, &index.index)?;
-                Ok(pending(Stage24Family::Index))
-            }
+            (Stage24Family::Index, Expression::Index(index)) => self
+                .lower_index(module, owner, context, index)
+                .map(LoweredExpressionKind::Index),
             (Stage24Family::Logical, Expression::Logical(logical)) => self
                 .lower_logical(module, owner, context, logical)
                 .map(LoweredExpressionKind::Logical),
@@ -2893,6 +2918,66 @@ impl LoweredProgram {
         })
     }
 
+    /// Lowers `base[index]` in evaluation order and copies the checked `Index`
+    /// dispatch recipe: owning trait, completed argument types, instantiated
+    /// method type (mutation/move masks, effects, resources), and the
+    /// temporary-cleanup facts for mutation operands that are not places.
+    fn lower_index(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        index: &staple_syntax::IndexExpression,
+    ) -> Result<LoweredIndex, Diagnostic> {
+        let base = self.lower_expression(module, owner, context, &index.value)?;
+        let position = self.lower_expression(module, owner, context, &index.index)?;
+        let dispatch = module
+            .trait_dispatch_for(index.syntax.id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(index.syntax.span.clone(), "missing `Index` dispatch")
+            })?;
+        let Some(trait_id) = module.resolved().trait_for_method(dispatch.method) else {
+            return Err(Diagnostic::new(
+                index.syntax.span.clone(),
+                "`Index` dispatch method has no owning trait",
+            ));
+        };
+        let arguments = module
+            .complete_trait_arguments(trait_id, &dispatch.arguments)
+            .ok_or_else(|| {
+                Diagnostic::new(index.syntax.span.clone(), "incomplete `Index` dispatch")
+            })?;
+        let method_type =
+            module.instantiated_trait_method_type(trait_id, &arguments, dispatch.method);
+        let base_place = expression_has_place_root(module.resolved(), &index.value);
+        let index_place = expression_has_place_root(module.resolved(), &index.index);
+        let mut whole_temporary = false;
+        let mut base_temporary = false;
+        let mut index_temporary = false;
+        if let Some(method_type) = &method_type {
+            for target in method_type.mutations.iter().chain(&method_type.moves) {
+                match target {
+                    CheckedMutation::Whole => whole_temporary = true,
+                    CheckedMutation::Element(0) => base_temporary |= !base_place,
+                    CheckedMutation::Element(1) => index_temporary |= !index_place,
+                    CheckedMutation::Element(_) => {}
+                }
+            }
+        }
+        Ok(LoweredIndex {
+            base,
+            index: position,
+            dispatch,
+            trait_id,
+            arguments,
+            method_type,
+            whole_temporary,
+            base_temporary,
+            index_temporary,
+        })
+    }
+
     /// Lowers a loop body into the existing block/item arenas, tracks loop
     /// nesting for break/continue validation, and records the body-result drop
     /// requirement and fall-through fact.
@@ -3184,6 +3269,54 @@ impl LoweredProgram {
                         }
                     }
                 }
+                LoweredExpressionKind::Index(index) => {
+                    for child in [index.base, index.index] {
+                        if !self.expressions.contains(child) {
+                            diagnostics.push(invalid_reference(
+                                &expression.origin,
+                                "index",
+                                "expression",
+                                child.index(),
+                            ));
+                        }
+                    }
+                    if self
+                        .trait_methods
+                        .get(index.dispatch.method)
+                        .map(|method| method.trait_id)
+                        != Some(index.trait_id)
+                    {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "index dispatch method does not belong to its recorded trait",
+                        ));
+                    }
+                    let base_type = self
+                        .expressions
+                        .get(index.base)
+                        .map(|base| &base.value_type);
+                    let position_type = self
+                        .expressions
+                        .get(index.index)
+                        .map(|position| &position.value_type);
+                    for (position, actual) in [
+                        (0usize, base_type),
+                        (1, position_type),
+                        (2, Some(&expression.value_type)),
+                    ] {
+                        if let (Some(expected), Some(actual)) =
+                            (index.arguments.get(position), actual)
+                            && !types_agree(expected, actual)
+                        {
+                            diagnostics.push(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                format!(
+                                    "index dispatch argument {position} is `{expected}` but the lowered operand is `{actual}`"
+                                ),
+                            ));
+                        }
+                    }
+                }
                 LoweredExpressionKind::Loop(loop_) => {
                     if !self.blocks.contains(loop_.body) {
                         diagnostics.push(invalid_reference(
@@ -3236,6 +3369,7 @@ impl LoweredProgram {
             self.validate_expression_coercion(expression, &mut diagnostics);
         }
         diagnostics.extend(self.validate_loop_exits());
+        diagnostics.extend(self.validate_mutation_dispatch_arguments());
         for (_, pattern) in self.patterns.iter() {
             match &pattern.kind {
                 LoweredPatternKind::Wildcard | LoweredPatternKind::Literal { .. } => {}
@@ -3570,6 +3704,52 @@ impl LoweredProgram {
         diagnostics
     }
 
+    /// Cross-checks `MutateIndex` assignment dispatches against the lowered
+    /// indexed place: the checked argument types must agree with the base,
+    /// the position expression, and the element type.
+    fn validate_mutation_dispatch_arguments(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (_, item) in self.items.iter() {
+            let LoweredItemKind::Assignment(assignment) = &item.kind else {
+                continue;
+            };
+            let Some(dispatch) = &assignment.mutate_index else {
+                continue;
+            };
+            if self.trait_methods.get(dispatch.method).is_none() {
+                diagnostics.push(Diagnostic::new(
+                    item.origin.span.clone(),
+                    "assignment `MutateIndex` dispatch method is missing from the trait method catalog",
+                ));
+            }
+            let Some(place) = self.places.get(assignment.target) else {
+                continue;
+            };
+            let LoweredPlaceKind::Indexed { base, index } = &place.kind else {
+                continue;
+            };
+            let base_type = self.places.get(*base).map(|base| &base.value_type);
+            let position_type = self.expressions.get(*index).map(|index| &index.value_type);
+            for (position, actual) in [
+                (0usize, base_type),
+                (1, position_type),
+                (2, Some(&place.value_type)),
+            ] {
+                if let (Some(expected), Some(actual)) = (dispatch.arguments.get(position), actual)
+                    && !types_agree(expected, actual)
+                {
+                    diagnostics.push(Diagnostic::new(
+                        item.origin.span.clone(),
+                        format!(
+                            "`MutateIndex` dispatch argument {position} is `{expected}` but the lowered place operand is `{actual}`"
+                        ),
+                    ));
+                }
+            }
+        }
+        diagnostics
+    }
+
     /// Traverses every lowered loop body once and checks that each
     /// break/continue item is owned by an enclosing loop at the depth it
     /// recorded. Orphaned exits and inconsistent nested depths diagnose.
@@ -3708,6 +3888,10 @@ impl LoweredProgram {
             }
             LoweredExpressionKind::Access(access) => {
                 self.collect_loop_expression(access.base, depth, reached, diagnostics);
+            }
+            LoweredExpressionKind::Index(index) => {
+                self.collect_loop_expression(index.base, depth, reached, diagnostics);
+                self.collect_loop_expression(index.index, depth, reached, diagnostics);
             }
             LoweredExpressionKind::Pending(_)
             | LoweredExpressionKind::Deferred(_)
@@ -4505,6 +4689,21 @@ fn integer_literal_bit_width(integer_type: IntegerType) -> u32 {
         IntegerType::I32 | IntegerType::U32 => 32,
         IntegerType::I64 | IntegerType::U64 | IntegerType::ISize | IntegerType::USize => 64,
     }
+}
+
+/// Whether a checked dispatch argument and a lowered operand type agree well
+/// enough for validation. `Inferred`, `Error`, and `Never` occurrences are
+/// placeholders rather than real operand types.
+fn types_agree(expected: &CheckedType, actual: &CheckedType) -> bool {
+    expected == actual
+        || matches!(
+            expected,
+            CheckedType::Inferred | CheckedType::Error | CheckedType::Never
+        )
+        || matches!(
+            actual,
+            CheckedType::Inferred | CheckedType::Error | CheckedType::Never
+        )
 }
 
 /// A source diagnostic for a final product slot that no explicit element or
@@ -7590,6 +7789,148 @@ mod tests {
                 .contains("not owned by an enclosing lowered loop")),
             "unexpected diagnostics: {diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn index_reads_copy_checked_dispatch_recipes_and_temporaries() {
+        let module = checked_program(concat!(
+            "use std.slice.Slice\n",
+            "type Counter = ctor I32\n",
+            "impl Index Counter String I32 { def index = (counter, key) => 0 }\n",
+            "impl MutateIndex Counter String I32 { def mutate_index = (mut counter, key, move value) => () }\n",
+            "def make_counter = () => Counter 0\n",
+            "let mut counter = Counter 0\n",
+            "let read = counter[\"key\"]\n",
+            "let temporary = (make_counter())[\"key\"]\n",
+            "counter[\"key\"] = 1\n",
+            "(make_counter())[\"key\"] = 1\n",
+            "let values: (I32; 2) = (10, 20)\n",
+            "let element = values[0]\n",
+            "def slice_read: (Slice I32, USize) -> I32 = (values, position) => values[position]\n",
+            "def ref_read: (Ref (I32; 2), USize) -> I32 = (values, position) => values[position]\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let indexes = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Index(index) => Some((expression, index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(indexes.len() >= 5, "stdlib and test indexes both lower");
+
+        let counter_type = module
+            .declared_type_of_symbol(binding_symbol(&module, "counter"))
+            .expect("counter type");
+        let counter_reads = indexes
+            .iter()
+            .filter(|(_, index)| {
+                program
+                    .expressions
+                    .get(index.base)
+                    .is_some_and(|base| base.value_type == counter_type)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(counter_reads.len(), 2, "direct and temporary reads lower");
+        for (expression, index) in &counter_reads {
+            assert!(program.expressions.contains(index.base));
+            assert!(program.expressions.contains(index.index));
+            assert_eq!(
+                Some(index.trait_id),
+                module.semantic_ids().index_trait,
+                "the dispatch's owning trait is copied"
+            );
+            assert!(index.method_type.is_some(), "instantiated method type");
+            assert!(matches!(
+                index.dispatch.arguments.first(),
+                Some(argument) if *argument == counter_type
+            ));
+            let base = program.expressions.get(index.base).unwrap();
+            let position = program.expressions.get(index.index).unwrap();
+            for (position, expected, actual) in [
+                (0usize, &index.arguments[0], &base.value_type),
+                (1, &index.arguments[1], &position.value_type),
+                (2, &index.arguments[2], &expression.value_type),
+            ] {
+                assert!(
+                    types_agree(expected, actual),
+                    "dispatch argument {position} `{expected}` vs operand `{actual}`"
+                );
+            }
+            // The read-only `Index` method declares no mutations, so no
+            // operand temporary is required.
+            assert!(!index.whole_temporary && !index.base_temporary && !index.index_temporary);
+        }
+
+        // A mutation of a non-place base materializes the base into a
+        // temporary place; the assignment keeps its checked `MutateIndex`
+        // dispatch and argument agreement.
+        let temporary_targets = program
+            .items
+            .iter()
+            .filter_map(|(_, item)| match &item.kind {
+                LoweredItemKind::Assignment(assignment) => Some(assignment),
+                _ => None,
+            })
+            .filter(|assignment| {
+                matches!(
+                    program.places.get(assignment.target).map(|place| &place.kind),
+                    Some(LoweredPlaceKind::Indexed { base, .. })
+                        if matches!(
+                            program.places.get(*base).map(|place| &place.kind),
+                            Some(LoweredPlaceKind::Temporary { .. })
+                        )
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !temporary_targets.is_empty(),
+            "`(make_counter())[\"key\"] = 1` needs a temporary place"
+        );
+        for assignment in temporary_targets {
+            assert!(assignment.mutate_index.is_some());
+        }
+
+        // Structural product, slice, and ref reads all lower through the same
+        // checked dispatch recipe rather than a source-level access.
+        for name in ["slice_read", "ref_read"] {
+            let body = expression_body(&program, name);
+            assert!(
+                matches!(body.kind, LoweredExpressionKind::Index(_)),
+                "`{name}` lowers through the index dispatcher"
+            );
+        }
+        assert!(
+            indexes.iter().any(
+                |(_, index)| program
+                    .expressions
+                    .get(index.base)
+                    .is_some_and(|base| matches!(
+                        &base.value_type,
+                        CheckedType::Product(product) if product.elements.len() == 2
+                    ))
+            ),
+            "the fixed-product read lowers through the index dispatcher"
+        );
+
+        // The indexed assignment's `MutateIndex` dispatch agrees with the
+        // lowered place operands (validated during snapshot).
+        let assignments = program
+            .items
+            .iter()
+            .filter_map(|(_, item)| match &item.kind {
+                LoweredItemKind::Assignment(assignment) if assignment.mutate_index.is_some() => {
+                    Some(assignment)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!assignments.is_empty());
     }
 
     #[test]
