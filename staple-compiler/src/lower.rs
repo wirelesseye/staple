@@ -328,6 +328,40 @@ pub(crate) enum LoweredExpressionKind {
     Loop(LoweredLoop),
     Match(LoweredMatch),
     Index(LoweredIndex),
+    StringTemplate(LoweredStringTemplate),
+}
+
+/// A string template with its ordered parts and checked formatting
+/// selections. Literal text is retained exactly after source decoding, and
+/// interpolations keep the selected formatting trait/method and value type.
+/// Helper instantiation and artifact deduplication remain Stage 2.5/4 work.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredStringTemplate {
+    pub parts: Vec<LoweredStringTemplatePart>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LoweredStringTemplatePart {
+    Literal(String),
+    Interpolation(LoweredInterpolation),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredInterpolation {
+    pub expression: ExpressionId,
+    pub format: staple_syntax::StringInterpolationFormat,
+    pub value_type: CheckedType,
+    pub trait_id: TraitId,
+    pub method: TraitMethodId,
+}
+
+/// Standard formatter helper selections copied from checked metadata so later
+/// emission never discovers them by name.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LoweredStringFormatting {
+    pub constructor: Option<FunctionId>,
+    pub write: Option<FunctionId>,
+    pub finish: Option<FunctionId>,
 }
 
 /// A checked index read: `base[index]`. The complete checked `Index` dispatch
@@ -977,6 +1011,7 @@ pub(crate) struct LoweredProgram {
     trait_implementations: Arena<LoweredTraitImplementationMetadata, LoweredTraitImplementationId>,
     initializers: Arena<LoweredInitializer, InitializerId>,
     semantic_ids: LoweredSemanticIds,
+    string_formatting: LoweredStringFormatting,
     /// Transient lowering state: the number of currently enclosing loops,
     /// recorded on break/continue items and loop nodes so validation can tie
     /// exits to the loop that owns them. Not part of the lowered program.
@@ -1030,6 +1065,12 @@ impl LoweredProgram {
             reactive_resource: module.reactive_resource(),
             string_representation: module.string_representation().cloned(),
             entry_reactive_required: module.entry_reactive_required(),
+        };
+        let formatting = module.string_formatting();
+        self.string_formatting = LoweredStringFormatting {
+            constructor: formatting.formatter_new,
+            write: formatting.formatter_write,
+            finish: formatting.formatter_finish,
         };
         Vec::new()
     }
@@ -2290,14 +2331,9 @@ impl LoweredProgram {
             (Stage24Family::Logical, Expression::Logical(logical)) => self
                 .lower_logical(module, owner, context, logical)
                 .map(LoweredExpressionKind::Logical),
-            (Stage24Family::StringTemplate, Expression::StringTemplate(template)) => {
-                for part in &template.parts {
-                    if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
-                        self.lower_expression(module, owner, context, &interpolation.expression)?;
-                    }
-                }
-                Ok(pending(Stage24Family::StringTemplate))
-            }
+            (Stage24Family::StringTemplate, Expression::StringTemplate(template)) => self
+                .lower_string_template(module, owner, context, template)
+                .map(LoweredExpressionKind::StringTemplate),
             (family, _) => Ok(pending(family)),
         }
     }
@@ -2918,6 +2954,95 @@ impl LoweredProgram {
         })
     }
 
+    /// Lowers a string template: parts keep their order and decoded literal
+    /// text, interpolations lower left-to-right, and each interpolation keeps
+    /// its checked value type plus the selected formatting trait and method.
+    /// Missing formatter helpers or trait selections diagnose here instead of
+    /// being rediscovered by name during emission.
+    fn lower_string_template(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        template: &staple_syntax::StringTemplateExpression,
+    ) -> Result<LoweredStringTemplate, Diagnostic> {
+        let formatting = module.string_formatting();
+        if formatting.formatter_new.is_none()
+            || formatting.formatter_write.is_none()
+            || formatting.formatter_finish.is_none()
+        {
+            return Err(Diagnostic::new(
+                template.syntax.span.clone(),
+                "string formatting helpers are unavailable",
+            ));
+        }
+        let mut parts = Vec::with_capacity(template.parts.len());
+        for part in &template.parts {
+            match part {
+                staple_syntax::StringTemplatePart::Literal(literal) => {
+                    parts.push(LoweredStringTemplatePart::Literal(literal.clone()));
+                }
+                staple_syntax::StringTemplatePart::Interpolation(interpolation) => {
+                    let expression =
+                        self.lower_expression(module, owner, context, &interpolation.expression)?;
+                    let value_type = self
+                        .expressions
+                        .get(expression)
+                        .map(|expression| expression.value_type.clone())
+                        .unwrap_or(CheckedType::Never);
+                    let checked = formatting
+                        .interpolations
+                        .get(&interpolation.expression.syntax().id)
+                        .cloned();
+                    let (trait_id, method, value_type) = match checked {
+                        Some(checked) => (checked.trait_id, checked.method, checked.value_type),
+                        None => {
+                            // Checking diverged before recording this
+                            // interpolation; the template is unreachable. Use
+                            // the checker-selected formatting trait, never a
+                            // name lookup.
+                            let trait_id = match interpolation.format {
+                                staple_syntax::StringInterpolationFormat::Display => {
+                                    module.semantic_ids().display_trait
+                                }
+                                staple_syntax::StringInterpolationFormat::Debug => {
+                                    module.semantic_ids().debug_trait
+                                }
+                            }
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    interpolation.expression.syntax().span.clone(),
+                                    "standard formatting trait is unavailable",
+                                )
+                            })?;
+                            let method = self
+                                .traits
+                                .get(trait_id)
+                                .and_then(|trait_| trait_.methods.first().copied())
+                                .ok_or_else(|| {
+                                    Diagnostic::new(
+                                        interpolation.expression.syntax().span.clone(),
+                                        "formatting trait has no method",
+                                    )
+                                })?;
+                            (trait_id, method, value_type)
+                        }
+                    };
+                    parts.push(LoweredStringTemplatePart::Interpolation(
+                        LoweredInterpolation {
+                            expression,
+                            format: interpolation.format,
+                            value_type,
+                            trait_id,
+                            method,
+                        },
+                    ));
+                }
+            }
+        }
+        Ok(LoweredStringTemplate { parts })
+    }
+
     /// Lowers `base[index]` in evaluation order and copies the checked `Index`
     /// dispatch recipe: owning trait, completed argument types, instantiated
     /// method type (mutation/move masks, effects, resources), and the
@@ -3152,6 +3277,33 @@ impl LoweredProgram {
             &self.types,
             &self.traits,
         ));
+        diagnostics.extend(self.validate_string_formatting());
+        diagnostics
+    }
+
+    /// Checks that checked formatter helper selections resolve to the
+    /// function catalog. Absent helpers are valid for `no_prelude` programs
+    /// that never construct a template.
+    fn validate_string_formatting(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (role, function) in [
+            ("formatter constructor", self.string_formatting.constructor),
+            ("formatter write", self.string_formatting.write),
+            ("formatter finish", self.string_formatting.finish),
+        ] {
+            let Some(function) = function else {
+                continue;
+            };
+            if self.functions.get(function).is_none() {
+                diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!(
+                        "lowered {role} function reference {} is missing from the function catalog",
+                        function.0
+                    ),
+                ));
+            }
+        }
         diagnostics
     }
 
@@ -3266,6 +3418,42 @@ impl LoweredProgram {
                                 "expression",
                                 child.index(),
                             ));
+                        }
+                    }
+                }
+                LoweredExpressionKind::StringTemplate(template) => {
+                    for part in &template.parts {
+                        let LoweredStringTemplatePart::Interpolation(interpolation) = part else {
+                            continue;
+                        };
+                        if !self.expressions.contains(interpolation.expression) {
+                            diagnostics.push(invalid_reference(
+                                &expression.origin,
+                                "string template",
+                                "expression",
+                                interpolation.expression.index(),
+                            ));
+                        }
+                        if self.traits.get(interpolation.trait_id).is_none() {
+                            diagnostics.push(invalid_reference(
+                                &expression.origin,
+                                "string template",
+                                "trait",
+                                interpolation.trait_id.0,
+                            ));
+                        }
+                        match self.trait_methods.get(interpolation.method) {
+                            Some(method) if method.trait_id == interpolation.trait_id => {}
+                            Some(_) => diagnostics.push(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                "interpolation formatting method does not belong to its trait",
+                            )),
+                            None => diagnostics.push(invalid_reference(
+                                &expression.origin,
+                                "string template",
+                                "trait method",
+                                interpolation.method.0,
+                            )),
                         }
                     }
                 }
@@ -3892,6 +4080,18 @@ impl LoweredProgram {
             LoweredExpressionKind::Index(index) => {
                 self.collect_loop_expression(index.base, depth, reached, diagnostics);
                 self.collect_loop_expression(index.index, depth, reached, diagnostics);
+            }
+            LoweredExpressionKind::StringTemplate(template) => {
+                for part in &template.parts {
+                    if let LoweredStringTemplatePart::Interpolation(interpolation) = part {
+                        self.collect_loop_expression(
+                            interpolation.expression,
+                            depth,
+                            reached,
+                            diagnostics,
+                        );
+                    }
+                }
             }
             LoweredExpressionKind::Pending(_)
             | LoweredExpressionKind::Deferred(_)
@@ -7931,6 +8131,171 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(!assignments.is_empty());
+    }
+
+    #[test]
+    fn string_templates_record_parts_and_formatting_selections() {
+        let module = checked_program(concat!(
+            "use std.fmt.Formatter\n",
+            "type Label = ctor String\n",
+            "impl Display Label {\n",
+            "  def fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
+            "}\n",
+            "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
+            "let name: String = \"world\"\n",
+            "let answer: I32 = 42\n",
+            "let product = (answer, name)\n",
+            "let message: String = \"hello $name: ${answer}; ${product:?}; \\$5\"\n",
+            "let generic: String = render answer\n",
+            "let nominal: String = \"label=${Label \"tag\"}\"\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let formatting = program.string_formatting.clone();
+        for function in [formatting.constructor, formatting.write, formatting.finish] {
+            assert!(
+                function.is_some_and(|id| program.functions.get(id).is_some()),
+                "checked formatter helper selections resolve in the function catalog"
+            );
+        }
+
+        let templates = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::StringTemplate(template) => Some(template),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            templates.len() >= 3,
+            "message, nominal, and render templates"
+        );
+
+        let display_trait = module.semantic_ids().display_trait.expect("Display");
+        let debug_trait = module.semantic_ids().debug_trait.expect("Debug");
+        let message = templates
+            .iter()
+            .find(|template| {
+                template.parts.iter().any(|part| {
+                    matches!(part, LoweredStringTemplatePart::Literal(text) if text == "hello ")
+                })
+            })
+            .expect("the message template lowers");
+        let literals = message
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                LoweredStringTemplatePart::Literal(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(literals, vec!["hello ", ": ", "; ", "; $5"]);
+        let interpolations = message
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                LoweredStringTemplatePart::Interpolation(interpolation) => Some(interpolation),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(interpolations.len(), 3);
+        assert_eq!(
+            interpolations[0].format,
+            staple_syntax::StringInterpolationFormat::Display
+        );
+        assert_eq!(interpolations[0].trait_id, display_trait);
+        assert_eq!(
+            interpolations[1].format,
+            staple_syntax::StringInterpolationFormat::Display
+        );
+        assert_eq!(interpolations[1].trait_id, display_trait);
+        assert_eq!(
+            interpolations[2].format,
+            staple_syntax::StringInterpolationFormat::Debug
+        );
+        assert_eq!(interpolations[2].trait_id, debug_trait);
+        for interpolation in &interpolations {
+            assert!(program.expressions.contains(interpolation.expression));
+            let value = program
+                .expressions
+                .get(interpolation.expression)
+                .expect("interpolation value");
+            assert_eq!(interpolation.value_type, value.value_type);
+            let method = program
+                .trait_methods
+                .get(interpolation.method)
+                .expect("formatting method");
+            assert_eq!(method.trait_id, interpolation.trait_id);
+        }
+
+        // A generic interpolation keeps the declared type parameter and the
+        // prelude's `Display` selection; nested interpolation expressions are
+        // lowered left-to-right through the same arena.
+        let generic = templates
+            .iter()
+            .find(|template| {
+                template.parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        LoweredStringTemplatePart::Interpolation(interpolation)
+                            if matches!(interpolation.value_type, CheckedType::Parameter { .. })
+                    )
+                })
+            })
+            .expect("the generic template keeps its parameter type");
+        let nominal = templates
+            .iter()
+            .find(|template| {
+                template.parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        LoweredStringTemplatePart::Literal(text) if text == "label="
+                    )
+                })
+            })
+            .expect("the nominal template lowers");
+        let LoweredStringTemplatePart::Interpolation(interpolation) = &nominal.parts[1] else {
+            panic!("the nominal interpolation is the second part");
+        };
+        assert!(matches!(
+            program
+                .expressions
+                .get(interpolation.expression)
+                .unwrap()
+                .kind,
+            LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable)
+        ));
+    }
+
+    #[test]
+    fn unreachable_string_templates_still_lower_their_parts() {
+        let module = checked_program(concat!(
+            "use std.fmt.Formatter\n",
+            "let answer: I32 = 42\n",
+            "def early = () => { return \"early\"; \"value=${answer}\" }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let (_, early) = lowered_function(&program, "early");
+        let block = body_block(&program, early);
+        let result = block.result.expect("unreachable tail is still the result");
+        let LoweredExpressionKind::StringTemplate(template) =
+            &program.expressions.get(result).unwrap().kind
+        else {
+            panic!("the unreachable tail template still lowers");
+        };
+        assert!(template.parts.iter().any(|part| matches!(
+            part,
+            LoweredStringTemplatePart::Interpolation(interpolation)
+                if interpolation.value_type == CheckedType::I32
+        )));
     }
 
     #[test]

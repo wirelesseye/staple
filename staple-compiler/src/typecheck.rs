@@ -122,6 +122,28 @@ pub struct CheckedLogical {
     pub bool_type: CheckedType,
 }
 
+/// Formatting selections the type checker made for string templates, so
+/// lowering and later emission never discover them by name again.
+#[derive(Debug, Clone, Default)]
+pub struct CheckedStringFormatting {
+    /// Per interpolation, keyed by the interpolation expression's syntax:
+    /// the checked value type plus the selected formatting trait and method.
+    pub interpolations: HashMap<SyntaxId, CheckedInterpolationFormat>,
+    /// The standard `Formatter.new` constructor, when the prelude provides it.
+    pub formatter_new: Option<FunctionId>,
+    /// The standard `Formatter.write` method, when the prelude provides it.
+    pub formatter_write: Option<FunctionId>,
+    /// The standard `Formatter.finish` method, when the prelude provides it.
+    pub formatter_finish: Option<FunctionId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckedInterpolationFormat {
+    pub trait_id: TraitId,
+    pub method: TraitMethodId,
+    pub value_type: CheckedType,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckedAccess {
     Representation {
@@ -236,6 +258,22 @@ fn expected_string_representation() -> CheckedType {
 /// their expanded representation, and contextual defaults are dropped. The
 /// result stays proportional to the declaration's own syntax even when nested
 /// nominal types would expand exponentially.
+/// Selects one of the standard-library formatting helpers by name. Mirrors
+/// the backend's historical lookup so lowering can record the selection once:
+/// an exact match, or the trailing component of a `__staple_m...` qualified
+/// function name.
+fn standard_function_named(module: &ResolvedModule, name: &str) -> Option<FunctionId> {
+    module.functions().iter().find_map(|function| {
+        let candidate = function.name.as_str();
+        let matches = candidate == name
+            || candidate
+                .strip_prefix("__staple_m")
+                .and_then(|rest| rest.rsplit_once('.'))
+                .is_some_and(|(_, last)| last == name);
+        matches.then_some(function.id)
+    })
+}
+
 fn compact_type_template(value_type: CheckedType) -> CheckedType {
     match value_type {
         CheckedType::Distinct {
@@ -1112,6 +1150,7 @@ pub struct TypedModule {
     logicals: HashMap<SyntaxId, CheckedLogical>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
+    string_formatting: CheckedStringFormatting,
     string_representation: Option<CheckedType>,
     ownership: crate::ownership::OwnershipInfo,
     copy_trait: Option<TraitId>,
@@ -1429,6 +1468,12 @@ impl TypedModule {
 
     pub fn match_for(&self, syntax_id: SyntaxId) -> Option<&CheckedMatch> {
         self.matches.get(&syntax_id)
+    }
+
+    /// Formatting selections recorded during checking: per-interpolation
+    /// traits/methods and the standard formatter helper functions.
+    pub(crate) fn string_formatting(&self) -> &CheckedStringFormatting {
+        &self.string_formatting
     }
 
     pub fn logical_for(&self, syntax_id: SyntaxId) -> Option<&CheckedLogical> {
@@ -1936,6 +1981,7 @@ pub struct TypeChecker {
     selected_trait_overload_arities: HashMap<SyntaxId, usize>,
     symbol_companion_types: HashMap<SymbolId, TypeId>,
     function_result_companion_types: HashMap<FunctionId, TypeId>,
+    string_formatting: CheckedStringFormatting,
     string_representation: Option<CheckedType>,
     copy_trait: Option<TraitId>,
     natural_trait: Option<TraitId>,
@@ -2086,6 +2132,11 @@ impl TypeChecker {
         self.mutate_index_trait = module.standard_trait("MutateIndex");
         self.into_iterator_trait = module.standard_trait("IntoIterator");
         self.iterator_trait = module.standard_trait("Iterator");
+        self.string_formatting.formatter_new = standard_function_named(&module, "formatter_new");
+        self.string_formatting.formatter_write =
+            standard_function_named(&module, "formatter_write");
+        self.string_formatting.formatter_finish =
+            standard_function_named(&module, "formatter_finish");
         self.collect_type_declarations(&module);
         self.collect_string_representation(&module);
         self.collect_traits(&module);
@@ -2194,6 +2245,7 @@ impl TypeChecker {
             logicals: self.logicals,
             accesses: self.accesses,
             pattern_types: self.pattern_types,
+            string_formatting: self.string_formatting,
             string_representation: self.string_representation,
             ownership: crate::ownership::OwnershipInfo::default(),
             copy_trait: self.copy_trait,
@@ -8874,7 +8926,7 @@ impl TypeChecker {
                         ));
                         continue;
                     };
-                    let arguments = vec![value_type];
+                    let arguments = vec![value_type.clone()];
                     if self
                         .resolve_trait_obligation(trait_id, &arguments)
                         .is_none()
@@ -8885,6 +8937,26 @@ impl TypeChecker {
                         ));
                         continue;
                     }
+                    let Some(method) = module
+                        .traits()
+                        .get(&trait_id)
+                        .and_then(|trait_| trait_.methods.first())
+                        .copied()
+                    else {
+                        self.diagnostics.push(Diagnostic::new(
+                            interpolation.expression.syntax().span.clone(),
+                            "formatting trait has no method",
+                        ));
+                        continue;
+                    };
+                    self.string_formatting.interpolations.insert(
+                        interpolation.expression.syntax().id,
+                        CheckedInterpolationFormat {
+                            trait_id,
+                            method,
+                            value_type,
+                        },
+                    );
                 }
                 CheckedType::String
             }

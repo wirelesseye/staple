@@ -218,7 +218,7 @@ Completed:
 - New focused tests cover direct, temporary-base, structural product, slice, and ref reads; `MutateIndex` assignments including a non-place temporary base; and dispatch argument agreement.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (63 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
-### Step 7 - Lower String Templates and Formatting Selections
+### Step 7 - Lower String Templates and Formatting Selections (Done)
 
 - Preserve template part order and literal text exactly after source decoding.
 - Lower interpolation expressions left-to-right.
@@ -229,7 +229,15 @@ Completed:
 
 Gate: a template's complete evaluation and formatting-selection plan is reconstructible from lowered IR, with no standard-function or standard-trait name lookup required.
 
-After this step, update both plan files.
+Completed:
+
+- The type checker now retains a narrow `CheckedStringFormatting` side table: per-interpolation checked value type plus selected formatting trait/method, and the `Formatter.new`/`Formatter.write`/`Formatter.finish` semantic function IDs, all selected once during checking.
+- `LoweredStringTemplate` keeps ordered `Literal` (decoded text preserved exactly) and `Interpolation` parts; each interpolation stores the lowered expression, display/debug format, checked value type, and selected trait/method.
+- `LoweredProgram` records the formatter helper selections as owned semantic IDs; lowering diagnoses missing helpers or trait/method selections instead of leaving them for name-based backend discovery.
+- Unreachable interpolations (checking diverged before recording them) fall back to the checker-selected display/debug trait and its catalog method rather than a name lookup.
+- Validation checks interpolation expression references, trait/method catalog membership and ownership, and that recorded formatter helper IDs resolve in the function catalog.
+- New focused tests cover message templates with mixed display/debug and escaped literals, nominal and nested interpolation expressions, generic interpolation type parameters, helper selection resolution, and unreachable templates.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (65 tests), `cargo test --workspace` (1000 tests), and `git diff --check`.
 
 ### Step 8 - Complete Validation, Coverage, and Transition Checks
 
