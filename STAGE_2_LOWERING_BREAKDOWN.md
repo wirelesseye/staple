@@ -177,6 +177,8 @@ For each expression, store the already selected access/coercion/match/logical pl
 
 ## Stage 2.5 - Lower Calls, Trait Evidence, and Closures
 
+The focused implementation sequence is maintained in [STAGE_2_5_CALLS_TRAITS_CLOSURES_PLAN.md](STAGE_2_5_CALLS_TRAITS_CLOSURES_PLAN.md).
+
 - Introduce explicit callable categories for known functions, indirect closures, externs, intrinsics, constructors, trait implementations, structural trait methods, and compiler helpers.
 - Lower ordinary, curried-default, juxtaposed, companion-method, constructor, and intrinsic calls without reconstructing their checked plans later.
 - Record the checked function type at each call after call-site inference, along with ordered arguments, hidden resources, mutations, moves, and initialization checks.
