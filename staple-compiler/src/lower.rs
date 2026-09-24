@@ -277,6 +277,7 @@ pub(crate) enum Stage24Family {
     Integer,
     Float,
     Function,
+    Call,
 }
 
 /// An expression family explicitly deferred to a later lowering stage.
@@ -622,7 +623,11 @@ pub(crate) enum LoweredArgumentPassMode {
 /// facts. Final slot mapping is stored here, separately from evaluation order.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredCallArgument {
-    pub expression: ExpressionId,
+    /// The argument occurrence, absent when the argument is an implicit
+    /// thunk whose body is owned by the thunk function.
+    pub expression: Option<ExpressionId>,
+    /// The implicit thunk closure this argument adapts to, when present.
+    pub thunk: Option<FunctionId>,
     /// The final ABI slot, absent when the argument is materialized.
     pub slot: Option<usize>,
     pub pass_mode: LoweredArgumentPassMode,
@@ -706,6 +711,9 @@ pub(crate) struct LoweredCall {
     pub substitutions: CallSubstitutions,
     /// Trait evidence for trait-dispatched calls.
     pub evidence: Option<TraitEvidence>,
+    /// The call owns a C-string temporary that must outlive the call (an
+    /// extern call whose argument is an unsymbolized `CString` value).
+    pub c_string_temporary: bool,
 }
 
 /// A first-class callable value with its explicit target and construction
@@ -2800,6 +2808,9 @@ impl LoweredProgram {
                 )?;
                 Ok(LoweredExpressionKind::CallableValue(value))
             }
+            (Stage24Family::Call, Expression::Call(call)) => {
+                self.lower_call(module, owner, context, call)
+            }
             (Stage24Family::Integer, Expression::Integer(integer)) => self
                 .lower_integer(module, integer)
                 .map(LoweredExpressionKind::Integer),
@@ -4321,6 +4332,452 @@ impl LoweredProgram {
         owned || captured
     }
 
+    /// Lowers an ordinary, direct, indirect, external, or intrinsic call.
+    /// Juxtaposed chains, curried defaults, trait dispatch, constructors, and
+    /// primitive macros stay explicitly deferred to their owning steps.
+    fn lower_call(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        call: &staple_syntax::CallExpression,
+    ) -> Result<LoweredExpressionKind, Diagnostic> {
+        let route = self.classify_call_route(module, owner, call)?;
+        if !matches!(
+            route,
+            CallRoute::GenericDirect
+                | CallRoute::External
+                | CallRoute::Indirect
+                | CallRoute::Intrinsic
+        ) {
+            return Ok(LoweredExpressionKind::Deferred(
+                DeferredExpressionFamily::Callable,
+            ));
+        }
+        // Contextual defaults and spread arguments keep their checked product
+        // plans and are normalized in Step 4.
+        if call_arguments_need_step_4(module, call) {
+            return Ok(LoweredExpressionKind::Deferred(
+                DeferredExpressionFamily::Callable,
+            ));
+        }
+        let origin = Origin {
+            syntax: call.syntax.id,
+            span: call.syntax.span.clone(),
+        };
+        let resolved = module.resolved();
+        let callee_syntax = call.callee.syntax().id;
+        let symbol = module.symbol_for(callee_syntax);
+        let mut substitutions = CallSubstitutions::default();
+        let mut initialization_checks = Vec::new();
+        let mut c_string_temporary = false;
+        let (target, callee, function_type) = match route {
+            CallRoute::GenericDirect => {
+                let symbol = symbol.expect("generic direct calls are symbol-selected");
+                let function = module
+                    .function_for_symbol(symbol)
+                    .expect("checked generic function symbol");
+                let function_type = checked_call_function_type(module, call, &origin)?;
+                let template = module.type_of_function(function).cloned().ok_or_else(|| {
+                    Diagnostic::new(
+                        origin.span.clone(),
+                        format!("function {} has no checked type", function.0),
+                    )
+                })?;
+                substitutions = call_substitutions(&template, &function_type);
+                if resolved.requires_initialization_check(callee_syntax) {
+                    initialization_checks.push(symbol);
+                }
+                let environment = match owner {
+                    ExpressionOwner::Function(owner_function) if owner_function == function => {
+                        LoweredCallEnvironment::Current
+                    }
+                    _ => LoweredCallEnvironment::None,
+                };
+                (
+                    LoweredCallableTarget::DirectFunction {
+                        function,
+                        environment,
+                    },
+                    None,
+                    function_type,
+                )
+            }
+            CallRoute::External => {
+                let symbol = symbol.expect("extern calls are symbol-selected");
+                let function_type = checked_call_function_type(module, call, &origin)?;
+                c_string_temporary = module
+                    .type_of_expression(call.argument.syntax().id)
+                    .is_some_and(|value_type| *value_type == CheckedType::CString)
+                    && module.symbol_for(call.argument.syntax().id).is_none();
+                (
+                    LoweredCallableTarget::ExternalFunction { symbol },
+                    None,
+                    function_type,
+                )
+            }
+            CallRoute::Intrinsic => {
+                let symbol = symbol.expect("intrinsic calls are symbol-selected");
+                let intrinsic = resolved
+                    .intrinsic_function(symbol)
+                    .expect("checked intrinsic symbol");
+                let function_type = checked_call_function_type(module, call, &origin)?;
+                (
+                    LoweredCallableTarget::Intrinsic { symbol, intrinsic },
+                    None,
+                    function_type,
+                )
+            }
+            CallRoute::Indirect => {
+                let callee = self.lower_expression(module, owner, context, &call.callee)?;
+                let function_type = match module.type_of_expression(callee_syntax) {
+                    Some(CheckedType::Function(function_type)) => function_type.clone(),
+                    _ => self
+                        .expressions
+                        .get(callee)
+                        .and_then(|expression| match &expression.value_type {
+                            CheckedType::Function(function_type) => Some(function_type.clone()),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                origin.span.clone(),
+                                "indirect call has no checked function type",
+                            )
+                        })?,
+                };
+                (
+                    LoweredCallableTarget::IndirectClosure { callee },
+                    Some(callee),
+                    function_type,
+                )
+            }
+            _ => unreachable!("non-Step-3 call routes defer above"),
+        };
+        let (arguments, mut steps) = if matches!(route, CallRoute::External | CallRoute::Intrinsic)
+        {
+            self.lower_plain_call_arguments(module, owner, context, &call.argument, &function_type)?
+        } else {
+            self.lower_effect_call_arguments(
+                module,
+                owner,
+                context,
+                &call.argument,
+                &function_type,
+            )?
+        };
+        if let Some(callee) = callee {
+            steps.insert(0, LoweredCallStep::Callee { expression: callee });
+        }
+        let resources = function_type.effects.resources.clone();
+        for index in 0..resources.len() {
+            steps.push(LoweredCallStep::Resource { resource: index });
+        }
+        steps.push(LoweredCallStep::Invoke);
+        let call_id = self.calls.push(LoweredCall {
+            origin,
+            target,
+            callee,
+            function_type: function_type.clone(),
+            arguments,
+            resources,
+            mutations: function_type.mutations.clone(),
+            moves: function_type.moves.clone(),
+            initialization_checks,
+            steps,
+            result_type: function_type.result.as_ref().clone(),
+            substitutions,
+            evidence: None,
+            c_string_temporary,
+        });
+        Ok(LoweredExpressionKind::Call(call_id))
+    }
+
+    /// Lowers call arguments that the backend passes by value only: external
+    /// and intrinsic calls.
+    fn lower_plain_call_arguments(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        argument: &Expression,
+        function_type: &CheckedFunctionType,
+    ) -> Result<(Vec<LoweredCallArgument>, Vec<LoweredCallStep>), Diagnostic> {
+        let types = flattened_parameter_types(&function_type.parameter);
+        if let Expression::Product(product) = argument
+            && !product.elements.iter().any(|element| element.spread)
+            && product.elements.len() == types.len()
+        {
+            let mut arguments = Vec::new();
+            let mut steps = Vec::new();
+            for (index, element) in product.elements.iter().enumerate() {
+                let entry = self.lower_call_argument(
+                    module,
+                    owner,
+                    context,
+                    &element.value,
+                    Some(index),
+                    &types[index],
+                    false,
+                    false,
+                )?;
+                steps.push(call_argument_step(index, index, &entry));
+                arguments.push(entry);
+            }
+            return Ok((arguments, steps));
+        }
+        let entry = self.lower_call_argument(
+            module,
+            owner,
+            context,
+            argument,
+            (types.len() == 1).then_some(0),
+            types.first().unwrap_or(&function_type.parameter),
+            false,
+            false,
+        )?;
+        Ok((vec![entry], vec![LoweredCallStep::Argument { argument: 0 }]))
+    }
+
+    /// Lowers call arguments with the backend's effect-aware pass modes:
+    /// mutation and move markers become mutable place pointers, non-`Copy`
+    /// slots become borrowed or materialized pointers, and the rest pass by
+    /// value.
+    fn lower_effect_call_arguments(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        argument: &Expression,
+        function_type: &CheckedFunctionType,
+    ) -> Result<(Vec<LoweredCallArgument>, Vec<LoweredCallStep>), Diagnostic> {
+        let types = flattened_parameter_types(&function_type.parameter);
+        let count = types.len();
+        let mutation_mask = mutation_slot_mask(count, &function_type.mutations);
+        let move_mask = mutation_slot_mask(count, &function_type.moves);
+        let mut indirect = (0..count)
+            .map(|index| {
+                mutation_mask[index]
+                    || (!move_mask[index] && !module.is_copy_in_function(&types[index], None))
+            })
+            .collect::<Vec<_>>();
+        if let Some(actual) = module.type_of_expression(argument.syntax().id) {
+            let actual_types = flattened_parameter_types(actual);
+            if actual_types.len() == count {
+                for (index, actual_type) in actual_types.iter().enumerate() {
+                    if !mutation_mask[index] && !move_mask[index] {
+                        indirect[index] = !module.is_copy_in_function(actual_type, None);
+                    }
+                }
+            }
+        }
+        if !indirect.iter().any(|flag| *flag) {
+            return self.lower_value_call_arguments(
+                module,
+                owner,
+                context,
+                argument,
+                function_type,
+                &types,
+            );
+        }
+        if function_type.mutations.contains(&CheckedMutation::Whole) {
+            let entry = self.lower_call_argument(
+                module, owner, context, argument, None, &types[0], true, true,
+            )?;
+            return Ok((vec![entry], vec![LoweredCallStep::Argument { argument: 0 }]));
+        }
+        if count == 1 && indirect[0] {
+            let entry = self.lower_call_argument(
+                module,
+                owner,
+                context,
+                argument,
+                Some(0),
+                &types[0],
+                indirect[0],
+                mutation_mask[0],
+            )?;
+            return Ok((vec![entry], vec![LoweredCallStep::Argument { argument: 0 }]));
+        }
+        if let Expression::Product(product) = argument
+            && !product.elements.iter().any(|element| element.spread)
+            && product.elements.len() == count
+        {
+            let mut arguments = Vec::new();
+            let mut steps = Vec::new();
+            for (index, element) in product.elements.iter().enumerate() {
+                let entry = self.lower_call_argument(
+                    module,
+                    owner,
+                    context,
+                    &element.value,
+                    Some(index),
+                    &types[index],
+                    indirect[index],
+                    mutation_mask[index],
+                )?;
+                steps.push(call_argument_step(index, index, &entry));
+                arguments.push(entry);
+            }
+            return Ok((arguments, steps));
+        }
+        // A product-valued place passed without literal destructuring: the
+        // backend takes addresses of mutated fields and loads the rest.
+        if let CheckedType::Product(_) = function_type.parameter.as_ref()
+            && expression_has_place_root(module.resolved(), argument)
+        {
+            let expression = self.lower_expression(module, owner, context, argument)?;
+            let place = self.lower_place(module, owner, context, argument).ok();
+            let mut arguments = Vec::new();
+            for index in 0..count {
+                let pass_mode = if mutation_mask[index] {
+                    LoweredArgumentPassMode::MutablePlace
+                } else if indirect[index] {
+                    LoweredArgumentPassMode::BorrowedPointer
+                } else {
+                    LoweredArgumentPassMode::Value
+                };
+                arguments.push(LoweredCallArgument {
+                    expression: Some(expression),
+                    thunk: None,
+                    slot: Some(index),
+                    pass_mode,
+                    expected: types[index].clone(),
+                    place,
+                    temporary: false,
+                    writeback: false,
+                    drops_after_call: false,
+                });
+            }
+            return Ok((arguments, vec![LoweredCallStep::Argument { argument: 0 }]));
+        }
+        Err(Diagnostic::new(
+            argument.syntax().span.clone(),
+            "mutation-affected product argument cannot be addressed",
+        ))
+    }
+
+    /// Lowers arguments for a call with no indirect slots: every argument
+    /// passes by value, with implicit thunks recorded explicitly.
+    fn lower_value_call_arguments(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        argument: &Expression,
+        function_type: &CheckedFunctionType,
+        types: &[CheckedType],
+    ) -> Result<(Vec<LoweredCallArgument>, Vec<LoweredCallStep>), Diagnostic> {
+        let count = types.len();
+        if let Expression::Product(product) = argument
+            && !product.elements.iter().any(|element| element.spread)
+            && product.elements.len() == count
+        {
+            let mut arguments = Vec::new();
+            let mut steps = Vec::new();
+            for (index, element) in product.elements.iter().enumerate() {
+                let entry = self.lower_call_argument(
+                    module,
+                    owner,
+                    context,
+                    &element.value,
+                    Some(index),
+                    &types[index],
+                    false,
+                    false,
+                )?;
+                steps.push(call_argument_step(index, index, &entry));
+                arguments.push(entry);
+            }
+            return Ok((arguments, steps));
+        }
+        if count == 1 {
+            let entry = self.lower_call_argument(
+                module,
+                owner,
+                context,
+                argument,
+                Some(0),
+                &types[0],
+                false,
+                false,
+            )?;
+            return Ok((vec![entry], vec![LoweredCallStep::Argument { argument: 0 }]));
+        }
+        // A product-valued argument is flattened by the backend; record the
+        // single evaluation and let the final layout stay implicit.
+        let entry = self.lower_call_argument(
+            module,
+            owner,
+            context,
+            argument,
+            None,
+            &function_type.parameter,
+            false,
+            false,
+        )?;
+        Ok((vec![entry], vec![LoweredCallStep::Argument { argument: 0 }]))
+    }
+
+    /// Lowers one argument occurrence with its final ABI slot and pass mode.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_call_argument(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        expression: &Expression,
+        slot: Option<usize>,
+        expected: &CheckedType,
+        indirect: bool,
+        mutation: bool,
+    ) -> Result<LoweredCallArgument, Diagnostic> {
+        if let Some(thunk) = module.implicit_thunk_for(expression.syntax().id) {
+            return Ok(LoweredCallArgument {
+                expression: None,
+                thunk: Some(thunk.id),
+                slot,
+                pass_mode: LoweredArgumentPassMode::Value,
+                expected: expected.clone(),
+                place: None,
+                temporary: false,
+                writeback: false,
+                drops_after_call: false,
+            });
+        }
+        let expression_id = self.lower_expression(module, owner, context, expression)?;
+        let place = if expression_has_place_root(module.resolved(), expression) {
+            self.lower_place(module, owner, context, expression).ok()
+        } else {
+            None
+        };
+        let pass_mode = if mutation {
+            LoweredArgumentPassMode::MutablePlace
+        } else if indirect {
+            if place.is_some() {
+                LoweredArgumentPassMode::BorrowedPointer
+            } else {
+                LoweredArgumentPassMode::MaterializedTemporary
+            }
+        } else {
+            LoweredArgumentPassMode::Value
+        };
+        let temporary = (mutation || indirect) && place.is_none();
+        let drops_after_call = mutation && place.is_none() && module.type_needs_drop(expected);
+        Ok(LoweredCallArgument {
+            expression: Some(expression_id),
+            thunk: None,
+            slot,
+            pass_mode,
+            expected: expected.clone(),
+            place,
+            temporary,
+            writeback: false,
+            drops_after_call,
+        })
+    }
+
     fn validate(&self) -> Vec<Diagnostic> {
         let mut diagnostics = self.modules.validate("module");
         diagnostics.extend(self.functions.validate("function"));
@@ -4365,12 +4822,24 @@ impl LoweredProgram {
             }
             let mut slots = HashSet::new();
             for argument in &call.arguments {
-                if !self.expressions.contains(argument.expression) {
+                if let Some(expression) = argument.expression
+                    && !self.expressions.contains(expression)
+                {
                     diagnostics.push(invalid_reference(
                         &call.origin,
                         "call argument",
                         "expression",
-                        argument.expression.index(),
+                        expression.index(),
+                    ));
+                }
+                if let Some(thunk) = argument.thunk
+                    && self.functions.get(thunk).is_none()
+                {
+                    diagnostics.push(invalid_reference(
+                        &call.origin,
+                        "call argument",
+                        "function",
+                        thunk.0,
                     ));
                 }
                 if let Some(place) = argument.place
@@ -5655,7 +6124,9 @@ impl LoweredProgram {
             self.visit_owned_expression(callee, reached);
         }
         for argument in &call.arguments {
-            self.visit_owned_expression(argument.expression, reached);
+            if let Some(expression) = argument.expression {
+                self.visit_owned_expression(expression, reached);
+            }
             if let Some(place) = argument.place {
                 self.visit_owned_place(place, reached);
             }
@@ -6188,7 +6659,9 @@ impl LoweredProgram {
             self.collect_loop_expression(callee, depth, reached, diagnostics);
         }
         for argument in &call.arguments {
-            self.collect_loop_expression(argument.expression, depth, reached, diagnostics);
+            if let Some(expression) = argument.expression {
+                self.collect_loop_expression(expression, depth, reached, diagnostics);
+            }
             if let Some(place) = argument.place {
                 self.collect_loop_place(place, depth, reached, diagnostics);
             }
@@ -6775,12 +7248,12 @@ fn module_origin(module: &SourceModule) -> Origin {
 /// owned/deferred/rejected decision, and the coverage classifier test keeps
 /// the enumerated variant list in agreement.
 fn classify_expression(expression: &Expression) -> ExpressionDisposition {
-    use DeferredExpressionFamily::{Callable, Coroutine, Resource};
+    use DeferredExpressionFamily::{Coroutine, Resource};
     use ExpressionDisposition::{Deferred, Ordinary, Rejected};
     use Stage24Family as Family;
     match expression {
         Expression::Function(_) => Ordinary(Family::Function),
-        Expression::Call(_) => Deferred(Callable),
+        Expression::Call(_) => Ordinary(Family::Call),
         Expression::Satisfies(_) => Ordinary(Family::Satisfies),
         Expression::Match(_) => Ordinary(Family::Match),
         Expression::Loop(_) => Ordinary(Family::Loop),
@@ -6825,6 +7298,7 @@ fn family_name(family: Stage24Family) -> &'static str {
         Stage24Family::Integer => "Integer",
         Stage24Family::Float => "Float",
         Stage24Family::Function => "Function",
+        Stage24Family::Call => "Call",
     }
 }
 
@@ -7073,6 +7547,85 @@ fn symbol_function_type(module: &TypedModule, symbol: SymbolId) -> Option<Checke
         Some(CheckedType::Function(function_type)) => Some(function_type),
         _ => None,
     }
+}
+
+/// The checked function type of a call's callee, falling back to the callee
+/// symbol's declared function type when the occurrence is checked as a
+/// coerced type.
+fn checked_call_function_type(
+    module: &TypedModule,
+    call: &staple_syntax::CallExpression,
+    origin: &Origin,
+) -> Result<CheckedFunctionType, Diagnostic> {
+    if let Some(CheckedType::Function(function_type)) =
+        module.type_of_expression(call.callee.syntax().id)
+    {
+        return Ok(function_type.clone());
+    }
+    if let Some(symbol) = module.symbol_for(call.callee.syntax().id)
+        && let Some(function_type) = symbol_function_type(module, symbol)
+    {
+        return Ok(function_type);
+    }
+    Err(Diagnostic::new(
+        origin.span.clone(),
+        "call has no checked function type",
+    ))
+}
+
+/// Whether a call's argument keeps a checked product plan (contextual
+/// defaults) or spread/designated elements. Those are normalized in Step 4.
+fn call_arguments_need_step_4(module: &TypedModule, call: &staple_syntax::CallExpression) -> bool {
+    let argument = call.argument.as_ref();
+    if module.product_default_plan(argument.syntax().id).is_some() {
+        return true;
+    }
+    match argument {
+        Expression::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| element.spread || element.designated || element.named_spread),
+        _ => false,
+    }
+}
+
+/// The ordered step that evaluates one call argument. An implicit thunk has
+/// no argument occurrence; its closure construction is recorded on the
+/// argument itself.
+fn call_argument_step(
+    argument: usize,
+    slot: usize,
+    entry: &LoweredCallArgument,
+) -> LoweredCallStep {
+    match entry.expression {
+        Some(expression) => LoweredCallStep::ProductElement {
+            argument,
+            slot,
+            expression,
+        },
+        None => LoweredCallStep::Argument { argument },
+    }
+}
+
+/// The flattened ABI slots of a parameter type: a product's element types, or
+/// the type itself for every other shape.
+fn flattened_parameter_types(parameter: &CheckedType) -> Vec<CheckedType> {
+    match parameter {
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .map(|element| element.value_type.clone())
+            .collect(),
+        other => vec![other.clone()],
+    }
+}
+
+/// Which slots a mutation/move marker list addresses.
+fn mutation_slot_mask(count: usize, mutations: &[CheckedMutation]) -> Vec<bool> {
+    let whole = mutations.contains(&CheckedMutation::Whole);
+    (0..count)
+        .map(|index| whole || mutations.contains(&CheckedMutation::Element(index)))
+        .collect()
 }
 
 /// Compile-time substitutions from a function template to the concrete type
@@ -9113,7 +9666,7 @@ mod tests {
             assert_eq!(expression_variant_name(expression), *name);
             let expected = match *name {
                 "Function" => Ordinary(Stage24Family::Function),
-                "Call" => Deferred(DeferredExpressionFamily::Callable),
+                "Call" => Ordinary(Stage24Family::Call),
                 "Resource" | "With" => Deferred(DeferredExpressionFamily::Resource),
                 "Coro" | "Await" => Deferred(DeferredExpressionFamily::Coroutine),
                 "Unary" | "Binary" | "SyntaxArgument" | "VisibilityArgument" | "Quote"
@@ -9662,6 +10215,222 @@ mod tests {
             saw_by_value && saw_borrowed && saw_shared_cell,
             "the fixture should exercise every capture access"
         );
+
+        let mut second = LoweredProgram::default();
+        assert!(second.snapshot(&module).is_empty());
+        assert!(second.validate().is_empty());
+        assert_eq!(
+            normalized_program_snapshot(&program),
+            normalized_program_snapshot(&second)
+        );
+    }
+
+    fn call_fixture() -> &'static str {
+        concat!(
+            "use std.cinterop.*\n",
+            "use std.io.IO\n",
+            "extern \"c\" {\n",
+            "  external_identity: I32 -> I32\n",
+            "  external_cstr: CString -> I32\n",
+            "}\n",
+            "type MoveOnly = ctor String\n",
+            "impl !Copy MoveOnly {}\n",
+            "def generic_identity: <T where Copy T> T -> T = value => value\n",
+            "def declared: I32 -> I32 = value => value\n",
+            "def mutate = (mut target: I32) => { target = 1 }\n",
+            "def take: MoveOnly -> I32 = value => 1\n",
+            "def generic_recursive: <T where Copy T> T -> T = value => generic_recursive value\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def with_io: () ->{IO} () = () => ()\n",
+            "def call_samples: () ->{state} I32 = () => {\n",
+            "  let closure = (value: I32) => value\n",
+            "  let indirect: I32 = closure (1)\n",
+            "  let direct: I32 = generic_identity 1\n",
+            "  let declared_result: I32 = declared (1)\n",
+            "  let external_result: I32 = external_identity (1)\n",
+            "  let c_string_result: I32 = external_cstr (c_string \"x\")\n",
+            "  let mut number: I32 = 0\n",
+            "  mutate number\n",
+            "  mutate (1 + 1)\n",
+            "  let value = MoveOnly \"x\"\n",
+            "  let borrowed: I32 = take value\n",
+            "  let temporary: I32 = take (MoveOnly \"y\")\n",
+            "  let recursed: I32 = generic_recursive 1\n",
+            "  let evaluated: I32 = evaluate { number = number + 1; number }\n",
+            "  indirect\n",
+            "}\n",
+            "def call_io: () ->{IO} I32 = () => {\n",
+            "  with_io ()\n",
+            "  0\n",
+            "}\n",
+        )
+    }
+
+    #[test]
+    fn ordinary_direct_indirect_external_and_intrinsic_calls_lower() {
+        let module = checked_program(call_fixture());
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let calls = program
+            .calls
+            .iter()
+            .map(|(_, call)| call)
+            .collect::<Vec<_>>();
+        assert!(!calls.is_empty());
+        let categories = calls
+            .iter()
+            .map(|call| call.target.category())
+            .collect::<HashSet<_>>();
+        for expected in [
+            LoweredCallableCategory::DirectKnownFunction,
+            LoweredCallableCategory::IndirectClosure,
+            LoweredCallableCategory::ExternalFunction,
+            LoweredCallableCategory::Intrinsic,
+        ] {
+            assert!(
+                categories.contains(&expected),
+                "the fixture should lower a {expected:?} call"
+            );
+        }
+
+        assert!(calls.iter().any(|call| matches!(
+            &call.target,
+            LoweredCallableTarget::DirectFunction {
+                environment: LoweredCallEnvironment::Current,
+                ..
+            }
+        )));
+        for call in &calls {
+            if let LoweredCallableTarget::IndirectClosure { callee } = call.target {
+                assert_eq!(call.callee, Some(callee));
+                assert!(matches!(
+                    call.steps.first(),
+                    Some(LoweredCallStep::Callee { expression }) if *expression == callee
+                ));
+            }
+        }
+        assert!(calls.iter().any(|call| matches!(
+            call.target,
+            LoweredCallableTarget::ExternalFunction { .. }
+        ) && call.c_string_temporary));
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call.target, LoweredCallableTarget::Intrinsic { .. }))
+        );
+    }
+
+    #[test]
+    fn call_arguments_record_pass_modes_temporaries_and_steps() {
+        let module = checked_program(call_fixture());
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let calls = program
+            .calls
+            .iter()
+            .map(|(_, call)| call)
+            .collect::<Vec<_>>();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.arguments.iter().any(|argument| {
+                    argument.pass_mode == LoweredArgumentPassMode::MutablePlace
+                        && argument.place.is_some()
+                        && !argument.temporary
+                }))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.arguments.iter().any(|argument| {
+                    argument.pass_mode == LoweredArgumentPassMode::MutablePlace
+                        && argument.place.is_none()
+                        && argument.temporary
+                }))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.arguments.iter().any(|argument| {
+                    argument.pass_mode == LoweredArgumentPassMode::BorrowedPointer
+                        && argument.place.is_some()
+                        && !argument.temporary
+                }))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.arguments.iter().any(|argument| {
+                    argument.pass_mode == LoweredArgumentPassMode::MaterializedTemporary
+                        && argument.temporary
+                        && !argument.drops_after_call
+                }))
+        );
+        assert!(calls.iter().any(|call| {
+            call.arguments
+                .iter()
+                .any(|argument| argument.thunk.is_some() && argument.expression.is_none())
+        }));
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.arguments.iter().any(|argument| {
+                    argument.pass_mode == LoweredArgumentPassMode::Value
+                        && argument.temporary == false
+                }))
+        );
+        assert!(calls.iter().any(|call| !call.mutations.is_empty()));
+        assert!(calls.iter().any(|call| !call.resources.is_empty()));
+
+        for call in &calls {
+            assert!(
+                matches!(call.steps.last(), Some(LoweredCallStep::Invoke)),
+                "every call ends with an invocation step"
+            );
+            assert_eq!(
+                call.steps
+                    .iter()
+                    .filter(|step| matches!(step, LoweredCallStep::Resource { .. }))
+                    .count(),
+                call.resources.len()
+            );
+            let mut slots = HashSet::new();
+            for argument in &call.arguments {
+                if let Some(slot) = argument.slot {
+                    assert!(slots.insert(slot), "call argument slots are unique");
+                }
+                if argument.temporary {
+                    assert_ne!(argument.pass_mode, LoweredArgumentPassMode::Value);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn call_facts_agree_with_checked_function_types() {
+        let module = checked_program(call_fixture());
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        for (_, call) in program.calls.iter() {
+            assert_eq!(call.resources, call.function_type.effects.resources);
+            assert_eq!(call.mutations, call.function_type.mutations);
+            assert_eq!(call.moves, call.function_type.moves);
+            assert_eq!(call.result_type, *call.function_type.result);
+            assert!(
+                !call.c_string_temporary
+                    || matches!(call.target, LoweredCallableTarget::ExternalFunction { .. })
+            );
+            for symbol in &call.initialization_checks {
+                assert!(program.symbols.get(*symbol).is_some());
+            }
+        }
 
         let mut second = LoweredProgram::default();
         assert!(second.snapshot(&module).is_empty());

@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, Stage 2.3, and all of Stage 2.4 are complete. Stage 2.5 (lower calls, trait evidence, and closures) is in progress: Step 1 (call-route inventory and callable IR skeleton) and Step 2 (callable values and closure construction) are complete.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, Stage 2.3, and all of Stage 2.4 are complete. Stage 2.5 (lower calls, trait evidence, and closures) is in progress: Steps 1-3 (call-route inventory and IR skeleton, callable values and closure construction, and ordinary/direct/indirect/external/intrinsic calls) are complete.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -205,6 +205,11 @@ Progress:
 - Function snapshots are now two-pass: every function's metadata is inserted before any body lowers, and declaration catalogs (types, traits, implementations, semantic IDs) are populated before functions and modules, so forward and recursive callable references resolve. This reorders arena population but not catalog or expression order.
 - Added route-coverage and construction-plan tests covering named, anonymous, nested, generic, borrowed, mutable-cell, recursive, constructor, extern, explicit-trait, declared-bound, and structural values, including capture-order/access/ownership assertions and normalized repeated-lowering snapshots. Intrinsics have no first-class value route in the backend, so that route stays explicit and defensive.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (73 tests), `cargo test --workspace` (1021 tests), and `git diff --check`.
+- Step 3 lowered ordinary (indirect closure), generic direct, external, and intrinsic calls. Each `LoweredCall` records its explicit target, callee occurrence for indirect calls, checked call-site function type, ordered arguments with final ABI slots and pass modes, hidden effect resources in effect-row order, checked mutation/move markers, initialization checks, ordered call steps, result type, and use-site substitutions. Juxtaposed chains, curried defaults, trait dispatch, constructors, primitive macros, and calls whose arguments keep checked product plans or spread/designated elements stay explicitly deferred to Steps 4-6.
+- Argument pass modes mirror `compile_effect_arguments`: mutation markers become `MutablePlace` (reusing Stage 2.3 place IDs where the argument has a place root, otherwise a materialized temporary that is dropped after the call when the value needs drop), non-`Copy` non-`move` slots become `BorrowedPointer` or `MaterializedTemporary`, and the rest pass by value. Implicit thunk arguments record the thunk function instead of an argument occurrence, and a product-valued place passed without destructuring shares one evaluation across its slots.
+- Call steps keep the backend's evaluation order: indirect callees evaluate first, explicit arguments and product elements follow in source order, then hidden resource lookups, then the invocation. Same-function generic recursion records `LoweredCallEnvironment::Current`, and extern calls whose argument is an unsymbolized C-string record `c_string_temporary`.
+- Added route/target coverage, pass-mode/temporary/thunk/step assertions, transition comparisons against the checked function types, and normalized repeated-lowering determinism coverage.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (76 tests), `cargo test --workspace` (1024 tests), and `git diff --check`.
 
 > **Complexity note:** This is Stage 2's highest-risk substage. Curried calls, generic captures, trait functional dependencies, defaults, and structural evidence may require separate breakdown plans.
 
