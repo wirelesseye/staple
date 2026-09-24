@@ -3033,11 +3033,22 @@ impl LoweredProgram {
         &self,
         string: &staple_syntax::CStringExpression,
     ) -> Result<LoweredCString, Diagnostic> {
-        let value = staple_syntax::string_literal::decode(&string.literal)
-            .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
+        self.lower_c_string_literal(&string.literal, string.syntax.span.clone())
+    }
+
+    /// Decodes a C-string literal once, validating the interior-NUL rule.
+    /// Shared by `Expression::CString` and any surviving `c_string` primitive
+    /// call.
+    fn lower_c_string_literal(
+        &self,
+        literal: &str,
+        span: Span,
+    ) -> Result<LoweredCString, Diagnostic> {
+        let value = staple_syntax::string_literal::decode(literal)
+            .map_err(|message| Diagnostic::new(span.clone(), message))?;
         if value.as_bytes().contains(&0) {
             return Err(Diagnostic::new(
-                string.syntax.span.clone(),
+                span,
                 "C string literals cannot contain an interior NUL byte",
             ));
         }
@@ -4363,12 +4374,27 @@ impl LoweredProgram {
         ) {
             return self.lower_juxtaposed_call(module, owner, context, call);
         }
+        if route == CallRoute::PrimitiveMacro {
+            // Macro expansion normally rewrites `c_string "..."` into a
+            // decoded `Expression::CString`; normalize any surviving primitive
+            // call to the same owned payload with its interior-NUL check.
+            let Expression::String(string) = call.argument.as_ref() else {
+                return Err(Diagnostic::new(
+                    call.syntax.span.clone(),
+                    "`c_string` requires a string literal",
+                ));
+            };
+            let c_string =
+                self.lower_c_string_literal(&string.literal, string.syntax.span.clone())?;
+            return Ok(LoweredExpressionKind::CString(c_string));
+        }
         if !matches!(
             route,
             CallRoute::GenericDirect
                 | CallRoute::External
                 | CallRoute::Indirect
                 | CallRoute::Intrinsic
+                | CallRoute::Constructor
         ) {
             return Ok(LoweredExpressionKind::Deferred(
                 DeferredExpressionFamily::Callable,
@@ -4465,10 +4491,28 @@ impl LoweredProgram {
                     function_type,
                 )
             }
+            CallRoute::Constructor => {
+                let symbol = symbol.expect("constructor calls are symbol-selected");
+                let type_id = resolved
+                    .constructor_type(symbol)
+                    .expect("checked constructor symbol");
+                let function_type = checked_call_function_type(module, call, &origin)?;
+                (
+                    LoweredCallableTarget::Constructor {
+                        symbol,
+                        type_id,
+                        recursive: resolved.recursive_construction(type_id),
+                    },
+                    None,
+                    function_type,
+                )
+            }
             _ => unreachable!("non-Step-3 call routes defer above"),
         };
-        let (arguments, mut steps) = if matches!(route, CallRoute::External | CallRoute::Intrinsic)
-        {
+        let (arguments, mut steps) = if matches!(
+            route,
+            CallRoute::External | CallRoute::Intrinsic | CallRoute::Constructor
+        ) {
             self.lower_plain_call_arguments(module, owner, context, &call.argument, &function_type)?
         } else {
             self.lower_effect_call_arguments(
@@ -11092,6 +11136,116 @@ mod tests {
     }
 
     #[test]
+    fn constructor_calls_and_values_record_explicit_targets() {
+        let module = checked_program(concat!(
+            "use std.core.reference.(Ref)\n",
+            "type TestBox = ctor (value: I32)\n",
+            "type TestEnabled\n",
+            "let enabled: TestEnabled = TestEnabled\n",
+            "let maker = TestBox\n",
+            "let boxed: TestBox = TestBox (value: 1)\n",
+            "let single_ref: Ref I32 = Ref 0\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let constructor_calls = program
+            .calls
+            .iter()
+            .filter_map(|(_, call)| match &call.target {
+                LoweredCallableTarget::Constructor { type_id, .. } => Some((*type_id, call)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let constructor_names = constructor_calls
+            .iter()
+            .map(|(type_id, _)| {
+                program
+                    .types
+                    .get(*type_id)
+                    .map(|metadata| metadata.name.as_str())
+                    .unwrap_or("<unknown>")
+            })
+            .collect::<Vec<_>>();
+        assert!(constructor_names.contains(&"TestBox"));
+        assert!(constructor_names.contains(&"Ref"));
+
+        for (_, call) in &constructor_calls {
+            assert!(call.callee.is_none());
+            assert!(matches!(call.steps.last(), Some(LoweredCallStep::Invoke)));
+        }
+        let box_call = constructor_calls
+            .iter()
+            .find(|(type_id, _)| {
+                program
+                    .types
+                    .get(*type_id)
+                    .map(|metadata| metadata.name.as_str())
+                    == Some("TestBox")
+            })
+            .map(|(_, call)| *call)
+            .expect("TestBox construction");
+        assert_eq!(box_call.arguments.len(), 1);
+        assert_eq!(
+            box_call.arguments[0].pass_mode,
+            LoweredArgumentPassMode::Value
+        );
+        let ref_call = constructor_calls
+            .iter()
+            .find(|(type_id, _)| {
+                program
+                    .types
+                    .get(*type_id)
+                    .map(|metadata| metadata.name.as_str())
+                    == Some("Ref")
+            })
+            .map(|(_, call)| *call)
+            .expect("Ref construction");
+        assert!(matches!(
+            ref_call.target,
+            LoweredCallableTarget::Constructor {
+                recursive: Some(RecursiveConstruction::ManagedReference),
+                ..
+            }
+        ));
+
+        // Constructor values keep their adapter; singleton values stay values.
+        assert!(program.callable_values.iter().any(|(_, value)| {
+            matches!(value.target, LoweredCallableTarget::Constructor { .. })
+                && value.adapter == LoweredCallableAdapter::Constructor
+        }));
+        let singleton_type = program
+            .expressions
+            .iter()
+            .find_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Name(name) => name.singleton,
+                _ => None,
+            })
+            .expect("a singleton name");
+        assert!(
+            !constructor_calls
+                .iter()
+                .any(|(type_id, _)| *type_id == singleton_type),
+            "singletons are values, not constructor calls"
+        );
+    }
+
+    #[test]
+    fn c_string_primitive_normalization_reuses_the_decoded_payload() {
+        let program = LoweredProgram::default();
+        let bytes = program
+            .lower_c_string_literal("\"ok\"", Span::Compiler)
+            .expect("decodable literal");
+        assert_eq!(bytes.bytes, b"ok\0");
+        let diagnostic = program
+            .lower_c_string_literal("\"a\\0b\"", Span::Compiler)
+            .expect_err("interior NUL");
+        assert!(diagnostic.message.contains("interior NUL"));
+    }
+
+    #[test]
     fn occurrence_keys_deduplicate_ordinary_expressions_and_blocks() {
         let module = checked_program("def block_body = () => { let value: I32 = 1; value }\n");
         let function = module
@@ -12439,7 +12593,7 @@ mod tests {
                 .get(interpolation.expression)
                 .unwrap()
                 .kind,
-            LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable)
+            LoweredExpressionKind::Call(_)
         ));
     }
 

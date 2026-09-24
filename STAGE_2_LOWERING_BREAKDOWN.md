@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, Stage 2.3, and all of Stage 2.4 are complete. Stage 2.5 (lower calls, trait evidence, and closures) is in progress: Steps 1-4 (call-route inventory and IR skeleton, callable values and closure construction, ordinary/direct/indirect/external/intrinsic calls, and juxtaposed/defaulted/spread call arguments) are complete.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, Stage 2.3, and all of Stage 2.4 are complete. Stage 2.5 (lower calls, trait evidence, and closures) is in progress: Steps 1-5 (call-route inventory and IR skeleton, callable values and closure construction, ordinary/direct/indirect/external/intrinsic calls, juxtaposed/defaulted/spread call arguments, and constructor/compiler-provided routes) are complete.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -215,6 +215,9 @@ Progress:
 - Curried defaults remain explicitly deferred because curried defaults are rejected during source resolution; the route stays defensive.
 - Added juxtaposed chain-consumption and intrinsic-companion coverage, defaults/designators/spread step-order and occurrence-key assertions, and repeated-lowering determinism checks.
 - Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (78 tests), `cargo test --workspace` (1026 tests), and `git diff --check`.
+- Step 5 lowered constructor calls and compiler-provided routes. Constructor calls record an explicit `Constructor` target carrying the selected symbol, type, and recursive-construction classification, so managed-reference (`Ref`) construction is distinct from ordinary nominal wrapping; they evaluate their argument by value and end with an invocation step. Constructor values keep their constructor adapter from Step 2, and singleton values remain ordinary reads with their singleton identity rather than constructor calls. Any surviving `c_string` primitive call is normalized to the same decoded owned C-string payload as `Expression::CString`, including the interior-NUL diagnostic, so no backend AST matching remains for it. Compiler-helper identities stay recorded through checked formatter selections and the `CompilerHelper` target category; Stage 4 completes the generated-helper catalog and deduplication.
+- Added constructor call/value target assertions (including `Ref` managed-reference construction), singleton-as-value coverage, and C-string normalization/validation coverage.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (80 tests), `cargo test --workspace` (1028 tests), and `git diff --check`.
 
 > **Complexity note:** This is Stage 2's highest-risk substage. Curried calls, generic captures, trait functional dependencies, defaults, and structural evidence may require separate breakdown plans.
 
