@@ -5534,6 +5534,7 @@ impl LoweredProgram {
             if let Some(evidence) = &call.evidence {
                 self.validate_trait_evidence(&call.origin, evidence, &mut diagnostics);
             }
+            self.validate_call_target_agreement(call, &mut diagnostics);
         }
         for (_, value) in self.callable_values.iter() {
             self.validate_callable_target(&value.origin, &value.target, &mut diagnostics);
@@ -5583,6 +5584,161 @@ impl LoweredProgram {
             }
         }
         diagnostics
+    }
+
+    /// Checks that a call's callee occurrence, target category, evidence
+    /// recipe, resource order, argument slot layout, and substitutions are
+    /// mutually consistent.
+    fn validate_call_target_agreement(
+        &self,
+        call: &LoweredCall,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        match (&call.target, call.callee) {
+            (LoweredCallableTarget::IndirectClosure { callee }, Some(field)) => {
+                if *callee != field {
+                    diagnostics.push(Diagnostic::new(
+                        call.origin.span.clone(),
+                        "indirect call target disagrees with its callee occurrence",
+                    ));
+                }
+            }
+            (LoweredCallableTarget::IndirectClosure { .. }, None) => {
+                diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    "indirect call target has no callee occurrence",
+                ));
+            }
+            (_, Some(_)) => {
+                diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    "direct call target owns a callee occurrence",
+                ));
+            }
+            (_, None) => {}
+        }
+
+        match (&call.target, &call.evidence) {
+            (
+                LoweredCallableTarget::TraitImplementation {
+                    trait_id,
+                    method,
+                    function,
+                },
+                Some(TraitEvidence::ExplicitImplementation {
+                    trait_id: evidence_trait,
+                    method: evidence_method,
+                    function: evidence_function,
+                    ..
+                }),
+            ) if trait_id == evidence_trait
+                && method == evidence_method
+                && function == &Some(*evidence_function) => {}
+            (
+                LoweredCallableTarget::StructuralTraitMethod {
+                    trait_id,
+                    method,
+                    structural,
+                },
+                Some(TraitEvidence::Structural {
+                    trait_id: evidence_trait,
+                    method: evidence_method,
+                    structural: evidence_structural,
+                    ..
+                }),
+            ) if trait_id == evidence_trait
+                && method == evidence_method
+                && structural == evidence_structural => {}
+            (
+                LoweredCallableTarget::TraitImplementation {
+                    trait_id, method, ..
+                },
+                Some(TraitEvidence::DeclaredBound {
+                    trait_id: evidence_trait,
+                    method: evidence_method,
+                    ..
+                }),
+            ) if trait_id == evidence_trait && Some(*method) == *evidence_method => {}
+            (LoweredCallableTarget::TraitImplementation { .. }, _) => {
+                diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    "trait implementation call has no matching evidence recipe",
+                ));
+            }
+            (LoweredCallableTarget::StructuralTraitMethod { .. }, _) => {
+                diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    "structural trait call has no matching evidence recipe",
+                ));
+            }
+            (_, Some(_)) => {
+                diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    "non-trait call owns a trait evidence recipe",
+                ));
+            }
+            (_, None) => {}
+        }
+
+        if call.resources != call.function_type.effects.resources {
+            diagnostics.push(Diagnostic::new(
+                call.origin.span.clone(),
+                "call resources disagree with its checked effect row",
+            ));
+        }
+
+        let parameter_slots = flattened_parameter_types(&call.function_type.parameter).len();
+        let variadic = matches!(
+            call.function_type.parameter.as_ref(),
+            CheckedType::Product(product) if product.variadic
+        );
+        let mut slotted = call
+            .arguments
+            .iter()
+            .filter_map(|argument| argument.slot)
+            .collect::<Vec<_>>();
+        if slotted.len() == call.arguments.len() {
+            slotted.sort_unstable();
+            if variadic {
+                if slotted.len() < parameter_slots {
+                    diagnostics.push(Diagnostic::new(
+                        call.origin.span.clone(),
+                        format!(
+                            "variadic call fills {} slots for a {parameter_slots}-slot fixed prefix",
+                            slotted.len()
+                        ),
+                    ));
+                }
+            } else if slotted != (0..parameter_slots).collect::<Vec<_>>() {
+                diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    format!(
+                        "call argument slots do not fill the {parameter_slots} parameter slots exactly once"
+                    ),
+                ));
+            }
+        }
+
+        let mut substituted = HashSet::new();
+        for parameter in call
+            .substitutions
+            .types
+            .iter()
+            .map(|substitution| substitution.parameter)
+            .chain(
+                call.substitutions
+                    .effects
+                    .iter()
+                    .map(|substitution| substitution.parameter),
+            )
+        {
+            if !substituted.insert(parameter) {
+                diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    format!("call substitution repeats type parameter {}", parameter.0),
+                ));
+            }
+        }
     }
 
     fn check_call_step_argument(
@@ -5863,6 +6019,12 @@ impl LoweredProgram {
                 ));
             }
             match &expression.kind {
+                LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable) => {
+                    diagnostics.push(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "callable expression was not lowered",
+                    ));
+                }
                 LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::String(_) => {}
                 LoweredExpressionKind::Integer(integer) => {
                     let width = integer_literal_bit_width(integer.integer_type);
@@ -6103,6 +6265,16 @@ impl LoweredProgram {
                             &interpolation.evidence,
                             &mut diagnostics,
                         );
+                        if !evidence_matches(
+                            &interpolation.evidence,
+                            interpolation.trait_id,
+                            Some(interpolation.method),
+                        ) {
+                            diagnostics.push(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                "interpolation evidence does not match its formatting selection",
+                            ));
+                        }
                     }
                 }
                 LoweredExpressionKind::Index(index) => {
@@ -6138,6 +6310,16 @@ impl LoweredProgram {
                         &index.evidence,
                         &mut diagnostics,
                     );
+                    if !evidence_matches(
+                        &index.evidence,
+                        index.trait_id,
+                        Some(index.dispatch.method),
+                    ) {
+                        diagnostics.push(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "index evidence does not match its checked dispatch",
+                        ));
+                    }
                     let base_type = self
                         .expressions
                         .get(index.base)
@@ -7049,11 +7231,27 @@ impl LoweredProgram {
             let Some(dispatch) = &assignment.mutate_index else {
                 continue;
             };
-            if self.trait_methods.get(dispatch.method).is_none() {
+            let Some(trait_id) = self
+                .trait_methods
+                .get(dispatch.method)
+                .map(|method| method.trait_id)
+            else {
                 diagnostics.push(Diagnostic::new(
                     item.origin.span.clone(),
                     "assignment `MutateIndex` dispatch method is missing from the trait method catalog",
                 ));
+                continue;
+            };
+            match &assignment.evidence {
+                Some(evidence) if evidence_matches(evidence, trait_id, Some(dispatch.method)) => {}
+                Some(_) => diagnostics.push(Diagnostic::new(
+                    item.origin.span.clone(),
+                    "assignment `MutateIndex` evidence does not match its checked dispatch",
+                )),
+                None => diagnostics.push(Diagnostic::new(
+                    item.origin.span.clone(),
+                    "assignment `MutateIndex` dispatch has no evidence recipe",
+                )),
             }
             let Some(place) = self.places.get(assignment.target) else {
                 continue;
@@ -8127,6 +8325,28 @@ struct Reachability {
     items: HashSet<ItemId>,
     calls: HashSet<LoweredCallId>,
     callable_values: HashSet<LoweredCallableValueId>,
+}
+
+/// Whether a trait evidence recipe addresses the given trait and, when
+/// known, method.
+fn evidence_matches(
+    evidence: &TraitEvidence,
+    trait_id: TraitId,
+    method: Option<TraitMethodId>,
+) -> bool {
+    let (evidence_trait, evidence_method) = match evidence {
+        TraitEvidence::ExplicitImplementation {
+            trait_id, method, ..
+        }
+        | TraitEvidence::Structural {
+            trait_id, method, ..
+        } => (*trait_id, Some(*method)),
+        TraitEvidence::DeclaredBound {
+            trait_id, method, ..
+        } => (*trait_id, *method),
+        TraitEvidence::RejectedImplementation { trait_id, .. } => (*trait_id, None),
+    };
+    evidence_trait == trait_id && method.is_none_or(|method| evidence_method == Some(method))
 }
 
 /// Whether a checked dispatch argument and a lowered operand type agree well
@@ -11570,6 +11790,207 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    fn transition_fixture() -> &'static str {
+        concat!(
+            "use std.cinterop.*\n",
+            "use std.core.reference.(Ref)\n",
+            "use std.io.IO\n",
+            "extern \"c\" { external_identity: I32 -> I32 }\n",
+            "trait TestShow T { test_show: T -> Bool }\n",
+            "impl TestShow I32 { def test_show = _ => True }\n",
+            "def generic_identity: <T where Copy T> T -> T = value => value\n",
+            "let pair_add: x: I32 * y: I32 -> I32 = x * y => x + y\n",
+            "def trait_sample: () -> Bool = () => test_show 1\n",
+            "def transition_samples: () -> I32 = () => {\n",
+            "  let closure = (value: I32) => value\n",
+            "  let indirect: I32 = closure (1)\n",
+            "  let direct: I32 = generic_identity 1\n",
+            "  let external_result: I32 = external_identity (1)\n",
+            "  let chained: I32 = pair_add 1 2\n",
+            "  let mut reference: Ref I32 = Ref 0\n",
+            "  let replaced: I32 = Ref.replace reference 1\n",
+            "  let arithmetic: I32 = 1 + 2\n",
+            "  indirect\n",
+            "}\n",
+            "def transition_io: () ->{IO} I32 = () => {\n",
+            "  std.io.println \"transition\"\n",
+            "  0\n",
+            "}\n",
+        )
+    }
+
+    #[test]
+    fn lowered_calls_agree_with_checked_plans_and_signatures() {
+        let module = checked_program(transition_fixture());
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        for (_, call) in program.calls.iter() {
+            assert_eq!(call.resources, call.function_type.effects.resources);
+            assert_eq!(call.mutations, call.function_type.mutations);
+            assert_eq!(call.moves, call.function_type.moves);
+            assert_eq!(call.result_type, *call.function_type.result);
+            match &call.target {
+                LoweredCallableTarget::DirectFunction { function, .. } => {
+                    let template = module
+                        .type_of_function(*function)
+                        .expect("checked function template");
+                    assert!(
+                        template == &call.function_type
+                            || contains_type_parameter(&CheckedType::Function(template.clone()))
+                    );
+                }
+                LoweredCallableTarget::IndirectClosure { callee } => {
+                    let callee_expression =
+                        program.expressions.get(*callee).expect("lowered callee");
+                    assert_eq!(
+                        module.type_of_expression(callee_expression.key.syntax),
+                        Some(&CheckedType::Function(call.function_type.clone()))
+                    );
+                }
+                LoweredCallableTarget::ExternalFunction { symbol } => {
+                    assert!(module.resolved().is_external_symbol(*symbol));
+                }
+                LoweredCallableTarget::Intrinsic { symbol, intrinsic } => {
+                    assert_eq!(
+                        module.resolved().intrinsic_function(*symbol),
+                        Some(*intrinsic)
+                    );
+                }
+                LoweredCallableTarget::Constructor {
+                    symbol, type_id, ..
+                } => {
+                    assert_eq!(module.resolved().constructor_type(*symbol), Some(*type_id));
+                }
+                LoweredCallableTarget::TraitImplementation { .. }
+                | LoweredCallableTarget::StructuralTraitMethod { .. } => {
+                    let evidence = call.evidence.as_ref().expect("trait evidence");
+                    let (trait_id, method) = match &call.target {
+                        LoweredCallableTarget::TraitImplementation {
+                            trait_id, method, ..
+                        }
+                        | LoweredCallableTarget::StructuralTraitMethod {
+                            trait_id, method, ..
+                        } => (*trait_id, Some(*method)),
+                        _ => unreachable!(),
+                    };
+                    assert!(evidence_matches(evidence, trait_id, method));
+                }
+                LoweredCallableTarget::CompilerHelper { function } => {
+                    assert!(program.functions.get(*function).is_some());
+                }
+            }
+            if let Some(plan) = module.juxtaposed_call_plan(call.origin.syntax) {
+                assert_eq!(plan.function, call.function_type);
+                assert_eq!(plan.arguments.len(), call.arguments.len());
+            }
+        }
+
+        // Closure captures follow the resolved catalog order and ownership
+        // facts.
+        for (_, value) in program.callable_values.iter() {
+            let Some(closure) = &value.closure else {
+                continue;
+            };
+            let function = module
+                .function_by_id(closure.function)
+                .expect("resolved closure function");
+            assert_eq!(
+                closure
+                    .captures
+                    .iter()
+                    .map(|capture| capture.capture.symbol)
+                    .collect::<Vec<_>>(),
+                function.captures
+            );
+            for capture in &closure.captures {
+                assert_eq!(
+                    capture.capture.borrowed,
+                    module.is_borrowed_capture(closure.function, capture.capture.symbol)
+                );
+                assert_eq!(
+                    capture.capture.requires_cell,
+                    capture_requires_cell(&module, capture.capture.symbol)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validation_rejects_inconsistent_calls_and_deferred_callables() {
+        let module = checked_program(transition_fixture());
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        // A direct target that owns a callee occurrence diagnoses.
+        let indirect = program
+            .calls
+            .iter()
+            .find(|(_, call)| matches!(call.target, LoweredCallableTarget::IndirectClosure { .. }))
+            .map(|(id, call)| (id, call.target.clone(), call.callee))
+            .expect("an indirect call");
+        if let Some(entry) = program.calls.get_mut(indirect.0) {
+            entry.target = LoweredCallableTarget::DirectFunction {
+                function: FunctionId(0),
+                environment: LoweredCallEnvironment::None,
+            };
+        }
+        assert!(program.validate().iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("direct call target owns a callee occurrence")
+                || diagnostic
+                    .message
+                    .contains("callable target has dangling function reference")
+        }));
+
+        // Missing resources diagnose against the checked effect row.
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let resource_call = program
+            .calls
+            .iter()
+            .find(|(_, call)| !call.resources.is_empty())
+            .map(|(id, _)| id)
+            .expect("a resource-bearing call");
+        if let Some(entry) = program.calls.get_mut(resource_call) {
+            entry.resources.clear();
+        }
+        assert!(program.validate().iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("call resources disagree with its checked effect row")
+        }));
+
+        // A remaining callable deferral diagnoses.
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        program.expressions.push(LoweredExpression {
+            key: ExpressionKey {
+                syntax: SyntaxId(999_999),
+                owner: ExpressionOwner::Module(ModuleId(0)),
+                context: ExpressionContext::Primary,
+            },
+            origin: Origin {
+                syntax: SyntaxId(999_999),
+                span: Span::Compiler,
+            },
+            value_type: CheckedType::I32,
+            effects: CheckedEffectSet::default(),
+            coercion: None,
+            moved_symbols: Vec::new(),
+            kind: LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable),
+        });
+        assert!(program.validate().iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("callable expression was not lowered")
+        }));
     }
 
     #[test]
