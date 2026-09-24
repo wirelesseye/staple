@@ -5521,6 +5521,7 @@ impl LoweredProgram {
                     ));
                 }
             }
+            self.validate_call_step_sequence(call, &mut diagnostics);
             for symbol in &call.initialization_checks {
                 if self.symbols.get(*symbol).is_none() {
                     diagnostics.push(invalid_reference(
@@ -5736,6 +5737,119 @@ impl LoweredProgram {
                 diagnostics.push(Diagnostic::new(
                     call.origin.span.clone(),
                     format!("call substitution repeats type parameter {}", parameter.0),
+                ));
+            }
+        }
+    }
+
+    /// Check that the ordered program actually evaluates every input before
+    /// its single invocation, rather than merely containing valid references.
+    fn validate_call_step_sequence(&self, call: &LoweredCall, diagnostics: &mut Vec<Diagnostic>) {
+        let mut covered = vec![0usize; call.arguments.len()];
+        let mut resources = Vec::new();
+        let mut callee_count = 0usize;
+        let mut invoked = false;
+        let mut resources_started = false;
+        for (index, step) in call.steps.iter().enumerate() {
+            match step {
+                LoweredCallStep::Callee { expression } => {
+                    callee_count += 1;
+                    if index != 0 || call.callee != Some(*expression) {
+                        diagnostics.push(Diagnostic::new(
+                            call.origin.span.clone(),
+                            "call callee step is missing, misplaced, or disagrees with its callee",
+                        ));
+                    }
+                }
+                LoweredCallStep::Argument { argument } => {
+                    if let Some(count) = covered.get_mut(*argument) {
+                        *count += 1;
+                    }
+                    // A product-valued place is evaluated once, then projected
+                    // into all ABI slots by the backend.
+                    if *argument == 0 && call.arguments.len() > 1 {
+                        let first = &call.arguments[0];
+                        if first.place.is_some()
+                            && call.arguments.iter().all(|entry| {
+                                entry.expression == first.expression && entry.place == first.place
+                            })
+                        {
+                            for count in covered.iter_mut().skip(1) {
+                                *count += 1;
+                            }
+                        }
+                    }
+                }
+                LoweredCallStep::ProductElement { argument, .. }
+                | LoweredCallStep::Default { argument, .. } => {
+                    if let Some(count) = covered.get_mut(*argument) {
+                        *count += 1;
+                    }
+                }
+                LoweredCallStep::ProductSpread { mappings, .. } => {
+                    for mapping in mappings {
+                        if let Some(count) = covered.get_mut(mapping.slot) {
+                            *count += 1;
+                        }
+                    }
+                }
+                LoweredCallStep::NamedProductSpread { mappings, .. } => {
+                    for mapping in mappings {
+                        if let Some(count) = covered.get_mut(mapping.slot) {
+                            *count += 1;
+                        }
+                    }
+                }
+                LoweredCallStep::Resource { resource } => {
+                    resources_started = true;
+                    resources.push(*resource);
+                }
+                LoweredCallStep::Invoke => {
+                    if invoked || index + 1 != call.steps.len() {
+                        diagnostics.push(Diagnostic::new(
+                            call.origin.span.clone(),
+                            "call invocation must occur exactly once as the final step",
+                        ));
+                    }
+                    invoked = true;
+                }
+            }
+            if !matches!(
+                step,
+                LoweredCallStep::Callee { .. }
+                    | LoweredCallStep::Resource { .. }
+                    | LoweredCallStep::Invoke
+            ) && resources_started
+            {
+                diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    "call argument step occurs after a resource step",
+                ));
+            }
+        }
+        if callee_count != usize::from(call.callee.is_some()) {
+            diagnostics.push(Diagnostic::new(
+                call.origin.span.clone(),
+                "call has an incorrect number of callee steps",
+            ));
+        }
+        if !invoked {
+            diagnostics.push(Diagnostic::new(
+                call.origin.span.clone(),
+                "call has no invocation step",
+            ));
+        }
+        if resources != (0..call.resources.len()).collect::<Vec<_>>() {
+            diagnostics.push(Diagnostic::new(
+                call.origin.span.clone(),
+                "call resource steps are missing, duplicated, or out of order",
+            ));
+        }
+        for (argument, count) in covered.into_iter().enumerate() {
+            if count != 1 {
+                diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    format!("call argument {argument} is evaluated {count} times"),
                 ));
             }
         }
@@ -11991,6 +12105,60 @@ mod tests {
                 .message
                 .contains("callable expression was not lowered")
         }));
+    }
+
+    #[test]
+    fn validation_requires_complete_ordered_call_steps() {
+        let module = checked_program(transition_fixture());
+        let mut baseline = LoweredProgram::default();
+        assert!(baseline.snapshot(&module).is_empty());
+        assert!(baseline.validate().is_empty());
+        let call_id = baseline.calls.iter().next().expect("a call").0;
+
+        let mut program = baseline.clone();
+        program.calls.get_mut(call_id).unwrap().steps.clear();
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("no invocation step"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("evaluated 0 times"))
+        );
+
+        let mut program = baseline.clone();
+        program
+            .calls
+            .get_mut(call_id)
+            .unwrap()
+            .steps
+            .push(LoweredCallStep::Invoke);
+        assert!(program.validate().iter().any(|d| {
+            d.message
+                .contains("invocation must occur exactly once as the final step")
+        }));
+
+        let resource_call = baseline
+            .calls
+            .iter()
+            .find(|(_, call)| !call.resources.is_empty());
+        let (resource_id, _) = resource_call.expect("a resource-bearing call");
+        let mut program = baseline;
+        program
+            .calls
+            .get_mut(resource_id)
+            .unwrap()
+            .steps
+            .retain(|step| !matches!(step, LoweredCallStep::Resource { .. }));
+        assert!(
+            program
+                .validate()
+                .iter()
+                .any(|d| { d.message.contains("resource steps are missing") })
+        );
     }
 
     #[test]
