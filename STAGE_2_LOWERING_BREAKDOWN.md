@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, Stage 2.3, and all of Stage 2.4 are complete. Stage 2.5 (lower calls, trait evidence, and closures) is next.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, Stage 2.3, and all of Stage 2.4 are complete. Stage 2.5 (lower calls, trait evidence, and closures) is in progress: Step 1 (call-route inventory and callable IR skeleton) is complete.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -190,6 +190,15 @@ The focused implementation sequence is maintained in [STAGE_2_5_CALLS_TRAITS_CLO
 - Record compile-time substitutions known at the use site without assigning `FunctionInstanceId`; Stage 3 owns instance interning and worklist discovery.
 
 **Gate:** Every call and function value has exactly one explicit callable category and enough checked information for Stage 3 to resolve an instance without inspecting expression types or resolver maps.
+
+Progress:
+
+- Step 1 inventoried every runtime call route in `codegen.rs` — juxtaposed chain, curried defaults, trait dispatch, intrinsic, generic direct, declared/global/extern, indirect closure, constructor, primitive macro, and compiler-helper routes — and mapped each to its checked inputs (`juxtaposed_call_plan`, `curried_default_plan`, `trait_dispatch_for`, `symbol_for`, `function_for_symbol`, function/symbol catalogs, checked function types, and product default plans). The schema now has `LoweredCallableCategory` (the eight explicit categories with no unknown fallback), `LoweredCallableTarget`, `LoweredCall`, `LoweredCallStep`, `LoweredCallArgument` (final ABI slots plus temporary/writeback/drop facts), `LoweredCallableValue`, `LoweredClosureConstruction` with ordered captures/access/ownership, `CallSubstitutions`, and `TraitEvidence` (explicit implementation, structural method, declared bound, and negative-implementation rejection data). Calls and callable values are arena-backed (`LoweredCallId`, `LoweredCallableValueId`) and referenced by the new `Call`/`CallableValue` expression kinds.
+- `LoweredProgram::classify_call_route` mirrors the backend's decision order (primitive macro, constructor, juxtaposed, curried, trait dispatch, intrinsic, generic direct, extern, indirect fallback) and never returns an unknown-callable outcome. `classify_trait_call_route` refines trait dispatch into a selected implementation, a structural method, or a declared bound whose selection waits for Stage 3 substitution, and `CallRoute::category` is an exhaustive map onto the eight categories. Local and captured callee symbols stay indirect, matching the backend's environment-local test.
+- Arena validation now checks call and callable-value targets against the function, symbol, type, trait, trait-method, and trait-implementation catalogs; argument expressions, argument places, ABI slot uniqueness, step argument/resource ranges, initialization symbols, closure capture order/symbols, and trait evidence. The ownership traversal visits calls, their arguments/steps, and indirect-closure callees, and reports unreachable call/callable-value nodes. Normalized repeated-lowering snapshots include both arenas.
+- Backend-only decisions identified for later steps: argument pass modes and temporary cleanup (currently inferred in `compile_effect_arguments`), extern C-string temporary lifetime, and implicit-thunk argument adaptation. The checked inputs needed to record them at lowering time already exist (`is_copy_in_function`, checked mutation/move masks, place roots, and `implicit_thunk_for`); Step 3 records the resulting per-argument facts.
+- Added a decision-table test proving every route maps to one of the eight categories and every category has exactly one target representation, plus a source classification test covering all source-reachable routes (juxtaposed, juxtaposed intrinsic, trait implementation, declared bound, structural, intrinsic, generic direct, external, indirect, and constructor). Curried defaults (rejected during resolution), primitive macros (normalized to `Expression::CString` by macro expansion), and compiler helpers (selected by checked operations) stay table-covered defensive routes.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test -p staple-compiler lower::tests` (71 tests), `cargo test --workspace` (1019 tests), and `git diff --check`.
 
 > **Complexity note:** This is Stage 2's highest-risk substage. Curried calls, generic captures, trait functional dependencies, defaults, and structural evidence may require separate breakdown plans.
 
