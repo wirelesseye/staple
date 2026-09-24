@@ -175,7 +175,7 @@ For each expression, store the already selected access/coercion/match/logical pl
 
 > **Complexity note:** Products, defaults, sums, propagation, and control-flow ownership interact heavily. These families may need individual implementation plans if the lowering functions become too broad.
 
-## Stage 2.5 - Lower Calls, Trait Evidence, and Closures
+## Stage 2.5 - Lower Calls, Trait Evidence, and Closures (Done)
 
 The focused implementation sequence is maintained in [STAGE_2_5_CALLS_TRAITS_CLOSURES_PLAN.md](STAGE_2_5_CALLS_TRAITS_CLOSURES_PLAN.md).
 
@@ -227,6 +227,8 @@ Progress:
 > **Complexity note:** This is Stage 2's highest-risk substage. Curried calls, generic captures, trait functional dependencies, defaults, and structural evidence may require separate breakdown plans.
 
 ## Stage 2.6 - Lower Resources, Reactive Operations, and Coroutines
+
+The focused implementation sequence is maintained in [STAGE_2_6_RESOURCES_REACTIVE_COROUTINES_PLAN.md](STAGE_2_6_RESOURCES_REACTIVE_COROUTINES_PLAN.md).
 
 - Lower `with` and resource access with canonical resource identity, mutability, lexical scope, and ordered effect-row requirements.
 - Record signal, derived binding, reaction, batching, and initialization metadata currently recovered by codegen.
