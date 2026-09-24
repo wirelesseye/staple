@@ -731,6 +731,9 @@ pub(crate) struct LoweredCallableValue {
     pub substitutions: CallSubstitutions,
     /// Trait evidence for trait-method values.
     pub evidence: Option<TraitEvidence>,
+    /// The value's symbol must have its initialization state checked before
+    /// the closure is used.
+    pub requires_initialization_check: bool,
 }
 
 /// The runtime call route a checked call follows, mirroring the backend's
@@ -1504,6 +1507,9 @@ pub(crate) struct LoweredProgram {
     /// recorded on break/continue items and loop nodes so validation can tie
     /// exits to the loop that owns them. Not part of the lowered program.
     loop_depth: usize,
+    /// Transient lowering state: inner call syntaxes consumed by an outer
+    /// juxtaposed call's checked plan. They are never lowered on their own.
+    consumed_calls: HashSet<SyntaxId>,
 }
 
 impl LoweredProgram {
@@ -4115,6 +4121,7 @@ impl LoweredProgram {
                 ));
             }
         };
+        let requires_initialization_check = resolved.requires_initialization_check(syntax);
         Ok(self.callable_values.push(LoweredCallableValue {
             origin,
             target,
@@ -4123,6 +4130,7 @@ impl LoweredProgram {
             closure,
             substitutions,
             evidence,
+            requires_initialization_check,
         }))
     }
 
@@ -4343,6 +4351,18 @@ impl LoweredProgram {
         call: &staple_syntax::CallExpression,
     ) -> Result<LoweredExpressionKind, Diagnostic> {
         let route = self.classify_call_route(module, owner, call)?;
+        if self.consumed_calls.contains(&call.syntax.id) {
+            return Err(Diagnostic::new(
+                call.syntax.span.clone(),
+                "call expression is consumed by an outer juxtaposed call",
+            ));
+        }
+        if matches!(
+            route,
+            CallRoute::Juxtaposed | CallRoute::JuxtaposedIntrinsic
+        ) {
+            return self.lower_juxtaposed_call(module, owner, context, call);
+        }
         if !matches!(
             route,
             CallRoute::GenericDirect
@@ -4350,13 +4370,6 @@ impl LoweredProgram {
                 | CallRoute::Indirect
                 | CallRoute::Intrinsic
         ) {
-            return Ok(LoweredExpressionKind::Deferred(
-                DeferredExpressionFamily::Callable,
-            ));
-        }
-        // Contextual defaults and spread arguments keep their checked product
-        // plans and are normalized in Step 4.
-        if call_arguments_need_step_4(module, call) {
             return Ok(LoweredExpressionKind::Deferred(
                 DeferredExpressionFamily::Callable,
             ));
@@ -4495,6 +4508,116 @@ impl LoweredProgram {
 
     /// Lowers call arguments that the backend passes by value only: external
     /// and intrinsic calls.
+    /// Lowers a complete juxtaposed call chain from its checked plan. The
+    /// outer call owns the whole chain: the plan's consumed inner calls are
+    /// marked consumed, the chain root is evaluated once as the callee, and
+    /// the plan's ordered arguments fill the flattened parameter slots.
+    fn lower_juxtaposed_call(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        call: &staple_syntax::CallExpression,
+    ) -> Result<LoweredExpressionKind, Diagnostic> {
+        let origin = Origin {
+            syntax: call.syntax.id,
+            span: call.syntax.span.clone(),
+        };
+        let plan = module
+            .juxtaposed_call_plan(call.syntax.id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(origin.span.clone(), "juxtaposed call has no checked plan")
+            })?;
+        let mut callee = call.callee.as_ref();
+        for _ in 1..plan.consumed_calls {
+            let Expression::Call(previous) = callee else {
+                break;
+            };
+            self.consumed_calls.insert(previous.syntax.id);
+            callee = previous.callee.as_ref();
+        }
+        let symbol = module.symbol_for(callee.syntax().id);
+        let intrinsic = symbol.and_then(|symbol| module.resolved().intrinsic_function(symbol));
+        let (target, callee_field, intrinsic_call) = match (intrinsic, symbol) {
+            (Some(intrinsic), Some(symbol)) => (
+                LoweredCallableTarget::Intrinsic { symbol, intrinsic },
+                None,
+                true,
+            ),
+            _ => {
+                let callee_id = self.lower_expression(module, owner, context, callee)?;
+                (
+                    LoweredCallableTarget::IndirectClosure { callee: callee_id },
+                    Some(callee_id),
+                    false,
+                )
+            }
+        };
+        let function_type = plan.function.clone();
+        let types = flattened_parameter_types(&function_type.parameter);
+        let count = types.len();
+        if plan.arguments.len() != count {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "juxtaposed call has {} arguments for {count} parameter slots",
+                    plan.arguments.len()
+                ),
+            ));
+        }
+        let mutation_mask = mutation_slot_mask(count, &function_type.mutations);
+        let move_mask = mutation_slot_mask(count, &function_type.moves);
+        let indirect = (0..count)
+            .map(|index| {
+                !intrinsic_call
+                    && (mutation_mask[index]
+                        || (!move_mask[index] && !module.is_copy_in_function(&types[index], None)))
+            })
+            .collect::<Vec<_>>();
+        let mut arguments = Vec::new();
+        let mut steps = Vec::new();
+        if let Some(callee) = callee_field {
+            steps.push(LoweredCallStep::Callee { expression: callee });
+        }
+        for (index, argument) in plan.arguments.iter().enumerate() {
+            let entry = self.lower_call_argument(
+                module,
+                owner,
+                context,
+                argument,
+                Some(index),
+                &types[index],
+                indirect[index],
+                mutation_mask[index],
+            )?;
+            steps.push(call_argument_step(index, index, entry.expression));
+            arguments.push(entry);
+        }
+        let resources = function_type.effects.resources.clone();
+        for index in 0..resources.len() {
+            steps.push(LoweredCallStep::Resource { resource: index });
+        }
+        steps.push(LoweredCallStep::Invoke);
+        let call_id = self.calls.push(LoweredCall {
+            origin,
+            target,
+            callee: callee_field,
+            function_type: function_type.clone(),
+            arguments,
+            resources,
+            mutations: function_type.mutations.clone(),
+            moves: function_type.moves.clone(),
+            initialization_checks: Vec::new(),
+            steps,
+            result_type: function_type.result.as_ref().clone(),
+            substitutions: CallSubstitutions::default(),
+            evidence: None,
+            c_string_temporary: false,
+        });
+        Ok(LoweredExpressionKind::Call(call_id))
+    }
+
     fn lower_plain_call_arguments(
         &mut self,
         module: &TypedModule,
@@ -4504,39 +4627,7 @@ impl LoweredProgram {
         function_type: &CheckedFunctionType,
     ) -> Result<(Vec<LoweredCallArgument>, Vec<LoweredCallStep>), Diagnostic> {
         let types = flattened_parameter_types(&function_type.parameter);
-        if let Expression::Product(product) = argument
-            && !product.elements.iter().any(|element| element.spread)
-            && product.elements.len() == types.len()
-        {
-            let mut arguments = Vec::new();
-            let mut steps = Vec::new();
-            for (index, element) in product.elements.iter().enumerate() {
-                let entry = self.lower_call_argument(
-                    module,
-                    owner,
-                    context,
-                    &element.value,
-                    Some(index),
-                    &types[index],
-                    false,
-                    false,
-                )?;
-                steps.push(call_argument_step(index, index, &entry));
-                arguments.push(entry);
-            }
-            return Ok((arguments, steps));
-        }
-        let entry = self.lower_call_argument(
-            module,
-            owner,
-            context,
-            argument,
-            (types.len() == 1).then_some(0),
-            types.first().unwrap_or(&function_type.parameter),
-            false,
-            false,
-        )?;
-        Ok((vec![entry], vec![LoweredCallStep::Argument { argument: 0 }]))
+        self.lower_value_call_arguments(module, owner, context, argument, function_type, &types)
     }
 
     /// Lowers call arguments with the backend's effect-aware pass modes:
@@ -4600,26 +4691,52 @@ impl LoweredProgram {
             )?;
             return Ok((vec![entry], vec![LoweredCallStep::Argument { argument: 0 }]));
         }
-        if let Expression::Product(product) = argument
-            && !product.elements.iter().any(|element| element.spread)
-            && product.elements.len() == count
+        if let Some((placements, steps)) =
+            self.place_call_arguments(module, owner, context, argument)?
         {
-            let mut arguments = Vec::new();
-            let mut steps = Vec::new();
-            for (index, element) in product.elements.iter().enumerate() {
-                let entry = self.lower_call_argument(
-                    module,
-                    owner,
-                    context,
-                    &element.value,
-                    Some(index),
-                    &types[index],
-                    indirect[index],
-                    mutation_mask[index],
-                )?;
-                steps.push(call_argument_step(index, index, &entry));
-                arguments.push(entry);
+            if placements.len() != count && !variadic_argument(function_type, placements.len()) {
+                return Err(Diagnostic::new(
+                    argument.syntax().span.clone(),
+                    format!(
+                        "call argument has {} slots for {count} parameter slots",
+                        placements.len()
+                    ),
+                ));
             }
+            let arguments = placements
+                .iter()
+                .enumerate()
+                .map(|(slot, placement)| {
+                    let place = placement.place;
+                    let mutation = mutation_mask.get(slot).copied().unwrap_or(false);
+                    let indirect_slot = indirect.get(slot).copied().unwrap_or(false);
+                    let expected = types.get(slot).cloned().unwrap_or(CheckedType::Error);
+                    let pass_mode = if mutation {
+                        LoweredArgumentPassMode::MutablePlace
+                    } else if indirect_slot {
+                        if place.is_some() {
+                            LoweredArgumentPassMode::BorrowedPointer
+                        } else {
+                            LoweredArgumentPassMode::MaterializedTemporary
+                        }
+                    } else {
+                        LoweredArgumentPassMode::Value
+                    };
+                    LoweredCallArgument {
+                        expression: placement.expression,
+                        thunk: placement.thunk,
+                        slot: Some(slot),
+                        pass_mode,
+                        expected: expected.clone(),
+                        place,
+                        temporary: (mutation || indirect_slot) && place.is_none(),
+                        writeback: false,
+                        drops_after_call: mutation
+                            && place.is_none()
+                            && module.type_needs_drop(&expected),
+                    }
+                })
+                .collect();
             return Ok((arguments, steps));
         }
         // A product-valued place passed without literal destructuring: the
@@ -4670,54 +4787,319 @@ impl LoweredProgram {
         types: &[CheckedType],
     ) -> Result<(Vec<LoweredCallArgument>, Vec<LoweredCallStep>), Diagnostic> {
         let count = types.len();
-        if let Expression::Product(product) = argument
-            && !product.elements.iter().any(|element| element.spread)
-            && product.elements.len() == count
+        if let Some((placements, steps)) =
+            self.place_call_arguments(module, owner, context, argument)?
         {
-            let mut arguments = Vec::new();
-            let mut steps = Vec::new();
-            for (index, element) in product.elements.iter().enumerate() {
-                let entry = self.lower_call_argument(
-                    module,
-                    owner,
-                    context,
-                    &element.value,
-                    Some(index),
-                    &types[index],
-                    false,
-                    false,
-                )?;
-                steps.push(call_argument_step(index, index, &entry));
-                arguments.push(entry);
+            if placements.len() != count && !variadic_argument(function_type, placements.len()) {
+                return Err(Diagnostic::new(
+                    argument.syntax().span.clone(),
+                    format!(
+                        "call argument has {} slots for {count} parameter slots",
+                        placements.len()
+                    ),
+                ));
             }
+            let argument_types = match module.type_of_expression(argument.syntax().id) {
+                Some(CheckedType::Product(product)) => product
+                    .elements
+                    .iter()
+                    .map(|element| element.value_type.clone())
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            let arguments = placements
+                .iter()
+                .enumerate()
+                .map(|(slot, placement)| LoweredCallArgument {
+                    expression: placement.expression,
+                    thunk: placement.thunk,
+                    slot: Some(slot),
+                    pass_mode: LoweredArgumentPassMode::Value,
+                    expected: types
+                        .get(slot)
+                        .cloned()
+                        .or_else(|| argument_types.get(slot).cloned())
+                        .unwrap_or(CheckedType::Error),
+                    place: placement.place,
+                    temporary: false,
+                    writeback: false,
+                    drops_after_call: false,
+                })
+                .collect();
             return Ok((arguments, steps));
         }
-        if count == 1 {
-            let entry = self.lower_call_argument(
-                module,
-                owner,
-                context,
-                argument,
-                Some(0),
-                &types[0],
-                false,
-                false,
-            )?;
-            return Ok((vec![entry], vec![LoweredCallStep::Argument { argument: 0 }]));
-        }
-        // A product-valued argument is flattened by the backend; record the
-        // single evaluation and let the final layout stay implicit.
         let entry = self.lower_call_argument(
             module,
             owner,
             context,
             argument,
-            None,
-            &function_type.parameter,
+            (count == 1).then_some(0),
+            types.first().unwrap_or(&function_type.parameter),
             false,
             false,
         )?;
         Ok((vec![entry], vec![LoweredCallStep::Argument { argument: 0 }]))
+    }
+
+    /// Evaluates a product argument into final ABI slots, mirroring the
+    /// backend's product-element and contextual-default handling: source
+    /// elements evaluate in order, spreads expand to slot mappings, and
+    /// checked defaults fill the remaining slots in final order. Returns
+    /// `None` when the argument is not a product.
+    fn place_call_arguments(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        argument: &Expression,
+    ) -> Result<Option<(Vec<CallArgumentPlacement>, Vec<LoweredCallStep>)>, Diagnostic> {
+        let plan = module.product_default_plan(argument.syntax().id).cloned();
+        let Expression::Product(product) = argument else {
+            // A non-product argument checked against a defaulted product
+            // parameter initializes its first slot; defaults fill the rest.
+            let Some(plan) = plan else {
+                return Ok(None);
+            };
+            let final_type = plan.final_type.clone();
+            let mut placements = vec![None; final_type.elements.len()];
+            let mut steps = Vec::new();
+            let placement = self.lower_argument_value(module, owner, context, argument)?;
+            steps.push(call_argument_step(0, 0, placement.expression));
+            placements[0] = Some(placement);
+            self.fill_call_defaults(
+                module,
+                owner,
+                argument,
+                &plan,
+                &final_type,
+                &mut placements,
+                &mut steps,
+            )?;
+            return Ok(Some((
+                placements.into_iter().map(Option::unwrap).collect(),
+                steps,
+            )));
+        };
+        let final_type = match module.type_of_expression(argument.syntax().id) {
+            Some(CheckedType::Product(product_type)) if !product_type.variadic => {
+                product_type.clone()
+            }
+            _ => match &plan {
+                Some(plan) => plan.final_type.clone(),
+                None => return Ok(None),
+            },
+        };
+        let mut placements = vec![None; final_type.elements.len()];
+        let mut steps = Vec::new();
+        let mut positional = 0usize;
+        for element in &product.elements {
+            if element.designated {
+                let name = element
+                    .name
+                    .clone()
+                    .expect("designated elements always have a name");
+                let Some(slot) = final_type
+                    .elements
+                    .iter()
+                    .position(|field| field.name.as_deref() == Some(name.as_str()))
+                else {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        format!("unknown designated product field `{name}`"),
+                    ));
+                };
+                let placement =
+                    self.lower_argument_value(module, owner, context, &element.value)?;
+                steps.push(call_argument_step(slot, slot, placement.expression));
+                placements[slot] = Some(placement);
+                continue;
+            }
+            if element.spread {
+                let expression = self.lower_expression(module, owner, context, &element.value)?;
+                let Some(CheckedType::Product(operand)) =
+                    module.type_of_expression(element.value.syntax().id)
+                else {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "product spread operand does not have a fixed product type",
+                    ));
+                };
+                let operand = operand.clone();
+                if element.named_spread {
+                    let mut mappings = Vec::new();
+                    for (source, field) in operand.elements.iter().enumerate() {
+                        let Some(name) = field.name.clone() else {
+                            return Err(Diagnostic::new(
+                                element.syntax.span.clone(),
+                                "a named spread operand must have every element named",
+                            ));
+                        };
+                        let Some(slot) = final_type.elements.iter().position(|final_field| {
+                            final_field.name.as_deref() == Some(name.as_str())
+                        }) else {
+                            return Err(Diagnostic::new(
+                                element.syntax.span.clone(),
+                                format!("unknown field `{name}` in named product spread"),
+                            ));
+                        };
+                        mappings.push(LoweredNamedSpreadMapping { name, source, slot });
+                        placements[slot] = Some(CallArgumentPlacement {
+                            expression: Some(expression),
+                            thunk: None,
+                            place: None,
+                        });
+                    }
+                    if let Some(first) = mappings.first() {
+                        steps.push(LoweredCallStep::NamedProductSpread {
+                            argument: first.slot,
+                            expression,
+                            mappings,
+                        });
+                    }
+                } else {
+                    let mut mappings = Vec::new();
+                    for source in 0..operand.elements.len() {
+                        if positional >= final_type.elements.len() {
+                            return Err(Diagnostic::new(
+                                element.syntax.span.clone(),
+                                "too many positional elements in product argument",
+                            ));
+                        }
+                        let slot = positional;
+                        positional += 1;
+                        mappings.push(LoweredSpreadMapping { source, slot });
+                        placements[slot] = Some(CallArgumentPlacement {
+                            expression: Some(expression),
+                            thunk: None,
+                            place: None,
+                        });
+                    }
+                    if let Some(first) = mappings.first() {
+                        steps.push(LoweredCallStep::ProductSpread {
+                            argument: first.slot,
+                            expression,
+                            mappings,
+                        });
+                    }
+                }
+                continue;
+            }
+            if positional >= final_type.elements.len() {
+                return Err(Diagnostic::new(
+                    element.syntax.span.clone(),
+                    "too many positional elements in product argument",
+                ));
+            }
+            let slot = positional;
+            positional += 1;
+            let placement = self.lower_argument_value(module, owner, context, &element.value)?;
+            steps.push(call_argument_step(slot, slot, placement.expression));
+            placements[slot] = Some(placement);
+        }
+        if let Some(plan) = &plan {
+            self.fill_call_defaults(
+                module,
+                owner,
+                argument,
+                plan,
+                &final_type,
+                &mut placements,
+                &mut steps,
+            )?;
+        }
+        for (slot, placement) in placements.iter().enumerate() {
+            if placement.is_none() {
+                return Err(missing_product_slot_error(
+                    &final_type,
+                    slot,
+                    &argument.syntax().span,
+                ));
+            }
+        }
+        Ok(Some((
+            placements.into_iter().map(Option::unwrap).collect(),
+            steps,
+        )))
+    }
+
+    /// Evaluates a checked product default for every still-empty argument
+    /// slot in final order, giving each default its own occurrence key.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_call_defaults(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        argument: &Expression,
+        plan: &crate::CheckedProductDefaultPlan,
+        final_type: &CheckedProductType,
+        placements: &mut [Option<CallArgumentPlacement>],
+        steps: &mut Vec<LoweredCallStep>,
+    ) -> Result<(), Diagnostic> {
+        for (slot, default) in plan.defaults.iter().enumerate() {
+            if placements[slot].is_some() {
+                continue;
+            }
+            let Some(default) = default else {
+                return Err(missing_product_slot_error(
+                    final_type,
+                    slot,
+                    &argument.syntax().span,
+                ));
+            };
+            let expected = plan.final_type.elements[slot].value_type.clone();
+            let expression = self.lower_expression_occurrence(
+                module,
+                owner,
+                ExpressionContext::ContextualDefault {
+                    consumer: argument.syntax().id,
+                    slot,
+                },
+                default,
+                Some(expected.clone()),
+            )?;
+            steps.push(LoweredCallStep::Default {
+                argument: slot,
+                slot,
+                expression,
+                expected,
+            });
+            placements[slot] = Some(CallArgumentPlacement {
+                expression: Some(expression),
+                thunk: None,
+                place: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// Lowers one argument element: an implicit thunk keeps its function and
+    /// no occurrence; anything else lowers to an expression and an optional
+    /// source place.
+    fn lower_argument_value(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        expression: &Expression,
+    ) -> Result<CallArgumentPlacement, Diagnostic> {
+        if let Some(thunk) = module.implicit_thunk_for(expression.syntax().id) {
+            return Ok(CallArgumentPlacement {
+                expression: None,
+                thunk: Some(thunk.id),
+                place: None,
+            });
+        }
+        let expression_id = self.lower_expression(module, owner, context, expression)?;
+        let place = if expression_has_place_root(module.resolved(), expression) {
+            self.lower_place(module, owner, context, expression).ok()
+        } else {
+            None
+        };
+        Ok(CallArgumentPlacement {
+            expression: Some(expression_id),
+            thunk: None,
+            place,
+        })
     }
 
     /// Lowers one argument occurrence with its final ABI slot and pass mode.
@@ -4733,29 +5115,11 @@ impl LoweredProgram {
         indirect: bool,
         mutation: bool,
     ) -> Result<LoweredCallArgument, Diagnostic> {
-        if let Some(thunk) = module.implicit_thunk_for(expression.syntax().id) {
-            return Ok(LoweredCallArgument {
-                expression: None,
-                thunk: Some(thunk.id),
-                slot,
-                pass_mode: LoweredArgumentPassMode::Value,
-                expected: expected.clone(),
-                place: None,
-                temporary: false,
-                writeback: false,
-                drops_after_call: false,
-            });
-        }
-        let expression_id = self.lower_expression(module, owner, context, expression)?;
-        let place = if expression_has_place_root(module.resolved(), expression) {
-            self.lower_place(module, owner, context, expression).ok()
-        } else {
-            None
-        };
+        let placement = self.lower_argument_value(module, owner, context, expression)?;
         let pass_mode = if mutation {
             LoweredArgumentPassMode::MutablePlace
         } else if indirect {
-            if place.is_some() {
+            if placement.place.is_some() {
                 LoweredArgumentPassMode::BorrowedPointer
             } else {
                 LoweredArgumentPassMode::MaterializedTemporary
@@ -4763,15 +5127,16 @@ impl LoweredProgram {
         } else {
             LoweredArgumentPassMode::Value
         };
-        let temporary = (mutation || indirect) && place.is_none();
-        let drops_after_call = mutation && place.is_none() && module.type_needs_drop(expected);
+        let temporary = (mutation || indirect) && placement.place.is_none();
+        let drops_after_call =
+            mutation && placement.place.is_none() && module.type_needs_drop(expected);
         Ok(LoweredCallArgument {
-            expression: Some(expression_id),
-            thunk: None,
+            expression: placement.expression,
+            thunk: placement.thunk,
             slot,
             pass_mode,
             expected: expected.clone(),
-            place,
+            place: placement.place,
             temporary,
             writeback: false,
             drops_after_call,
@@ -7573,20 +7938,22 @@ fn checked_call_function_type(
     ))
 }
 
-/// Whether a call's argument keeps a checked product plan (contextual
-/// defaults) or spread/designated elements. Those are normalized in Step 4.
-fn call_arguments_need_step_4(module: &TypedModule, call: &staple_syntax::CallExpression) -> bool {
-    let argument = call.argument.as_ref();
-    if module.product_default_plan(argument.syntax().id).is_some() {
-        return true;
-    }
-    match argument {
-        Expression::Product(product) => product
-            .elements
-            .iter()
-            .any(|element| element.spread || element.designated || element.named_spread),
-        _ => false,
-    }
+/// Whether an argument with `slots` elements fits a variadic parameter whose
+/// fixed prefix is the parameter's element count.
+fn variadic_argument(function_type: &CheckedFunctionType, slots: usize) -> bool {
+    matches!(
+        function_type.parameter.as_ref(),
+        CheckedType::Product(product)
+            if product.variadic && slots >= product.elements.len()
+    )
+}
+
+/// One evaluated call-argument placement before pass modes are applied.
+#[derive(Clone)]
+struct CallArgumentPlacement {
+    expression: Option<ExpressionId>,
+    thunk: Option<FunctionId>,
+    place: Option<PlaceId>,
 }
 
 /// The ordered step that evaluates one call argument. An implicit thunk has
@@ -7595,9 +7962,9 @@ fn call_arguments_need_step_4(module: &TypedModule, call: &staple_syntax::CallEx
 fn call_argument_step(
     argument: usize,
     slot: usize,
-    entry: &LoweredCallArgument,
+    expression: Option<ExpressionId>,
 ) -> LoweredCallStep {
-    match entry.expression {
+    match expression {
         Some(expression) => LoweredCallStep::ProductElement {
             argument,
             slot,
@@ -10441,6 +10808,289 @@ mod tests {
         );
     }
 
+    fn step4_fixture() -> &'static str {
+        concat!(
+            "use std.core.reference.(Ref)\n",
+            "let pair_add: x: I32 * y: I32 -> I32 = x * y => x + y\n",
+            "def defaulted: (String, x: I32 = 0, y: I32 = 0) -> I32 = (value, x, y) => x + y\n",
+            "def juxtaposed_samples: () -> I32 = () => {\n",
+            "  let chained: I32 = pair_add 1 2\n",
+            "  let mut reference: Ref I32 = Ref 0\n",
+            "  let replaced: I32 = Ref.replace reference 1\n",
+            "  chained\n",
+            "}\n",
+            "let via_value = defaulted\n",
+            "let indirect_result = via_value \"a\"\n",
+            "def default_samples: () -> I32 = () => {\n",
+            "  let plain: I32 = defaulted (\"a\")\n",
+            "  let designated: I32 = defaulted (\"b\", .y: 5)\n",
+            "  let explicit: I32 = defaulted (\"c\", 1, 2)\n",
+            "  let pair = (x: 3, y: 4)\n",
+            "  let spread: I32 = defaulted (\"d\", ...pair)\n",
+            "  plain\n",
+            "}\n",
+        )
+    }
+
+    #[test]
+    fn juxtaposed_calls_consume_inner_chain_nodes_once() {
+        let module = checked_program(step4_fixture());
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let samples = module
+            .functions()
+            .iter()
+            .find(|function| function.name.contains("juxtaposed_samples"))
+            .expect("juxtaposed_samples function");
+        let mut chains = Vec::new();
+        collect_calls(&samples.body, &mut |call| {
+            if module.juxtaposed_call_plan(call.syntax.id).is_some()
+                && matches!(call.callee.as_ref(), Expression::Call(_))
+            {
+                chains.push(call.clone());
+            }
+        });
+        assert_eq!(chains.len(), 2, "the fixture has two multi-layer chains");
+
+        let mut indirect_chain = None;
+        let mut intrinsic_chain = None;
+        for chain in &chains {
+            let lowered = program
+                .calls
+                .iter()
+                .find(|(_, call)| call.origin.syntax == chain.syntax.id)
+                .map(|(_, call)| call)
+                .expect("the outer chain call");
+            match lowered.target {
+                LoweredCallableTarget::IndirectClosure { .. } => {
+                    indirect_chain = Some((chain, lowered))
+                }
+                LoweredCallableTarget::Intrinsic {
+                    intrinsic: crate::IntrinsicFunction::RefReplace,
+                    ..
+                } => intrinsic_chain = Some(lowered),
+                _ => {}
+            }
+            let Expression::Call(inner) = chain.callee.as_ref() else {
+                panic!("a completed juxtaposed chain has a call callee");
+            };
+            assert!(program.consumed_calls.contains(&inner.syntax.id));
+            assert!(
+                !program
+                    .expressions
+                    .iter()
+                    .any(|(_, expression)| expression.origin.syntax == inner.syntax.id),
+                "the consumed inner call is not lowered on its own"
+            );
+        }
+
+        let (chain, lowered) = indirect_chain.expect("the indirect juxtaposed chain");
+        assert!(matches!(chain.callee.as_ref(), Expression::Call(_)));
+        assert!(lowered.callee.is_some());
+        assert_eq!(lowered.arguments.len(), 2);
+        assert!(matches!(
+            lowered.steps.first(),
+            Some(LoweredCallStep::Callee { .. })
+        ));
+        assert!(matches!(
+            lowered.steps.get(1),
+            Some(LoweredCallStep::ProductElement { slot: 0, .. })
+        ));
+        assert!(matches!(
+            lowered.steps.get(2),
+            Some(LoweredCallStep::ProductElement { slot: 1, .. })
+        ));
+
+        let replace_call = intrinsic_chain.expect("the juxtaposed intrinsic call");
+        assert!(replace_call.callee.is_none());
+        assert_eq!(replace_call.arguments.len(), 2);
+        assert_eq!(
+            replace_call.arguments[0].pass_mode,
+            LoweredArgumentPassMode::MutablePlace
+        );
+        assert!(matches!(
+            replace_call.steps.first(),
+            Some(LoweredCallStep::ProductElement { slot: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn call_arguments_lower_defaults_spreads_and_designators() {
+        let module = checked_program(step4_fixture());
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        // A non-product argument checked against a defaulted product
+        // parameter: slot 0 explicit, defaults fill the rest in slot order.
+        assert!(program.calls.iter().any(|(_, call)| {
+            matches!(
+                call.steps.as_slice(),
+                [
+                    LoweredCallStep::Callee { .. },
+                    LoweredCallStep::ProductElement { slot: 0, .. },
+                    LoweredCallStep::Default { slot: 1, .. },
+                    LoweredCallStep::Default { slot: 2, .. },
+                    LoweredCallStep::Invoke
+                ]
+            )
+        }));
+        // A designated element fills its named slot; its default is
+        // evaluated afterwards in slot order.
+        assert!(program.calls.iter().any(|(_, call)| {
+            matches!(
+                call.steps.as_slice(),
+                [
+                    LoweredCallStep::Callee { .. },
+                    LoweredCallStep::ProductElement { slot: 0, .. },
+                    LoweredCallStep::ProductElement { slot: 2, .. },
+                    LoweredCallStep::Default { slot: 1, .. },
+                    LoweredCallStep::Invoke
+                ]
+            )
+        }));
+        // A positional spread expands to ordered slot mappings.
+        assert!(program.calls.iter().any(|(_, call)| {
+            call.steps.iter().any(|step| {
+                matches!(
+                    step,
+                    LoweredCallStep::ProductSpread { mappings, .. }
+                        if mappings
+                            == &vec![
+                                LoweredSpreadMapping { source: 0, slot: 1 },
+                                LoweredSpreadMapping { source: 1, slot: 2 },
+                            ]
+                )
+            })
+        }));
+        // Every default occurrence owns a contextual occurrence key.
+        for (_, call) in program.calls.iter() {
+            for step in &call.steps {
+                if let LoweredCallStep::Default {
+                    expression,
+                    expected,
+                    ..
+                } = step
+                {
+                    let lowered = program.expressions.get(*expression).expect("default");
+                    assert!(matches!(
+                        lowered.key.context,
+                        ExpressionContext::ContextualDefault { .. }
+                    ));
+                    assert!(types_agree(expected, &lowered.value_type));
+                }
+            }
+        }
+
+        let mut second = LoweredProgram::default();
+        assert!(second.snapshot(&module).is_empty());
+        assert!(second.validate().is_empty());
+        assert_eq!(
+            normalized_program_snapshot(&program),
+            normalized_program_snapshot(&second)
+        );
+    }
+
+    fn collect_calls(
+        expression: &Expression,
+        visit: &mut impl FnMut(&staple_syntax::CallExpression),
+    ) {
+        if let Expression::Call(call) = expression {
+            visit(call);
+            collect_calls(&call.callee, visit);
+            collect_calls(&call.argument, visit);
+            return;
+        }
+        match expression {
+            Expression::Function(function) => collect_calls(&function.body, visit),
+            Expression::Satisfies(satisfies) => collect_calls(&satisfies.value, visit),
+            Expression::Match(match_) => {
+                collect_calls(&match_.subject, visit);
+                for arm in &match_.arms {
+                    collect_calls(&arm.body, visit);
+                }
+            }
+            Expression::Loop(loop_) => collect_block_calls(&loop_.body, visit),
+            Expression::Coro(coro) => collect_block_calls(&coro.body, visit),
+            Expression::Await(await_) => collect_calls(&await_.operand, visit),
+            Expression::With(with) => {
+                collect_calls(&with.value, visit);
+                collect_block_calls(&with.body, visit);
+            }
+            Expression::Block(block) => collect_block_calls(block, visit),
+            Expression::Product(product) => {
+                for element in &product.elements {
+                    collect_calls(&element.value, visit);
+                }
+            }
+            Expression::RepeatedProduct(repeated) => collect_calls(&repeated.value, visit),
+            Expression::Call(_) => unreachable!("calls handled above"),
+            Expression::Access(access) => collect_calls(&access.value, visit),
+            Expression::Index(index) => {
+                collect_calls(&index.value, visit);
+                collect_calls(&index.index, visit);
+            }
+            Expression::Unary(unary) => collect_calls(&unary.operand, visit),
+            Expression::Binary(binary) => {
+                collect_calls(&binary.left, visit);
+                collect_calls(&binary.right, visit);
+            }
+            Expression::Logical(logical) => {
+                collect_calls(&logical.left, visit);
+                collect_calls(&logical.right, visit);
+            }
+            Expression::StringTemplate(template) => {
+                for part in &template.parts {
+                    if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
+                        collect_calls(&interpolation.expression, visit);
+                    }
+                }
+            }
+            Expression::Resource(_)
+            | Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_)
+            | Expression::Name(_)
+            | Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
+        }
+    }
+
+    fn collect_block_calls(
+        block: &staple_syntax::BlockExpression,
+        visit: &mut impl FnMut(&staple_syntax::CallExpression),
+    ) {
+        for item in &block.items {
+            match item {
+                Item::Binding(binding) => {
+                    if let Some(value) = &binding.value {
+                        collect_calls(value, visit);
+                    }
+                }
+                Item::PatternBinding(binding) => collect_calls(&binding.value, visit),
+                Item::Assignment(assignment) => {
+                    collect_calls(&assignment.target, visit);
+                    collect_calls(&assignment.value, visit);
+                }
+                Item::Return(item) => collect_calls(&item.value, visit),
+                Item::Break(item) => {
+                    if let Some(value) = &item.value {
+                        collect_calls(value, visit);
+                    }
+                }
+                Item::Expression(expression) => collect_calls(expression, visit),
+                _ => {}
+            }
+        }
+    }
+
     #[test]
     fn occurrence_keys_deduplicate_ordinary_expressions_and_blocks() {
         let module = checked_program("def block_body = () => { let value: I32 = 1; value }\n");
@@ -11912,6 +12562,7 @@ mod tests {
         for expected in [
             "access",
             "block",
+            "call",
             "callable-value",
             "cstring",
             "deferred.callable",
