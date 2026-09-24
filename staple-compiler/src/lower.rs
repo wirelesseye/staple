@@ -367,6 +367,8 @@ pub(crate) struct LoweredInterpolation {
     pub value_type: CheckedType,
     pub trait_id: TraitId,
     pub method: TraitMethodId,
+    /// The single validated evidence recipe for the formatting selection.
+    pub evidence: TraitEvidence,
 }
 
 /// Standard formatter helper selections copied from checked metadata so later
@@ -871,6 +873,8 @@ pub(crate) struct LoweredIndex {
     pub base_temporary: bool,
     /// The index operand is materialized into a temporary for a mutation.
     pub index_temporary: bool,
+    /// The single validated evidence recipe for the `Index` dispatch.
+    pub evidence: TraitEvidence,
 }
 
 #[derive(Debug, Clone)]
@@ -1227,6 +1231,8 @@ pub(crate) struct LoweredAssignmentItem {
     pub value: ExpressionId,
     /// Selected `MutateIndex` dispatch for an indexed target.
     pub mutate_index: Option<CheckedTraitDispatch>,
+    /// The single validated evidence recipe for the `MutateIndex` dispatch.
+    pub evidence: Option<TraitEvidence>,
     /// The place's root symbol, whose initialization state is written back.
     pub initialization_symbol: Option<SymbolId>,
     /// Whether the place's previous value must be dropped before the store.
@@ -2330,16 +2336,22 @@ impl LoweredProgram {
             let target = self.lower_indexed_place(module, owner, context, index)?;
             let value = self.lower_expression(module, owner, context, &assignment.value)?;
             let mutate_index = module.trait_dispatch_for(assignment.syntax.id).cloned();
-            if mutate_index.is_none() {
+            let Some(dispatch) = &mutate_index else {
                 return Err(Diagnostic::new(
                     assignment.syntax.span.clone(),
                     "cannot lower an indexed assignment without a checked MutateIndex dispatch",
                 ));
-            }
+            };
+            let origin = Origin {
+                syntax: assignment.syntax.id,
+                span: assignment.syntax.span.clone(),
+            };
+            let evidence = Some(self.evidence_for_dispatch(module, owner, &origin, dispatch)?);
             return Ok(LoweredAssignmentItem {
                 target,
                 value,
                 mutate_index,
+                evidence,
                 initialization_symbol: None,
                 drop_previous: false,
                 signal: false,
@@ -2359,10 +2371,36 @@ impl LoweredProgram {
             target,
             value,
             mutate_index: None,
+            evidence: None,
             initialization_symbol,
             drop_previous: module.type_needs_drop(&target_type),
             signal,
         })
+    }
+
+    /// Builds the evidence recipe for a checked dispatch whose owning trait is
+    /// looked up from the dispatch method.
+    fn evidence_for_dispatch(
+        &self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        origin: &Origin,
+        dispatch: &CheckedTraitDispatch,
+    ) -> Result<TraitEvidence, Diagnostic> {
+        let Some(trait_id) = module.resolved().trait_for_method(dispatch.method) else {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                format!("trait method {} has no owning trait", dispatch.method.0),
+            ));
+        };
+        self.trait_evidence_for(
+            module,
+            owner,
+            origin,
+            trait_id,
+            dispatch.method,
+            &dispatch.arguments,
+        )
     }
 
     /// The symbol whose initialization state an assignment writes back. Mirrors
@@ -2801,6 +2839,7 @@ impl LoweredProgram {
             }
             (Stage24Family::Name, Expression::Name(name)) => self.lower_name(
                 module,
+                owner,
                 name.syntax.id,
                 name.syntax.span.clone(),
                 module.symbol_for(name.syntax.id),
@@ -2808,6 +2847,7 @@ impl LoweredProgram {
             (Stage24Family::Function, Expression::Function(function)) => {
                 let value = self.lower_callable_value(
                     module,
+                    owner,
                     function.syntax.id,
                     function.syntax.span.clone(),
                     None,
@@ -2857,6 +2897,7 @@ impl LoweredProgram {
     fn lower_name(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
         syntax: SyntaxId,
         span: Span,
         symbol: Option<SymbolId>,
@@ -2882,7 +2923,7 @@ impl LoweredProgram {
                     || resolved.intrinsic_function(symbol).is_some()
             })
         {
-            let value = self.lower_callable_value(module, syntax, span, symbol)?;
+            let value = self.lower_callable_value(module, owner, syntax, span, symbol)?;
             return Ok(LoweredExpressionKind::CallableValue(value));
         }
         let Some(symbol) = symbol else {
@@ -2922,6 +2963,7 @@ impl LoweredProgram {
         if module.trait_dispatch_for(access.syntax.id).is_some() {
             let value = self.lower_callable_value(
                 module,
+                owner,
                 access.syntax.id,
                 access.syntax.span.clone(),
                 module.symbol_for(access.syntax.id),
@@ -2931,6 +2973,7 @@ impl LoweredProgram {
         if let Some(symbol) = module.symbol_for(access.syntax.id) {
             return self.lower_name(
                 module,
+                owner,
                 access.syntax.id,
                 access.syntax.span.clone(),
                 Some(symbol),
@@ -3569,6 +3612,17 @@ impl LoweredProgram {
                             (trait_id, method, value_type)
                         }
                     };
+                    let evidence = self.trait_evidence_for(
+                        module,
+                        owner,
+                        &Origin {
+                            syntax: interpolation.expression.syntax().id,
+                            span: interpolation.expression.syntax().span.clone(),
+                        },
+                        trait_id,
+                        method,
+                        std::slice::from_ref(&value_type),
+                    )?;
                     parts.push(LoweredStringTemplatePart::Interpolation(
                         LoweredInterpolation {
                             expression,
@@ -3576,6 +3630,7 @@ impl LoweredProgram {
                             value_type,
                             trait_id,
                             method,
+                            evidence,
                         },
                     ));
                 }
@@ -3631,6 +3686,15 @@ impl LoweredProgram {
                 }
             }
         }
+        let evidence = self.evidence_for_dispatch(
+            module,
+            owner,
+            &Origin {
+                syntax: index.syntax.id,
+                span: index.syntax.span.clone(),
+            },
+            &dispatch,
+        )?;
         Ok(LoweredIndex {
             base,
             index: position,
@@ -3641,6 +3705,7 @@ impl LoweredProgram {
             whole_temporary,
             base_temporary,
             index_temporary,
+            evidence,
         })
     }
 
@@ -3963,6 +4028,7 @@ impl LoweredProgram {
     fn lower_callable_value(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
         syntax: SyntaxId,
         span: Span,
         symbol: Option<SymbolId>,
@@ -3987,7 +4053,7 @@ impl LoweredProgram {
                     )
                 })?;
                 let (target, adapter, closure, evidence) =
-                    self.lower_trait_method_value(module, &origin, &dispatch)?;
+                    self.lower_trait_method_value(module, owner, &origin, &dispatch)?;
                 let function_type = checked_function_type
                     .or_else(|| {
                         match self
@@ -4152,6 +4218,7 @@ impl LoweredProgram {
     fn lower_trait_method_value(
         &mut self,
         module: &TypedModule,
+        owner: ExpressionOwner,
         origin: &Origin,
         dispatch: &CheckedTraitDispatch,
     ) -> Result<
@@ -4163,102 +4230,140 @@ impl LoweredProgram {
         ),
         Diagnostic,
     > {
-        let resolved = module.resolved();
-        let Some(trait_id) = resolved.trait_for_method(dispatch.method) else {
+        let Some(trait_id) = module.resolved().trait_for_method(dispatch.method) else {
             return Err(Diagnostic::new(
                 origin.span.clone(),
                 format!("trait method {} has no owning trait", dispatch.method.0),
             ));
         };
-        let Some(arguments) = module.complete_trait_arguments(trait_id, &dispatch.arguments) else {
-            let evidence = TraitEvidence::DeclaredBound {
-                trait_id,
-                method: Some(dispatch.method),
-                arguments: dispatch.arguments.clone(),
-                prerequisites: Vec::new(),
-            };
-            return Ok((
-                LoweredCallableTarget::TraitImplementation {
+        let evidence = self.trait_evidence_for(
+            module,
+            owner,
+            origin,
+            trait_id,
+            dispatch.method,
+            &dispatch.arguments,
+        )?;
+        match &evidence {
+            TraitEvidence::ExplicitImplementation { function, .. } => {
+                let closure = self.closure_construction(
+                    module,
+                    origin,
+                    *function,
+                    LoweredClosureEnvironment::Fresh,
+                    CallSubstitutions::default(),
+                )?;
+                Ok((
+                    LoweredCallableTarget::TraitImplementation {
+                        trait_id,
+                        method: dispatch.method,
+                        function: Some(*function),
+                    },
+                    LoweredCallableAdapter::None,
+                    Some(closure),
+                    Some(evidence),
+                ))
+            }
+            TraitEvidence::Structural { structural, .. } => Ok((
+                LoweredCallableTarget::StructuralTraitMethod {
                     trait_id,
                     method: dispatch.method,
-                    function: None,
+                    structural: *structural,
                 },
                 LoweredCallableAdapter::None,
                 None,
                 Some(evidence),
-            ));
+            )),
+            TraitEvidence::DeclaredBound { .. } | TraitEvidence::RejectedImplementation { .. } => {
+                Ok((
+                    LoweredCallableTarget::TraitImplementation {
+                        trait_id,
+                        method: dispatch.method,
+                        function: None,
+                    },
+                    LoweredCallableAdapter::None,
+                    None,
+                    Some(evidence),
+                ))
+            }
+        }
+    }
+
+    /// Builds the single evidence recipe for a checked trait dispatch:
+    /// a selected explicit implementation, a structural method, or the
+    /// declared bound Stage 3 must realize after substitution. Selection never
+    /// uses display names.
+    fn trait_evidence_for(
+        &self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        origin: &Origin,
+        trait_id: TraitId,
+        method: TraitMethodId,
+        arguments: &[CheckedType],
+    ) -> Result<TraitEvidence, Diagnostic> {
+        let Some(completed) = module.complete_trait_arguments(trait_id, arguments) else {
+            return Ok(TraitEvidence::DeclaredBound {
+                trait_id,
+                method: Some(method),
+                arguments: arguments.to_vec(),
+                prerequisites: self.declared_prerequisites(module, owner, trait_id),
+            });
         };
-        if let Some(function) = module.trait_impl_method(trait_id, &arguments, dispatch.method) {
+        if let Some(function) = module.trait_impl_method(trait_id, &completed, method) {
             let implementation = self
-                .trait_implementation_id(trait_id, dispatch.method, function)
+                .trait_implementation_id(trait_id, method, function)
                 .ok_or_else(|| {
                     Diagnostic::new(
                         origin.span.clone(),
                         format!(
                             "trait implementation for method {} and function {} is missing from the lowered catalog",
-                            dispatch.method.0, function.0
+                            method.0, function.0
                         ),
                     )
                 })?;
-            let closure = self.closure_construction(
-                module,
-                origin,
-                function,
-                LoweredClosureEnvironment::Fresh,
-                CallSubstitutions::default(),
-            )?;
-            let evidence = TraitEvidence::ExplicitImplementation {
+            return Ok(TraitEvidence::ExplicitImplementation {
                 trait_id,
                 implementation,
-                method: dispatch.method,
+                method,
                 function,
-                arguments,
-            };
-            return Ok((
-                LoweredCallableTarget::TraitImplementation {
-                    trait_id,
-                    method: dispatch.method,
-                    function: Some(function),
-                },
-                LoweredCallableAdapter::None,
-                Some(closure),
-                Some(evidence),
-            ));
+                arguments: completed,
+            });
         }
-        if let Some(structural) = module.structural_trait_method(trait_id, &arguments) {
-            let evidence = TraitEvidence::Structural {
+        if let Some(structural) = module.structural_trait_method(trait_id, &completed) {
+            return Ok(TraitEvidence::Structural {
                 trait_id,
-                method: dispatch.method,
+                method,
                 structural,
-                arguments,
-            };
-            return Ok((
-                LoweredCallableTarget::StructuralTraitMethod {
-                    trait_id,
-                    method: dispatch.method,
-                    structural,
-                },
-                LoweredCallableAdapter::None,
-                None,
-                Some(evidence),
-            ));
+                arguments: completed,
+            });
         }
-        let evidence = TraitEvidence::DeclaredBound {
+        Ok(TraitEvidence::DeclaredBound {
             trait_id,
-            method: Some(dispatch.method),
-            arguments,
-            prerequisites: Vec::new(),
-        };
-        Ok((
-            LoweredCallableTarget::TraitImplementation {
-                trait_id,
-                method: dispatch.method,
-                function: None,
-            },
-            LoweredCallableAdapter::None,
-            None,
-            Some(evidence),
-        ))
+            method: Some(method),
+            arguments: completed,
+            prerequisites: self.declared_prerequisites(module, owner, trait_id),
+        })
+    }
+
+    /// The enclosing function's declared bounds for one trait, retained on a
+    /// deferred evidence recipe so Stage 3 can realize the obligation without
+    /// a resolver lookup.
+    fn declared_prerequisites(
+        &self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        trait_id: TraitId,
+    ) -> Vec<CheckedTraitBound> {
+        match owner {
+            ExpressionOwner::Function(function) => module
+                .bounds_of_function(function)
+                .iter()
+                .filter(|bound| bound.trait_id == trait_id)
+                .cloned()
+                .collect(),
+            ExpressionOwner::Module(_) => Vec::new(),
+        }
     }
 
     /// Finds the lowered trait implementation that provides `method`.
@@ -4395,6 +4500,9 @@ impl LoweredProgram {
                 | CallRoute::Indirect
                 | CallRoute::Intrinsic
                 | CallRoute::Constructor
+                | CallRoute::TraitImplementation
+                | CallRoute::DeclaredTraitBound
+                | CallRoute::StructuralTraitMethod
         ) {
             return Ok(LoweredExpressionKind::Deferred(
                 DeferredExpressionFamily::Callable,
@@ -4410,6 +4518,7 @@ impl LoweredProgram {
         let mut substitutions = CallSubstitutions::default();
         let mut initialization_checks = Vec::new();
         let mut c_string_temporary = false;
+        let mut evidence = None;
         let (target, callee, function_type) = match route {
             CallRoute::GenericDirect => {
                 let symbol = symbol.expect("generic direct calls are symbol-selected");
@@ -4507,6 +4616,83 @@ impl LoweredProgram {
                     function_type,
                 )
             }
+            CallRoute::TraitImplementation
+            | CallRoute::DeclaredTraitBound
+            | CallRoute::StructuralTraitMethod => {
+                let dispatch = module
+                    .trait_dispatch_for(callee_syntax)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(origin.span.clone(), "trait call has no checked dispatch")
+                    })?;
+                let trait_id = resolved.trait_for_method(dispatch.method).ok_or_else(|| {
+                    Diagnostic::new(
+                        origin.span.clone(),
+                        format!("trait method {} has no owning trait", dispatch.method.0),
+                    )
+                })?;
+                let recipe = self.trait_evidence_for(
+                    module,
+                    owner,
+                    &origin,
+                    trait_id,
+                    dispatch.method,
+                    &dispatch.arguments,
+                )?;
+                let completed = match &recipe {
+                    TraitEvidence::ExplicitImplementation { arguments, .. }
+                    | TraitEvidence::Structural { arguments, .. }
+                    | TraitEvidence::DeclaredBound { arguments, .. }
+                    | TraitEvidence::RejectedImplementation { arguments, .. } => arguments.clone(),
+                };
+                let function_type = module
+                    .instantiated_trait_method_type(trait_id, &completed, dispatch.method)
+                    .or_else(|| {
+                        match self
+                            .trait_methods
+                            .get(dispatch.method)
+                            .map(|method| &method.value_type)
+                        {
+                            Some(CheckedType::Function(function_type)) => {
+                                Some(function_type.clone())
+                            }
+                            _ => None,
+                        }
+                    })
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            origin.span.clone(),
+                            "trait call has no checked function type",
+                        )
+                    })?;
+                let target = match &recipe {
+                    TraitEvidence::Structural { structural, .. } => {
+                        LoweredCallableTarget::StructuralTraitMethod {
+                            trait_id,
+                            method: dispatch.method,
+                            structural: *structural,
+                        }
+                    }
+                    _ => LoweredCallableTarget::TraitImplementation {
+                        trait_id,
+                        method: dispatch.method,
+                        function: match &recipe {
+                            TraitEvidence::ExplicitImplementation { function, .. } => {
+                                Some(*function)
+                            }
+                            _ => None,
+                        },
+                    },
+                };
+                let parameters = self
+                    .traits
+                    .get(trait_id)
+                    .map(|trait_| trait_.parameters.clone())
+                    .unwrap_or_default();
+                substitutions = trait_call_substitutions(&parameters, &completed);
+                evidence = Some(recipe);
+                (target, None, function_type)
+            }
             _ => unreachable!("non-Step-3 call routes defer above"),
         };
         let (arguments, mut steps) = if matches!(
@@ -4544,14 +4730,12 @@ impl LoweredProgram {
             steps,
             result_type: function_type.result.as_ref().clone(),
             substitutions,
-            evidence: None,
+            evidence,
             c_string_temporary,
         });
         Ok(LoweredExpressionKind::Call(call_id))
     }
 
-    /// Lowers call arguments that the backend passes by value only: external
-    /// and intrinsic calls.
     /// Lowers a complete juxtaposed call chain from its checked plan. The
     /// outer call owns the whole chain: the plan's consumed inner calls are
     /// marked consumed, the chain root is evaluated once as the callee, and
@@ -4662,6 +4846,8 @@ impl LoweredProgram {
         Ok(LoweredExpressionKind::Call(call_id))
     }
 
+    /// Lowers call arguments that the backend passes by value only: external,
+    /// intrinsic, and constructor calls.
     fn lower_plain_call_arguments(
         &mut self,
         module: &TypedModule,
@@ -5912,6 +6098,11 @@ impl LoweredProgram {
                                 interpolation.method.0,
                             )),
                         }
+                        self.validate_trait_evidence(
+                            &expression.origin,
+                            &interpolation.evidence,
+                            &mut diagnostics,
+                        );
                     }
                 }
                 LoweredExpressionKind::Index(index) => {
@@ -5942,6 +6133,11 @@ impl LoweredProgram {
                             "index dispatch has no instantiated method type for Stage 2.5",
                         ));
                     }
+                    self.validate_trait_evidence(
+                        &expression.origin,
+                        &index.evidence,
+                        &mut diagnostics,
+                    );
                     let base_type = self
                         .expressions
                         .get(index.base)
@@ -6251,6 +6447,9 @@ impl LoweredProgram {
                     );
                     if let Some(symbol) = assignment.initialization_symbol {
                         check("symbol", symbol.0, self.symbols.get(symbol).is_some());
+                    }
+                    if let Some(evidence) = &assignment.evidence {
+                        self.validate_trait_evidence(&item.origin, evidence, &mut diagnostics);
                     }
                 }
                 LoweredItemKind::Return(item) => {
@@ -8052,6 +8251,26 @@ fn call_substitutions(
         &CheckedType::Function(actual.clone()),
         &mut inferred,
     );
+    substitutions_from_map(inferred)
+}
+
+/// Trait-call substitutions: the trait's declared parameter templates mapped
+/// onto the completed call-site arguments.
+fn trait_call_substitutions(
+    parameters: &[CheckedType],
+    arguments: &[CheckedType],
+) -> CallSubstitutions {
+    let mut inferred = HashMap::new();
+    if parameters.len() == arguments.len() {
+        for (parameter, argument) in parameters.iter().zip(arguments) {
+            let _ = infer_type_parameters(parameter, argument, &mut inferred);
+        }
+    }
+    substitutions_from_map(inferred)
+}
+
+/// Splits an inferred substitution map into type and effect substitutions.
+fn substitutions_from_map(inferred: HashMap<TypeParameterId, CheckedType>) -> CallSubstitutions {
     let mut types = Vec::new();
     let mut effects = Vec::new();
     for (parameter, value_type) in inferred {
@@ -10136,7 +10355,10 @@ mod tests {
         assert!(program.validate().is_empty());
 
         let deferred = deferred_families(&program);
-        assert!(deferred.contains(&DeferredExpressionFamily::Callable));
+        assert!(
+            !deferred.contains(&DeferredExpressionFamily::Callable),
+            "every call and callable value lowers to an owned node"
+        );
         assert!(deferred.contains(&DeferredExpressionFamily::Resource));
         assert!(deferred.contains(&DeferredExpressionFamily::Coroutine));
     }
@@ -11233,6 +11455,124 @@ mod tests {
     }
 
     #[test]
+    fn trait_calls_index_mutation_and_interpolations_carry_evidence() {
+        let module = checked_program(concat!(
+            "trait TestShow T { test_show: T -> Bool }\n",
+            "impl TestShow I32 { def test_show = _ => True }\n",
+            "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
+            "def evidence_samples: () -> Bool = () => {\n",
+            "  let arithmetic: I32 = 1 + 2\n",
+            "  let pair = (1, 2)\n",
+            "  let first: I32 = pair[0]\n",
+            "  let mut mutable_pair = (1, 2)\n",
+            "  mutable_pair[0] = 3\n",
+            "  let answer: I32 = 42\n",
+            "  let displayed = \"answer=${answer}\"\n",
+            "  let debugged = \"${pair:?}\"\n",
+            "  let bound = show_bound 1\n",
+            "  True\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        // An explicit trait call records its selected implementation.
+        assert!(program.calls.iter().any(|(_, call)| matches!(
+            call.evidence,
+            Some(TraitEvidence::ExplicitImplementation { .. })
+        )));
+        // A bound-dependent call keeps its declared prerequisites.
+        let bound = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| match &call.evidence {
+                Some(TraitEvidence::DeclaredBound {
+                    method: Some(_),
+                    prerequisites,
+                    ..
+                }) => Some(prerequisites),
+                _ => None,
+            })
+            .expect("a declared-bound trait call");
+        assert!(
+            bound.iter().any(|bound| {
+                program
+                    .traits
+                    .get(bound.trait_id)
+                    .map(|trait_| trait_.name.as_str())
+                    == Some("TestShow")
+            }),
+            "the declared TestShow bound is retained"
+        );
+
+        // Index reads carry structural evidence.
+        let index_evidence = program
+            .expressions
+            .iter()
+            .find_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Index(index) => Some(&index.evidence),
+                _ => None,
+            })
+            .expect("an index read");
+        assert!(matches!(
+            index_evidence,
+            TraitEvidence::Structural {
+                structural: StructuralTraitMethod::Index,
+                ..
+            }
+        ));
+
+        // Indexed mutations carry structural evidence too.
+        let assignment_evidence = program
+            .items
+            .iter()
+            .find_map(|(_, item)| match &item.kind {
+                LoweredItemKind::Assignment(assignment) => assignment.evidence.as_ref(),
+                _ => None,
+            })
+            .expect("an indexed assignment");
+        assert!(matches!(
+            assignment_evidence,
+            TraitEvidence::Structural {
+                structural: StructuralTraitMethod::MutateIndex,
+                ..
+            }
+        ));
+
+        // Interpolations carry their formatting evidence: explicit for
+        // `Display I32`, structural for a product's `Debug`.
+        let interpolation_evidence = program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::StringTemplate(template) => Some(template.parts.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|part| match part {
+                LoweredStringTemplatePart::Interpolation(interpolation) => {
+                    Some(&interpolation.evidence)
+                }
+                LoweredStringTemplatePart::Literal(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            interpolation_evidence
+                .iter()
+                .any(|evidence| matches!(evidence, TraitEvidence::ExplicitImplementation { .. }))
+        );
+        assert!(interpolation_evidence.iter().any(|evidence| matches!(
+            evidence,
+            TraitEvidence::Structural {
+                structural: StructuralTraitMethod::Debug,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn c_string_primitive_normalization_reuses_the_decoded_payload() {
         let program = LoweredProgram::default();
         let bytes = program
@@ -11430,19 +11770,20 @@ mod tests {
             }
         }
 
-        let deferred = program
-            .expressions
+        let callable_values = program
+            .callable_values
             .iter()
-            .filter(|(_, expression)| {
+            .filter(|(_, value)| {
                 matches!(
-                    expression.kind,
-                    LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable)
+                    value.target,
+                    LoweredCallableTarget::Constructor { .. }
+                        | LoweredCallableTarget::DirectFunction { .. }
                 )
             })
             .count();
         assert!(
-            deferred >= 3,
-            "function, constructor, and companion-method values defer to Stage 2.5"
+            callable_values >= 3,
+            "function, constructor, and companion-method values lower to explicit callable values"
         );
     }
 
@@ -12719,7 +13060,6 @@ mod tests {
             "call",
             "callable-value",
             "cstring",
-            "deferred.callable",
             "deferred.coroutine",
             "deferred.resource",
             "float",
@@ -13600,6 +13940,7 @@ mod tests {
                 target: PlaceId::from_index(999_999),
                 value,
                 mutate_index: None,
+                evidence: None,
                 initialization_symbol: None,
                 drop_previous: false,
                 signal: false,
