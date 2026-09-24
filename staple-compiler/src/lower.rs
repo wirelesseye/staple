@@ -20,7 +20,7 @@ use crate::{
     CheckedResource, CheckedTraitBound, CheckedTraitDispatch, CheckedType, DefinitionId, FloatType,
     FunctionId, IntegerType, IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction,
     ResolvedModule, SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId,
-    TypeParameterId, TypedModule, contains_type_parameter,
+    TypeParameterId, TypedModule, contains_type_parameter, infer_type_parameters,
 };
 
 macro_rules! arena_id {
@@ -93,6 +93,10 @@ impl<T, I: ArenaId> Arena<T, I> {
         self.values.get(id.index())
     }
 
+    fn get_mut(&mut self, id: I) -> Option<&mut T> {
+        self.values.get_mut(id.index())
+    }
+
     fn iter(&self) -> impl Iterator<Item = (I, &T)> {
         self.values
             .iter()
@@ -150,6 +154,11 @@ where
             .get(&key)
             .and_then(|id| self.entries.get(*id))
             .map(|entry| &entry.value)
+    }
+
+    fn get_mut(&mut self, key: K) -> Option<&mut T> {
+        let id = *self.by_key.get(&key)?;
+        self.entries.get_mut(id).map(|entry| &mut entry.value)
     }
 
     fn iter(&self) -> impl Iterator<Item = (I, K, &T)> {
@@ -246,8 +255,10 @@ pub(crate) struct ExpressionKey {
     pub context: ExpressionContext,
 }
 
-/// A Stage 2.4-owned expression family. Every ordinary syntax variant maps to
-/// exactly one family, and every family has a concrete lowered payload.
+/// An owned expression family. Every ordinary syntax variant maps to exactly
+/// one family, and every family has a concrete lowered payload. Stage 2.4
+/// established the families below `Function`; `Function` is the first Stage
+/// 2.5-owned family, and `Call` joins it in Step 3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stage24Family {
     Block,
@@ -265,6 +276,7 @@ pub(crate) enum Stage24Family {
     CString,
     Integer,
     Float,
+    Function,
 }
 
 /// An expression family explicitly deferred to a later lowering stage.
@@ -496,15 +508,18 @@ pub(crate) enum LoweredCaptureAccess {
     SharedCell,
 }
 
-/// The environment a closure construction allocates or reuses.
+/// The environment a callable value's closure plan uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoweredClosureEnvironment {
-    /// Construction allocates a fresh environment.
+    /// Construction allocates a fresh environment from the catalog captures.
     Fresh,
-    /// The value needs no environment.
+    /// The value needs no environment (null).
     None,
     /// Construction reuses the enclosing environment (recursion).
     Current,
+    /// The value is an existing stored closure; no environment is
+    /// constructed at this site.
+    Stored,
 }
 
 /// One capture of a closure construction, copied from the function catalog in
@@ -782,6 +797,43 @@ impl CallRoute {
             CallRoute::CompilerHelper => CompilerHelper,
         }
     }
+}
+
+/// The construction route of a first-class callable value, mirroring the
+/// backend's value routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CallableValueRoute {
+    /// A trait method selector value.
+    TraitMethod,
+    /// A constructor value.
+    Constructor,
+    /// An `extern` binding value.
+    External,
+    /// A compiler intrinsic value.
+    Intrinsic,
+    /// A generic function template value.
+    GenericFunction,
+    /// A declared non-generic function value.
+    DeclaredFunction,
+    /// An anonymous function expression.
+    AnonymousFunction,
+    /// An ordinary function-typed value read; the value's construction
+    /// happened at its binding site.
+    OrdinaryRead,
+}
+
+impl CallableValueRoute {
+    /// Every construction route, checked by the decision-table test.
+    pub(crate) const ALL: [CallableValueRoute; 8] = [
+        CallableValueRoute::TraitMethod,
+        CallableValueRoute::Constructor,
+        CallableValueRoute::External,
+        CallableValueRoute::Intrinsic,
+        CallableValueRoute::GenericFunction,
+        CallableValueRoute::DeclaredFunction,
+        CallableValueRoute::AnonymousFunction,
+        CallableValueRoute::OrdinaryRead,
+    ];
 }
 
 /// A checked index read: `base[index]`. The complete checked `Index` dispatch
@@ -1451,12 +1503,16 @@ impl LoweredProgram {
     /// Symbols are snapshotted first so expression lowering can read storage
     /// facts from the catalog instead of the resolver.
     fn snapshot(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
+        // Declaration catalogs are populated before any expression lowers:
+        // module initializers and function bodies reference functions, types,
+        // traits, implementations, and symbols by semantic ID, so every
+        // catalog must already be complete when a callable value is lowered.
         let mut diagnostics = self.snapshot_symbols(module);
-        diagnostics.extend(self.snapshot_modules(module));
-        diagnostics.extend(self.snapshot_functions(module));
         diagnostics.extend(self.snapshot_types(module));
         diagnostics.extend(self.snapshot_traits(module));
         diagnostics.extend(self.snapshot_semantic_ids(module));
+        diagnostics.extend(self.snapshot_functions(module));
+        diagnostics.extend(self.snapshot_modules(module));
         diagnostics.extend(self.validate_runtime_metadata(module));
         diagnostics
     }
@@ -1827,6 +1883,9 @@ impl LoweredProgram {
 
     /// Inserts declared functions in resolver order, then implicit thunks in
     /// stable semantic-ID order.
+    /// Populates the function catalog in two passes so forward and recursive
+    /// references resolve: every function's metadata is inserted first, then
+    /// every body is lowered with the complete catalog available.
     fn snapshot_functions(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
         let derived_evaluators = module
             .derived_evaluators_in_symbol_order()
@@ -1834,28 +1893,36 @@ impl LoweredProgram {
             .map(|(_, function)| function)
             .collect::<HashSet<_>>();
         let mut diagnostics = Vec::new();
+        let mut pending = Vec::new();
         for function in module.functions() {
-            self.snapshot_function(
+            pending.push((function, false));
+        }
+        for function in module.implicit_thunks_in_id_order() {
+            pending.push((function, true));
+        }
+        for (function, implicit_thunk) in &pending {
+            self.snapshot_function_metadata(
                 module,
                 function,
-                false,
+                *implicit_thunk,
                 &derived_evaluators,
                 &mut diagnostics,
             );
         }
-        for function in module.implicit_thunks_in_id_order() {
-            self.snapshot_function(
-                module,
-                function,
-                true,
-                &derived_evaluators,
-                &mut diagnostics,
-            );
+        for (function, _) in &pending {
+            match self.lower_function_body(module, function) {
+                Ok(body) => {
+                    if let Some(entry) = self.functions.get_mut(function.id) {
+                        entry.body = Some(body);
+                    }
+                }
+                Err(diagnostic) => diagnostics.push(diagnostic),
+            }
         }
         diagnostics
     }
 
-    fn snapshot_function(
+    fn snapshot_function_metadata(
         &mut self,
         module: &TypedModule,
         function: &ResolvedFunction,
@@ -1925,13 +1992,6 @@ impl LoweredProgram {
                 requires_cell: capture_requires_cell(module, *symbol),
             })
             .collect();
-        let body = match self.lower_function_body(module, function) {
-            Ok(body) => Some(body),
-            Err(diagnostic) => {
-                diagnostics.push(diagnostic);
-                return;
-            }
-        };
         let value = LoweredFunction {
             origin: origin.clone(),
             semantic_id: function.id,
@@ -1946,7 +2006,7 @@ impl LoweredProgram {
             captures,
             body_origin: origin.clone(),
             body_syntax: body_syntax.id,
-            body,
+            body: None,
             class,
         };
         if let Err(diagnostic) = self
@@ -2725,17 +2785,20 @@ impl LoweredProgram {
             (Stage24Family::Access, Expression::Access(access)) => {
                 self.lower_access(module, owner, context, access)
             }
-            (Stage24Family::Name, Expression::Name(name)) => {
-                let Some(symbol) = module.symbol_for(name.syntax.id) else {
-                    return Err(Diagnostic::new(
-                        name.syntax.span.clone(),
-                        format!(
-                            "cannot lower name `{}` without a resolved symbol",
-                            name.name
-                        ),
-                    ));
-                };
-                self.lower_name(module, name.syntax.id, name.syntax.span.clone(), symbol)
+            (Stage24Family::Name, Expression::Name(name)) => self.lower_name(
+                module,
+                name.syntax.id,
+                name.syntax.span.clone(),
+                module.symbol_for(name.syntax.id),
+            ),
+            (Stage24Family::Function, Expression::Function(function)) => {
+                let value = self.lower_callable_value(
+                    module,
+                    function.syntax.id,
+                    function.syntax.span.clone(),
+                    None,
+                )?;
+                Ok(LoweredExpressionKind::CallableValue(value))
             }
             (Stage24Family::Integer, Expression::Integer(integer)) => self
                 .lower_integer(module, integer)
@@ -2770,38 +2833,47 @@ impl LoweredProgram {
         }
     }
 
-    /// Lowers a symbol-selected name occurrence. Functions, constructors, and
-    /// other callable values are explicitly deferred to Stage 2.5; singleton
-    /// values record their identity and remain ordinary reads.
+    /// Lowers a symbol-selected name occurrence. Functions, constructors,
+    /// trait-method selectors, and other callable values get explicit
+    /// construction plans; singleton values record their identity and remain
+    /// ordinary reads.
     fn lower_name(
         &mut self,
         module: &TypedModule,
         syntax: SyntaxId,
         span: Span,
-        symbol: SymbolId,
+        symbol: Option<SymbolId>,
     ) -> Result<LoweredExpressionKind, Diagnostic> {
         let resolved = module.resolved();
-        // A name or companion selector that the checker resolved to a trait
-        // method is a first-class callable value; Stage 2.5 owns its closure
-        // construction and evidence.
-        if module.trait_dispatch_for(syntax).is_some() {
-            return Ok(LoweredExpressionKind::Deferred(
-                DeferredExpressionFamily::Callable,
-            ));
-        }
-        if compile_time_only_symbol(module, symbol) {
+        if let Some(symbol) = symbol
+            && compile_time_only_symbol(module, symbol)
+        {
             return Err(Diagnostic::new(
                 span,
                 format!("compile-time-only symbol {symbol:?} reached lowering as a runtime value"),
             ));
         }
-        if resolved.constructor_type(symbol).is_some()
-            || module.function_for_symbol(symbol).is_some()
+        // A name or companion selector that the checker resolved to a trait
+        // method is a first-class callable value, as are constructors and
+        // function bindings. Their explicit targets and closure construction
+        // plans are owned here.
+        if module.trait_dispatch_for(syntax).is_some()
+            || symbol.is_some_and(|symbol| {
+                resolved.constructor_type(symbol).is_some()
+                    || module.function_for_symbol(symbol).is_some()
+                    || resolved.is_external_symbol(symbol)
+                    || resolved.intrinsic_function(symbol).is_some()
+            })
         {
-            return Ok(LoweredExpressionKind::Deferred(
-                DeferredExpressionFamily::Callable,
-            ));
+            let value = self.lower_callable_value(module, syntax, span, symbol)?;
+            return Ok(LoweredExpressionKind::CallableValue(value));
         }
+        let Some(symbol) = symbol else {
+            return Err(Diagnostic::new(
+                span,
+                "cannot lower a name without a resolved symbol",
+            ));
+        };
         let Some(catalog) = self.symbols.get(symbol) else {
             return Err(Diagnostic::new(
                 span,
@@ -2831,12 +2903,21 @@ impl LoweredProgram {
         access: &staple_syntax::AccessExpression,
     ) -> Result<LoweredExpressionKind, Diagnostic> {
         if module.trait_dispatch_for(access.syntax.id).is_some() {
-            return Ok(LoweredExpressionKind::Deferred(
-                DeferredExpressionFamily::Callable,
-            ));
+            let value = self.lower_callable_value(
+                module,
+                access.syntax.id,
+                access.syntax.span.clone(),
+                module.symbol_for(access.syntax.id),
+            )?;
+            return Ok(LoweredExpressionKind::CallableValue(value));
         }
         if let Some(symbol) = module.symbol_for(access.syntax.id) {
-            return self.lower_name(module, access.syntax.id, access.syntax.span.clone(), symbol);
+            return self.lower_name(
+                module,
+                access.syntax.id,
+                access.syntax.span.clone(),
+                Some(symbol),
+            );
         }
         let Some(checked) = module.access_for(access.syntax.id).cloned() else {
             return Err(Diagnostic::new(
@@ -3801,6 +3882,424 @@ impl LoweredProgram {
         // A generic argument's implementation may only be selectable after
         // Stage 3 has canonical substitutions.
         Ok(CallRoute::DeclaredTraitBound)
+    }
+
+    /// Classifies a callable value expression into its construction route,
+    /// mirroring the backend's value routes: trait method, constructor,
+    /// intrinsic, extern, generic or declared function, anonymous function,
+    /// or an ordinary function-typed read.
+    fn classify_callable_value_route(
+        &self,
+        module: &TypedModule,
+        syntax: SyntaxId,
+        symbol: Option<SymbolId>,
+    ) -> CallableValueRoute {
+        if module.trait_dispatch_for(syntax).is_some() {
+            return CallableValueRoute::TraitMethod;
+        }
+        let Some(symbol) = symbol else {
+            return CallableValueRoute::AnonymousFunction;
+        };
+        let resolved = module.resolved();
+        if resolved.constructor_type(symbol).is_some() {
+            return CallableValueRoute::Constructor;
+        }
+        // Extern bindings are function candidates too, but their first-class
+        // values go through the generated extern adapter, so they must be
+        // classified before plain function bindings.
+        if resolved.is_external_symbol(symbol) {
+            return CallableValueRoute::External;
+        }
+        if let Some(function) = module.function_for_symbol(symbol) {
+            let generic = module
+                .type_of_function(function)
+                .is_some_and(|function_type| {
+                    contains_type_parameter(&CheckedType::Function(function_type.clone()))
+                });
+            return if generic {
+                CallableValueRoute::GenericFunction
+            } else {
+                CallableValueRoute::DeclaredFunction
+            };
+        }
+        // An intrinsic without a function binding has no first-class value
+        // route in the backend; the route stays explicit and defensive.
+        if resolved.intrinsic_function(symbol).is_some() {
+            return CallableValueRoute::Intrinsic;
+        }
+        CallableValueRoute::OrdinaryRead
+    }
+
+    /// Lowers a first-class callable value into its explicit target,
+    /// construction plan, adapter, substitutions, and trait evidence.
+    fn lower_callable_value(
+        &mut self,
+        module: &TypedModule,
+        syntax: SyntaxId,
+        span: Span,
+        symbol: Option<SymbolId>,
+    ) -> Result<LoweredCallableValueId, Diagnostic> {
+        let origin = Origin { syntax, span };
+        let route = self.classify_callable_value_route(module, syntax, symbol);
+        // A callable value can be checked as a sum alternative or another
+        // coercible type; its underlying callable type comes from the
+        // semantic target in that case.
+        let checked_function_type = match module.type_of_expression(syntax) {
+            Some(CheckedType::Function(function_type)) => Some(function_type.clone()),
+            _ => None,
+        };
+        let resolved = module.resolved();
+        let mut substitutions = CallSubstitutions::default();
+        let (target, function_type, adapter, closure, evidence) = match route {
+            CallableValueRoute::TraitMethod => {
+                let dispatch = module.trait_dispatch_for(syntax).cloned().ok_or_else(|| {
+                    Diagnostic::new(
+                        origin.span.clone(),
+                        "trait-method value has no checked dispatch",
+                    )
+                })?;
+                let (target, adapter, closure, evidence) =
+                    self.lower_trait_method_value(module, &origin, &dispatch)?;
+                let function_type = checked_function_type
+                    .or_else(|| {
+                        match self
+                            .trait_methods
+                            .get(dispatch.method)
+                            .map(|method| &method.value_type)
+                        {
+                            Some(CheckedType::Function(function_type)) => {
+                                Some(function_type.clone())
+                            }
+                            _ => None,
+                        }
+                    })
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            origin.span.clone(),
+                            "trait-method value has no checked function type",
+                        )
+                    })?;
+                (target, function_type, adapter, closure, evidence)
+            }
+            CallableValueRoute::Constructor => {
+                let symbol = symbol.expect("constructor values are symbol-selected");
+                let type_id = resolved
+                    .constructor_type(symbol)
+                    .expect("checked constructor symbol");
+                let function_type = checked_function_type
+                    .or_else(|| symbol_function_type(module, symbol))
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            origin.span.clone(),
+                            "constructor value has no checked function type",
+                        )
+                    })?;
+                (
+                    LoweredCallableTarget::Constructor {
+                        symbol,
+                        type_id,
+                        recursive: resolved.recursive_construction(type_id),
+                    },
+                    function_type,
+                    LoweredCallableAdapter::Constructor,
+                    None,
+                    None,
+                )
+            }
+            CallableValueRoute::External => {
+                let symbol = symbol.expect("extern values are symbol-selected");
+                let function_type = checked_function_type
+                    .or_else(|| symbol_function_type(module, symbol))
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            origin.span.clone(),
+                            "extern value has no checked function type",
+                        )
+                    })?;
+                (
+                    LoweredCallableTarget::ExternalFunction { symbol },
+                    function_type,
+                    LoweredCallableAdapter::External,
+                    None,
+                    None,
+                )
+            }
+            CallableValueRoute::Intrinsic => {
+                let symbol = symbol.expect("intrinsic values are symbol-selected");
+                let intrinsic = resolved
+                    .intrinsic_function(symbol)
+                    .expect("checked intrinsic symbol");
+                let function_type = checked_function_type
+                    .or_else(|| symbol_function_type(module, symbol))
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            origin.span.clone(),
+                            "intrinsic value has no checked function type",
+                        )
+                    })?;
+                (
+                    LoweredCallableTarget::Intrinsic { symbol, intrinsic },
+                    function_type,
+                    LoweredCallableAdapter::None,
+                    None,
+                    None,
+                )
+            }
+            CallableValueRoute::GenericFunction
+            | CallableValueRoute::DeclaredFunction
+            | CallableValueRoute::AnonymousFunction => {
+                let function = match route {
+                    CallableValueRoute::AnonymousFunction => module.function_for(syntax),
+                    _ => symbol.and_then(|symbol| module.function_for_symbol(symbol)),
+                }
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        origin.span.clone(),
+                        "callable value has no resolved function",
+                    )
+                })?;
+                let template = module.type_of_function(function).cloned().ok_or_else(|| {
+                    Diagnostic::new(
+                        origin.span.clone(),
+                        format!("function {} has no checked type", function.0),
+                    )
+                })?;
+                let function_type = checked_function_type.unwrap_or_else(|| template.clone());
+                substitutions = call_substitutions(&template, &function_type);
+                let environment = if route == CallableValueRoute::DeclaredFunction {
+                    LoweredClosureEnvironment::Stored
+                } else {
+                    LoweredClosureEnvironment::Fresh
+                };
+                let mut closure = self.closure_construction(
+                    module,
+                    &origin,
+                    function,
+                    environment,
+                    substitutions.clone(),
+                )?;
+                let adapter = if route == CallableValueRoute::AnonymousFunction
+                    && !closure.captures.is_empty()
+                {
+                    LoweredCallableAdapter::NestedClosure
+                } else {
+                    LoweredCallableAdapter::None
+                };
+                closure.adapter = adapter;
+                (
+                    LoweredCallableTarget::DirectFunction {
+                        function,
+                        environment: LoweredCallEnvironment::None,
+                    },
+                    function_type,
+                    adapter,
+                    Some(closure),
+                    None,
+                )
+            }
+            CallableValueRoute::OrdinaryRead => {
+                return Err(Diagnostic::new(
+                    origin.span.clone(),
+                    "an ordinary function-typed value is not a callable construction",
+                ));
+            }
+        };
+        Ok(self.callable_values.push(LoweredCallableValue {
+            origin,
+            target,
+            function_type,
+            adapter,
+            closure,
+            substitutions,
+            evidence,
+        }))
+    }
+
+    /// Lowers a trait-method selector value into explicit evidence. Generic
+    /// arguments whose implementation depends on later substitution keep a
+    /// declared bound instead of a premature concrete choice.
+    #[allow(clippy::type_complexity)]
+    fn lower_trait_method_value(
+        &mut self,
+        module: &TypedModule,
+        origin: &Origin,
+        dispatch: &CheckedTraitDispatch,
+    ) -> Result<
+        (
+            LoweredCallableTarget,
+            LoweredCallableAdapter,
+            Option<LoweredClosureConstruction>,
+            Option<TraitEvidence>,
+        ),
+        Diagnostic,
+    > {
+        let resolved = module.resolved();
+        let Some(trait_id) = resolved.trait_for_method(dispatch.method) else {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                format!("trait method {} has no owning trait", dispatch.method.0),
+            ));
+        };
+        let Some(arguments) = module.complete_trait_arguments(trait_id, &dispatch.arguments) else {
+            let evidence = TraitEvidence::DeclaredBound {
+                trait_id,
+                method: Some(dispatch.method),
+                arguments: dispatch.arguments.clone(),
+                prerequisites: Vec::new(),
+            };
+            return Ok((
+                LoweredCallableTarget::TraitImplementation {
+                    trait_id,
+                    method: dispatch.method,
+                    function: None,
+                },
+                LoweredCallableAdapter::None,
+                None,
+                Some(evidence),
+            ));
+        };
+        if let Some(function) = module.trait_impl_method(trait_id, &arguments, dispatch.method) {
+            let implementation = self
+                .trait_implementation_id(trait_id, dispatch.method, function)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        origin.span.clone(),
+                        format!(
+                            "trait implementation for method {} and function {} is missing from the lowered catalog",
+                            dispatch.method.0, function.0
+                        ),
+                    )
+                })?;
+            let closure = self.closure_construction(
+                module,
+                origin,
+                function,
+                LoweredClosureEnvironment::Fresh,
+                CallSubstitutions::default(),
+            )?;
+            let evidence = TraitEvidence::ExplicitImplementation {
+                trait_id,
+                implementation,
+                method: dispatch.method,
+                function,
+                arguments,
+            };
+            return Ok((
+                LoweredCallableTarget::TraitImplementation {
+                    trait_id,
+                    method: dispatch.method,
+                    function: Some(function),
+                },
+                LoweredCallableAdapter::None,
+                Some(closure),
+                Some(evidence),
+            ));
+        }
+        if let Some(structural) = module.structural_trait_method(trait_id, &arguments) {
+            let evidence = TraitEvidence::Structural {
+                trait_id,
+                method: dispatch.method,
+                structural,
+                arguments,
+            };
+            return Ok((
+                LoweredCallableTarget::StructuralTraitMethod {
+                    trait_id,
+                    method: dispatch.method,
+                    structural,
+                },
+                LoweredCallableAdapter::None,
+                None,
+                Some(evidence),
+            ));
+        }
+        let evidence = TraitEvidence::DeclaredBound {
+            trait_id,
+            method: Some(dispatch.method),
+            arguments,
+            prerequisites: Vec::new(),
+        };
+        Ok((
+            LoweredCallableTarget::TraitImplementation {
+                trait_id,
+                method: dispatch.method,
+                function: None,
+            },
+            LoweredCallableAdapter::None,
+            None,
+            Some(evidence),
+        ))
+    }
+
+    /// Finds the lowered trait implementation that provides `method`.
+    fn trait_implementation_id(
+        &self,
+        trait_id: TraitId,
+        method: TraitMethodId,
+        function: FunctionId,
+    ) -> Option<LoweredTraitImplementationId> {
+        self.trait_implementations
+            .iter()
+            .find(|(_, metadata)| {
+                metadata.trait_id == trait_id
+                    && metadata
+                        .methods
+                        .iter()
+                        .any(|(candidate, selected)| *candidate == method && *selected == function)
+            })
+            .map(|(id, _)| id)
+    }
+
+    /// Copies a function's catalog captures in order into a closure plan,
+    /// classifying each capture's access and ownership/drop responsibility.
+    fn closure_construction(
+        &self,
+        module: &TypedModule,
+        origin: &Origin,
+        function: FunctionId,
+        environment: LoweredClosureEnvironment,
+        substitutions: CallSubstitutions,
+    ) -> Result<LoweredClosureConstruction, Diagnostic> {
+        let catalog = self.functions.get(function).ok_or_else(|| {
+            Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "closure function {} is missing from the lowered function catalog",
+                    function.0
+                ),
+            )
+        })?;
+        let mut captures = Vec::with_capacity(catalog.captures.len());
+        for capture in &catalog.captures {
+            let value_type = module
+                .type_of_symbol(capture.symbol)
+                .cloned()
+                .or_else(|| module.declared_type_of_symbol(capture.symbol))
+                .unwrap_or(CheckedType::Error);
+            let access = if capture.requires_cell {
+                LoweredCaptureAccess::SharedCell
+            } else if capture.borrowed {
+                LoweredCaptureAccess::Borrowed
+            } else {
+                LoweredCaptureAccess::ByValue
+            };
+            let owns_value = access == LoweredCaptureAccess::ByValue && !capture.non_owning;
+            let drops_value = owns_value && module.type_needs_drop(&value_type);
+            captures.push(LoweredClosureCapture {
+                capture: capture.clone(),
+                value_type,
+                access,
+                owns_value,
+                drops_value,
+            });
+        }
+        Ok(LoweredClosureConstruction {
+            function,
+            captures,
+            environment,
+            adapter: LoweredCallableAdapter::None,
+            substitutions,
+        })
     }
 
     /// Whether a callee symbol is local at this call site: owned by the
@@ -6280,7 +6779,8 @@ fn classify_expression(expression: &Expression) -> ExpressionDisposition {
     use ExpressionDisposition::{Deferred, Ordinary, Rejected};
     use Stage24Family as Family;
     match expression {
-        Expression::Function(_) | Expression::Call(_) => Deferred(Callable),
+        Expression::Function(_) => Ordinary(Family::Function),
+        Expression::Call(_) => Deferred(Callable),
         Expression::Satisfies(_) => Ordinary(Family::Satisfies),
         Expression::Match(_) => Ordinary(Family::Match),
         Expression::Loop(_) => Ordinary(Family::Loop),
@@ -6324,6 +6824,7 @@ fn family_name(family: Stage24Family) -> &'static str {
         Stage24Family::CString => "CString",
         Stage24Family::Integer => "Integer",
         Stage24Family::Float => "Float",
+        Stage24Family::Function => "Function",
     }
 }
 
@@ -6559,6 +7060,62 @@ fn types_agree(expected: &CheckedType, actual: &CheckedType) -> bool {
             actual,
             CheckedType::Inferred | CheckedType::Error | CheckedType::Never
         )
+}
+
+/// The checked function type declared for a symbol, used when a callable
+/// occurrence is checked as a coerced (for example sum-alternative) type.
+fn symbol_function_type(module: &TypedModule, symbol: SymbolId) -> Option<CheckedFunctionType> {
+    match module
+        .type_of_symbol(symbol)
+        .cloned()
+        .or_else(|| module.declared_type_of_symbol(symbol))
+    {
+        Some(CheckedType::Function(function_type)) => Some(function_type),
+        _ => None,
+    }
+}
+
+/// Compile-time substitutions from a function template to the concrete type
+/// recorded at a use site. Effect variables are inferred by the checker as
+/// error-shaped function types and are split back into effect substitutions.
+fn call_substitutions(
+    template: &CheckedFunctionType,
+    actual: &CheckedFunctionType,
+) -> CallSubstitutions {
+    let mut inferred = HashMap::new();
+    let _ = infer_type_parameters(
+        &CheckedType::Function(template.clone()),
+        &CheckedType::Function(actual.clone()),
+        &mut inferred,
+    );
+    let mut types = Vec::new();
+    let mut effects = Vec::new();
+    for (parameter, value_type) in inferred {
+        match effect_substitution_of(&value_type) {
+            Some(effects_value) => effects.push(CallEffectSubstitution {
+                parameter,
+                effects: effects_value,
+            }),
+            None => types.push(CallTypeSubstitution {
+                parameter,
+                value_type,
+            }),
+        }
+    }
+    types.sort_by_key(|substitution| substitution.parameter.0);
+    effects.sort_by_key(|substitution| substitution.parameter.0);
+    CallSubstitutions { types, effects }
+}
+
+/// Decodes the checker's error-shaped function encoding of an effect
+/// substitution.
+fn effect_substitution_of(value_type: &CheckedType) -> Option<CheckedEffectSet> {
+    let CheckedType::Function(function) = value_type else {
+        return None;
+    };
+    (function.parameter.as_ref() == &CheckedType::Error
+        && function.result.as_ref() == &CheckedType::Error)
+        .then(|| function.effects.clone())
 }
 
 /// A source diagnostic for a final product slot that no explicit element or
@@ -8555,7 +9112,8 @@ mod tests {
         for (name, expression) in &representatives {
             assert_eq!(expression_variant_name(expression), *name);
             let expected = match *name {
-                "Function" | "Call" => Deferred(DeferredExpressionFamily::Callable),
+                "Function" => Ordinary(Stage24Family::Function),
+                "Call" => Deferred(DeferredExpressionFamily::Callable),
                 "Resource" | "With" => Deferred(DeferredExpressionFamily::Resource),
                 "Coro" | "Await" => Deferred(DeferredExpressionFamily::Coroutine),
                 "Unary" | "Binary" | "SyntaxArgument" | "VisibilityArgument" | "Quote"
@@ -8888,6 +9446,230 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    fn callable_value_fixture() -> &'static str {
+        concat!(
+            "use std.cinterop.*\n",
+            "use std.slice.Slice\n",
+            "use std.fmt.Formatter\n",
+            "extern \"c\" { external_identity: I32 -> I32 }\n",
+            "trait TestShow T { test_show: T -> Bool }\n",
+            "impl TestShow I32 { def test_show = _ => True }\n",
+            "def generic_identity: <T where Copy T> T -> T = value => value\n",
+            "def declared: I32 -> I32 = value => value\n",
+            "type TestBox = ctor (value: I32)\n",
+            "def make_borrower: String -> () -> Slice U8 = value => () => String.bytes value\n",
+            "type MyString = ctor String\n",
+            "impl !Copy MyString {}\n",
+            "companion MyString {\n",
+            "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
+            "}\n",
+            "def cell_capture: () -> () -> I32 = () => {\n",
+            "  let mut count: I32 = 0\n",
+            "  () => { count = count + 1; count }\n",
+            "}\n",
+            "def recursive: I32 -> I32 = value => {\n",
+            "  let self_ref = recursive\n",
+            "  self_ref value\n",
+            "}\n",
+            "def show_bound: <T where TestShow T> T -> Bool = value => {\n",
+            "  let method: T -> Bool = test_show\n",
+            "  method value\n",
+            "}\n",
+            "def structural_debug: () -> () = () => {\n",
+            "  let debug: ((I32, I32), mut Formatter) -> () = Debug.fmt\n",
+            "  ()\n",
+            "}\n",
+            "def value_samples: () -> I32 = () => {\n",
+            "  let anonymous = (value: I32) => value\n",
+            "  let named = declared\n",
+            "  let generic: I32 -> I32 = generic_identity\n",
+            "  let built = TestBox\n",
+            "  let external = external_identity\n",
+            "  let maker = make_borrower\n",
+            "  let cell = cell_capture\n",
+            "  let recursive_value = recursive\n",
+            "  let method = test_show\n",
+            "  anonymous 1\n",
+            "}\n",
+        )
+    }
+
+    #[test]
+    fn callable_value_routes_cover_every_construction_route() {
+        let mut routes = HashSet::new();
+        for route in CallableValueRoute::ALL {
+            assert!(routes.insert(route), "route {route:?} appears twice");
+        }
+        assert_eq!(routes.len(), 8);
+
+        let module = checked_program(callable_value_fixture());
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let categories = program
+            .callable_values
+            .iter()
+            .map(|(_, value)| value.target.category())
+            .collect::<HashSet<_>>();
+        for expected in [
+            LoweredCallableCategory::DirectKnownFunction,
+            LoweredCallableCategory::ExternalFunction,
+            LoweredCallableCategory::Constructor,
+            LoweredCallableCategory::TraitImplementation,
+            LoweredCallableCategory::StructuralTraitMethod,
+        ] {
+            assert!(
+                categories.contains(&expected),
+                "the fixture should construct a {expected:?} callable value"
+            );
+        }
+    }
+
+    #[test]
+    fn function_values_record_targets_adapters_and_closure_plans() {
+        let module = checked_program(callable_value_fixture());
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let values = program
+            .callable_values
+            .iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        let named_function = |suffix: &str, value: &&LoweredCallableValue| match &value.target {
+            LoweredCallableTarget::DirectFunction { function, .. } => program
+                .functions
+                .get(*function)
+                .is_some_and(|function| function.name.ends_with(suffix)),
+            _ => false,
+        };
+
+        assert!(values.iter().any(|value| matches!(
+            &value.target,
+            LoweredCallableTarget::Constructor { .. }
+        ) && value.adapter
+            == LoweredCallableAdapter::Constructor));
+        assert!(values.iter().any(|value| matches!(
+            &value.target,
+            LoweredCallableTarget::ExternalFunction { .. }
+        ) && value.adapter == LoweredCallableAdapter::External));
+        assert!(values.iter().any(|value| matches!(
+            value.evidence,
+            Some(TraitEvidence::ExplicitImplementation { .. })
+        ) && matches!(
+            value.target,
+            LoweredCallableTarget::TraitImplementation {
+                function: Some(_),
+                ..
+            }
+        )));
+        assert!(values.iter().any(|value| matches!(
+            value.evidence,
+            Some(TraitEvidence::DeclaredBound {
+                method: Some(_),
+                ..
+            })
+        ) && matches!(
+            value.target,
+            LoweredCallableTarget::TraitImplementation { function: None, .. }
+        )));
+        assert!(values.iter().any(|value| matches!(
+            value.evidence,
+            Some(TraitEvidence::Structural {
+                structural: StructuralTraitMethod::Debug,
+                ..
+            })
+        ) && matches!(
+            value.target,
+            LoweredCallableTarget::StructuralTraitMethod { .. }
+        )));
+
+        assert!(values.iter().any(|value| {
+            named_function(".declared", value)
+                && value
+                    .closure
+                    .as_ref()
+                    .is_some_and(|closure| closure.environment == LoweredClosureEnvironment::Stored)
+        }));
+        assert!(values.iter().any(|value| {
+            named_function(".recursive", value)
+                && value
+                    .closure
+                    .as_ref()
+                    .is_some_and(|closure| closure.environment == LoweredClosureEnvironment::Stored)
+        }));
+        assert!(values.iter().any(|value| {
+            named_function(".anonymous", value)
+                && value
+                    .closure
+                    .as_ref()
+                    .is_some_and(|closure| closure.environment == LoweredClosureEnvironment::Fresh)
+        }));
+        assert!(
+            values
+                .iter()
+                .any(|value| named_function(".generic_identity", value)
+                    && value.closure.as_ref().is_some_and(|closure| {
+                        closure.environment == LoweredClosureEnvironment::Fresh
+                            && !closure.substitutions.types.is_empty()
+                    }))
+        );
+
+        let mut saw_by_value = false;
+        let mut saw_borrowed = false;
+        let mut saw_shared_cell = false;
+        for value in &values {
+            let Some(closure) = &value.closure else {
+                continue;
+            };
+            let catalog = program
+                .functions
+                .get(closure.function)
+                .expect("closure function");
+            assert_eq!(catalog.captures.len(), closure.captures.len());
+            for (catalog_capture, capture) in catalog.captures.iter().zip(&closure.captures) {
+                assert_eq!(catalog_capture.symbol, capture.capture.symbol);
+                match capture.access {
+                    LoweredCaptureAccess::ByValue => {
+                        assert!(!capture.capture.borrowed && !capture.capture.requires_cell);
+                        saw_by_value = true;
+                    }
+                    LoweredCaptureAccess::Borrowed => {
+                        assert!(capture.capture.borrowed && !capture.capture.requires_cell);
+                        saw_borrowed = true;
+                    }
+                    LoweredCaptureAccess::SharedCell => {
+                        assert!(capture.capture.requires_cell);
+                        saw_shared_cell = true;
+                    }
+                }
+                assert_eq!(
+                    capture.owns_value,
+                    capture.access == LoweredCaptureAccess::ByValue && !capture.capture.non_owning
+                );
+                assert_eq!(
+                    capture.drops_value,
+                    capture.owns_value && module.type_needs_drop(&capture.value_type)
+                );
+            }
+        }
+        assert!(
+            saw_by_value && saw_borrowed && saw_shared_cell,
+            "the fixture should exercise every capture access"
+        );
+
+        let mut second = LoweredProgram::default();
+        assert!(second.snapshot(&module).is_empty());
+        assert!(second.validate().is_empty());
+        assert_eq!(
+            normalized_program_snapshot(&program),
+            normalized_program_snapshot(&second)
+        );
     }
 
     #[test]
@@ -10361,6 +11143,7 @@ mod tests {
         for expected in [
             "access",
             "block",
+            "callable-value",
             "cstring",
             "deferred.callable",
             "deferred.coroutine",
