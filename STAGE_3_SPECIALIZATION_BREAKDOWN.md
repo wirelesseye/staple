@@ -44,6 +44,8 @@ Build the concrete function-instance graph from the owned Stage 2 `LoweredProgra
 
 **Gate:** Unit tests cover result-only parameters, empty and nonempty effect rows, nested closure captures, irrelevant outer parameters, conditional trait implementations, prerequisites, structural evidence, and same-key recursion.
 
+The implementation sequence and resolver gates are in [STAGE_3_2_SUBSTITUTIONS_EVIDENCE_PLAN.md](STAGE_3_2_SUBSTITUTIONS_EVIDENCE_PLAN.md).
+
 **Handoff from Stage 3.1:** Use `InstanceRequest::new` + `resolve`, `ConstructorAdapterKey::new`, and `StructuralMethodKey::new`; concrete conversion already rejects leftover parameters, effect variables, `Inferred`, and `Error`. Stage 3.2 owns relevant-parameter collection, `CallSubstitutions`/environment composition, effect normalization before keying, and `DeclaredBound` resolution; unresolved requests stay `InstanceRequest` values. Stage 3.3 hands off at `SpecializationCatalog::reserve_instance`/`reserve_artifact`, called before visiting a body so recursion converges. The full boundary is recorded in [STAGE_3_1_SPECIALIZATION_KEYS_PLAN.md](STAGE_3_1_SPECIALIZATION_KEYS_PLAN.md).
 
 > **Complexity note:** Free-parameter collection and evidence resolution are the highest-risk parts of this stage; plan them separately during implementation if their invariants need more detail.

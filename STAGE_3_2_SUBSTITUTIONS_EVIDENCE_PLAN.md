@@ -1,0 +1,75 @@
+# Stage 3.2 Plan: Resolve Substitutions and Relevant Parameters
+
+**Status:** Not started. Stage 3.1 is complete.
+
+## Goal and starting point
+
+Turn a Stage 2 specialization request into a complete, concrete `InstanceKey` without consulting LLVM or inventing unchecked type arguments. For each function template, determine which declared type/effect parameters can affect its emitted signature, body, captures, layout, or selected evidence. Compose the use-site `CallSubstitutions` with the enclosing instance environment, infer justified missing values from the complete checked callable type, resolve deferred trait evidence, and validate same-key recursion.
+
+Stage 3.1 is complete. `specialization.rs` supplies structural `CanonicalType`/`CanonicalEffectSet`, `InstanceRequest`, `InstanceKey`, namespaced artifact keys, and family-specific `InstanceOrdinal`/`ArtifactOrdinal`. `InstanceRequest::resolve` currently converts a request's *already complete* substitutions and selected evidence; it does not collect relevant parameters, compose environments, infer missing values, or resolve `TraitEvidence::DeclaredBound`. Stage 3.2 must make those steps explicit before calling it. Stage 3.3 will use the resolver while traversing the deterministic worklist.
+
+## Scope and completion gate
+
+- A deterministic `RelevantParameters` result exists for every lowered function template. It includes type and effect parameter IDs used by owned code or evidence even when absent from the function signature, and excludes enclosing IDs that cannot change this instance. Collection never walks another function's body as if it belonged to the current template.
+- A resolved environment has at most one concrete value of the correct kind per `TypeParameterId`. Site substitutions, enclosing values, and callable-type inference agree; conflicts, cycles, unresolved required values, kind mismatches, and checker placeholders produce diagnostics at the requesting `Origin`.
+- Inferred substitutions use the whole checked callable type, including result-only parameters, nested/curried function layers, arrays and repeated-product counts, and effect rows. The checker’s type-encoded effect substitution is decoded into a real `CheckedEffectSet` before canonical key construction. No unconstrained parameter is assigned a guessed value.
+- `TraitEvidence::DeclaredBound` is resolved from the owned trait and implementation catalogs under the concrete environment, including functional dependencies and prerequisite bounds. The result is an explicit selected method or a structural method with concrete arguments. Negative, ambiguous, cyclic, or unsatisfied obligations are rejected; explicit and structural selections already recorded by Stage 2 remain consistent after substitution.
+- Recursive calls to the current function use the current key only when the normalized requested substitutions/evidence match it. The existing prohibition on polymorphic recursion remains in force.
+- Focused tests and the full workspace checks pass. Stage 3.2 does not intern a worklist, clone bodies, generate helper bodies, or switch LLVM emission.
+
+## Resolver contract
+
+The resolver takes the owned `LoweredProgram`, a target `FunctionId`, the requesting `Origin`, the site’s checked `CheckedFunctionType`, `CallSubstitutions` and optional `TraitEvidence`, plus an optional enclosing instance environment/current key. It returns either a concrete `InstanceKey` and resolved selection facts for Stage 3.3, or a source diagnostic. The interface may use a dedicated `ResolvedInstanceRequest` rather than extend `InstanceRequest`; either way, raw Stage 2 recipes must not be interned directly. Keep the resolved environment available for Stage 3.4 body substitution, rather than reconstructing it from a debug string or LLVM state.
+
+A parameter is *relevant* when changing its concrete value can change this template's signature, body metadata, capture/environment layout, resource/effect requirements, aggregate shape, default expression, nested callable request, or selected trait method. Declared parameters are identified by semantic `TypeParameterId`; display names are diagnostic text only. Preserve the distinction between type substitutions and effect-row substitutions. Put relevant entries into the key in parameter-ID order, using Stage 3.1 canonical values. Exclude values that are only present in an outer environment and never read by the target template or its dependency requests.
+
+The resolver must carry the selected `TraitEvidence` separately from the function template ID until it is concrete. `InstanceKey` includes canonical evidence when it changes emitted code; a selected method function also gets its own source-function instance request at the dependency site. Do not treat a declared bound as a selected implementation or turn a negative implementation into a callable target.
+
+## Implementation sequence
+
+### Step 1 — Inventory parameter-bearing owned records
+
+- Walk the Stage 2 function catalog and each function-owned body in deterministic arena/evaluation order. List all checked type/effect/bound positions: `LoweredFunction.signature`, `bounds`, parameter pattern and symbols, captures; expression headers and coercions; calls, callable values, closure construction and call steps/defaults; patterns, places, items, resource providers/uses; index and interpolation evidence; reactive callbacks/derived evaluators; coroutine plans, captures, deferred effects, and awaited result types. Include type and effect arguments in trait recipes and implementation prerequisites.
+- Attribute each record to its owning function. A nested function body, implicit thunk, derived evaluator, or coroutine body thunk is scanned under its own `FunctionId`. The enclosing body scans the construction/call site and its dependency request, not the nested body as ordinary children. Track outer parameter IDs used by nested captures and metadata even if the nested signature is concrete.
+- Record declaration IDs and use IDs separately. Do not include `Distinct.representation` recursively in identity collection when its semantic nominal ID and arguments are sufficient; scan metadata whose concrete layout actually depends on the representation through the owned type catalog. Do not scan source defaults or `TypedModule` maps in place of owned default occurrences.
+
+Gate: a coverage test enumerates each lowered arena/record family that can carry a type, effect, bound, capture, or evidence argument; adding a new variant requires an explicit collector decision. Fixtures show that signature-only, body-only, capture-only, evidence-only, and effect-only parameters are found, while an irrelevant outer parameter is excluded.
+
+### Step 2 — Build and normalize the substitution environment
+
+- Start from the enclosing concrete environment and the site’s ordered `CallSubstitutions`; retain provenance for conflict diagnostics. Merge by `TypeParameterId`, refusing duplicate incompatible values or a type/effect kind mismatch. For a nested closure, retain only values needed by its `RelevantParameters` result while still allowing transitively referenced outer values to resolve.
+- Match the target template’s full `CheckedFunctionType` to the complete checked callable type at the site. Reuse the checker’s `infer_type_parameters` behavior as the semantic reference, including result-only arguments, curried layers, product/array shape, and effect-row variables. Compare inferred values with recorded site/enclosing values instead of silently overwriting them. Do not infer from a parameter type alone.
+- Decode the checker’s effect substitution carrier (`CheckedType::Function` with `Error` parameter/result and the effect row in `effects`; see `effect_substitution_of` in `lower.rs`). Keep that carrier outside the final environment and key. Substitute effect resources and state modes under the same rules as the checker’s `substitute_effect_set`, including fixed resources plus a variable row; preserve canonical checked resource order and mutability.
+- Resolve references to other parameters transitively in stable parameter-ID order. Detect self-reference and longer cycles before substitution, rather than relying on repeated `substitute_type` calls to converge. Require each relevant parameter to become concrete; diagnose an unconstrained or missing parameter at the request origin. A nonrelevant outer parameter does not enter the key.
+
+Gate: tests cover complete and partial site substitutions, result-only values, empty and nonempty effect rows, fixed-plus-variable effects, state effects, repeated-product counts, nested and curried callable types, agreeing versus conflicting sources, type/effect kind mismatch, transitive chains, cycles, and an unconstrained parameter.
+
+### Step 3 — Resolve declared trait bounds using owned metadata
+
+- Substitute the recipe’s `arguments` and recorded `prerequisites`, then complete any functional-dependency arguments using the owned `LoweredTraitMetadata` and implementation headers. Require concrete completed arguments before choosing a method. Preserve the Stage 2 explicit/structural choice after substitution, validating its target and arguments; do not reselect it merely because a later catalog entry also matches.
+- For `DeclaredBound`, match owned `LoweredTraitImplementationMetadata` in deterministic declaration order using the same unification, conditional-bound, negative-implementation, and coherence rules the checker applies. Recursively discharge implementation bounds and trait prerequisites with a visited-obligation guard. Handle structural obligations through the same checked structural selection rules, including `Copy`/`Sized` and indexing/iterator/debug cases where applicable. A `method: None` recipe proves an obligation but must not invent a method target.
+- Return a concrete `TraitEvidence::ExplicitImplementation` with the selected implementation and method `FunctionId`, or `TraitEvidence::Structural` with completed arguments and structural kind. Report no match, negative match, ambiguity, prerequisite failure, or an unresolved cycle with the original use-site span and the failing trait/arguments. Avoid runtime implementation search and avoid using `TypedModule` as the final selection source; a test-only transition comparison may consult the old checker selector.
+
+Gate: tests cover direct explicit methods, defaults, two implementations with the same callable signature, conditional implementations, transitive prerequisites, functional dependencies, structural selections, negative implementations, ambiguity/cycles, and a bound whose arguments become concrete only after outer substitution.
+
+### Step 4 — Finish key construction and recursive-call checks
+
+- Prune the environment to relevant parameter IDs, canonicalize each concrete type/effect value, and resolve selected evidence through the Stage 3.1 key API. Ensure every required value and evidence argument is concrete before `InstanceKey::new` or `SpecializationCatalog::reserve_instance` can see it.
+- For a same-function `LoweredCallableTarget::DirectFunction` with `LoweredCallEnvironment::Current`, compare the completed request to the enclosing instance key. Return the current key on equality. Diagnose a changed key as polymorphic recursion rather than enqueueing another specialization. Apply the same rule to function-valued self references that reuse the current closure environment.
+- Supply Stage 3.3 with the resolved key, concrete environment, selected evidence, and request origin. Keep the API independent of discovery order; Stage 3.3 alone reserves IDs and decides reachability.
+
+Gate: repeated equivalent requests yield equal keys, irrelevant outer substitutions deduplicate, capture-dependent substitutions separate, same-key recursion succeeds, a changed recursive substitution diagnoses, and every returned key rejects declared type/effect parameters or unresolved evidence.
+
+### Step 5 — Validate against current checking and emission
+
+- Add focused unit tests beside `specialization.rs`/lowering tests, plus small compiler fixtures for nested generic closures, result-only generics, effect-polymorphic callbacks, trait prerequisites, defaults, cross-module functions, and coroutine/reactive thunks. Compare chosen concrete arguments and method IDs with the legacy checked/codegen path in tests while the legacy backend remains active.
+- Run `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, and `git diff --check`. Exercise the CLI LLVM, object, and run paths with the worktree standard library through the existing regression suite.
+- Record actual implementation results and remaining Stage 3.3 handoff in this file, `STAGE_3_SPECIALIZATION_BREAKDOWN.md`, and `TYPED_LOWERING_PLAN.md` after each completed step. Mark Stage 3.2 complete only when the resolver gate and full suite pass.
+
+Gate: every request presented to the resolver produces one concrete, validated key and evidence selection or a source diagnostic; no request depends on a backend substitution map or a runtime trait lookup. Stage 3.3 can consume the resolver without recomputing free parameters, substitutions, or evidence.
+
+## Open design decisions to settle during implementation
+
+- Decide whether relevant-parameter collection is a cached per-template analysis or computed during a deterministic first scan. Its output must be stable and shared by calls, callable values, and implicit thunk requests.
+- Decide whether the resolver returns a dedicated selected-evidence record and resolved environment or extends `InstanceRequest`. Preserve `InstanceRequest::resolve` as a final concrete conversion step, not a shortcut around missing-value checks.
+- Confirm the exact checker rules for structural derivation, negative implementations, conditional bounds, and functional-dependency completion before duplicating selection logic over owned catalogs. If the owned snapshot lacks a checked decision needed for equivalence, add that owned metadata in Stage 3.2 with a transition test.
