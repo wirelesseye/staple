@@ -6,6 +6,7 @@ mod macro_expand;
 mod ownership;
 mod program;
 mod resolve;
+mod specialization;
 mod typecheck;
 
 pub use codegen::*;
