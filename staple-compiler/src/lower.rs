@@ -37,6 +37,13 @@ macro_rules! arena_id {
                 self.0
             }
         }
+
+        #[cfg(test)]
+        impl $name {
+            pub(crate) fn for_test(index: usize) -> Self {
+                Self(index)
+            }
+        }
     };
 }
 

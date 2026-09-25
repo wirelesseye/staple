@@ -12,8 +12,10 @@
 use staple_syntax::Diagnostic;
 
 use crate::{
-    CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedResource, CheckedStateEffect,
-    CheckedType, Origin, TypeId, TypeParameterId,
+    CallSubstitutions, CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedResource,
+    CheckedStateEffect, CheckedType, FunctionId, LoweredCallableAdapter, Origin,
+    StructuralTraitMethod, SymbolId, TraitEvidence, TraitId, TraitMethodId, TypeId,
+    TypeParameterId,
 };
 
 /// One canonical structural type. Every vector preserves the checked semantic
@@ -275,7 +277,43 @@ impl CanonicalType {
     }
 }
 
+impl CanonicalType {
+    /// The first declared type parameter reachable from this value, used to
+    /// reject programmatically-built substitution values that are not
+    /// concrete. Traversal follows structural field order.
+    pub(crate) fn unresolved_parameter(&self) -> Option<TypeParameterId> {
+        match self {
+            CanonicalType::Parameter(parameter) => Some(*parameter),
+            CanonicalType::Ref(payload)
+            | CanonicalType::Slice(payload)
+            | CanonicalType::Buffer(payload)
+            | CanonicalType::CPointer { pointee: payload } => payload.unresolved_parameter(),
+            CanonicalType::Array { element, count } => element
+                .unresolved_parameter()
+                .or_else(|| count.unresolved_parameter()),
+            CanonicalType::Nominal { arguments, .. }
+            | CanonicalType::Sum {
+                alternatives: arguments,
+            } => arguments
+                .iter()
+                .find_map(CanonicalType::unresolved_parameter),
+            CanonicalType::Product { elements, .. } => elements
+                .iter()
+                .find_map(|element| element.value_type.unresolved_parameter()),
+            CanonicalType::Function(function) => function.unresolved_parameter(),
+            _ => None,
+        }
+    }
+}
+
 impl CanonicalFunctionType {
+    fn unresolved_parameter(&self) -> Option<TypeParameterId> {
+        self.parameter
+            .unresolved_parameter()
+            .or_else(|| self.effects.unresolved_variable())
+            .or_else(|| self.result.unresolved_parameter())
+    }
+
     pub(crate) fn template(
         function: &CheckedFunctionType,
         origin: &Origin,
@@ -312,6 +350,14 @@ impl CanonicalFunctionType {
 }
 
 impl CanonicalEffectSet {
+    fn unresolved_variable(&self) -> Option<TypeParameterId> {
+        self.variable.or_else(|| {
+            self.resources
+                .iter()
+                .find_map(|resource| resource.value_type.unresolved_parameter())
+        })
+    }
+
     pub(crate) fn template(
         effects: &CheckedEffectSet,
         origin: &Origin,
@@ -388,6 +434,379 @@ impl From<CheckedStateEffect> for CanonicalStateEffect {
     }
 }
 
+/// One ordered substitution entry of an instance key. `Effect` entries carry
+/// the whole canonical row for a declared effect parameter.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum InstanceSubstitution {
+    Type {
+        parameter: TypeParameterId,
+        value: CanonicalType,
+    },
+    Effect {
+        parameter: TypeParameterId,
+        effects: CanonicalEffectSet,
+    },
+}
+
+impl InstanceSubstitution {
+    pub(crate) fn parameter(&self) -> TypeParameterId {
+        match self {
+            InstanceSubstitution::Type { parameter, .. }
+            | InstanceSubstitution::Effect { parameter, .. } => *parameter,
+        }
+    }
+}
+
+/// The identity of one source-function instance: the template function plus
+/// ordered, sorted, conflict-free substitution entries and, when body selection
+/// depends on it, canonical trait evidence.
+///
+/// Equality inputs are fixed here; which parameters are *relevant* to a given
+/// template is collected by Stage 3.2 and only affects which entries callers
+/// add. A function with no relevant parameters or evidence has exactly one key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct InstanceKey {
+    function: FunctionId,
+    substitutions: Vec<InstanceSubstitution>,
+    evidence: Option<CanonicalEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum InstanceKeyError {
+    /// The same parameter was given twice.
+    DuplicateParameter(TypeParameterId),
+    /// A parameter appeared as both a type and an effect entry.
+    ConflictingParameter(TypeParameterId),
+    /// A substitution value still contains a declared type parameter.
+    UnresolvedTypeParameter(TypeParameterId),
+    /// An effect substitution still carries its declared effect variable.
+    UnresolvedEffectVariable(TypeParameterId),
+}
+
+impl InstanceKeyError {
+    pub(crate) fn message(self) -> String {
+        match self {
+            InstanceKeyError::DuplicateParameter(parameter) => format!(
+                "instance key repeats the substitution for parameter {}",
+                parameter.0
+            ),
+            InstanceKeyError::ConflictingParameter(parameter) => format!(
+                "instance key has both a type and an effect substitution for parameter {}",
+                parameter.0
+            ),
+            InstanceKeyError::UnresolvedTypeParameter(parameter) => format!(
+                "instance key substitution for parameter {} still contains a declared type parameter",
+                parameter.0
+            ),
+            InstanceKeyError::UnresolvedEffectVariable(parameter) => format!(
+                "instance key effect substitution for parameter {} still names its declared effect variable",
+                parameter.0
+            ),
+        }
+    }
+}
+
+impl InstanceKey {
+    /// Builds a concrete key. Entries are stably sorted by parameter ID, and
+    /// duplicate, conflicting, or unresolved entries are rejected: an
+    /// unresolved request never masquerades as a concrete key.
+    pub(crate) fn new(
+        function: FunctionId,
+        mut substitutions: Vec<InstanceSubstitution>,
+        evidence: Option<CanonicalEvidence>,
+    ) -> Result<Self, InstanceKeyError> {
+        substitutions.sort_by_key(|substitution| substitution.parameter().0);
+        for pair in substitutions.windows(2) {
+            if pair[0].parameter() == pair[1].parameter() {
+                let same_kind = matches!(
+                    (&pair[0], &pair[1]),
+                    (
+                        InstanceSubstitution::Type { .. },
+                        InstanceSubstitution::Type { .. }
+                    ) | (
+                        InstanceSubstitution::Effect { .. },
+                        InstanceSubstitution::Effect { .. }
+                    )
+                );
+                return Err(if same_kind {
+                    InstanceKeyError::DuplicateParameter(pair[0].parameter())
+                } else {
+                    InstanceKeyError::ConflictingParameter(pair[0].parameter())
+                });
+            }
+        }
+        for substitution in &substitutions {
+            match substitution {
+                InstanceSubstitution::Type { value, .. } => {
+                    if let Some(unresolved) = value.unresolved_parameter() {
+                        return Err(InstanceKeyError::UnresolvedTypeParameter(unresolved));
+                    }
+                }
+                InstanceSubstitution::Effect { effects, .. } => {
+                    if let Some(unresolved) = effects.unresolved_variable() {
+                        return Err(InstanceKeyError::UnresolvedEffectVariable(unresolved));
+                    }
+                }
+            }
+        }
+        Ok(InstanceKey {
+            function,
+            substitutions,
+            evidence,
+        })
+    }
+
+    pub(crate) fn function(&self) -> FunctionId {
+        self.function
+    }
+
+    pub(crate) fn substitutions(&self) -> &[InstanceSubstitution] {
+        &self.substitutions
+    }
+
+    pub(crate) fn evidence(&self) -> Option<&CanonicalEvidence> {
+        self.evidence.as_ref()
+    }
+}
+
+/// Canonical trait evidence. Only resolved selections appear here; declared
+/// bounds and negative obligations stay in `InstanceRequest` until Stage 3.2
+/// replaces them with a concrete selection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CanonicalEvidence {
+    /// A selected explicit implementation method. The selected method
+    /// `FunctionId` is unique per implementation method and is what keeps two
+    /// implementations distinct even when their signatures match.
+    ExplicitImplementation {
+        trait_id: TraitId,
+        method: TraitMethodId,
+        function: FunctionId,
+        arguments: Vec<CanonicalType>,
+    },
+    /// A selected compiler-generated structural method.
+    Structural {
+        trait_id: TraitId,
+        method: TraitMethodId,
+        structural: StructuralTraitMethod,
+        arguments: Vec<CanonicalType>,
+    },
+}
+
+/// A Stage 2 site recipe whose substitutions or evidence may still be
+/// unresolved. `resolve` either produces a concrete `InstanceKey` or reports
+/// the unresolved input at the requesting record's origin.
+#[derive(Debug, Clone)]
+pub(crate) struct InstanceRequest {
+    pub function: FunctionId,
+    pub origin: Origin,
+    pub substitutions: CallSubstitutions,
+    pub evidence: Option<TraitEvidence>,
+}
+
+impl InstanceRequest {
+    pub(crate) fn new(
+        function: FunctionId,
+        origin: Origin,
+        substitutions: CallSubstitutions,
+        evidence: Option<TraitEvidence>,
+    ) -> Self {
+        InstanceRequest {
+            function,
+            origin,
+            substitutions,
+            evidence,
+        }
+    }
+
+    pub(crate) fn resolve(&self) -> Result<InstanceKey, Diagnostic> {
+        let mut substitutions =
+            Vec::with_capacity(self.substitutions.types.len() + self.substitutions.effects.len());
+        for substitution in &self.substitutions.types {
+            substitutions.push(InstanceSubstitution::Type {
+                parameter: substitution.parameter,
+                value: CanonicalType::concrete(&substitution.value_type, &self.origin)?,
+            });
+        }
+        for substitution in &self.substitutions.effects {
+            substitutions.push(InstanceSubstitution::Effect {
+                parameter: substitution.parameter,
+                effects: CanonicalEffectSet::concrete(&substitution.effects, &self.origin)?,
+            });
+        }
+        InstanceKey::new(
+            self.function,
+            substitutions,
+            self.evidence
+                .as_ref()
+                .map(|evidence| self.canonical_evidence(evidence))
+                .transpose()?,
+        )
+        .map_err(|error| origin_diagnostic(&self.origin, error.message()))
+    }
+
+    fn canonical_evidence(
+        &self,
+        evidence: &TraitEvidence,
+    ) -> Result<CanonicalEvidence, Diagnostic> {
+        match evidence {
+            TraitEvidence::ExplicitImplementation {
+                trait_id,
+                method,
+                function,
+                arguments,
+                ..
+            } => Ok(CanonicalEvidence::ExplicitImplementation {
+                trait_id: *trait_id,
+                method: *method,
+                function: *function,
+                arguments: self.canonical_arguments(arguments)?,
+            }),
+            TraitEvidence::Structural {
+                trait_id,
+                method,
+                structural,
+                arguments,
+            } => Ok(CanonicalEvidence::Structural {
+                trait_id: *trait_id,
+                method: *method,
+                structural: *structural,
+                arguments: self.canonical_arguments(arguments)?,
+            }),
+            TraitEvidence::DeclaredBound { trait_id, .. } => Err(origin_diagnostic(
+                &self.origin,
+                format!(
+                    "trait {} evidence is still a declared bound; Stage 3.2 must resolve it before an instance key exists",
+                    trait_id.0
+                ),
+            )),
+            TraitEvidence::RejectedImplementation { trait_id, .. } => Err(origin_diagnostic(
+                &self.origin,
+                format!(
+                    "trait {} evidence is a negative implementation and never forms an instance key",
+                    trait_id.0
+                ),
+            )),
+        }
+    }
+
+    fn canonical_arguments(
+        &self,
+        arguments: &[CheckedType],
+    ) -> Result<Vec<CanonicalType>, Diagnostic> {
+        arguments
+            .iter()
+            .map(|argument| CanonicalType::concrete(argument, &self.origin))
+            .collect()
+    }
+}
+
+/// The canonical adapter a callable value needs. Mirrors
+/// `LoweredCallableAdapter` so artifact keys never depend on the lowered
+/// record's own enum ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CanonicalAdapterKind {
+    None,
+    Constructor,
+    External,
+    Curried,
+    NestedClosure,
+    ImplicitThunk,
+}
+
+impl From<LoweredCallableAdapter> for CanonicalAdapterKind {
+    fn from(adapter: LoweredCallableAdapter) -> Self {
+        match adapter {
+            LoweredCallableAdapter::None => CanonicalAdapterKind::None,
+            LoweredCallableAdapter::Constructor => CanonicalAdapterKind::Constructor,
+            LoweredCallableAdapter::External => CanonicalAdapterKind::External,
+            LoweredCallableAdapter::Curried => CanonicalAdapterKind::Curried,
+            LoweredCallableAdapter::NestedClosure => CanonicalAdapterKind::NestedClosure,
+            LoweredCallableAdapter::ImplicitThunk => CanonicalAdapterKind::ImplicitThunk,
+        }
+    }
+}
+
+/// The identity of a generated constructor-adapter body: the constructor's
+/// semantic symbol and nominal type, the adapter kind, and the concrete
+/// callable type the adapter must expose.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ConstructorAdapterKey {
+    pub symbol: SymbolId,
+    pub type_id: TypeId,
+    pub adapter: CanonicalAdapterKind,
+    pub callable_type: CanonicalFunctionType,
+}
+
+impl ConstructorAdapterKey {
+    pub(crate) fn new(
+        symbol: SymbolId,
+        type_id: TypeId,
+        adapter: LoweredCallableAdapter,
+        callable_type: &CheckedFunctionType,
+        origin: &Origin,
+    ) -> Result<Self, Diagnostic> {
+        Ok(ConstructorAdapterKey {
+            symbol,
+            type_id,
+            adapter: adapter.into(),
+            callable_type: CanonicalFunctionType::concrete(callable_type, origin)?,
+        })
+    }
+}
+
+/// The identity of a generated structural-method body. The legacy backend
+/// cached `(StructuralTraitMethod, Debug arguments)`: for the seven current
+/// methods the trait, method, and callable type are derivable from the
+/// structural kind plus completed arguments, but this key keeps them explicit
+/// so Stage 4 never depends on that derivability.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct StructuralMethodKey {
+    pub structural: StructuralTraitMethod,
+    pub trait_id: TraitId,
+    pub method: TraitMethodId,
+    pub arguments: Vec<CanonicalType>,
+    pub callable_type: CanonicalFunctionType,
+}
+
+impl StructuralMethodKey {
+    pub(crate) fn new(
+        structural: StructuralTraitMethod,
+        trait_id: TraitId,
+        method: TraitMethodId,
+        arguments: &[CheckedType],
+        callable_type: &CheckedFunctionType,
+        origin: &Origin,
+    ) -> Result<Self, Diagnostic> {
+        Ok(StructuralMethodKey {
+            structural,
+            trait_id,
+            method,
+            arguments: arguments
+                .iter()
+                .map(|argument| CanonicalType::concrete(argument, origin))
+                .collect::<Result<Vec<_>, Diagnostic>>()?,
+            callable_type: CanonicalFunctionType::concrete(callable_type, origin)?,
+        })
+    }
+}
+
+/// Generated-artifact request keys. The variant is the namespace: a
+/// constructor adapter and a structural method can never compare or hash
+/// equal, even when their numeric IDs coincide.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ArtifactRequestKey {
+    ConstructorAdapter(ConstructorAdapterKey),
+    StructuralMethod(StructuralMethodKey),
+}
+
+/// The complete namespace separation for Stage 3.3: source-function instances
+/// and generated artifacts are distinct key families.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum SpecializationKey {
+    Instance(InstanceKey),
+    Artifact(ArtifactRequestKey),
+}
+
 fn origin_diagnostic(origin: &Origin, message: impl Into<String>) -> Diagnostic {
     Diagnostic::new(origin.span.clone(), message)
 }
@@ -401,6 +820,7 @@ mod tests {
 
     use crate::{
         CheckedFunctionParameterDefault, CheckedProductType, CheckedSumType, CheckedTypeElement,
+        LoweredTraitImplementationId,
     };
 
     fn requesting_origin() -> Origin {
@@ -1034,6 +1454,485 @@ mod tests {
                 .expect_err("checker placeholders never form concrete keys");
             assert_eq!(diagnostic.span, requesting_origin().span);
         }
+    }
+
+    fn type_substitution(parameter: usize, value_type: CheckedType) -> InstanceSubstitution {
+        InstanceSubstitution::Type {
+            parameter: TypeParameterId(parameter),
+            value: concrete(&value_type),
+        }
+    }
+
+    fn effect_substitution(parameter: usize, effects: &CheckedEffectSet) -> InstanceSubstitution {
+        InstanceSubstitution::Effect {
+            parameter: TypeParameterId(parameter),
+            effects: CanonicalEffectSet::concrete(effects, &requesting_origin())
+                .expect("concrete effect substitution"),
+        }
+    }
+
+    fn substitutions(
+        types: &[(usize, CheckedType)],
+        effects: &[(usize, CheckedEffectSet)],
+    ) -> CallSubstitutions {
+        CallSubstitutions {
+            types: types
+                .iter()
+                .map(|(parameter, value_type)| crate::CallTypeSubstitution {
+                    parameter: TypeParameterId(*parameter),
+                    value_type: value_type.clone(),
+                })
+                .collect(),
+            effects: effects
+                .iter()
+                .map(|(parameter, effects)| crate::CallEffectSubstitution {
+                    parameter: TypeParameterId(*parameter),
+                    effects: effects.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn instance_key(
+        function: usize,
+        substitutions: Vec<InstanceSubstitution>,
+        evidence: Option<CanonicalEvidence>,
+    ) -> InstanceKey {
+        InstanceKey::new(FunctionId(function), substitutions, evidence)
+            .expect("well-formed instance key")
+    }
+
+    #[test]
+    fn instance_keys_order_dedupe_and_reject_conflicts() {
+        let unsorted = instance_key(
+            1,
+            vec![
+                type_substitution(2, CheckedType::I64),
+                type_substitution(1, CheckedType::I32),
+            ],
+            None,
+        );
+        let sorted = instance_key(
+            1,
+            vec![
+                type_substitution(1, CheckedType::I32),
+                type_substitution(2, CheckedType::I64),
+            ],
+            None,
+        );
+        assert_eq!(unsorted, sorted, "entry order is normalized, not identity");
+        assert_eq!(
+            unsorted
+                .substitutions()
+                .iter()
+                .map(InstanceSubstitution::parameter)
+                .collect::<Vec<_>>(),
+            vec![TypeParameterId(1), TypeParameterId(2)]
+        );
+
+        let duplicate = InstanceKey::new(
+            FunctionId(1),
+            vec![
+                type_substitution(1, CheckedType::I32),
+                type_substitution(1, CheckedType::I64),
+            ],
+            None,
+        )
+        .expect_err("duplicate parameter entries are rejected");
+        assert_eq!(
+            duplicate,
+            InstanceKeyError::DuplicateParameter(TypeParameterId(1))
+        );
+
+        let conflicting = InstanceKey::new(
+            FunctionId(1),
+            vec![
+                type_substitution(1, CheckedType::I32),
+                effect_substitution(1, &CheckedEffectSet::default()),
+            ],
+            None,
+        )
+        .expect_err("type and effect entries cannot share a parameter");
+        assert_eq!(
+            conflicting,
+            InstanceKeyError::ConflictingParameter(TypeParameterId(1))
+        );
+
+        let unresolved = InstanceKey::new(
+            FunctionId(1),
+            vec![InstanceSubstitution::Type {
+                parameter: TypeParameterId(1),
+                value: CanonicalType::Ref(Box::new(CanonicalType::Parameter(TypeParameterId(9)))),
+            }],
+            None,
+        )
+        .expect_err("a nested declared parameter is not concrete");
+        assert_eq!(
+            unresolved,
+            InstanceKeyError::UnresolvedTypeParameter(TypeParameterId(9))
+        );
+
+        let unresolved_effect = InstanceKey::new(
+            FunctionId(1),
+            vec![InstanceSubstitution::Effect {
+                parameter: TypeParameterId(1),
+                effects: CanonicalEffectSet {
+                    variable: Some(TypeParameterId(8)),
+                    resources: Vec::new(),
+                    state: None,
+                },
+            }],
+            None,
+        )
+        .expect_err("a declared effect variable is not concrete");
+        assert_eq!(
+            unresolved_effect,
+            InstanceKeyError::UnresolvedEffectVariable(TypeParameterId(8))
+        );
+
+        let unparameterized = instance_key(3, Vec::new(), None);
+        assert!(unparameterized.substitutions().is_empty());
+        assert!(unparameterized.evidence().is_none());
+        assert_eq!(unparameterized, instance_key(3, Vec::new(), None));
+    }
+
+    #[test]
+    fn instance_requests_resolve_or_fail_at_their_origin() {
+        let origin = requesting_origin();
+
+        let explicit = InstanceRequest::new(
+            FunctionId(4),
+            origin.clone(),
+            substitutions(&[(1, CheckedType::I32)], &[]),
+            None,
+        );
+        let key = explicit.resolve().expect("resolved request");
+        assert_eq!(key.function(), FunctionId(4));
+        assert_eq!(key.substitutions().len(), 1);
+
+        let explicit_evidence = InstanceRequest::new(
+            FunctionId(4),
+            origin.clone(),
+            CallSubstitutions::default(),
+            Some(TraitEvidence::ExplicitImplementation {
+                trait_id: TraitId(5),
+                implementation: LoweredTraitImplementationId::for_test(1),
+                method: TraitMethodId(6),
+                function: FunctionId(7),
+                arguments: vec![CheckedType::I32],
+            }),
+        );
+        assert!(matches!(
+            explicit_evidence
+                .resolve()
+                .expect("resolved evidence")
+                .evidence(),
+            Some(CanonicalEvidence::ExplicitImplementation {
+                function: FunctionId(7),
+                ..
+            })
+        ));
+
+        let structural_evidence = InstanceRequest::new(
+            FunctionId(4),
+            origin.clone(),
+            CallSubstitutions::default(),
+            Some(TraitEvidence::Structural {
+                trait_id: TraitId(5),
+                method: TraitMethodId(6),
+                structural: StructuralTraitMethod::Debug,
+                arguments: vec![CheckedType::Product(CheckedProductType {
+                    elements: vec![element(Some("x"), CheckedType::I32, None)],
+                    variadic: false,
+                })],
+            }),
+        );
+        assert!(matches!(
+            structural_evidence
+                .resolve()
+                .expect("resolved structural evidence")
+                .evidence(),
+            Some(CanonicalEvidence::Structural {
+                structural: StructuralTraitMethod::Debug,
+                ..
+            })
+        ));
+
+        let declared = InstanceRequest::new(
+            FunctionId(4),
+            origin.clone(),
+            CallSubstitutions::default(),
+            Some(TraitEvidence::DeclaredBound {
+                trait_id: TraitId(2),
+                method: None,
+                arguments: Vec::new(),
+                prerequisites: Vec::new(),
+            }),
+        );
+        let diagnostic = declared
+            .resolve()
+            .expect_err("declared bounds are unresolved");
+        assert_eq!(diagnostic.span, origin.span);
+        assert!(diagnostic.message.contains("declared bound"));
+
+        let rejected = InstanceRequest::new(
+            FunctionId(4),
+            origin.clone(),
+            CallSubstitutions::default(),
+            Some(TraitEvidence::RejectedImplementation {
+                trait_id: TraitId(2),
+                implementation: LoweredTraitImplementationId::for_test(0),
+                arguments: Vec::new(),
+            }),
+        );
+        let diagnostic = rejected
+            .resolve()
+            .expect_err("negative evidence is not a key");
+        assert_eq!(diagnostic.span, origin.span);
+        assert!(diagnostic.message.contains("negative implementation"));
+
+        let unresolved = InstanceRequest::new(
+            FunctionId(4),
+            origin.clone(),
+            substitutions(
+                &[(
+                    1,
+                    CheckedType::Parameter {
+                        id: TypeParameterId(3),
+                        name: "T".to_owned(),
+                        sized: false,
+                    },
+                )],
+                &[],
+            ),
+            None,
+        );
+        let diagnostic = unresolved
+            .resolve()
+            .expect_err("unresolved substitutions are not a key");
+        assert_eq!(diagnostic.span, origin.span);
+
+        let unresolved_arguments = InstanceRequest::new(
+            FunctionId(4),
+            origin.clone(),
+            CallSubstitutions::default(),
+            Some(TraitEvidence::Structural {
+                trait_id: TraitId(5),
+                method: TraitMethodId(6),
+                structural: StructuralTraitMethod::Index,
+                arguments: vec![CheckedType::Parameter {
+                    id: TypeParameterId(11),
+                    name: "K".to_owned(),
+                    sized: false,
+                }],
+            }),
+        );
+        assert_eq!(
+            unresolved_arguments
+                .resolve()
+                .expect_err("unresolved evidence arguments are not a key")
+                .span,
+            origin.span
+        );
+    }
+
+    #[test]
+    fn identical_signatures_still_separate_on_outer_substitutions() {
+        let signature = function_type(
+            CheckedType::Function(function_type(
+                CheckedType::I32,
+                FunctionParameterStyle::Single,
+                Vec::new(),
+                Vec::new(),
+                CheckedEffectSet::default(),
+                CheckedType::I32,
+            )),
+            FunctionParameterStyle::Single,
+            Vec::new(),
+            Vec::new(),
+            CheckedEffectSet::default(),
+            CheckedType::Function(function_type(
+                CheckedType::I32,
+                FunctionParameterStyle::Single,
+                Vec::new(),
+                Vec::new(),
+                CheckedEffectSet::default(),
+                CheckedType::I32,
+            )),
+        );
+        let canonical_signature = canonical_function(&signature);
+        let left = instance_key(9, vec![type_substitution(7, CheckedType::I32)], None);
+        let right = instance_key(9, vec![type_substitution(7, CheckedType::I64)], None);
+        assert_eq!(
+            canonical_signature,
+            canonical_function(&signature),
+            "the callable signature is identical under both outer substitutions"
+        );
+        assert_ne!(
+            left, right,
+            "capture/body-relevant outer substitutions still separate instances"
+        );
+    }
+
+    #[test]
+    fn selected_implementations_and_structural_methods_separate() {
+        let explicit = |function: usize| CanonicalEvidence::ExplicitImplementation {
+            trait_id: TraitId(1),
+            method: TraitMethodId(2),
+            function: FunctionId(function),
+            arguments: vec![concrete(&CheckedType::I32)],
+        };
+        let structural = |arguments: Vec<CheckedType>| CanonicalEvidence::Structural {
+            trait_id: TraitId(1),
+            method: TraitMethodId(2),
+            structural: StructuralTraitMethod::Index,
+            arguments: arguments
+                .iter()
+                .map(|argument| concrete(argument))
+                .collect(),
+        };
+
+        assert_eq!(
+            instance_key(3, Vec::new(), Some(explicit(4))),
+            instance_key(3, Vec::new(), Some(explicit(4)))
+        );
+        assert_ne!(
+            instance_key(3, Vec::new(), Some(explicit(4))),
+            instance_key(3, Vec::new(), Some(explicit(5))),
+            "two selected implementations stay distinct even with matching signatures"
+        );
+        assert_ne!(
+            instance_key(3, Vec::new(), Some(explicit(4))),
+            instance_key(3, Vec::new(), Some(structural(vec![CheckedType::I32]))),
+            "explicit and structural selections are different keys"
+        );
+        assert_ne!(
+            instance_key(3, Vec::new(), Some(structural(vec![CheckedType::I32]))),
+            instance_key(3, Vec::new(), Some(structural(vec![CheckedType::I64]))),
+            "structural arguments are part of evidence identity"
+        );
+    }
+
+    #[test]
+    fn artifact_keys_are_namespaced_and_concrete() {
+        let callable = function_type(
+            CheckedType::I32,
+            FunctionParameterStyle::Single,
+            Vec::new(),
+            Vec::new(),
+            CheckedEffectSet::default(),
+            CheckedType::I32,
+        );
+        let adapter = |symbol: usize, adapter_kind| {
+            ConstructorAdapterKey::new(
+                SymbolId(symbol),
+                TypeId(2),
+                adapter_kind,
+                &callable,
+                &requesting_origin(),
+            )
+            .expect("concrete constructor-adapter key")
+        };
+        assert_eq!(
+            adapter(1, LoweredCallableAdapter::Constructor),
+            adapter(1, LoweredCallableAdapter::Constructor)
+        );
+        assert_ne!(
+            adapter(1, LoweredCallableAdapter::Constructor),
+            adapter(9, LoweredCallableAdapter::Constructor),
+            "constructor symbol identity is part of the key"
+        );
+        assert_ne!(
+            adapter(1, LoweredCallableAdapter::Constructor),
+            adapter(1, LoweredCallableAdapter::External),
+            "adapter kind is part of the key"
+        );
+
+        let structural = |kind, arguments: Vec<CheckedType>| {
+            StructuralMethodKey::new(
+                kind,
+                TraitId(3),
+                TraitMethodId(4),
+                &arguments,
+                &callable,
+                &requesting_origin(),
+            )
+            .expect("concrete structural-method key")
+        };
+        assert_eq!(
+            structural(StructuralTraitMethod::Index, vec![CheckedType::I32]),
+            structural(StructuralTraitMethod::Index, vec![CheckedType::I32])
+        );
+        assert_ne!(
+            structural(StructuralTraitMethod::Index, vec![CheckedType::I32]),
+            structural(StructuralTraitMethod::Debug, vec![CheckedType::I32]),
+            "structural method kind is part of the key"
+        );
+        assert_ne!(
+            structural(StructuralTraitMethod::Index, vec![CheckedType::I32]),
+            structural(StructuralTraitMethod::Index, vec![CheckedType::I64]),
+            "structural arguments are part of the key"
+        );
+
+        let constructor_key = adapter(1, LoweredCallableAdapter::Constructor);
+        let structural_key = structural(StructuralTraitMethod::Index, vec![CheckedType::I32]);
+        assert_ne!(
+            ArtifactRequestKey::ConstructorAdapter(constructor_key.clone()),
+            ArtifactRequestKey::StructuralMethod(structural_key.clone()),
+            "constructor-adapter and structural-method namespaces are distinct"
+        );
+        let instance = instance_key(1, vec![type_substitution(1, CheckedType::I32)], None);
+        assert_ne!(
+            SpecializationKey::Instance(instance.clone()),
+            SpecializationKey::Artifact(ArtifactRequestKey::ConstructorAdapter(constructor_key)),
+            "source-function instances and generated artifacts never share a namespace"
+        );
+        assert_eq!(
+            SpecializationKey::Instance(instance.clone()),
+            SpecializationKey::Instance(instance)
+        );
+
+        let unresolved_callable = function_type(
+            CheckedType::Parameter {
+                id: TypeParameterId(4),
+                name: "T".to_owned(),
+                sized: false,
+            },
+            FunctionParameterStyle::Single,
+            Vec::new(),
+            Vec::new(),
+            CheckedEffectSet::default(),
+            CheckedType::I32,
+        );
+        assert_eq!(
+            ConstructorAdapterKey::new(
+                SymbolId(1),
+                TypeId(2),
+                LoweredCallableAdapter::Constructor,
+                &unresolved_callable,
+                &requesting_origin(),
+            )
+            .expect_err("unresolved callable types never form artifact keys")
+            .span,
+            requesting_origin().span
+        );
+        assert_eq!(
+            StructuralMethodKey::new(
+                StructuralTraitMethod::Index,
+                TraitId(3),
+                TraitMethodId(4),
+                &[CheckedType::Parameter {
+                    id: TypeParameterId(5),
+                    name: "K".to_owned(),
+                    sized: false,
+                }],
+                &callable,
+                &requesting_origin(),
+            )
+            .expect_err("unresolved structural arguments never form artifact keys")
+            .span,
+            requesting_origin().span
+        );
     }
 
     #[test]
