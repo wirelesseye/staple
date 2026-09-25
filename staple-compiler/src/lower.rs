@@ -2358,17 +2358,82 @@ impl LoweredProgram {
                 &mut diagnostics,
             );
         }
-        for (function, _) in &pending {
+        for (function, implicit_thunk) in &pending {
             match self.lower_function_body(module, function) {
                 Ok(body) => {
                     if let Some(entry) = self.functions.get_mut(function.id) {
                         entry.body = Some(body);
+                    }
+                    if *implicit_thunk {
+                        self.snapshot_coroutine_plan(module, function, body, &mut diagnostics);
                     }
                 }
                 Err(diagnostic) => diagnostics.push(diagnostic),
             }
         }
         diagnostics
+    }
+
+    /// Copies the checker's coroutine plan for one coroutine body thunk into an
+    /// owned lowered record keyed by its body syntax. The plan links the body
+    /// block, the owning implicit thunk, ordered captures, checked result and
+    /// deferred effects, resume count, frame bindings, awaited result types,
+    /// and wait/`until` cancellation classifications. Await sites populate in
+    /// Step 6.
+    fn snapshot_coroutine_plan(
+        &mut self,
+        module: &TypedModule,
+        function: &ResolvedFunction,
+        body: BlockId,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let body_syntax = function.body.syntax().id;
+        let Some(plan) = module.coroutine_plan(body_syntax) else {
+            return;
+        };
+        let origin = Origin {
+            syntax: body_syntax,
+            span: function.body.syntax().span.clone(),
+        };
+        let Some(catalog) = self.functions.get(function.id) else {
+            diagnostics.push(Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "cannot lower coroutine plan for function {} missing from the function catalog",
+                    function.id.0
+                ),
+            ));
+            return;
+        };
+        // The checked thunk result is `Coroutine{E} T`; the plan's result and
+        // deferred effects must be exactly its parts.
+        if let Some((effects, result)) = module.coroutine_parts(&catalog.signature.result)
+            && (effects != &plan.deferred_effects || result != &plan.result_type)
+        {
+            diagnostics.push(Diagnostic::new(
+                origin.span.clone(),
+                "coroutine plan result/deferred effects disagree with its thunk signature",
+            ));
+            return;
+        }
+        let captures = catalog.captures.clone();
+        let result_type = plan.result_type.clone();
+        let deferred_effects = plan.deferred_effects.clone();
+        self.coroutine_plans.push(LoweredCoroutinePlan {
+            origin,
+            body_syntax: plan.body_syntax,
+            body,
+            thunk: function.id,
+            captures,
+            result_type,
+            deferred_effects,
+            resume_points: plan.resume_points,
+            frame_bindings: plan.frame_bindings.clone(),
+            await_result_types: plan.await_result_types.clone(),
+            wait_await_states: plan.wait_await_states.clone(),
+            until_await_states: plan.until_await_states.clone(),
+            awaits: Vec::new(),
+        });
     }
 
     fn snapshot_function_metadata(
@@ -6876,8 +6941,10 @@ impl LoweredProgram {
                     plan.body.index(),
                 ));
             }
+            let mut thunk_captures: Option<&[LoweredCapture]> = None;
             match self.functions.get(plan.thunk) {
                 Some(thunk) => {
+                    thunk_captures = Some(&thunk.captures);
                     if thunk.captures.len() != plan.captures.len() {
                         diagnostics.push(Diagnostic::new(
                             plan.origin.span.clone(),
@@ -6899,6 +6966,18 @@ impl LoweredProgram {
                             ));
                         }
                     }
+                    if thunk.body != Some(plan.body) {
+                        diagnostics.push(Diagnostic::new(
+                            plan.origin.span.clone(),
+                            "coroutine plan body disagrees with its thunk body block",
+                        ));
+                    }
+                    if thunk.body_syntax != plan.body_syntax {
+                        diagnostics.push(Diagnostic::new(
+                            plan.origin.span.clone(),
+                            "coroutine plan body syntax disagrees with its thunk",
+                        ));
+                    }
                 }
                 None => diagnostics.push(invalid_reference(
                     &plan.origin,
@@ -6907,26 +6986,59 @@ impl LoweredProgram {
                     plan.thunk.0,
                 )),
             }
+            let mut frame_owner = None;
             for symbol in &plan.frame_bindings {
-                if self.symbols.get(*symbol).is_none() {
-                    diagnostics.push(invalid_reference(
+                match self.symbols.get(*symbol) {
+                    Some(record) => {
+                        if thunk_captures
+                            .is_some_and(|captures| captures.iter().any(|c| c.symbol == *symbol))
+                        {
+                            diagnostics.push(Diagnostic::new(
+                                plan.origin.span.clone(),
+                                format!(
+                                    "coroutine frame binding {} is also a thunk capture",
+                                    symbol.0
+                                ),
+                            ));
+                        }
+                        match frame_owner {
+                            None => frame_owner = Some(record.owner),
+                            Some(owner) if owner != record.owner => {
+                                diagnostics.push(Diagnostic::new(
+                                    plan.origin.span.clone(),
+                                    "coroutine frame bindings span multiple owners",
+                                ))
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                    None => diagnostics.push(invalid_reference(
                         &plan.origin,
                         "coroutine plan",
                         "symbol",
                         symbol.0,
-                    ));
+                    )),
                 }
             }
-            if plan.await_result_types.len() != plan.resume_points
-                || plan.awaits.len() != plan.resume_points
-            {
+            if plan.await_result_types.len() != plan.resume_points {
                 diagnostics.push(Diagnostic::new(
                     plan.origin.span.clone(),
                     format!(
-                        "coroutine plan has {} resume points but {} awaited result types and {} awaits",
+                        "coroutine plan has {} resume points but {} awaited result types",
                         plan.resume_points,
-                        plan.await_result_types.len(),
-                        plan.awaits.len()
+                        plan.await_result_types.len()
+                    ),
+                ));
+            }
+            // Await sites populate in Step 6; a plan can never hold more than
+            // its resume count.
+            if plan.awaits.len() > plan.resume_points {
+                diagnostics.push(Diagnostic::new(
+                    plan.origin.span.clone(),
+                    format!(
+                        "coroutine plan has {} awaits for {} resume points",
+                        plan.awaits.len(),
+                        plan.resume_points
                     ),
                 ));
             }
@@ -8667,6 +8779,14 @@ impl LoweredProgram {
         }
         for (_, initializer) in self.initializers.iter() {
             self.visit_owned_block(initializer.body, &mut reached);
+        }
+        // A coroutine plan is owned by its body thunk's catalog entry, and the
+        // function catalog is a root set; `coro` expressions reach the same
+        // plans again in Step 6.
+        for (id, plan) in self.coroutine_plans.iter() {
+            if self.functions.get(plan.thunk).is_some() {
+                self.visit_owned_coroutine_plan(id, &mut reached);
+            }
         }
         for (_, _, function) in self.functions.iter() {
             self.visit_owned_pattern(function.parameter_pattern, &mut reached);
@@ -13006,8 +13126,8 @@ mod tests {
         ));
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
-        assert!(program.validate().is_empty());
-
+        let check = program.validate();
+        assert!(check.is_empty(), "{check:?}");
         let deferred = deferred_families(&program);
         assert!(
             !deferred.contains(&DeferredExpressionFamily::Callable),
@@ -17185,6 +17305,186 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("resource read")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+    }
+
+    /// Checked programs that are expected to fail checking, for diagnostics
+    /// that must stay source errors.
+    fn checked_program_diagnostics(source: &str) -> Result<TypedModule, Vec<Diagnostic>> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler crate should have a workspace parent");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(standard_library_root())
+            .load_source(source, root)
+            .expect("test source should load");
+        let resolved = NameResolver::new()
+            .resolve_program(program)
+            .expect("test source should resolve");
+        TypeChecker::new().check(resolved)
+    }
+
+    fn plans_by_resume_points(
+        program: &LoweredProgram,
+        points: usize,
+    ) -> Vec<&LoweredCoroutinePlan> {
+        program
+            .coroutine_plans
+            .iter()
+            .filter_map(|(_, plan)| (plan.resume_points == points).then_some(plan))
+            .collect()
+    }
+
+    #[test]
+    fn coroutine_plans_copy_scanner_classifications() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "def child: () -> Coroutine{} I32 = () => coro { 7 }\n",
+            "def driver: () -> Coroutine{} I32 = () => coro {\n",
+            "  let first = await (child ())\n",
+            "  let second = await (child ())\n",
+            "  first + second\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let driver = plans_by_resume_points(&program, 2);
+        assert_eq!(driver.len(), 1, "the driver owns two suspension points");
+        let plan = driver[0];
+        assert_eq!(plan.result_type, CheckedType::I32);
+        assert!(plan.deferred_effects.resources.is_empty());
+        assert_eq!(
+            plan.await_result_types,
+            vec![CheckedType::I32, CheckedType::I32]
+        );
+        assert!(plan.wait_await_states.is_empty());
+        assert!(plan.until_await_states.is_empty());
+        assert_eq!(plan.frame_bindings.len(), 2);
+        assert_ne!(plan.frame_bindings[0], plan.frame_bindings[1]);
+        for symbol in &plan.frame_bindings {
+            assert!(
+                lowered_symbol(&program, *symbol).owner.is_some(),
+                "frame bindings belong to a lowered function owner"
+            );
+        }
+
+        let thunk = program.functions.get(plan.thunk).expect("body thunk");
+        assert!(thunk.class.coroutine_body);
+        assert_eq!(thunk.body, Some(plan.body));
+        assert_eq!(thunk.captures.len(), plan.captures.len());
+        assert_eq!(
+            thunk
+                .captures
+                .iter()
+                .map(|capture| capture.symbol)
+                .collect::<Vec<_>>(),
+            plan.captures
+                .iter()
+                .map(|capture| capture.symbol)
+                .collect::<Vec<_>>()
+        );
+        assert!(!plans_by_resume_points(&program, 0).is_empty());
+    }
+
+    #[test]
+    fn nested_coroutines_own_separate_plans() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "def outer: () -> Coroutine{} I32 = () => coro {\n",
+            "  let inner = coro { 1 }\n",
+            "  let value = await inner\n",
+            "  value\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let outer = plans_by_resume_points(&program, 1);
+        let inner = plans_by_resume_points(&program, 0);
+        assert_eq!(outer.len(), 1);
+        assert_eq!(inner.len(), 1);
+        assert_ne!(
+            outer[0].thunk, inner[0].thunk,
+            "nested body is its own thunk"
+        );
+        assert_ne!(outer[0].body, inner[0].body);
+        assert_ne!(outer[0].body_syntax, inner[0].body_syntax);
+        assert_eq!(
+            program
+                .functions
+                .get(outer[0].thunk)
+                .unwrap()
+                .class
+                .coroutine_body,
+            true
+        );
+        assert_eq!(
+            program
+                .functions
+                .get(inner[0].thunk)
+                .unwrap()
+                .class
+                .coroutine_body,
+            true
+        );
+    }
+
+    #[test]
+    fn coroutine_plans_preserve_wait_and_until_cancellation_states() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "let signal n = 0\n",
+            "def waiter: () -> Coroutine{Reactive} () = () => coro {\n",
+            "  let _ = await (until { n >= 5 })\n",
+            "  ()\n",
+            "}\n",
+            "def observer: move Wait I32 -> Coroutine{} () = move w => coro {\n",
+            "  let _ = await w; ()\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let waiting: Vec<_> = plans_by_resume_points(&program, 1)
+            .into_iter()
+            .filter(|plan| !plan.until_await_states.is_empty())
+            .collect();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].until_await_states, vec![1]);
+        assert!(waiting[0].wait_await_states.is_empty());
+
+        let external: Vec<_> = plans_by_resume_points(&program, 1)
+            .into_iter()
+            .filter(|plan| !plan.wait_await_states.is_empty())
+            .collect();
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].wait_await_states, vec![1]);
+        assert!(external[0].until_await_states.is_empty());
+    }
+
+    #[test]
+    fn non_statement_position_await_stays_a_source_diagnostic() {
+        let diagnostics = checked_program_diagnostics(concat!(
+            "use std.coroutine.*\n",
+            "def child: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def driver: () -> Coroutine{} I32 = () => coro {\n",
+            "  let value = await (child ()) + 1\n",
+            "  value\n",
+            "}\n",
+        ))
+        .expect_err("expression-position `await` should be rejected during checking");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("must be a statement")),
             "unexpected diagnostics: {diagnostics:?}"
         );
     }
