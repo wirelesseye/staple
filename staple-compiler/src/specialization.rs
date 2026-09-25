@@ -551,6 +551,12 @@ impl InstanceKey {
                 }
             }
         }
+        if let Some(unresolved) = evidence
+            .as_ref()
+            .and_then(CanonicalEvidence::unresolved_parameter)
+        {
+            return Err(InstanceKeyError::UnresolvedTypeParameter(unresolved));
+        }
         Ok(InstanceKey {
             function,
             substitutions,
@@ -592,6 +598,18 @@ pub(crate) enum CanonicalEvidence {
         structural: StructuralTraitMethod,
         arguments: Vec<CanonicalType>,
     },
+}
+
+impl CanonicalEvidence {
+    fn unresolved_parameter(&self) -> Option<TypeParameterId> {
+        let arguments = match self {
+            CanonicalEvidence::ExplicitImplementation { arguments, .. }
+            | CanonicalEvidence::Structural { arguments, .. } => arguments,
+        };
+        arguments
+            .iter()
+            .find_map(CanonicalType::unresolved_parameter)
+    }
 }
 
 /// A Stage 2 site recipe whose substitutions or evidence may still be
@@ -1136,12 +1154,22 @@ fn structural_tag(structural: StructuralTraitMethod) -> u8 {
     }
 }
 
-/// The append-only position of a reserved key. Ordinals are assigned in
-/// first-discovery order within their family and never reused.
+/// Append-only positions within their own key families. Distinct types keep
+/// a source-function instance ID from being used to look up an artifact (or
+/// the reverse), even when both families have the same numeric position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct SpecializationOrdinal(usize);
+pub(crate) struct InstanceOrdinal(usize);
 
-impl SpecializationOrdinal {
+impl InstanceOrdinal {
+    pub(crate) fn index(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ArtifactOrdinal(usize);
+
+impl ArtifactOrdinal {
     pub(crate) fn index(self) -> usize {
         self.0
     }
@@ -1172,48 +1200,46 @@ pub(crate) struct SpecializationCatalog {
 }
 
 impl SpecializationCatalog {
-    pub(crate) fn reserve_instance(&mut self, key: InstanceKey) -> SpecializationOrdinal {
+    pub(crate) fn reserve_instance(&mut self, key: InstanceKey) -> InstanceOrdinal {
         if let Some(ordinal) = self.instance_lookup.get(&key) {
-            return SpecializationOrdinal(*ordinal);
+            return InstanceOrdinal(*ordinal);
         }
-        let ordinal = SpecializationOrdinal(self.instances.len());
+        let ordinal = InstanceOrdinal(self.instances.len());
         self.instance_lookup.insert(key.clone(), ordinal.0);
         self.instances.push(key);
         ordinal
     }
 
-    pub(crate) fn reserve_artifact(&mut self, key: ArtifactRequestKey) -> SpecializationOrdinal {
+    pub(crate) fn reserve_artifact(&mut self, key: ArtifactRequestKey) -> ArtifactOrdinal {
         if let Some(ordinal) = self.artifact_lookup.get(&key) {
-            return SpecializationOrdinal(*ordinal);
+            return ArtifactOrdinal(*ordinal);
         }
-        let ordinal = SpecializationOrdinal(self.artifacts.len());
+        let ordinal = ArtifactOrdinal(self.artifacts.len());
         self.artifact_lookup.insert(key.clone(), ordinal.0);
         self.artifacts.push(key);
         ordinal
     }
 
-    pub(crate) fn instance(&self, ordinal: SpecializationOrdinal) -> Option<&InstanceKey> {
+    pub(crate) fn instance(&self, ordinal: InstanceOrdinal) -> Option<&InstanceKey> {
         self.instances.get(ordinal.0)
     }
 
-    pub(crate) fn artifact(&self, ordinal: SpecializationOrdinal) -> Option<&ArtifactRequestKey> {
+    pub(crate) fn artifact(&self, ordinal: ArtifactOrdinal) -> Option<&ArtifactRequestKey> {
         self.artifacts.get(ordinal.0)
     }
 
-    pub(crate) fn instances(&self) -> impl Iterator<Item = (SpecializationOrdinal, &InstanceKey)> {
+    pub(crate) fn instances(&self) -> impl Iterator<Item = (InstanceOrdinal, &InstanceKey)> {
         self.instances
             .iter()
             .enumerate()
-            .map(|(index, key)| (SpecializationOrdinal(index), key))
+            .map(|(index, key)| (InstanceOrdinal(index), key))
     }
 
-    pub(crate) fn artifacts(
-        &self,
-    ) -> impl Iterator<Item = (SpecializationOrdinal, &ArtifactRequestKey)> {
+    pub(crate) fn artifacts(&self) -> impl Iterator<Item = (ArtifactOrdinal, &ArtifactRequestKey)> {
         self.artifacts
             .iter()
             .enumerate()
-            .map(|(index, key)| (SpecializationOrdinal(index), key))
+            .map(|(index, key)| (ArtifactOrdinal(index), key))
     }
 
     /// The planned emitted symbol names in emission order. Names are
@@ -2044,6 +2070,27 @@ mod tests {
             InstanceKeyError::UnresolvedEffectVariable(TypeParameterId(8))
         );
 
+        for evidence in [
+            CanonicalEvidence::ExplicitImplementation {
+                trait_id: TraitId(1),
+                method: TraitMethodId(2),
+                function: FunctionId(3),
+                arguments: vec![CanonicalType::Parameter(TypeParameterId(9))],
+            },
+            CanonicalEvidence::Structural {
+                trait_id: TraitId(1),
+                method: TraitMethodId(2),
+                structural: StructuralTraitMethod::Debug,
+                arguments: vec![CanonicalType::Parameter(TypeParameterId(9))],
+            },
+        ] {
+            assert_eq!(
+                InstanceKey::new(FunctionId(1), Vec::new(), Some(evidence))
+                    .expect_err("selected evidence must be concrete"),
+                InstanceKeyError::UnresolvedTypeParameter(TypeParameterId(9))
+            );
+        }
+
         let unparameterized = instance_key(3, Vec::new(), None);
         assert!(unparameterized.substitutions().is_empty());
         assert!(unparameterized.evidence().is_none());
@@ -2529,6 +2576,9 @@ mod tests {
         );
         assert_eq!(catalog.reserve_artifact(artifact.clone()), artifact_ordinal);
         assert_eq!(catalog.artifact(artifact_ordinal), Some(&artifact));
+        assert_eq!(first_ordinal.index(), artifact_ordinal.index());
+        let _: InstanceOrdinal = first_ordinal;
+        let _: ArtifactOrdinal = artifact_ordinal;
         assert_eq!(
             catalog.planned_names().expect("unique names"),
             vec![
