@@ -899,12 +899,24 @@ pub(crate) enum LoweredProviderOriginKind {
     EntryParameter,
 }
 
-/// What the provider identity refers to: the `with` value expression or the
-/// parameter/entry symbol that carries the value.
+/// What the provider identity refers to: the `with` value expression, an
+/// implicit function effect parameter, or an executable-entry resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoweredProviderTarget {
+    /// The provider value expression of a `with`.
     Expression(ExpressionId),
-    Symbol(SymbolId),
+    /// A function effect parameter at its position in the checked row.
+    EffectParameter { position: usize },
+    /// An executable-entry resource installed before initialization.
+    Entry,
+}
+
+/// How a provider's storage is established. `Place` reuses a source place's
+/// address; `Materialized` evaluates the provider value into fresh storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredProviderStorage {
+    Place,
+    Materialized,
 }
 
 /// The scope-exit obligation a provider carries when its lexical scope ends.
@@ -935,6 +947,8 @@ pub(crate) struct LoweredResourceProvider {
     pub indirect: bool,
     /// Passing the provider requires a borrow pointer (mutable or non-`Copy`).
     pub borrow: bool,
+    /// Whether the provider pointer is a source place or materialized storage.
+    pub storage: LoweredProviderStorage,
     pub scope_exit: LoweredScopeExit,
 }
 
@@ -1513,8 +1527,8 @@ pub(crate) enum LoweredPlaceKind {
     /// A non-place base materialized into temporary storage so it can be
     /// mutated (`x[i] = v` where `x` is not itself a place root).
     Temporary { expression: ExpressionId },
-    /// An ambient resource value in scope.
-    Resource { resource: CheckedResource },
+    /// An ambient resource value in scope, bound to its selected provider.
+    Resource { use_: LoweredResourceUseId },
     /// A pointer into a reference value: `reference` evaluates the `Ref`
     /// container and `dereference` records the crossed payloads
     /// outermost-first, matching `CheckedAccess`.
@@ -1890,6 +1904,10 @@ pub(crate) struct LoweredProgram {
     /// Transient lowering state: inner call syntaxes consumed by an outer
     /// juxtaposed call's checked plan. They are never lowered on their own.
     consumed_calls: HashSet<SyntaxId>,
+    /// Transient lowering state: the active lexical provider stack while one
+    /// function body or module initializer lowers. The last matching provider
+    /// by checked value type is the one the legacy backend would select.
+    active_resource_providers: Vec<LoweredResourceProviderId>,
 }
 
 impl LoweredProgram {
@@ -2429,12 +2447,26 @@ impl LoweredProgram {
                 continue;
             }
             let is_entry = executable_entry == Some(module_id);
+            let resources = if is_entry {
+                entry_resources(module)
+            } else {
+                Vec::new()
+            };
+            let provider_base = self.active_resource_providers.len();
+            if is_entry {
+                self.seed_entry_providers(
+                    ExpressionOwner::Module(module_id),
+                    origin.clone(),
+                    &resources,
+                );
+            }
             let items = self.lower_items(
                 module,
                 ExpressionOwner::Module(module_id),
                 &source.syntax.items,
                 &mut diagnostics,
             );
+            self.active_resource_providers.truncate(provider_base);
             let body = self.blocks.push(LoweredBlock {
                 origin: origin.clone(),
                 items,
@@ -2444,11 +2476,7 @@ impl LoweredProgram {
                 origin: origin.clone(),
                 module: module_id,
                 executable_entry: is_entry,
-                resources: if is_entry {
-                    entry_resources(module)
-                } else {
-                    Vec::new()
-                },
+                resources,
                 body,
             });
             let info = LoweredModuleInfo {
@@ -2524,8 +2552,11 @@ impl LoweredProgram {
         function: &ResolvedFunction,
     ) -> Result<BlockId, Diagnostic> {
         let owner = ExpressionOwner::Function(function.id);
-        let body =
-            self.lower_expression(module, owner, ExpressionContext::Primary, &function.body)?;
+        let provider_base = self.active_resource_providers.len();
+        self.seed_function_providers(module, function);
+        let body = self.lower_expression(module, owner, ExpressionContext::Primary, &function.body);
+        self.active_resource_providers.truncate(provider_base);
+        let body = body?;
         if let Some(LoweredExpressionKind::Block(block)) = self
             .expressions
             .get(body)
@@ -2777,6 +2808,214 @@ impl LoweredProgram {
         )
     }
 
+    /// The scope-exit obligation a provider of `value_type` carries: a
+    /// `Reactive` provider disposes its scope, a `Tasks` provider closes its
+    /// queued children, and every other provider is ordinary.
+    fn scope_exit_for(module: &TypedModule, value_type: &CheckedType) -> LoweredScopeExit {
+        if module.is_reactive_type(value_type) {
+            LoweredScopeExit::Reactive
+        } else if module.is_tasks_type(value_type) {
+            LoweredScopeExit::Tasks
+        } else {
+            LoweredScopeExit::Ordinary
+        }
+    }
+
+    /// The nearest active provider with the same checked value type, in
+    /// reverse lexical order — the exact rule code generation uses.
+    fn active_provider_for(&self, value_type: &CheckedType) -> Option<LoweredResourceProviderId> {
+        self.active_resource_providers
+            .iter()
+            .rev()
+            .copied()
+            .find(|provider| {
+                self.resource_providers
+                    .get(*provider)
+                    .is_some_and(|provider| provider.resource.value_type == *value_type)
+            })
+    }
+
+    /// Pushes one provider record for a function effect row or executable
+    /// entry, returning its stable identity.
+    fn push_provider(
+        &mut self,
+        origin: Origin,
+        resource: CheckedResource,
+        kind: LoweredProviderOriginKind,
+        target: LoweredProviderTarget,
+        owner: ExpressionOwner,
+        indirect: bool,
+        borrow: bool,
+        storage: LoweredProviderStorage,
+        scope_exit: LoweredScopeExit,
+    ) -> LoweredResourceProviderId {
+        let parent = self.active_resource_providers.last().copied();
+        let provider = self.resource_providers.push(LoweredResourceProvider {
+            origin,
+            resource,
+            kind,
+            target,
+            parent,
+            owner,
+            indirect,
+            borrow,
+            storage,
+            scope_exit,
+        });
+        self.active_resource_providers.push(provider);
+        provider
+    }
+
+    /// Seeds the provider stack with a function's checked effect-row resources
+    /// at their row positions. Effect resources are implicit ABI parameters
+    /// and own no source symbol.
+    fn seed_function_providers(&mut self, module: &TypedModule, function: &ResolvedFunction) {
+        let Some(signature) = module.type_of_function(function.id).cloned() else {
+            return;
+        };
+        for (position, resource) in signature.effects.resources.iter().cloned().enumerate() {
+            let indirect = resource.mutable
+                || !module.is_copy_in_function(&resource.value_type, Some(function.id));
+            let origin = Origin {
+                syntax: function.body.syntax().id,
+                span: function.body.syntax().span.clone(),
+            };
+            let scope_exit = Self::scope_exit_for(module, &resource.value_type);
+            self.push_provider(
+                origin,
+                resource,
+                LoweredProviderOriginKind::FunctionParameter,
+                LoweredProviderTarget::EffectParameter { position },
+                ExpressionOwner::Function(function.id),
+                indirect,
+                indirect,
+                LoweredProviderStorage::Materialized,
+                scope_exit,
+            );
+        }
+    }
+
+    /// Seeds the provider stack with the executable entry's IO and reactive
+    /// resources, in the order the entry installs them.
+    fn seed_entry_providers(
+        &mut self,
+        owner: ExpressionOwner,
+        origin: Origin,
+        resources: &[LoweredEntryResource],
+    ) {
+        for entry in resources {
+            let (indirect, scope_exit) = match entry.kind {
+                LoweredEntryResourceKind::Io => (true, LoweredScopeExit::Ordinary),
+                LoweredEntryResourceKind::Reactive => (false, LoweredScopeExit::Reactive),
+            };
+            self.push_provider(
+                origin.clone(),
+                entry.resource.clone(),
+                LoweredProviderOriginKind::EntryParameter,
+                LoweredProviderTarget::Entry,
+                owner,
+                indirect,
+                false,
+                LoweredProviderStorage::Materialized,
+                scope_exit,
+            );
+        }
+    }
+
+    /// Lowers an ambient resource occurrence into a use bound to the nearest
+    /// active provider. Missing providers produce the same source diagnostic
+    /// the legacy backend raises.
+    fn lower_resource_use(
+        &mut self,
+        module: &TypedModule,
+        syntax: SyntaxId,
+        span: Span,
+        kind: LoweredResourceUseKind,
+    ) -> Result<LoweredResourceUseId, Diagnostic> {
+        let Some(resource) = module.resource_for_expression(syntax).cloned() else {
+            return Err(Diagnostic::new(
+                span,
+                "cannot lower a resource occurrence without checked resource metadata",
+            ));
+        };
+        let Some(provider) = self.active_provider_for(&resource.value_type) else {
+            return Err(Diagnostic::new(
+                span,
+                format!("resource `{}` is not available", resource.value_type),
+            ));
+        };
+        let indirect = self
+            .resource_providers
+            .get(provider)
+            .is_some_and(|provider| provider.indirect);
+        let pass_mode = match kind {
+            LoweredResourceUseKind::MutablePlace => LoweredArgumentPassMode::MutablePlace,
+            LoweredResourceUseKind::Read | LoweredResourceUseKind::HiddenArgument => {
+                LoweredArgumentPassMode::Value
+            }
+        };
+        Ok(self.resource_uses.push(LoweredResourceUse {
+            origin: Origin { syntax, span },
+            resource,
+            provider: Some(provider),
+            kind,
+            pass_mode,
+            indirect,
+        }))
+    }
+
+    /// Lowers a `with`: the provider value evaluates once, the provider is
+    /// active only while the body lowers, and the scope-exit obligation is
+    /// recorded for both normal and early exits.
+    fn lower_with(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        with: &staple_syntax::WithResourceExpression,
+    ) -> Result<LoweredWithId, Diagnostic> {
+        let origin = Origin {
+            syntax: with.syntax.id,
+            span: with.syntax.span.clone(),
+        };
+        let Some(resource) = module.resource_for_expression(with.syntax.id).cloned() else {
+            return Err(Diagnostic::new(
+                with.syntax.span.clone(),
+                "cannot lower a `with` without checked resource metadata",
+            ));
+        };
+        let value = self.lower_expression(module, owner, context, &with.value)?;
+        let copy = module.is_copy_in_function(&resource.value_type, owner_function(owner));
+        let borrow = with.mutable || !copy;
+        let storage = if borrow && expression_has_place_root(module.resolved(), &with.value) {
+            LoweredProviderStorage::Place
+        } else {
+            LoweredProviderStorage::Materialized
+        };
+        let scope_exit = Self::scope_exit_for(module, &resource.value_type);
+        let provider = self.push_provider(
+            origin.clone(),
+            resource,
+            LoweredProviderOriginKind::Source,
+            LoweredProviderTarget::Expression(value),
+            owner,
+            true,
+            borrow,
+            storage,
+            scope_exit,
+        );
+        let body = self.lower_block(module, owner, context, &with.body);
+        self.active_resource_providers.pop();
+        let body = body?;
+        Ok(self.withs.push(LoweredWith {
+            origin,
+            provider,
+            value,
+            body,
+            scope_exit,
+        }))
+    }
+
     /// The symbol whose initialization state an assignment writes back. Mirrors
     /// code generation's place-pointer result: direct storage keeps its symbol,
     /// slice and dereference places do not.
@@ -2887,14 +3126,13 @@ impl LoweredProgram {
                 return self.lower_place(module, owner, context, &satisfies.value);
             }
             Expression::Resource(resource) => {
-                let Some(resource) = module.resource_for_expression(resource.syntax.id).cloned()
-                else {
-                    return Err(Diagnostic::new(
-                        resource.syntax.span.clone(),
-                        "cannot lower a resource place without checked resource metadata",
-                    ));
-                };
-                LoweredPlaceKind::Resource { resource }
+                let use_ = self.lower_resource_use(
+                    module,
+                    resource.syntax.id,
+                    resource.syntax.span.clone(),
+                    LoweredResourceUseKind::MutablePlace,
+                )?;
+                LoweredPlaceKind::Resource { use_ }
             }
             Expression::Access(access) => {
                 self.lower_access_place(module, owner, context, access)?
@@ -3159,11 +3397,7 @@ impl LoweredProgram {
                 self.lower_ordinary_expression(module, owner, context, family, expression)?
             }
             ExpressionDisposition::Stage26(route) => {
-                // The route owns its concrete payload; Steps 2, 4, 5, and 6
-                // populate provider, reactive, and coroutine records. Until
-                // then the expression records its explicit route instead of an
-                // untyped fallback.
-                LoweredExpressionKind::Stage26Deferred(route)
+                self.lower_stage26_expression(module, owner, context, route, expression)?
             }
             ExpressionDisposition::Deferred(family) => LoweredExpressionKind::Deferred(family),
             ExpressionDisposition::Rejected => unreachable!("rejected above"),
@@ -3268,6 +3502,34 @@ impl LoweredProgram {
                     family_name(family)
                 ),
             )),
+        }
+    }
+
+    /// Lowers one Stage 2.6-owned family. Resource reads, providers, and places
+    /// have concrete payloads; coroutine creation and `await` keep their
+    /// explicit route until Steps 5 and 6 populate their records.
+    fn lower_stage26_expression(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        context: ExpressionContext,
+        route: Stage26Route,
+        expression: &Expression,
+    ) -> Result<LoweredExpressionKind, Diagnostic> {
+        match (route, expression) {
+            (Stage26Route::ResourceUse, Expression::Resource(resource)) => {
+                let use_ = self.lower_resource_use(
+                    module,
+                    resource.syntax.id,
+                    resource.syntax.span.clone(),
+                    LoweredResourceUseKind::Read,
+                )?;
+                Ok(LoweredExpressionKind::Resource(use_))
+            }
+            (Stage26Route::ResourceProvider, Expression::With(with)) => self
+                .lower_with(module, owner, context, with)
+                .map(LoweredExpressionKind::With),
+            (_, _) => Ok(LoweredExpressionKind::Stage26Deferred(route)),
         }
     }
 
@@ -5797,7 +6059,7 @@ impl LoweredProgram {
                     parent.index(),
                 ));
             }
-            match provider.target {
+            let target_kind = match provider.target {
                 LoweredProviderTarget::Expression(expression) => {
                     if !self.expressions.contains(expression) {
                         diagnostics.push(invalid_reference(
@@ -5807,29 +6069,58 @@ impl LoweredProgram {
                             expression.index(),
                         ));
                     }
+                    LoweredProviderOriginKind::Source
                 }
-                LoweredProviderTarget::Symbol(symbol) => {
-                    if self.symbols.get(symbol).is_none() {
-                        diagnostics.push(invalid_reference(
-                            &provider.origin,
-                            "resource provider",
-                            "symbol",
-                            symbol.0,
-                        ));
-                    }
+                LoweredProviderTarget::EffectParameter { .. } => {
+                    LoweredProviderOriginKind::FunctionParameter
+                }
+                LoweredProviderTarget::Entry => LoweredProviderOriginKind::EntryParameter,
+            };
+            if provider.kind != target_kind {
+                diagnostics.push(Diagnostic::new(
+                    provider.origin.span.clone(),
+                    "resource provider origin and target disagree",
+                ));
+            }
+            if let Some(parent) = provider.parent {
+                match self.resource_providers.get(parent) {
+                    Some(parent) if parent.owner == provider.owner => {}
+                    Some(_) => diagnostics.push(Diagnostic::new(
+                        provider.origin.span.clone(),
+                        "resource provider nests across two lexical owners",
+                    )),
+                    None => {}
                 }
             }
         }
         for (_, use_) in self.resource_uses.iter() {
-            if let Some(provider) = use_.provider
-                && !self.resource_providers.contains(provider)
-            {
-                diagnostics.push(invalid_reference(
-                    &use_.origin,
-                    "resource use",
-                    "provider",
-                    provider.index(),
-                ));
+            match use_.provider {
+                Some(provider) => match self.resource_providers.get(provider) {
+                    Some(record) => {
+                        if record.resource.value_type != use_.resource.value_type {
+                            diagnostics.push(Diagnostic::new(
+                                use_.origin.span.clone(),
+                                format!(
+                                    "resource use `{}` selected a provider for `{}`",
+                                    use_.resource.value_type, record.resource.value_type
+                                ),
+                            ));
+                        }
+                        if use_.indirect != record.indirect {
+                            diagnostics.push(Diagnostic::new(
+                                use_.origin.span.clone(),
+                                "resource use indirectness disagrees with its provider",
+                            ));
+                        }
+                    }
+                    None => diagnostics.push(invalid_reference(
+                        &use_.origin,
+                        "resource use",
+                        "provider",
+                        provider.index(),
+                    )),
+                },
+                None => {}
             }
         }
         for (_, with) in self.withs.iter() {
@@ -5856,6 +6147,35 @@ impl LoweredProgram {
                     "block",
                     with.body.index(),
                 ));
+            }
+            match (
+                self.resource_providers.get(with.provider),
+                self.expressions.get(with.value),
+            ) {
+                (Some(provider), Some(value)) => {
+                    if provider.kind != LoweredProviderOriginKind::Source {
+                        diagnostics.push(Diagnostic::new(
+                            with.origin.span.clone(),
+                            "lowered `with` references a non-source provider",
+                        ));
+                    }
+                    if !types_agree(&provider.resource.value_type, &value.value_type) {
+                        diagnostics.push(Diagnostic::new(
+                            with.origin.span.clone(),
+                            format!(
+                                "lowered `with` provider is `{}` but its value is `{}`",
+                                provider.resource.value_type, value.value_type
+                            ),
+                        ));
+                    }
+                    if provider.scope_exit != with.scope_exit {
+                        diagnostics.push(Diagnostic::new(
+                            with.origin.span.clone(),
+                            "lowered `with` scope-exit classification disagrees with its provider",
+                        ));
+                    }
+                }
+                _ => {}
             }
         }
         for (_, callback) in self.reactive_callbacks.iter() {
@@ -7422,7 +7742,19 @@ impl LoweredProgram {
                         ));
                     }
                 }
-                LoweredPlaceKind::Resource { .. } => {}
+                LoweredPlaceKind::Resource { use_ } => match self.resource_uses.get(*use_) {
+                    Some(use_) if use_.kind == LoweredResourceUseKind::MutablePlace => {}
+                    Some(_) => diagnostics.push(Diagnostic::new(
+                        place.origin.span.clone(),
+                        "resource place references a resource read",
+                    )),
+                    None => diagnostics.push(invalid_reference(
+                        &place.origin,
+                        "place",
+                        "resource use",
+                        use_.index(),
+                    )),
+                },
                 LoweredPlaceKind::Dereference { reference, .. } => {
                     if !self.expressions.contains(*reference) {
                         diagnostics.push(invalid_reference(
@@ -7589,6 +7921,16 @@ impl LoweredProgram {
     /// memo is expected; the traversal visits each node once.
     fn validate_ownership(&self) -> Vec<Diagnostic> {
         let mut reached = Reachability::default();
+        // Function effect providers and executable-entry providers are scope
+        // roots installed by the owner's prologue: nothing expression-shaped
+        // references them, so they seed the traversal directly. `with`
+        // providers are reached through their `with` expression or the uses
+        // that select them.
+        for (id, provider) in self.resource_providers.iter() {
+            if provider.kind != LoweredProviderOriginKind::Source {
+                self.visit_owned_resource_provider(id, &mut reached);
+            }
+        }
         for (_, initializer) in self.initializers.iter() {
             self.visit_owned_block(initializer.body, &mut reached);
         }
@@ -8137,9 +8479,10 @@ impl LoweredProgram {
                 self.visit_owned_place(*base, reached);
                 self.visit_owned_expression(*index, reached);
             }
-            LoweredPlaceKind::Symbol { .. }
-            | LoweredPlaceKind::CapturedCell { .. }
-            | LoweredPlaceKind::Resource { .. } => {}
+            LoweredPlaceKind::Resource { use_ } => {
+                self.visit_owned_resource_use(*use_, reached);
+            }
+            LoweredPlaceKind::Symbol { .. } | LoweredPlaceKind::CapturedCell { .. } => {}
         }
     }
 
@@ -9427,6 +9770,15 @@ fn reject_compile_time_expression(expression: &Expression) -> Result<(), Diagnos
         _ => return Ok(()),
     };
     Err(Diagnostic::new(expression.syntax().span.clone(), message))
+}
+
+/// The function a runtime owner lowers inside, if any. Module initializers
+/// have no function context for `Copy`/borrow decisions.
+fn owner_function(owner: ExpressionOwner) -> Option<FunctionId> {
+    match owner {
+        ExpressionOwner::Function(function) => Some(function),
+        ExpressionOwner::Module(_) => None,
+    }
 }
 
 /// Whether an expression has a place root, mirroring code generation's
@@ -11276,6 +11628,21 @@ mod tests {
                 .iter()
                 .any(|resource| resource.kind == LoweredEntryResourceKind::Reactive)
         );
+        let reactive_provider = program
+            .resource_providers
+            .iter()
+            .find_map(|(_, provider)| {
+                (provider.owner == ExpressionOwner::Module(entry_id)
+                    && provider.kind == LoweredProviderOriginKind::EntryParameter
+                    && provider.scope_exit == LoweredScopeExit::Reactive)
+                    .then_some(provider)
+            })
+            .expect("the entry should install a reactive provider");
+        assert_eq!(reactive_provider.target, LoweredProviderTarget::Entry);
+        assert!(
+            !reactive_provider.indirect,
+            "the entry reactive scope is a direct value"
+        );
     }
 
     #[test]
@@ -11862,7 +12229,10 @@ mod tests {
             !deferred.contains(&DeferredExpressionFamily::Callable),
             "every call and callable value lowers to an owned node"
         );
-        assert!(deferred.contains(&DeferredExpressionFamily::Resource));
+        assert!(
+            !deferred.contains(&DeferredExpressionFamily::Resource),
+            "resource reads and `with` lower to owned nodes"
+        );
         assert!(deferred.contains(&DeferredExpressionFamily::Coroutine));
     }
 
@@ -11893,10 +12263,28 @@ mod tests {
         assert!(program.validate().is_empty());
 
         let routes = stage26_routes(&program);
-        for route in Stage26Route::ALL {
+        for route in [
+            Stage26Route::CoroutineCreation,
+            Stage26Route::AwaitChildCoroutine,
+            Stage26Route::AwaitTask,
+            Stage26Route::AwaitWait,
+        ] {
             assert!(
                 routes.contains(&route),
-                "the route fixture should lower `{route:?}`; have {routes:?}"
+                "the route fixture should still defer `{route:?}`; have {routes:?}"
+            );
+        }
+        let mut kinds = program
+            .expressions
+            .iter()
+            .map(|(_, expression)| expression_kind_name(&expression.kind))
+            .collect::<Vec<_>>();
+        kinds.sort_unstable();
+        kinds.dedup();
+        for expected in ["resource", "with"] {
+            assert!(
+                kinds.iter().any(|kind| kind == expected),
+                "resource expressions should lower concretely; have {kinds:?}"
             );
         }
         for route in Stage26Route::ALL {
@@ -11909,7 +12297,7 @@ mod tests {
                 }
             );
         }
-        let mut families = routes
+        let mut families = Stage26Route::ALL
             .iter()
             .map(|route| route.record_family())
             .collect::<Vec<_>>();
@@ -14963,10 +15351,10 @@ mod tests {
             "product",
             "repeated-product",
             "satisfies",
+            "resource",
             "stage26.Await",
             "stage26.Coro",
-            "stage26.ResourceUse",
-            "stage26.With",
+            "with",
             "string",
             "string-template",
         ] {
@@ -15567,16 +15955,290 @@ mod tests {
             panic!("`(resource Counter).value` should lower to a representation place");
         };
         let resource = lowered_place(&program, *base);
-        let LoweredPlaceKind::Resource { resource: checked } = &resource.kind else {
+        let LoweredPlaceKind::Resource { use_ } = &resource.kind else {
             panic!("the representation base should be a resource place");
         };
-        assert_eq!(resource.value_type, checked.value_type);
+        let use_ = program
+            .resource_uses
+            .get(*use_)
+            .expect("the resource place should bind a use");
+        assert_eq!(use_.kind, LoweredResourceUseKind::MutablePlace);
+        assert!(use_.provider.is_some(), "the effect parameter is in scope");
+        assert_eq!(resource.value_type, use_.resource.value_type);
         let Some(id) = nominal_type_id(&resource.value_type) else {
             panic!("a resource type should be nominal");
         };
         assert_eq!(
             program.types.get(id).map(|info| info.name.as_str()),
             Some("Counter")
+        );
+    }
+
+    /// Provider identities owned by one lowered function, in creation order.
+    fn function_providers(
+        program: &LoweredProgram,
+        function: FunctionId,
+    ) -> Vec<LoweredResourceProviderId> {
+        program
+            .resource_providers
+            .iter()
+            .filter_map(|(id, provider)| {
+                (provider.owner == ExpressionOwner::Function(function)).then_some(id)
+            })
+            .collect()
+    }
+
+    /// Resource reads owned by one lowered function, in expression order.
+    fn function_resource_uses(
+        program: &LoweredProgram,
+        function: FunctionId,
+    ) -> Vec<&LoweredResourceUse> {
+        program
+            .expressions
+            .iter()
+            .filter(|(_, expression)| expression.key.owner == ExpressionOwner::Function(function))
+            .filter_map(|(_, expression)| match expression.kind {
+                LoweredExpressionKind::Resource(use_) => program.resource_uses.get(use_),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resource_uses_bind_the_nearest_matching_provider() {
+        let module = checked_program(concat!(
+            "type A = ctor (value: I32)\n",
+            "type B = ctor (value: I32)\n",
+            "def read_a: () ->{A} I32 = () => (resource A).value\n",
+            "def read_b: () ->{B} I32 = () => (resource B).value\n",
+            "def nested: () -> I32 = () => with A = A (value: 1) {\n",
+            "  let outer = (resource A).value\n",
+            "  with A = A (value: 2) { (resource A).value }\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let (_, read_a) = lowered_function(&program, "read_a");
+        let use_ = function_resource_uses(&program, read_a.semantic_id)
+            .into_iter()
+            .next()
+            .expect("read_a should lower a resource read");
+        let provider = program
+            .resource_providers
+            .get(use_.provider.expect("read_a provider"))
+            .expect("provider");
+        assert_eq!(provider.kind, LoweredProviderOriginKind::FunctionParameter);
+        assert_eq!(
+            provider.target,
+            LoweredProviderTarget::EffectParameter { position: 0 }
+        );
+        assert_eq!(
+            provider.owner,
+            ExpressionOwner::Function(read_a.semantic_id)
+        );
+        assert!(
+            !provider.indirect,
+            "a plain `Copy` effect resource is passed by value"
+        );
+
+        let (_, nested) = lowered_function(&program, "nested");
+        let providers = function_providers(&program, nested.semantic_id);
+        assert_eq!(providers.len(), 2, "outer and inner `with` providers");
+        let outer = providers[0];
+        let inner = providers[1];
+        assert_eq!(
+            program.resource_providers.get(inner).unwrap().parent,
+            Some(outer),
+            "the inner provider nests in the outer one"
+        );
+        assert_eq!(program.resource_providers.get(outer).unwrap().parent, None);
+
+        let reads = function_resource_uses(&program, nested.semantic_id);
+        assert_eq!(reads.len(), 2);
+        assert_eq!(
+            reads[0].provider,
+            Some(outer),
+            "the binding before the inner `with` selects the outer provider"
+        );
+        assert_eq!(
+            reads[1].provider,
+            Some(inner),
+            "the read inside the inner `with` selects the shadowing provider"
+        );
+    }
+
+    #[test]
+    fn with_records_provider_storage_scope_exit_and_borrow_facts() {
+        let module = checked_program(concat!(
+            "type A = ctor (value: I32)\n",
+            "type Handle = ctor I32\n",
+            "impl Drop Handle { def drop = Handle value => () }\n",
+            "def mutable_provider: () -> () = () => {\n",
+            "  let mut value = A (value: 1)\n",
+            "  with mut A = value { () }\n",
+            "}\n",
+            "def materialized_provider: () -> () = () => with A = A (value: 2) { () }\n",
+            "def borrowed_provider: () -> () = () => with Handle = Handle 1 { () }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let (_, mutable) = lowered_function(&program, "mutable_provider");
+        let providers = function_providers(&program, mutable.semantic_id);
+        assert_eq!(providers.len(), 1);
+        let provider = program.resource_providers.get(providers[0]).unwrap();
+        assert!(provider.borrow, "a mutable provider is borrowed");
+        assert!(provider.indirect, "a borrowed provider passes by pointer");
+        assert_eq!(provider.storage, LoweredProviderStorage::Place);
+        assert_eq!(provider.scope_exit, LoweredScopeExit::Ordinary);
+
+        let (_, materialized) = lowered_function(&program, "materialized_provider");
+        let providers = function_providers(&program, materialized.semantic_id);
+        assert_eq!(providers.len(), 1);
+        let provider = program.resource_providers.get(providers[0]).unwrap();
+        assert_eq!(provider.storage, LoweredProviderStorage::Materialized);
+        assert_eq!(provider.kind, LoweredProviderOriginKind::Source);
+        assert!(matches!(
+            provider.target,
+            LoweredProviderTarget::Expression(_)
+        ));
+
+        let (_, borrowed) = lowered_function(&program, "borrowed_provider");
+        let providers = function_providers(&program, borrowed.semantic_id);
+        assert_eq!(providers.len(), 1);
+        let provider = program.resource_providers.get(providers[0]).unwrap();
+        assert!(provider.borrow, "a non-`Copy` provider is borrowed");
+        assert!(provider.indirect, "a borrowed provider passes by pointer");
+        assert_eq!(provider.storage, LoweredProviderStorage::Materialized);
+    }
+
+    #[test]
+    fn reactive_and_entry_providers_record_scope_exit_classifications() {
+        let module = checked_program(concat!(
+            "let signal count = 0\n",
+            "with Reactive = reactive_scope () { count = 1 }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let (entry_id, _) = entry_module(&program);
+        let entry_roots = program
+            .resource_providers
+            .iter()
+            .filter_map(|(id, provider)| {
+                (provider.owner == ExpressionOwner::Module(entry_id)
+                    && provider.kind == LoweredProviderOriginKind::EntryParameter)
+                    .then_some((id, provider))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(entry_roots.len(), 1, "the entry IO root");
+        let io = entry_roots[0].1;
+        assert_eq!(io.target, LoweredProviderTarget::Entry);
+        assert_eq!(io.scope_exit, LoweredScopeExit::Ordinary);
+        assert!(io.indirect);
+
+        let with = program
+            .withs
+            .iter()
+            .find(|(_, with)| {
+                program
+                    .resource_providers
+                    .get(with.provider)
+                    .is_some_and(|provider| {
+                        provider.owner == ExpressionOwner::Module(entry_id)
+                            && provider.kind == LoweredProviderOriginKind::Source
+                    })
+            })
+            .map(|(_, with)| with)
+            .expect("the source `with Reactive` should lower");
+        let source_provider = program
+            .resource_providers
+            .get(with.provider)
+            .expect("the source provider");
+        assert_eq!(source_provider.kind, LoweredProviderOriginKind::Source);
+        assert_eq!(source_provider.scope_exit, LoweredScopeExit::Reactive);
+        assert_eq!(with.scope_exit, LoweredScopeExit::Reactive);
+    }
+
+    #[test]
+    fn validator_rejects_inconsistent_resource_records() {
+        let module = checked_program(concat!(
+            "type A = ctor (value: I32)\n",
+            "def bump: () ->{mut A} () = () => {\n",
+            "  (resource A).value = (resource A).value + 1\n",
+            "}\n",
+            "def nested: () -> I32 = () => with A = A (value: 1) {\n",
+            "  let outer = (resource A).value\n",
+            "  with A = A (value: 2) { (resource A).value }\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+
+        let (_, nested) = lowered_function(&program, "nested");
+        let providers = function_providers(&program, nested.semantic_id);
+        let inner_provider = providers[1];
+        let use_id = program
+            .resource_uses
+            .iter()
+            .find_map(|(id, use_)| (use_.provider == Some(inner_provider)).then_some(id))
+            .expect("the inner `with` read");
+        // Make the use's expected type disagree with its provider.
+        program.resource_uses.values[use_id.index()]
+            .resource
+            .value_type = CheckedType::I32;
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("selected a provider for")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let (_, nested) = lowered_function(&program, "nested");
+        let providers = function_providers(&program, nested.semantic_id);
+        // Make the outer provider claim an effect-parameter origin while its
+        // target is still an expression.
+        program.resource_providers.values[providers[0].index()].kind =
+            LoweredProviderOriginKind::FunctionParameter;
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("origin and target disagree")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let place_id = program
+            .places
+            .iter()
+            .find_map(|(id, place)| {
+                matches!(place.kind, LoweredPlaceKind::Resource { .. }).then_some(id)
+            })
+            .expect("the resource assignment place");
+        let LoweredPlaceKind::Resource { use_ } =
+            program.places.values[place_id.index()].kind.clone()
+        else {
+            unreachable!()
+        };
+        program.resource_uses.values[use_.index()].kind = LoweredResourceUseKind::Read;
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("resource read")),
+            "unexpected diagnostics: {diagnostics:?}"
         );
     }
 

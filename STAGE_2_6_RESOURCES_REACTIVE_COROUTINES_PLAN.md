@@ -33,8 +33,9 @@ Use the existing expression `Origin` and checked type/effect headers. Do not clo
 
 ## Progress
 
-- Step 1 complete: backend resource/reactive/coroutine decisions inventoried; owned provider, use, `with`, reactive-operation/callback, coroutine-plan, `coro`, and `await` records and arenas added with typed links; expression dispatch, intrinsic routing, arena validation, loop-exit traversal, and ownership traversal extended; route-table coverage tests added. Concrete payload population begins in Step 2.
-- Steps 2-7 pending.
+- Step 1 complete: backend resource/reactive/coroutine decisions inventoried; owned provider, use, `with`, reactive-operation/callback, coroutine-plan, `coro`, and `await` records and arenas added with typed links; expression dispatch, intrinsic routing, arena validation, loop-exit traversal, and ownership traversal extended; route-table coverage tests added.
+- Step 2 complete: function effect rows and executable-entry resources seed stable lexical providers; `with` evaluates its provider once and records place-backed versus materialized storage, borrow/indirect facts, and `Reactive`/`Tasks`/ordinary scope exits; `resource` reads and resource assignment places bind the nearest matching provider by checked value type and become explicit resource uses; validation checks provider kind/target agreement, same-owner nesting, use/provider type and indirectness agreement, `with` value and scope-exit agreement, and mutable-place legality; focused shadowing/storage/scope-exit/corruption tests plus CLI resource and reactive compile-run tests pass.
+- Steps 3-7 pending.
 
 ## Implementation sequence
 
