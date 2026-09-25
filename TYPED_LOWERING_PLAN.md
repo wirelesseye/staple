@@ -43,7 +43,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - Changed all public `CodeGenerator` entry points to accept `&LoweredModule`; direct public emission from `TypedModule` is no longer available.
 - Kept the old backend reachable only through a private transitional `LoweredModule::typed` bridge. Removing this bridge requires the explicit arenas and metadata introduced in Stage 2.
 
-### Stage 2 - Lower Existing Typed Programs Completely (In Progress: 2.1-2.5 Done)
+### Stage 2 - Lower Existing Typed Programs Completely (In Progress: 2.1-2.6 Done)
 
 - Add owned, arena-backed lowered modules, expressions, patterns, initializers, callable targets, function templates, trait evidence, closure construction, ownership facts, and helper requirements alongside the temporary legacy backend payload.
 - Preserve source spans and syntax IDs on lowered nodes for diagnostics.

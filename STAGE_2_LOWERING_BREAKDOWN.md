@@ -226,7 +226,7 @@ Progress:
 
 > **Complexity note:** This is Stage 2's highest-risk substage. Curried calls, generic captures, trait functional dependencies, defaults, and structural evidence may require separate breakdown plans.
 
-## Stage 2.6 - Lower Resources, Reactive Operations, and Coroutines
+## Stage 2.6 - Lower Resources, Reactive Operations, and Coroutines (Done)
 
 The focused implementation sequence is maintained in [STAGE_2_6_RESOURCES_REACTIVE_COROUTINES_PLAN.md](STAGE_2_6_RESOURCES_REACTIVE_COROUTINES_PLAN.md).
 

@@ -3010,7 +3010,6 @@ impl LoweredProgram {
                 syntax: function.body.syntax().id,
                 span: function.body.syntax().span.clone(),
             };
-            let scope_exit = Self::scope_exit_for(module, &resource.value_type);
             self.push_provider(
                 origin,
                 resource,
@@ -3020,7 +3019,9 @@ impl LoweredProgram {
                 indirect,
                 indirect,
                 LoweredProviderStorage::Materialized,
-                scope_exit,
+                // Effect parameters borrow the caller's scope; only a `with`
+                // provider or an entry-created scope owns its cleanup.
+                LoweredScopeExit::Ordinary,
             );
         }
     }
@@ -3441,7 +3442,7 @@ impl LoweredProgram {
         let value = self.lower_expression(module, owner, context, &with.value)?;
         let copy = module.is_copy_in_function(&resource.value_type, owner_function(owner));
         let borrow = with.mutable || !copy;
-        let storage = if borrow && expression_has_place_root(module.resolved(), &with.value) {
+        let storage = if borrow && self.provider_value_has_place(module, &with.value) {
             LoweredProviderStorage::Place
         } else {
             LoweredProviderStorage::Materialized
@@ -3468,6 +3469,43 @@ impl LoweredProgram {
             body,
             scope_exit,
         }))
+    }
+
+    /// Whether code generation can reuse an existing pointer for a `with`
+    /// value. This follows `compile_place_pointer`, including resource places
+    /// and transparent single-value wrappers, rather than the narrower
+    /// symbol-root test used for call argument mutation.
+    fn provider_value_has_place(&self, module: &TypedModule, value: &Expression) -> bool {
+        if module.resolved().symbol_for(value.syntax().id).is_some() {
+            return true;
+        }
+        match value {
+            Expression::Product(product) if product.elements.len() == 1 => {
+                self.provider_value_has_place(module, &product.elements[0].value)
+            }
+            Expression::Satisfies(satisfies) => {
+                self.provider_value_has_place(module, &satisfies.value)
+            }
+            Expression::Resource(resource) => module
+                .resource_for_expression(resource.syntax.id)
+                .and_then(|required| self.active_provider_for(&required.value_type))
+                .and_then(|provider| self.resource_providers.get(provider))
+                .is_some_and(|provider| provider.indirect),
+            Expression::Access(access) => match module.access_for(access.syntax.id) {
+                Some(crate::CheckedAccess::Representation { dereference }) => {
+                    !dereference.is_empty() || self.provider_value_has_place(module, &access.value)
+                }
+                Some(crate::CheckedAccess::Product {
+                    dereference, slice, ..
+                }) => {
+                    !dereference.is_empty()
+                        || *slice
+                        || self.provider_value_has_place(module, &access.value)
+                }
+                None => false,
+            },
+            _ => false,
+        }
     }
 
     /// The symbol whose initialization state an assignment writes back. Mirrors
@@ -6737,6 +6775,14 @@ impl LoweredProgram {
                 diagnostics.push(Diagnostic::new(
                     provider.origin.span.clone(),
                     "resource provider origin and target disagree",
+                ));
+            }
+            if provider.kind == LoweredProviderOriginKind::FunctionParameter
+                && provider.scope_exit != LoweredScopeExit::Ordinary
+            {
+                diagnostics.push(Diagnostic::new(
+                    provider.origin.span.clone(),
+                    "function effect parameter cannot own resource scope cleanup",
                 ));
             }
             if let Some(parent) = provider.parent {
@@ -17693,6 +17739,8 @@ mod tests {
             "}\n",
             "def materialized_provider: () -> () = () => with A = A (value: 2) { () }\n",
             "def borrowed_provider: () -> () = () => with Handle = Handle 1 { () }\n",
+            "def aliased_provider: () ->{mut A} () = () => ",
+            "  with mut A = resource A { (resource A).value = 2 }\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -17726,6 +17774,12 @@ mod tests {
         assert!(provider.borrow, "a non-`Copy` provider is borrowed");
         assert!(provider.indirect, "a borrowed provider passes by pointer");
         assert_eq!(provider.storage, LoweredProviderStorage::Materialized);
+        let (_, aliased) = lowered_function(&program, "aliased_provider");
+        let providers = function_providers(&program, aliased.semantic_id);
+        assert_eq!(providers.len(), 2, "effect parameter and nested `with`");
+        let provider = program.resource_providers.get(providers[1]).unwrap();
+        assert_eq!(provider.storage, LoweredProviderStorage::Place);
+        assert_eq!(provider.parent, Some(providers[0]));
     }
 
     #[test]
@@ -17733,6 +17787,8 @@ mod tests {
         let module = checked_program(concat!(
             "let signal count = 0\n",
             "with Reactive = reactive_scope () { count = 1 }\n",
+            "def uses_borrowed_reactive: () ->{Reactive} () = () => ",
+            "  reaction { () }\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -17776,6 +17832,23 @@ mod tests {
         assert_eq!(source_provider.kind, LoweredProviderOriginKind::Source);
         assert_eq!(source_provider.scope_exit, LoweredScopeExit::Reactive);
         assert_eq!(with.scope_exit, LoweredScopeExit::Reactive);
+
+        let (_, borrowed) = lowered_function(&program, "uses_borrowed_reactive");
+        let providers = function_providers(&program, borrowed.semantic_id);
+        assert_eq!(providers.len(), 1);
+        let provider = program.resource_providers.get(providers[0]).unwrap();
+        assert_eq!(provider.kind, LoweredProviderOriginKind::FunctionParameter);
+        assert_eq!(provider.scope_exit, LoweredScopeExit::Ordinary);
+
+        program.resource_providers.values[providers[0].index()].scope_exit =
+            LoweredScopeExit::Reactive;
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("function effect parameter cannot own resource scope cleanup")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
     }
 
     #[test]
