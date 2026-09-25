@@ -866,6 +866,9 @@ pub(crate) struct LoweredCall {
     /// The call owns a C-string temporary that must outlive the call (an
     /// extern call whose argument is an unsymbolized `CString` value).
     pub c_string_temporary: bool,
+    /// The reactive operation this intrinsic call performs (`reactive_scope`,
+    /// `reaction`, `batch`, `until`, `snapshot`).
+    pub reactive: Option<LoweredReactiveOperationId>,
 }
 
 /// A first-class callable value with its explicit target and construction
@@ -1006,15 +1009,28 @@ pub(crate) struct LoweredReactiveCallback {
     pub resources: Vec<LoweredResourceUseId>,
 }
 
+/// Where a signal's storage is created: module global storage or a local
+/// binding cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredSignalStorage {
+    Global,
+    LocalCell,
+}
+
 /// A signal, derived, or reactive operation attached to its checking site.
 #[derive(Debug, Clone)]
 pub(crate) enum LoweredReactiveOperationKind {
     /// Signal storage creation for a symbol.
-    SignalCreate { symbol: SymbolId },
+    SignalCreate {
+        symbol: SymbolId,
+        storage: LoweredSignalStorage,
+    },
     /// A tracked read of a signal symbol.
     SignalRead { symbol: SymbolId },
     /// A write notification for a signal symbol.
     SignalNotify { symbol: SymbolId },
+    /// A read that forces a derived binding to recompute if stale.
+    DerivedRead { symbol: SymbolId },
     /// Derived binding creation: evaluator thunk, captures, callback type.
     DerivedCreate {
         symbol: SymbolId,
@@ -1419,6 +1435,9 @@ pub(crate) struct LoweredName {
     pub move_parameter: bool,
     /// Singleton type identity when the name denotes a singleton value.
     pub singleton: Option<TypeId>,
+    /// The tracked signal read or derived read this occurrence performs, when
+    /// the symbol carries reactive storage.
+    pub reactive: Option<LoweredReactiveOperationId>,
 }
 
 /// A checked integer literal. The magnitude is parsed once and validated
@@ -1602,6 +1621,9 @@ pub(crate) struct LoweredBindingItem {
     pub generic: bool,
     pub derived: bool,
     pub signal: bool,
+    /// The signal creation or derived creation this binding performs, when the
+    /// symbol carries reactive storage.
+    pub reactive: Option<LoweredReactiveOperationId>,
     /// The binding's value lives in a local binding cell rather than an SSA
     /// value or module global storage.
     pub cell: bool,
@@ -1631,8 +1653,9 @@ pub(crate) struct LoweredAssignmentItem {
     pub initialization_symbol: Option<SymbolId>,
     /// Whether the place's previous value must be dropped before the store.
     pub drop_previous: bool,
-    /// Whether the assignment must notify the symbol's signal metadata.
-    pub signal: bool,
+    /// The signal write notification this assignment performs, when the place
+    /// is rooted at a signal symbol.
+    pub signal_notify: Option<LoweredReactiveOperationId>,
 }
 
 #[derive(Debug, Clone)]
@@ -2707,6 +2730,7 @@ impl LoweredProgram {
             Some(value) => Some(self.lower_expression(module, owner, context, value)?),
             None => None,
         };
+        let reactive = self.lower_binding_reactive_operation(module, binding, symbol)?;
         Ok(LoweredBindingItem {
             symbol: Some(symbol),
             value,
@@ -2714,6 +2738,7 @@ impl LoweredProgram {
             generic: !binding.type_parameters.is_empty(),
             derived: module.is_derived_symbol(symbol),
             signal: resolved.is_signal_symbol(symbol),
+            reactive,
             cell: symbol_requires_cell(module, symbol),
             requires_initialization_check: resolved.requires_initialization_state(symbol),
         })
@@ -2773,7 +2798,7 @@ impl LoweredProgram {
                 evidence,
                 initialization_symbol: None,
                 drop_previous: false,
-                signal: false,
+                signal_notify: None,
             });
         }
         let target = self.lower_place(module, owner, context, &assignment.target)?;
@@ -2784,8 +2809,17 @@ impl LoweredProgram {
             .map(|place| place.value_type.clone())
             .unwrap_or(CheckedType::Error);
         let initialization_symbol = self.place_root_symbol(target);
-        let signal =
-            initialization_symbol.is_some_and(|symbol| module.resolved().is_signal_symbol(symbol));
+        let signal_notify = initialization_symbol
+            .filter(|symbol| module.resolved().is_signal_symbol(*symbol))
+            .map(|symbol| {
+                self.push_reactive_operation(
+                    Origin {
+                        syntax: assignment.syntax.id,
+                        span: assignment.syntax.span.clone(),
+                    },
+                    LoweredReactiveOperationKind::SignalNotify { symbol },
+                )
+            });
         Ok(LoweredAssignmentItem {
             target,
             value,
@@ -2793,7 +2827,7 @@ impl LoweredProgram {
             evidence: None,
             initialization_symbol,
             drop_previous: module.type_needs_drop(&target_type),
-            signal,
+            signal_notify,
         })
     }
 
@@ -3013,6 +3047,267 @@ impl LoweredProgram {
             pass_mode,
             indirect,
         }))
+    }
+
+    /// Pushes one reactive operation record.
+    fn push_reactive_operation(
+        &mut self,
+        origin: Origin,
+        kind: LoweredReactiveOperationKind,
+    ) -> LoweredReactiveOperationId {
+        self.reactive_operations
+            .push(LoweredReactiveOperation { origin, kind })
+    }
+
+    /// Where a signal's storage is created: module symbols live in globals,
+    /// everything else in a binding cell.
+    fn signal_storage(&self, module: &TypedModule, symbol: SymbolId) -> LoweredSignalStorage {
+        if module.resolved().is_module_symbol(symbol) {
+            LoweredSignalStorage::Global
+        } else {
+            LoweredSignalStorage::LocalCell
+        }
+    }
+
+    /// Records the signal creation or derived creation performed by a binding.
+    /// Generic bindings only record initialization state in the backend, so
+    /// they create no reactive storage.
+    fn lower_binding_reactive_operation(
+        &mut self,
+        module: &TypedModule,
+        binding: &staple_syntax::Binding,
+        symbol: SymbolId,
+    ) -> Result<Option<LoweredReactiveOperationId>, Diagnostic> {
+        if !binding.type_parameters.is_empty() {
+            return Ok(None);
+        }
+        let origin = Origin {
+            syntax: binding.syntax.id,
+            span: binding.syntax.span.clone(),
+        };
+        if module.is_derived_symbol(symbol) {
+            let Some(evaluator) = module.derived_evaluator(symbol) else {
+                return Err(Diagnostic::new(
+                    origin.span,
+                    "derived evaluator is unavailable",
+                ));
+            };
+            let evaluator = evaluator.id;
+            let Some(function_type) = module.type_of_function(evaluator).cloned() else {
+                return Err(Diagnostic::new(
+                    origin.span,
+                    "derived evaluator has no function type",
+                ));
+            };
+            if !function_type.effects.resources.is_empty() {
+                return Err(Diagnostic::new(
+                    origin.span,
+                    "derived evaluators cannot capture resources",
+                ));
+            }
+            let captures = self
+                .functions
+                .get(evaluator)
+                .map(|function| function.captures.clone())
+                .unwrap_or_default();
+            return Ok(Some(self.push_reactive_operation(
+                origin,
+                LoweredReactiveOperationKind::DerivedCreate {
+                    symbol,
+                    evaluator,
+                    function_type,
+                    captures,
+                },
+            )));
+        }
+        if module.resolved().is_signal_symbol(symbol) {
+            let storage = self.signal_storage(module, symbol);
+            return Ok(Some(self.push_reactive_operation(
+                origin,
+                LoweredReactiveOperationKind::SignalCreate { symbol, storage },
+            )));
+        }
+        Ok(None)
+    }
+
+    /// The tracked read a name occurrence performs on reactive storage.
+    fn lower_name_reactive_operation(
+        &mut self,
+        module: &TypedModule,
+        origin: Origin,
+        symbol: SymbolId,
+    ) -> Option<LoweredReactiveOperationId> {
+        if module.resolved().is_signal_symbol(symbol) {
+            Some(self.push_reactive_operation(
+                origin,
+                LoweredReactiveOperationKind::SignalRead { symbol },
+            ))
+        } else if module.is_derived_symbol(symbol) {
+            Some(self.push_reactive_operation(
+                origin,
+                LoweredReactiveOperationKind::DerivedRead { symbol },
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// The nearest active `Reactive` provider, matching the backend's ambient
+    /// scope search.
+    fn active_reactive_provider(&self, module: &TypedModule) -> Option<LoweredResourceProviderId> {
+        self.active_resource_providers
+            .iter()
+            .rev()
+            .copied()
+            .find(|provider| {
+                self.resource_providers
+                    .get(*provider)
+                    .is_some_and(|provider| module.is_reactive_type(&provider.resource.value_type))
+            })
+    }
+
+    /// Captures already lowered on a callable-value occurrence. An explicit
+    /// callback can carry a stored closure or a fresh environment; the capture
+    /// catalog is copied here so the reactive record owns it.
+    fn callable_value_captures(&self, expression: ExpressionId) -> Vec<LoweredCapture> {
+        self.expressions
+            .get(expression)
+            .and_then(|expression| match &expression.kind {
+                LoweredExpressionKind::CallableValue(value) => self.callable_values.get(*value),
+                _ => None,
+            })
+            .and_then(|value| value.closure.as_ref())
+            .map(|closure| {
+                closure
+                    .captures
+                    .iter()
+                    .map(|capture| capture.capture.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Builds the callback record for a reactive intrinsic: the implicit thunk
+    /// that owns a block callback or the explicit callable occurrence, its
+    /// checked function type, ordered captures, and ordered hidden resource
+    /// requirements.
+    fn lower_reactive_callback(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        call: &staple_syntax::CallExpression,
+    ) -> Result<LoweredReactiveCallbackId, Diagnostic> {
+        let argument = &call.argument;
+        let span = argument.syntax().span.clone();
+        let thunk = module
+            .implicit_thunk_for(argument.syntax().id)
+            .map(|f| f.id);
+        let (callable, function_type) = match thunk {
+            Some(thunk) => {
+                let Some(function_type) = module.type_of_function(thunk).cloned() else {
+                    return Err(Diagnostic::new(span, "callback thunk has no function type"));
+                };
+                (None, function_type)
+            }
+            None => {
+                let callable =
+                    self.lower_expression(module, owner, ExpressionContext::Primary, argument)?;
+                let function_type = match module.type_of_expression(argument.syntax().id) {
+                    Some(CheckedType::Function(function_type)) => function_type.clone(),
+                    _ => {
+                        return Err(Diagnostic::new(span, "callback has no function type"));
+                    }
+                };
+                (Some(callable), function_type)
+            }
+        };
+        let captures = match (thunk, callable) {
+            (Some(thunk), _) => self
+                .functions
+                .get(thunk)
+                .map(|function| function.captures.clone())
+                .unwrap_or_default(),
+            (None, Some(callable)) => self.callable_value_captures(callable),
+            (None, None) => Vec::new(),
+        };
+        let mut resources = Vec::with_capacity(function_type.effects.resources.len());
+        for resource in &function_type.effects.resources {
+            resources.push(self.bind_resource_requirement(
+                module,
+                argument.syntax().id,
+                argument.syntax().span.clone(),
+                LoweredResourceUseKind::HiddenArgument,
+                resource.clone(),
+                owner_function(owner),
+            )?);
+        }
+        Ok(self.reactive_callbacks.push(LoweredReactiveCallback {
+            origin: Origin {
+                syntax: argument.syntax().id,
+                span: argument.syntax().span.clone(),
+            },
+            thunk,
+            callable,
+            function_type,
+            captures,
+            resources,
+        }))
+    }
+
+    /// The reactive operation an intrinsic call performs, when it is one of
+    /// the five reactive intrinsics.
+    fn lower_reactive_intrinsic_operation(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        origin: &Origin,
+        call: &staple_syntax::CallExpression,
+        intrinsic: crate::IntrinsicFunction,
+    ) -> Result<Option<LoweredReactiveOperationId>, Diagnostic> {
+        let Some(IntrinsicRoute::Reactive(route)) = intrinsic_route(intrinsic) else {
+            return Ok(None);
+        };
+        let kind = match route {
+            ReactiveIntrinsicRoute::Scope => LoweredReactiveOperationKind::Scope,
+            ReactiveIntrinsicRoute::Snapshot => LoweredReactiveOperationKind::Snapshot,
+            ReactiveIntrinsicRoute::Reaction => {
+                let callback = self.lower_reactive_callback(module, owner, call)?;
+                LoweredReactiveOperationKind::Reaction {
+                    callback,
+                    reactive_provider: self.active_reactive_provider(module),
+                }
+            }
+            ReactiveIntrinsicRoute::Batch => {
+                let callback = self.lower_reactive_callback(module, owner, call)?;
+                LoweredReactiveOperationKind::Batch { callback }
+            }
+            ReactiveIntrinsicRoute::Until => {
+                let predicate = self.lower_reactive_callback(module, owner, call)?;
+                let predicate_record = self
+                    .reactive_callbacks
+                    .get(predicate)
+                    .expect("the predicate callback was just recorded");
+                // D25: pure apart from reading signals.
+                if !predicate_record.function_type.effects.resources.is_empty()
+                    || matches!(
+                        predicate_record.function_type.effects.state,
+                        Some(
+                            crate::CheckedStateEffect::Write | crate::CheckedStateEffect::ReadWrite
+                        )
+                    )
+                {
+                    return Err(Diagnostic::new(
+                        call.argument.syntax().span.clone(),
+                        "an `until` predicate must be pure apart from reading signals",
+                    ));
+                }
+                LoweredReactiveOperationKind::Until {
+                    predicate,
+                    reactive_provider: self.active_reactive_provider(module),
+                }
+            }
+        };
+        Ok(Some(self.push_reactive_operation(origin.clone(), kind)))
     }
 
     /// Resolves a call's hidden effect-row requirements in checked order,
@@ -3658,15 +3953,31 @@ impl LoweredProgram {
                 format!("symbol {symbol:?} is missing from the lowered symbol catalog"),
             ));
         };
+        let storage = catalog.storage;
+        let captured_cell = catalog.captured_cell;
+        let move_parameter = catalog.move_parameter;
+        let requires_initialization_check = resolved.requires_initialization_check(syntax);
+        let mutable = module.has_mutable_storage(symbol);
+        let moved = module.moved_symbols(syntax).any(|moved| moved == symbol);
+        let singleton = resolved.singleton_type(symbol);
+        let reactive = self.lower_name_reactive_operation(
+            module,
+            Origin {
+                syntax,
+                span: span.clone(),
+            },
+            symbol,
+        );
         Ok(LoweredExpressionKind::Name(LoweredName {
             symbol,
-            storage: catalog.storage,
-            requires_initialization_check: resolved.requires_initialization_check(syntax),
-            mutable: module.has_mutable_storage(symbol),
-            captured_cell: catalog.captured_cell,
-            moved: module.moved_symbols(syntax).any(|moved| moved == symbol),
-            move_parameter: catalog.move_parameter,
-            singleton: resolved.singleton_type(symbol),
+            storage,
+            requires_initialization_check,
+            mutable,
+            captured_cell,
+            moved,
+            move_parameter,
+            singleton,
+            reactive,
         }))
     }
 
@@ -5444,6 +5755,12 @@ impl LoweredProgram {
             steps.push(LoweredCallStep::Resource { resource: index });
         }
         steps.push(LoweredCallStep::Invoke);
+        let reactive = match &target {
+            LoweredCallableTarget::Intrinsic { intrinsic, .. } => {
+                self.lower_reactive_intrinsic_operation(module, owner, &origin, call, *intrinsic)?
+            }
+            _ => None,
+        };
         let call_id = self.calls.push(LoweredCall {
             origin,
             target,
@@ -5459,6 +5776,7 @@ impl LoweredProgram {
             substitutions,
             evidence,
             c_string_temporary,
+            reactive,
         });
         Ok(LoweredExpressionKind::Call(call_id))
     }
@@ -5558,6 +5876,12 @@ impl LoweredProgram {
             steps.push(LoweredCallStep::Resource { resource: index });
         }
         steps.push(LoweredCallStep::Invoke);
+        let reactive = match &target {
+            LoweredCallableTarget::Intrinsic { intrinsic, .. } => {
+                self.lower_reactive_intrinsic_operation(module, owner, &origin, call, *intrinsic)?
+            }
+            _ => None,
+        };
         let call_id = self.calls.push(LoweredCall {
             origin,
             target,
@@ -5573,6 +5897,7 @@ impl LoweredProgram {
             substitutions: CallSubstitutions::default(),
             evidence: None,
             c_string_temporary: false,
+            reactive,
         });
         Ok(LoweredExpressionKind::Call(call_id))
     }
@@ -6267,15 +6592,41 @@ impl LoweredProgram {
             }
         }
         for (_, callback) in self.reactive_callbacks.iter() {
-            if let Some(thunk) = callback.thunk
-                && self.functions.get(thunk).is_none()
-            {
-                diagnostics.push(invalid_reference(
-                    &callback.origin,
-                    "reactive callback",
-                    "function",
-                    thunk.0,
+            if callback.thunk.is_some() == callback.callable.is_some() {
+                diagnostics.push(Diagnostic::new(
+                    callback.origin.span.clone(),
+                    "reactive callback must be exactly one of an implicit thunk or a callable occurrence",
                 ));
+            }
+            if let Some(thunk) = callback.thunk {
+                match self.functions.get(thunk) {
+                    Some(function) => {
+                        if function.signature != callback.function_type {
+                            diagnostics.push(Diagnostic::new(
+                                callback.origin.span.clone(),
+                                "reactive callback type disagrees with its thunk signature",
+                            ));
+                        }
+                        if function.captures.len() != callback.captures.len()
+                            || function
+                                .captures
+                                .iter()
+                                .zip(&callback.captures)
+                                .any(|(catalog, capture)| catalog.symbol != capture.symbol)
+                        {
+                            diagnostics.push(Diagnostic::new(
+                                callback.origin.span.clone(),
+                                "reactive callback captures disagree with its thunk",
+                            ));
+                        }
+                    }
+                    None => diagnostics.push(invalid_reference(
+                        &callback.origin,
+                        "reactive callback",
+                        "function",
+                        thunk.0,
+                    )),
+                }
             }
             if let Some(callable) = callback.callable
                 && !self.expressions.contains(callable)
@@ -6288,13 +6639,18 @@ impl LoweredProgram {
                 ));
             }
             for use_ in &callback.resources {
-                if !self.resource_uses.contains(*use_) {
-                    diagnostics.push(invalid_reference(
+                match self.resource_uses.get(*use_) {
+                    Some(record) if record.kind == LoweredResourceUseKind::HiddenArgument => {}
+                    Some(_) => diagnostics.push(Diagnostic::new(
+                        callback.origin.span.clone(),
+                        "reactive callback resource is not a hidden argument",
+                    )),
+                    None => diagnostics.push(invalid_reference(
                         &callback.origin,
                         "reactive callback",
                         "resource use",
                         use_.index(),
-                    ));
+                    )),
                 }
             }
             for capture in &callback.captures {
@@ -6308,40 +6664,120 @@ impl LoweredProgram {
                 }
             }
         }
+        diagnostics.extend(self.validate_reactive_attachments());
         for (_, operation) in self.reactive_operations.iter() {
             match &operation.kind {
-                LoweredReactiveOperationKind::SignalCreate { symbol }
-                | LoweredReactiveOperationKind::SignalRead { symbol }
-                | LoweredReactiveOperationKind::SignalNotify { symbol } => {
-                    if self.symbols.get(*symbol).is_none() {
-                        diagnostics.push(invalid_reference(
+                LoweredReactiveOperationKind::SignalCreate { symbol, storage } => {
+                    match self.symbols.get(*symbol) {
+                        Some(record) if record.signal => {
+                            // Module-level signals own their global; every
+                            // other signal lives in a binding cell.
+                            let expected = if record.owner.is_none() {
+                                LoweredSignalStorage::Global
+                            } else {
+                                LoweredSignalStorage::LocalCell
+                            };
+                            if *storage != expected {
+                                diagnostics.push(Diagnostic::new(
+                                    operation.origin.span.clone(),
+                                    "signal creation storage disagrees with the symbol's storage",
+                                ));
+                            }
+                        }
+                        Some(_) => diagnostics.push(Diagnostic::new(
+                            operation.origin.span.clone(),
+                            "signal creation names a non-signal symbol",
+                        )),
+                        None => diagnostics.push(invalid_reference(
                             &operation.origin,
                             "reactive operation",
                             "symbol",
                             symbol.0,
-                        ));
+                        )),
+                    }
+                }
+                LoweredReactiveOperationKind::SignalRead { symbol }
+                | LoweredReactiveOperationKind::SignalNotify { symbol } => {
+                    match self.symbols.get(*symbol) {
+                        Some(record) if record.signal => {}
+                        Some(_) => diagnostics.push(Diagnostic::new(
+                            operation.origin.span.clone(),
+                            "signal read/notify names a non-signal symbol",
+                        )),
+                        None => diagnostics.push(invalid_reference(
+                            &operation.origin,
+                            "reactive operation",
+                            "symbol",
+                            symbol.0,
+                        )),
+                    }
+                }
+                LoweredReactiveOperationKind::DerivedRead { symbol } => {
+                    match self.symbols.get(*symbol) {
+                        Some(record) if record.derived => {}
+                        Some(_) => diagnostics.push(Diagnostic::new(
+                            operation.origin.span.clone(),
+                            "derived read names a non-derived symbol",
+                        )),
+                        None => diagnostics.push(invalid_reference(
+                            &operation.origin,
+                            "reactive operation",
+                            "symbol",
+                            symbol.0,
+                        )),
                     }
                 }
                 LoweredReactiveOperationKind::DerivedCreate {
                     symbol,
                     evaluator,
+                    function_type,
                     captures,
-                    ..
                 } => {
-                    if self.symbols.get(*symbol).is_none() {
-                        diagnostics.push(invalid_reference(
+                    match self.symbols.get(*symbol) {
+                        Some(record) if record.derived => {}
+                        Some(_) => diagnostics.push(Diagnostic::new(
+                            operation.origin.span.clone(),
+                            "derived creation names a non-derived symbol",
+                        )),
+                        None => diagnostics.push(invalid_reference(
                             &operation.origin,
                             "reactive operation",
                             "symbol",
                             symbol.0,
-                        ));
+                        )),
                     }
-                    if self.functions.get(*evaluator).is_none() {
-                        diagnostics.push(invalid_reference(
+                    match self.functions.get(*evaluator) {
+                        Some(function) => {
+                            if function.signature != *function_type {
+                                diagnostics.push(Diagnostic::new(
+                                    operation.origin.span.clone(),
+                                    "derived evaluator type disagrees with its function catalog entry",
+                                ));
+                            }
+                            if function.captures.len() != captures.len()
+                                || function
+                                    .captures
+                                    .iter()
+                                    .zip(captures)
+                                    .any(|(catalog, capture)| catalog.symbol != capture.symbol)
+                            {
+                                diagnostics.push(Diagnostic::new(
+                                    operation.origin.span.clone(),
+                                    "derived captures disagree with the evaluator function",
+                                ));
+                            }
+                        }
+                        None => diagnostics.push(invalid_reference(
                             &operation.origin,
                             "reactive operation",
                             "function",
                             evaluator.0,
+                        )),
+                    }
+                    if !function_type.effects.resources.is_empty() {
+                        diagnostics.push(Diagnostic::new(
+                            operation.origin.span.clone(),
+                            "derived evaluators cannot capture resources",
                         ));
                     }
                     for capture in captures {
@@ -6359,10 +6795,6 @@ impl LoweredProgram {
                 LoweredReactiveOperationKind::Reaction {
                     callback,
                     reactive_provider,
-                }
-                | LoweredReactiveOperationKind::Until {
-                    predicate: callback,
-                    reactive_provider,
                 } => {
                     if !self.reactive_callbacks.contains(*callback) {
                         diagnostics.push(invalid_reference(
@@ -6371,6 +6803,46 @@ impl LoweredProgram {
                             "callback",
                             callback.index(),
                         ));
+                    }
+                    if let Some(provider) = reactive_provider
+                        && !self.resource_providers.contains(*provider)
+                    {
+                        diagnostics.push(invalid_reference(
+                            &operation.origin,
+                            "reactive operation",
+                            "provider",
+                            provider.index(),
+                        ));
+                    }
+                }
+                LoweredReactiveOperationKind::Until {
+                    predicate,
+                    reactive_provider,
+                } => {
+                    match self.reactive_callbacks.get(*predicate) {
+                        Some(callback) => {
+                            // D25: pure apart from reading signals.
+                            if !callback.function_type.effects.resources.is_empty()
+                                || matches!(
+                                    callback.function_type.effects.state,
+                                    Some(
+                                        crate::CheckedStateEffect::Write
+                                            | crate::CheckedStateEffect::ReadWrite
+                                    )
+                                )
+                            {
+                                diagnostics.push(Diagnostic::new(
+                                    operation.origin.span.clone(),
+                                    "an `until` predicate must be pure apart from reading signals",
+                                ));
+                            }
+                        }
+                        None => diagnostics.push(invalid_reference(
+                            &operation.origin,
+                            "reactive operation",
+                            "callback",
+                            predicate.index(),
+                        )),
                     }
                     if let Some(provider) = reactive_provider
                         && !self.resource_providers.contains(*provider)
@@ -6548,6 +7020,152 @@ impl LoweredProgram {
                         ));
                     }
                 }
+            }
+        }
+        diagnostics
+    }
+
+    /// Checks that every signal/derived site and every reactive intrinsic call
+    /// carries an operation of the matching kind for its symbol or intrinsic.
+    fn validate_reactive_attachments(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (_, item) in self.items.iter() {
+            match &item.kind {
+                LoweredItemKind::Binding(binding) => match (binding.reactive, binding.symbol) {
+                    (Some(operation), Some(symbol)) => {
+                        match self.reactive_operations.get(operation).map(|o| &o.kind) {
+                            Some(LoweredReactiveOperationKind::SignalCreate {
+                                symbol: target,
+                                ..
+                            }) if *target == symbol && binding.signal => {}
+                            Some(LoweredReactiveOperationKind::DerivedCreate {
+                                symbol: target,
+                                ..
+                            }) if *target == symbol && binding.derived => {}
+                            Some(_) => diagnostics.push(Diagnostic::new(
+                                item.origin.span.clone(),
+                                "binding reactive operation disagrees with its symbol",
+                            )),
+                            None => diagnostics.push(invalid_reference(
+                                &item.origin,
+                                "binding",
+                                "reactive operation",
+                                operation.index(),
+                            )),
+                        }
+                    }
+                    (Some(_), None) => diagnostics.push(Diagnostic::new(
+                        item.origin.span.clone(),
+                        "compile-time-only binding owns a reactive operation",
+                    )),
+                    (None, Some(_)) if binding.signal || binding.derived => {
+                        diagnostics.push(Diagnostic::new(
+                            item.origin.span.clone(),
+                            "signal/derived binding has no reactive creation operation",
+                        ));
+                    }
+                    (None, _) => {}
+                },
+                LoweredItemKind::Assignment(assignment) => {
+                    match (assignment.signal_notify, assignment.initialization_symbol) {
+                        (Some(operation), Some(symbol)) => {
+                            match self.reactive_operations.get(operation).map(|o| &o.kind) {
+                                Some(LoweredReactiveOperationKind::SignalNotify {
+                                    symbol: target,
+                                }) if *target == symbol => {}
+                                Some(_) => diagnostics.push(Diagnostic::new(
+                                    item.origin.span.clone(),
+                                    "assignment notification disagrees with its signal symbol",
+                                )),
+                                None => diagnostics.push(invalid_reference(
+                                    &item.origin,
+                                    "assignment",
+                                    "reactive operation",
+                                    operation.index(),
+                                )),
+                            }
+                        }
+                        (Some(_), None) => diagnostics.push(Diagnostic::new(
+                            item.origin.span.clone(),
+                            "assignment notification has no signal root",
+                        )),
+                        (None, _) => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (_, expression) in self.expressions.iter() {
+            let LoweredExpressionKind::Name(name) = &expression.kind else {
+                continue;
+            };
+            let derived = self
+                .symbols
+                .get(name.symbol)
+                .is_some_and(|symbol| symbol.derived);
+            match name.reactive {
+                Some(operation) => match self.reactive_operations.get(operation).map(|o| &o.kind) {
+                    Some(LoweredReactiveOperationKind::SignalRead { symbol })
+                        if *symbol == name.symbol && !derived => {}
+                    Some(LoweredReactiveOperationKind::DerivedRead { symbol })
+                        if *symbol == name.symbol && derived => {}
+                    Some(_) => diagnostics.push(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "name reactive operation disagrees with its symbol",
+                    )),
+                    None => diagnostics.push(invalid_reference(
+                        &expression.origin,
+                        "name",
+                        "reactive operation",
+                        operation.index(),
+                    )),
+                },
+                None => {}
+            }
+        }
+        for (_, call) in self.calls.iter() {
+            let expected = match &call.target {
+                LoweredCallableTarget::Intrinsic { intrinsic, .. } => intrinsic_route(*intrinsic)
+                    .and_then(|route| match route {
+                        IntrinsicRoute::Reactive(route) => Some(route),
+                        IntrinsicRoute::Coroutine(_) => None,
+                    }),
+                _ => None,
+            };
+            match (call.reactive, expected) {
+                (Some(operation), Some(expected)) => {
+                    match self.reactive_operations.get(operation).map(|o| &o.kind) {
+                        Some(LoweredReactiveOperationKind::Scope)
+                            if expected == ReactiveIntrinsicRoute::Scope => {}
+                        Some(LoweredReactiveOperationKind::Snapshot)
+                            if expected == ReactiveIntrinsicRoute::Snapshot => {}
+                        Some(LoweredReactiveOperationKind::Reaction { .. })
+                            if expected == ReactiveIntrinsicRoute::Reaction => {}
+                        Some(LoweredReactiveOperationKind::Batch { .. })
+                            if expected == ReactiveIntrinsicRoute::Batch => {}
+                        Some(LoweredReactiveOperationKind::Until { .. })
+                            if expected == ReactiveIntrinsicRoute::Until => {}
+                        Some(_) => diagnostics.push(Diagnostic::new(
+                            call.origin.span.clone(),
+                            "call reactive operation disagrees with its intrinsic",
+                        )),
+                        None => diagnostics.push(invalid_reference(
+                            &call.origin,
+                            "call",
+                            "reactive operation",
+                            operation.index(),
+                        )),
+                    }
+                }
+                (Some(_), None) => diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    "non-reactive call owns a reactive operation",
+                )),
+                (None, Some(_)) => diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    "reactive intrinsic call has no reactive operation",
+                )),
+                (None, None) => {}
             }
         }
         diagnostics
@@ -8264,6 +8882,9 @@ impl LoweredProgram {
                 if let Some(value) = binding.value {
                     self.visit_owned_expression(value, reached);
                 }
+                if let Some(operation) = binding.reactive {
+                    self.visit_owned_reactive_operation(operation, reached);
+                }
             }
             LoweredItemKind::PatternBinding(binding) => {
                 self.visit_owned_pattern(binding.pattern, reached);
@@ -8272,6 +8893,9 @@ impl LoweredProgram {
             LoweredItemKind::Assignment(assignment) => {
                 self.visit_owned_place(assignment.target, reached);
                 self.visit_owned_expression(assignment.value, reached);
+                if let Some(operation) = assignment.signal_notify {
+                    self.visit_owned_reactive_operation(operation, reached);
+                }
             }
             LoweredItemKind::Return(item) => self.visit_owned_expression(item.value, reached),
             LoweredItemKind::Break(item) => {
@@ -8347,9 +8971,13 @@ impl LoweredProgram {
             LoweredExpressionKind::With(with) => self.visit_owned_with(*with, reached),
             LoweredExpressionKind::Coro(coro) => self.visit_owned_coro(*coro, reached),
             LoweredExpressionKind::Await(await_) => self.visit_owned_await(*await_, reached),
+            LoweredExpressionKind::Name(name) => {
+                if let Some(operation) = name.reactive {
+                    self.visit_owned_reactive_operation(operation, reached);
+                }
+            }
             LoweredExpressionKind::Stage26Deferred(_)
             | LoweredExpressionKind::Deferred(_)
-            | LoweredExpressionKind::Name(_)
             | LoweredExpressionKind::Integer(_)
             | LoweredExpressionKind::Float(_)
             | LoweredExpressionKind::String(_)
@@ -8450,6 +9078,7 @@ impl LoweredProgram {
             LoweredReactiveOperationKind::SignalCreate { .. }
             | LoweredReactiveOperationKind::SignalRead { .. }
             | LoweredReactiveOperationKind::SignalNotify { .. }
+            | LoweredReactiveOperationKind::DerivedRead { .. }
             | LoweredReactiveOperationKind::DerivedCreate { .. }
             | LoweredReactiveOperationKind::Scope
             | LoweredReactiveOperationKind::Snapshot => {}
@@ -8511,6 +9140,9 @@ impl LoweredProgram {
         };
         if let Some(callee) = call.callee {
             self.visit_owned_expression(callee, reached);
+        }
+        if let Some(operation) = call.reactive {
+            self.visit_owned_reactive_operation(operation, reached);
         }
         for binding in &call.resource_bindings {
             self.visit_owned_resource_use(*binding, reached);
@@ -15821,6 +16453,7 @@ mod tests {
                 moved: false,
                 move_parameter: false,
                 singleton: None,
+                reactive: None,
             }),
         });
         program.expression_lookup.insert(key, id);
@@ -16114,7 +16747,8 @@ mod tests {
         };
         assert_eq!(assignment.initialization_symbol, Some(*symbol));
         assert!(assignment.mutate_index.is_none());
-        assert!(!assignment.drop_previous && !assignment.signal);
+        assert!(assignment.signal_notify.is_none());
+        assert!(!assignment.drop_previous);
 
         let LoweredItemKind::Assignment(assignment) = &items[1].kind else {
             panic!("`pair.0 = 2` should lower to an assignment item");
@@ -16555,6 +17189,303 @@ mod tests {
         );
     }
 
+    /// The lowered binding item for one symbol.
+    fn binding_item_for(program: &LoweredProgram, symbol: SymbolId) -> &LoweredBindingItem {
+        program
+            .items
+            .iter()
+            .find_map(|(_, item)| match &item.kind {
+                LoweredItemKind::Binding(binding) if binding.symbol == Some(symbol) => {
+                    Some(binding)
+                }
+                _ => None,
+            })
+            .expect("a lowered binding item")
+    }
+
+    /// The first tracked read of `symbol` in expression order.
+    fn name_reactive_read(
+        program: &LoweredProgram,
+        symbol: SymbolId,
+    ) -> Option<LoweredReactiveOperationId> {
+        program
+            .expressions
+            .iter()
+            .find_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Name(name) if name.symbol == symbol => name.reactive,
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn signals_and_derived_bindings_record_reactive_operations() {
+        let module = checked_program(concat!(
+            "let signal global_count = 0\n",
+            "let doubled = global_count + global_count\n",
+            "def local: () -> I32 = () => {\n",
+            "  let signal local_count = 0\n",
+            "  local_count = local_count + 1\n",
+            "  local_count\n",
+            "}\n",
+            "global_count = doubled\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let global_symbol = binding_symbol(&module, "global_count");
+        let doubled_symbol = binding_symbol(&module, "doubled");
+        let (_, local_function) = lowered_function(&program, "local");
+        let local_symbol = body_items(&program, local_function)
+            .iter()
+            .find_map(|item| match &item.kind {
+                LoweredItemKind::Binding(binding) if binding.signal => binding.symbol,
+                _ => None,
+            })
+            .expect("the local signal binding symbol");
+
+        let global = binding_item_for(&program, global_symbol);
+        let Some(LoweredReactiveOperationKind::SignalCreate { symbol, storage }) = global
+            .reactive
+            .and_then(|operation| program.reactive_operations.get(operation))
+            .map(|operation| &operation.kind)
+        else {
+            panic!("the global signal binding should create signal storage");
+        };
+        assert_eq!(*symbol, global_symbol);
+        assert_eq!(*storage, LoweredSignalStorage::Global);
+
+        let local = binding_item_for(&program, local_symbol);
+        let Some(LoweredReactiveOperationKind::SignalCreate { storage, .. }) = local
+            .reactive
+            .and_then(|operation| program.reactive_operations.get(operation))
+            .map(|operation| &operation.kind)
+        else {
+            panic!("the local signal binding should create signal storage");
+        };
+        assert_eq!(*storage, LoweredSignalStorage::LocalCell);
+
+        let derived = binding_item_for(&program, doubled_symbol);
+        let Some(LoweredReactiveOperationKind::DerivedCreate {
+            symbol,
+            evaluator,
+            function_type,
+            captures,
+        }) = derived
+            .reactive
+            .and_then(|operation| program.reactive_operations.get(operation))
+            .map(|operation| &operation.kind)
+        else {
+            panic!("the derived binding should record its evaluator");
+        };
+        assert_eq!(*symbol, doubled_symbol);
+        assert!(program.functions.get(*evaluator).is_some());
+        assert!(function_type.effects.resources.is_empty());
+        assert_eq!(
+            captures
+                .iter()
+                .map(|capture| capture.symbol)
+                .collect::<Vec<_>>(),
+            program
+                .functions
+                .get(*evaluator)
+                .unwrap()
+                .captures
+                .iter()
+                .map(|capture| capture.symbol)
+                .collect::<Vec<_>>()
+        );
+
+        // Reads track signals and derived bindings distinctly.
+        assert!(matches!(
+            name_reactive_read(&program, global_symbol)
+                .and_then(|operation| program.reactive_operations.get(operation))
+                .map(|operation| &operation.kind),
+            Some(LoweredReactiveOperationKind::SignalRead { .. })
+        ));
+        assert!(matches!(
+            name_reactive_read(&program, doubled_symbol)
+                .and_then(|operation| program.reactive_operations.get(operation))
+                .map(|operation| &operation.kind),
+            Some(LoweredReactiveOperationKind::DerivedRead { .. })
+        ));
+
+        // The local mutation notifies its signal.
+        let notify = program.items.iter().find_map(|(_, item)| match &item.kind {
+            LoweredItemKind::Assignment(assignment)
+                if assignment.initialization_symbol == Some(local_symbol) =>
+            {
+                assignment.signal_notify
+            }
+            _ => None,
+        });
+        assert!(matches!(
+            notify
+                .and_then(|operation| program.reactive_operations.get(operation))
+                .map(|operation| &operation.kind),
+            Some(LoweredReactiveOperationKind::SignalNotify { symbol }) if *symbol == local_symbol
+        ));
+    }
+
+    #[test]
+    fn reactive_intrinsics_record_callbacks_ambient_scope_and_purity() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "let signal count = 0\n",
+            "with Reactive = reactive_scope () {\n",
+            "  let first = reaction { let current = count; () }\n",
+            "  batch { count = 1 }\n",
+            "  let waiting = until { count >= 1 }\n",
+            "  let read = snapshot count\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let operations = program
+            .reactive_operations
+            .iter()
+            .map(|(_, operation)| &operation.kind)
+            .collect::<Vec<_>>();
+        assert!(
+            operations
+                .iter()
+                .any(|kind| matches!(kind, LoweredReactiveOperationKind::Reaction { .. }))
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|kind| matches!(kind, LoweredReactiveOperationKind::Batch { .. }))
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|kind| matches!(kind, LoweredReactiveOperationKind::Until { .. }))
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|kind| matches!(kind, LoweredReactiveOperationKind::Snapshot))
+        );
+        // `reactive_scope ()` lowers its stdlib wrapper, whose `__reactive_scope`
+        // intrinsic call owns the scope operation.
+        assert!(
+            operations
+                .iter()
+                .any(|kind| matches!(kind, LoweredReactiveOperationKind::Scope))
+        );
+
+        let reaction = operations
+            .iter()
+            .find_map(|kind| match kind {
+                LoweredReactiveOperationKind::Reaction {
+                    callback,
+                    reactive_provider,
+                } => Some((*callback, *reactive_provider)),
+                _ => None,
+            })
+            .expect("the reaction operation");
+        assert!(reaction.1.is_some(), "the ambient scope provides Reactive");
+        let callback = program
+            .reactive_callbacks
+            .get(reaction.0)
+            .expect("reaction callback");
+        assert!(callback.thunk.is_some() && callback.callable.is_none());
+        assert_eq!(
+            callback.function_type,
+            program
+                .functions
+                .get(callback.thunk.unwrap())
+                .unwrap()
+                .signature
+        );
+        assert!(callback.resources.is_empty());
+
+        let until = operations
+            .iter()
+            .find_map(|kind| match kind {
+                LoweredReactiveOperationKind::Until {
+                    predicate,
+                    reactive_provider,
+                } => Some((*predicate, *reactive_provider)),
+                _ => None,
+            })
+            .expect("the until operation");
+        assert!(until.1.is_some());
+        let predicate = program
+            .reactive_callbacks
+            .get(until.0)
+            .expect("until predicate");
+        assert!(predicate.function_type.effects.resources.is_empty());
+    }
+
+    #[test]
+    fn validator_rejects_impure_until_predicates_and_unattached_reactive_sites() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "let signal count = 0\n",
+            "with Reactive = reactive_scope () {\n",
+            "  let waiting = until { count >= 1 }\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let predicate = program
+            .reactive_operations
+            .iter()
+            .find_map(|(_, operation)| match &operation.kind {
+                LoweredReactiveOperationKind::Until { predicate, .. } => Some(*predicate),
+                _ => None,
+            })
+            .expect("the until operation");
+        let callback = program
+            .reactive_callbacks
+            .get(predicate)
+            .expect("predicate callback");
+        let mut function_type = callback.function_type.clone();
+        function_type.effects.state = Some(crate::CheckedStateEffect::Write);
+        program.reactive_callbacks.values[predicate.index()].function_type = function_type;
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("until` predicate")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let signal_symbol = binding_symbol(&module, "count");
+        let item_id = program
+            .items
+            .iter()
+            .find_map(|(id, item)| match &item.kind {
+                LoweredItemKind::Binding(binding) if binding.symbol == Some(signal_symbol) => {
+                    Some(id)
+                }
+                _ => None,
+            })
+            .expect("the signal binding item");
+        let mut binding = match &program.items.values[item_id.index()].kind {
+            LoweredItemKind::Binding(binding) => binding.clone(),
+            _ => unreachable!(),
+        };
+        binding.reactive = None;
+        program.items.values[item_id.index()].kind = LoweredItemKind::Binding(binding);
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("no reactive creation operation")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+    }
+
     #[test]
     fn module_items_record_binding_assignment_and_statement_metadata() {
         let program = snapshot(concat!(
@@ -16632,12 +17563,12 @@ mod tests {
         };
         assert!(assignment.mutate_index.is_none());
         assert!(assignment.initialization_symbol.is_some());
-        assert!(!assignment.signal && !assignment.drop_previous);
+        assert!(assignment.signal_notify.is_none() && !assignment.drop_previous);
 
         let LoweredItemKind::Assignment(assignment) = &items[6].kind else {
             panic!("the signal assignment should lower");
         };
-        assert!(assignment.signal);
+        assert!(assignment.signal_notify.is_some());
         assert_eq!(assignment.initialization_symbol, Some(signal_symbol));
 
         let (_, discard) = lowered_function(&program, "discard");
@@ -16813,7 +17744,7 @@ mod tests {
                 evidence: None,
                 initialization_symbol: None,
                 drop_previous: false,
-                signal: false,
+                signal_notify: None,
             });
         let diagnostics = program.validate();
         assert!(
