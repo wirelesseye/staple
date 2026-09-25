@@ -31,6 +31,11 @@ Exact Rust names can vary, but the following facts must be owned and linked by t
 
 Use the existing expression `Origin` and checked type/effect headers. Do not clone source `Expression` or `Block` nodes into new records. Keep representation decisions that depend on concrete target layout out of Stage 2.6.
 
+## Progress
+
+- Step 1 complete: backend resource/reactive/coroutine decisions inventoried; owned provider, use, `with`, reactive-operation/callback, coroutine-plan, `coro`, and `await` records and arenas added with typed links; expression dispatch, intrinsic routing, arena validation, loop-exit traversal, and ownership traversal extended; route-table coverage tests added. Concrete payload population begins in Step 2.
+- Steps 2-7 pending.
+
 ## Implementation sequence
 
 ### Step 1 — Inventory subsystem decisions and establish typed relationships

@@ -60,6 +60,14 @@ arena_id!(LoweredTraitMethodId);
 arena_id!(LoweredTraitImplementationId);
 arena_id!(LoweredCallId);
 arena_id!(LoweredCallableValueId);
+arena_id!(LoweredResourceProviderId);
+arena_id!(LoweredResourceUseId);
+arena_id!(LoweredWithId);
+arena_id!(LoweredReactiveOperationId);
+arena_id!(LoweredReactiveCallbackId);
+arena_id!(LoweredCoroutinePlanId);
+arena_id!(LoweredCoroId);
+arena_id!(LoweredAwaitId);
 
 /// Deterministic, append-only storage whose handles cannot be mixed with
 /// handles from another lowered-node family.
@@ -292,12 +300,142 @@ pub(crate) enum DeferredExpressionFamily {
     Coroutine,
 }
 
+/// The concrete Stage 2.6 route for a resource or coroutine expression. Every
+/// deferred syntax family maps to exactly one route, and each route names the
+/// record family that will own its populated payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Stage26Route {
+    /// A `resource` value read or resource place.
+    ResourceUse,
+    /// A `with` provider and its scoped body.
+    ResourceProvider,
+    /// A `coro { ... }` creation.
+    CoroutineCreation,
+    /// An `await` on a child coroutine frame.
+    AwaitChildCoroutine,
+    /// An `await` on an external `Task` handle.
+    AwaitTask,
+    /// An `await` on an external `Wait` handle.
+    AwaitWait,
+}
+
+impl Stage26Route {
+    /// Every route, checked by the route-table test.
+    pub(crate) const ALL: [Stage26Route; 6] = [
+        Stage26Route::ResourceUse,
+        Stage26Route::ResourceProvider,
+        Stage26Route::CoroutineCreation,
+        Stage26Route::AwaitChildCoroutine,
+        Stage26Route::AwaitTask,
+        Stage26Route::AwaitWait,
+    ];
+
+    /// The deferred family whose record ultimately replaces this route. Used
+    /// only while the route's concrete payload lands in later steps.
+    pub(crate) fn deferred_family(self) -> DeferredExpressionFamily {
+        match self {
+            Stage26Route::ResourceUse | Stage26Route::ResourceProvider => {
+                DeferredExpressionFamily::Resource
+            }
+            Stage26Route::CoroutineCreation
+            | Stage26Route::AwaitChildCoroutine
+            | Stage26Route::AwaitTask
+            | Stage26Route::AwaitWait => DeferredExpressionFamily::Coroutine,
+        }
+    }
+
+    /// The expression kind name a populated route produces, used by the route
+    /// table to prove every route has exactly one owned record family.
+    pub(crate) fn record_family(self) -> &'static str {
+        match self {
+            Stage26Route::ResourceUse => "ResourceUse",
+            Stage26Route::ResourceProvider => "With",
+            Stage26Route::CoroutineCreation => "Coro",
+            Stage26Route::AwaitChildCoroutine
+            | Stage26Route::AwaitTask
+            | Stage26Route::AwaitWait => "Await",
+        }
+    }
+}
+
+/// A reactive intrinsic's explicit lowering route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ReactiveIntrinsicRoute {
+    Scope,
+    Reaction,
+    Batch,
+    Until,
+    Snapshot,
+}
+
+impl ReactiveIntrinsicRoute {
+    pub(crate) const ALL: [ReactiveIntrinsicRoute; 5] = [
+        ReactiveIntrinsicRoute::Scope,
+        ReactiveIntrinsicRoute::Reaction,
+        ReactiveIntrinsicRoute::Batch,
+        ReactiveIntrinsicRoute::Until,
+        ReactiveIntrinsicRoute::Snapshot,
+    ];
+}
+
+/// A coroutine-related intrinsic's explicit lowering route. These intrinsics
+/// share the scheduler/completion runtime surface but do not lower to
+/// resource or coroutine plan records themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CoroutineIntrinsicRoute {
+    BlockOn,
+    SchedulerCreate,
+    TaskScope,
+    Spawn,
+    Pump,
+    YieldNow,
+    TaskIsFinished,
+    TaskCancel,
+    Completion,
+    CompletionWithCancel,
+    CompletionToken,
+    CompletionTokenResolve,
+    CompletionTokenCancel,
+    ResolverComplete,
+    ResolverCancel,
+}
+
+impl CoroutineIntrinsicRoute {
+    pub(crate) const ALL: [CoroutineIntrinsicRoute; 15] = [
+        CoroutineIntrinsicRoute::BlockOn,
+        CoroutineIntrinsicRoute::SchedulerCreate,
+        CoroutineIntrinsicRoute::TaskScope,
+        CoroutineIntrinsicRoute::Spawn,
+        CoroutineIntrinsicRoute::Pump,
+        CoroutineIntrinsicRoute::YieldNow,
+        CoroutineIntrinsicRoute::TaskIsFinished,
+        CoroutineIntrinsicRoute::TaskCancel,
+        CoroutineIntrinsicRoute::Completion,
+        CoroutineIntrinsicRoute::CompletionWithCancel,
+        CoroutineIntrinsicRoute::CompletionToken,
+        CoroutineIntrinsicRoute::CompletionTokenResolve,
+        CoroutineIntrinsicRoute::CompletionTokenCancel,
+        CoroutineIntrinsicRoute::ResolverComplete,
+        CoroutineIntrinsicRoute::ResolverCancel,
+    ];
+}
+
+/// The reactive or coroutine route of one compiler intrinsic. Ordinary
+/// intrinsics (`None`) stay ordinary calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum IntrinsicRoute {
+    Reactive(ReactiveIntrinsicRoute),
+    Coroutine(CoroutineIntrinsicRoute),
+}
+
 /// The single lowering decision for a syntax variant. Exhaustiveness is
 /// enforced by a match, and the coverage classifier test fails when a new
 /// variant is missing from the enumerated list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExpressionDisposition {
     Ordinary(Stage24Family),
+    /// A Stage 2.6 resource or coroutine expression with its concrete route.
+    Stage26(Stage26Route),
     Deferred(DeferredExpressionFamily),
     /// Compile-time-only survivors that earlier phases must eliminate.
     Rejected,
@@ -318,6 +456,10 @@ pub(crate) struct LoweredExpression {
 pub(crate) enum LoweredExpressionKind {
     /// Explicitly deferred to Stage 2.5 or Stage 2.6 with its owning family.
     Deferred(DeferredExpressionFamily),
+    /// A Stage 2.6 resource/coroutine expression whose owning record family
+    /// and route are explicit while Steps 2-6 populate the payload. No
+    /// untyped fallback remains: every route is classified.
+    Stage26Deferred(Stage26Route),
     Block(BlockId),
     /// An ordinary value read: a local, parameter, global, mutable cell,
     /// captured cell, or singleton. Callable-valued names and constructors are
@@ -343,6 +485,14 @@ pub(crate) enum LoweredExpressionKind {
     Call(LoweredCallId),
     /// An owned first-class callable value with its construction plan.
     CallableValue(LoweredCallableValueId),
+    /// An owned resource read bound to its selected lexical provider.
+    Resource(LoweredResourceUseId),
+    /// An owned `with` provider and scope body.
+    With(LoweredWithId),
+    /// An owned `coro` creation linked to its body plan.
+    Coro(LoweredCoroId),
+    /// An owned `await` suspension site in its owning coroutine plan.
+    Await(LoweredAwaitId),
 }
 
 /// A string template with its ordered parts and checked formatting
@@ -736,6 +886,222 @@ pub(crate) struct LoweredCallableValue {
     /// The value's symbol must have its initialization state checked before
     /// the closure is used.
     pub requires_initialization_check: bool,
+}
+
+/// How a resource provider entered scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredProviderOriginKind {
+    /// The provider value expression of a `with`.
+    Source,
+    /// A function parameter seeded from the checked effect row.
+    FunctionParameter,
+    /// The executable entry's IO/reactive resource parameter.
+    EntryParameter,
+}
+
+/// What the provider identity refers to: the `with` value expression or the
+/// parameter/entry symbol that carries the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredProviderTarget {
+    Expression(ExpressionId),
+    Symbol(SymbolId),
+}
+
+/// The scope-exit obligation a provider carries when its lexical scope ends.
+/// Exits are recorded as classifications rather than cleanup blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredScopeExit {
+    /// A `Reactive` scope disposes its subscriptions.
+    Reactive,
+    /// A `Tasks` scope closes queued children.
+    Tasks,
+    /// An ordinary resource needs no scope-exit cleanup.
+    Ordinary,
+}
+
+/// One lexical resource provider: a function/entry scope root or a `with`
+/// provider. Stable identity is the arena ID; `parent` records lexical nesting.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredResourceProvider {
+    pub origin: Origin,
+    pub resource: CheckedResource,
+    pub kind: LoweredProviderOriginKind,
+    pub target: LoweredProviderTarget,
+    /// The enclosing provider when this one nests inside another.
+    pub parent: Option<LoweredResourceProviderId>,
+    /// The runtime owner whose block contains the provider.
+    pub owner: ExpressionOwner,
+    /// The provider value is held indirectly and reads pass through a pointer.
+    pub indirect: bool,
+    /// Passing the provider requires a borrow pointer (mutable or non-`Copy`).
+    pub borrow: bool,
+    pub scope_exit: LoweredScopeExit,
+}
+
+/// How one resource use consumes its selected provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredResourceUseKind {
+    /// A `resource` value read.
+    Read,
+    /// The addressable place of a resource assignment target.
+    MutablePlace,
+    /// A hidden call/effect argument in checked effect-row order.
+    HiddenArgument,
+}
+
+/// A resolved resource requirement: the provider selected at the occurrence
+/// and how the value is read or passed. A generic template requirement keeps
+/// `provider` absent until Stage 3 substitutes it.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredResourceUse {
+    pub origin: Origin,
+    pub resource: CheckedResource,
+    pub provider: Option<LoweredResourceProviderId>,
+    pub kind: LoweredResourceUseKind,
+    pub pass_mode: LoweredArgumentPassMode,
+    /// The provider value must be loaded through its pointer.
+    pub indirect: bool,
+}
+
+/// A lowered `with`: provider value evaluated once before scope entry, the
+/// nested body block, and the ordered enter/exit obligations.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredWith {
+    pub origin: Origin,
+    pub provider: LoweredResourceProviderId,
+    /// The provider value expression, evaluated before the body.
+    pub value: ExpressionId,
+    pub body: BlockId,
+    /// The scope-exit obligation, if any.
+    pub scope_exit: LoweredScopeExit,
+}
+
+/// One reactive callback: an implicit thunk or an explicit callable occurrence
+/// with its checked function type, captures, and resource requirements.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredReactiveCallback {
+    pub origin: Origin,
+    /// The implicit thunk that owns a block callback.
+    pub thunk: Option<FunctionId>,
+    /// The callable occurrence for an explicit callback.
+    pub callable: Option<ExpressionId>,
+    pub function_type: CheckedFunctionType,
+    /// Ordered captures for a thunk callback.
+    pub captures: Vec<LoweredCapture>,
+    /// Ordered hidden resource uses the callback needs.
+    pub resources: Vec<LoweredResourceUseId>,
+}
+
+/// A signal, derived, or reactive operation attached to its checking site.
+#[derive(Debug, Clone)]
+pub(crate) enum LoweredReactiveOperationKind {
+    /// Signal storage creation for a symbol.
+    SignalCreate { symbol: SymbolId },
+    /// A tracked read of a signal symbol.
+    SignalRead { symbol: SymbolId },
+    /// A write notification for a signal symbol.
+    SignalNotify { symbol: SymbolId },
+    /// Derived binding creation: evaluator thunk, captures, callback type.
+    DerivedCreate {
+        symbol: SymbolId,
+        evaluator: FunctionId,
+        function_type: CheckedFunctionType,
+        /// Ordered captures copied from the evaluator thunk.
+        captures: Vec<LoweredCapture>,
+    },
+    /// A new ambient `Reactive` scope.
+    Scope,
+    /// A `reaction` subscription.
+    Reaction {
+        callback: LoweredReactiveCallbackId,
+        /// The ambient `Reactive` provider the subscription uses.
+        reactive_provider: Option<LoweredResourceProviderId>,
+    },
+    /// A `batch` boundary.
+    Batch { callback: LoweredReactiveCallbackId },
+    /// An `until` predicate subscription.
+    Until {
+        predicate: LoweredReactiveCallbackId,
+        reactive_provider: Option<LoweredResourceProviderId>,
+    },
+    /// A `snapshot` tracking suspension around its operand.
+    Snapshot,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredReactiveOperation {
+    pub origin: Origin,
+    pub kind: LoweredReactiveOperationKind,
+}
+
+/// One owned coroutine plan linked to its body function, captures, deferred
+/// effects, resume states, and cancellation classifications.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredCoroutinePlan {
+    pub origin: Origin,
+    /// The `coro` body block syntax that keys the plan.
+    pub body_syntax: SyntaxId,
+    /// The lowered coroutine body block.
+    pub body: BlockId,
+    /// The implicit thunk that owns the body.
+    pub thunk: FunctionId,
+    /// Ordered captures copied from the thunk catalog.
+    pub captures: Vec<LoweredCapture>,
+    pub result_type: CheckedType,
+    pub deferred_effects: CheckedEffectSet,
+    pub resume_points: usize,
+    /// Ordered body-local frame-binding symbols.
+    pub frame_bindings: Vec<SymbolId>,
+    /// Ordered awaited-result types.
+    pub await_result_types: Vec<CheckedType>,
+    /// One-based resume states whose `await` parks on a `Wait`.
+    pub wait_await_states: Vec<usize>,
+    /// One-based resume states whose `await` parks on an `until` child.
+    pub until_await_states: Vec<usize>,
+    /// Ordered awaits owned by this plan.
+    pub awaits: Vec<LoweredAwaitId>,
+}
+
+/// A `coro { ... }` creation linked to its body plan.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredCoro {
+    pub origin: Origin,
+    pub plan: LoweredCoroutinePlanId,
+    /// The capture environment construction at the creation site.
+    pub environment: LoweredClosureEnvironment,
+}
+
+/// Which suspension an `await` performs.
+#[derive(Debug, Clone)]
+pub(crate) enum LoweredAwaitKind {
+    /// A child coroutine frame: run it to completion and take its result.
+    ChildCoroutine {
+        /// The child's plan when the operand is an identifiable coroutine
+        /// body; absent when only the checked effect/result parts are known.
+        plan: Option<LoweredCoroutinePlanId>,
+        child_result: CheckedType,
+        /// Ordered resource uses acquired for the child's deferred effects at
+        /// activation time.
+        deferred_resources: Vec<LoweredResourceUseId>,
+    },
+    /// An external `Task` handle.
+    Task { result: CheckedType },
+    /// An external `Wait` handle.
+    Wait { result: CheckedType },
+}
+
+/// One `await` suspension site inside its owning coroutine plan.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredAwait {
+    pub origin: Origin,
+    pub operand: ExpressionId,
+    /// The await expression's checked result type: the child result, or the
+    /// `Completed T | Cancelled` outcome sum for external awaits.
+    pub result_type: CheckedType,
+    pub owning_plan: LoweredCoroutinePlanId,
+    /// One-based resume state.
+    pub resume_state: usize,
+    pub kind: LoweredAwaitKind,
 }
 
 /// The runtime call route a checked call follows, mirroring the backend's
@@ -1506,6 +1872,14 @@ pub(crate) struct LoweredProgram {
     trait_implementations: Arena<LoweredTraitImplementationMetadata, LoweredTraitImplementationId>,
     calls: Arena<LoweredCall, LoweredCallId>,
     callable_values: Arena<LoweredCallableValue, LoweredCallableValueId>,
+    resource_providers: Arena<LoweredResourceProvider, LoweredResourceProviderId>,
+    resource_uses: Arena<LoweredResourceUse, LoweredResourceUseId>,
+    withs: Arena<LoweredWith, LoweredWithId>,
+    reactive_operations: Arena<LoweredReactiveOperation, LoweredReactiveOperationId>,
+    reactive_callbacks: Arena<LoweredReactiveCallback, LoweredReactiveCallbackId>,
+    coroutine_plans: Arena<LoweredCoroutinePlan, LoweredCoroutinePlanId>,
+    coros: Arena<LoweredCoro, LoweredCoroId>,
+    awaits: Arena<LoweredAwait, LoweredAwaitId>,
     initializers: Arena<LoweredInitializer, InitializerId>,
     semantic_ids: LoweredSemanticIds,
     string_formatting: LoweredStringFormatting,
@@ -2754,7 +3128,7 @@ impl LoweredProgram {
         if let Some(existing) = self.expression_lookup.get(&key) {
             return Ok(*existing);
         }
-        let disposition = classify_expression(expression);
+        let disposition = classify_expression(module, expression);
         if disposition == ExpressionDisposition::Rejected {
             reject_compile_time_expression(expression)?;
             return Err(Diagnostic::new(
@@ -2783,6 +3157,13 @@ impl LoweredProgram {
         let kind = match disposition {
             ExpressionDisposition::Ordinary(family) => {
                 self.lower_ordinary_expression(module, owner, context, family, expression)?
+            }
+            ExpressionDisposition::Stage26(route) => {
+                // The route owns its concrete payload; Steps 2, 4, 5, and 6
+                // populate provider, reactive, and coroutine records. Until
+                // then the expression records its explicit route instead of an
+                // untyped fallback.
+                LoweredExpressionKind::Stage26Deferred(route)
             }
             ExpressionDisposition::Deferred(family) => LoweredExpressionKind::Deferred(family),
             ExpressionDisposition::Rejected => unreachable!("rejected above"),
@@ -5395,6 +5776,372 @@ impl LoweredProgram {
         ));
         diagnostics.extend(self.validate_string_formatting());
         diagnostics.extend(self.validate_calls_and_callable_values());
+        diagnostics.extend(self.validate_resource_and_coroutine_records());
+        diagnostics
+    }
+
+    /// Checks the Stage 2.6 resource provider/use, `with`, reactive, and
+    /// coroutine arenas against the catalogs and each other. Records populate
+    /// in Steps 2-6; the checks are already in place so a populated record can
+    /// never silently dangle.
+    fn validate_resource_and_coroutine_records(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (_, provider) in self.resource_providers.iter() {
+            if let Some(parent) = provider.parent
+                && !self.resource_providers.contains(parent)
+            {
+                diagnostics.push(invalid_reference(
+                    &provider.origin,
+                    "resource provider",
+                    "provider",
+                    parent.index(),
+                ));
+            }
+            match provider.target {
+                LoweredProviderTarget::Expression(expression) => {
+                    if !self.expressions.contains(expression) {
+                        diagnostics.push(invalid_reference(
+                            &provider.origin,
+                            "resource provider",
+                            "expression",
+                            expression.index(),
+                        ));
+                    }
+                }
+                LoweredProviderTarget::Symbol(symbol) => {
+                    if self.symbols.get(symbol).is_none() {
+                        diagnostics.push(invalid_reference(
+                            &provider.origin,
+                            "resource provider",
+                            "symbol",
+                            symbol.0,
+                        ));
+                    }
+                }
+            }
+        }
+        for (_, use_) in self.resource_uses.iter() {
+            if let Some(provider) = use_.provider
+                && !self.resource_providers.contains(provider)
+            {
+                diagnostics.push(invalid_reference(
+                    &use_.origin,
+                    "resource use",
+                    "provider",
+                    provider.index(),
+                ));
+            }
+        }
+        for (_, with) in self.withs.iter() {
+            if !self.resource_providers.contains(with.provider) {
+                diagnostics.push(invalid_reference(
+                    &with.origin,
+                    "with",
+                    "provider",
+                    with.provider.index(),
+                ));
+            }
+            if !self.expressions.contains(with.value) {
+                diagnostics.push(invalid_reference(
+                    &with.origin,
+                    "with",
+                    "expression",
+                    with.value.index(),
+                ));
+            }
+            if !self.blocks.contains(with.body) {
+                diagnostics.push(invalid_reference(
+                    &with.origin,
+                    "with",
+                    "block",
+                    with.body.index(),
+                ));
+            }
+        }
+        for (_, callback) in self.reactive_callbacks.iter() {
+            if let Some(thunk) = callback.thunk
+                && self.functions.get(thunk).is_none()
+            {
+                diagnostics.push(invalid_reference(
+                    &callback.origin,
+                    "reactive callback",
+                    "function",
+                    thunk.0,
+                ));
+            }
+            if let Some(callable) = callback.callable
+                && !self.expressions.contains(callable)
+            {
+                diagnostics.push(invalid_reference(
+                    &callback.origin,
+                    "reactive callback",
+                    "expression",
+                    callable.index(),
+                ));
+            }
+            for use_ in &callback.resources {
+                if !self.resource_uses.contains(*use_) {
+                    diagnostics.push(invalid_reference(
+                        &callback.origin,
+                        "reactive callback",
+                        "resource use",
+                        use_.index(),
+                    ));
+                }
+            }
+            for capture in &callback.captures {
+                if self.symbols.get(capture.symbol).is_none() {
+                    diagnostics.push(invalid_reference(
+                        &callback.origin,
+                        "reactive callback",
+                        "symbol",
+                        capture.symbol.0,
+                    ));
+                }
+            }
+        }
+        for (_, operation) in self.reactive_operations.iter() {
+            match &operation.kind {
+                LoweredReactiveOperationKind::SignalCreate { symbol }
+                | LoweredReactiveOperationKind::SignalRead { symbol }
+                | LoweredReactiveOperationKind::SignalNotify { symbol } => {
+                    if self.symbols.get(*symbol).is_none() {
+                        diagnostics.push(invalid_reference(
+                            &operation.origin,
+                            "reactive operation",
+                            "symbol",
+                            symbol.0,
+                        ));
+                    }
+                }
+                LoweredReactiveOperationKind::DerivedCreate {
+                    symbol,
+                    evaluator,
+                    captures,
+                    ..
+                } => {
+                    if self.symbols.get(*symbol).is_none() {
+                        diagnostics.push(invalid_reference(
+                            &operation.origin,
+                            "reactive operation",
+                            "symbol",
+                            symbol.0,
+                        ));
+                    }
+                    if self.functions.get(*evaluator).is_none() {
+                        diagnostics.push(invalid_reference(
+                            &operation.origin,
+                            "reactive operation",
+                            "function",
+                            evaluator.0,
+                        ));
+                    }
+                    for capture in captures {
+                        if self.symbols.get(capture.symbol).is_none() {
+                            diagnostics.push(invalid_reference(
+                                &operation.origin,
+                                "reactive operation",
+                                "symbol",
+                                capture.symbol.0,
+                            ));
+                        }
+                    }
+                }
+                LoweredReactiveOperationKind::Scope | LoweredReactiveOperationKind::Snapshot => {}
+                LoweredReactiveOperationKind::Reaction {
+                    callback,
+                    reactive_provider,
+                }
+                | LoweredReactiveOperationKind::Until {
+                    predicate: callback,
+                    reactive_provider,
+                } => {
+                    if !self.reactive_callbacks.contains(*callback) {
+                        diagnostics.push(invalid_reference(
+                            &operation.origin,
+                            "reactive operation",
+                            "callback",
+                            callback.index(),
+                        ));
+                    }
+                    if let Some(provider) = reactive_provider
+                        && !self.resource_providers.contains(*provider)
+                    {
+                        diagnostics.push(invalid_reference(
+                            &operation.origin,
+                            "reactive operation",
+                            "provider",
+                            provider.index(),
+                        ));
+                    }
+                }
+                LoweredReactiveOperationKind::Batch { callback } => {
+                    if !self.reactive_callbacks.contains(*callback) {
+                        diagnostics.push(invalid_reference(
+                            &operation.origin,
+                            "reactive operation",
+                            "callback",
+                            callback.index(),
+                        ));
+                    }
+                }
+            }
+        }
+        for (_, plan) in self.coroutine_plans.iter() {
+            if !self.blocks.contains(plan.body) {
+                diagnostics.push(invalid_reference(
+                    &plan.origin,
+                    "coroutine plan",
+                    "block",
+                    plan.body.index(),
+                ));
+            }
+            match self.functions.get(plan.thunk) {
+                Some(thunk) => {
+                    if thunk.captures.len() != plan.captures.len() {
+                        diagnostics.push(Diagnostic::new(
+                            plan.origin.span.clone(),
+                            format!(
+                                "coroutine plan has {} captures for a body thunk with {}",
+                                plan.captures.len(),
+                                thunk.captures.len()
+                            ),
+                        ));
+                    }
+                    for (catalog, capture) in thunk.captures.iter().zip(&plan.captures) {
+                        if catalog.symbol != capture.symbol {
+                            diagnostics.push(Diagnostic::new(
+                                plan.origin.span.clone(),
+                                format!(
+                                    "coroutine capture {} disagrees with body thunk capture {}",
+                                    capture.symbol.0, catalog.symbol.0
+                                ),
+                            ));
+                        }
+                    }
+                }
+                None => diagnostics.push(invalid_reference(
+                    &plan.origin,
+                    "coroutine plan",
+                    "function",
+                    plan.thunk.0,
+                )),
+            }
+            for symbol in &plan.frame_bindings {
+                if self.symbols.get(*symbol).is_none() {
+                    diagnostics.push(invalid_reference(
+                        &plan.origin,
+                        "coroutine plan",
+                        "symbol",
+                        symbol.0,
+                    ));
+                }
+            }
+            if plan.await_result_types.len() != plan.resume_points
+                || plan.awaits.len() != plan.resume_points
+            {
+                diagnostics.push(Diagnostic::new(
+                    plan.origin.span.clone(),
+                    format!(
+                        "coroutine plan has {} resume points but {} awaited result types and {} awaits",
+                        plan.resume_points,
+                        plan.await_result_types.len(),
+                        plan.awaits.len()
+                    ),
+                ));
+            }
+            for state in plan
+                .wait_await_states
+                .iter()
+                .chain(&plan.until_await_states)
+            {
+                if *state == 0 || *state > plan.resume_points {
+                    diagnostics.push(Diagnostic::new(
+                        plan.origin.span.clone(),
+                        format!(
+                            "coroutine plan cancellation state {state} is outside 1..={}",
+                            plan.resume_points
+                        ),
+                    ));
+                }
+            }
+            for await_ in &plan.awaits {
+                if !self.awaits.contains(*await_) {
+                    diagnostics.push(invalid_reference(
+                        &plan.origin,
+                        "coroutine plan",
+                        "await",
+                        await_.index(),
+                    ));
+                }
+            }
+        }
+        for (_, coro) in self.coros.iter() {
+            if !self.coroutine_plans.contains(coro.plan) {
+                diagnostics.push(invalid_reference(
+                    &coro.origin,
+                    "coro",
+                    "plan",
+                    coro.plan.index(),
+                ));
+            }
+        }
+        for (_, await_) in self.awaits.iter() {
+            if !self.expressions.contains(await_.operand) {
+                diagnostics.push(invalid_reference(
+                    &await_.origin,
+                    "await",
+                    "expression",
+                    await_.operand.index(),
+                ));
+            }
+            match self.coroutine_plans.get(await_.owning_plan) {
+                Some(plan) => {
+                    if await_.resume_state == 0 || await_.resume_state > plan.resume_points {
+                        diagnostics.push(Diagnostic::new(
+                            await_.origin.span.clone(),
+                            format!(
+                                "await resume state {} is outside 1..={}",
+                                await_.resume_state, plan.resume_points
+                            ),
+                        ));
+                    }
+                }
+                None => diagnostics.push(invalid_reference(
+                    &await_.origin,
+                    "await",
+                    "plan",
+                    await_.owning_plan.index(),
+                )),
+            }
+            if let LoweredAwaitKind::ChildCoroutine {
+                plan,
+                deferred_resources,
+                ..
+            } = &await_.kind
+            {
+                if let Some(plan) = plan
+                    && !self.coroutine_plans.contains(*plan)
+                {
+                    diagnostics.push(invalid_reference(
+                        &await_.origin,
+                        "await",
+                        "plan",
+                        plan.index(),
+                    ));
+                }
+                for use_ in deferred_resources {
+                    if !self.resource_uses.contains(*use_) {
+                        diagnostics.push(invalid_reference(
+                            &await_.origin,
+                            "await",
+                            "resource use",
+                            use_.index(),
+                        ));
+                    }
+                }
+            }
+        }
         diagnostics
     }
 
@@ -6139,7 +6886,9 @@ impl LoweredProgram {
                         "callable expression was not lowered",
                     ));
                 }
-                LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::String(_) => {}
+                LoweredExpressionKind::Deferred(_)
+                | LoweredExpressionKind::Stage26Deferred(_)
+                | LoweredExpressionKind::String(_) => {}
                 LoweredExpressionKind::Integer(integer) => {
                     let width = integer_literal_bit_width(integer.integer_type);
                     let value_bits = if integer.integer_type.is_signed() {
@@ -6528,6 +7277,46 @@ impl LoweredProgram {
                         ));
                     }
                 }
+                LoweredExpressionKind::Resource(use_) => {
+                    if !self.resource_uses.contains(*use_) {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "expression",
+                            "resource use",
+                            use_.index(),
+                        ));
+                    }
+                }
+                LoweredExpressionKind::With(with) => {
+                    if !self.withs.contains(*with) {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "expression",
+                            "with",
+                            with.index(),
+                        ));
+                    }
+                }
+                LoweredExpressionKind::Coro(coro) => {
+                    if !self.coros.contains(*coro) {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "expression",
+                            "coro",
+                            coro.index(),
+                        ));
+                    }
+                }
+                LoweredExpressionKind::Await(await_) => {
+                    if !self.awaits.contains(*await_) {
+                        diagnostics.push(invalid_reference(
+                            &expression.origin,
+                            "expression",
+                            "await",
+                            await_.index(),
+                        ));
+                    }
+                }
             }
             self.validate_expression_coercion(expression, &mut diagnostics);
         }
@@ -6899,6 +7688,94 @@ impl LoweredProgram {
                 ));
             }
         }
+        for (id, provider) in self.resource_providers.iter() {
+            if !reached.resource_providers.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    provider.origin.span.clone(),
+                    format!(
+                        "lowered resource provider {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, use_) in self.resource_uses.iter() {
+            if !reached.resource_uses.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    use_.origin.span.clone(),
+                    format!(
+                        "lowered resource use {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, with) in self.withs.iter() {
+            if !reached.withs.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    with.origin.span.clone(),
+                    format!(
+                        "lowered with {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, operation) in self.reactive_operations.iter() {
+            if !reached.reactive_operations.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    operation.origin.span.clone(),
+                    format!(
+                        "lowered reactive operation {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, callback) in self.reactive_callbacks.iter() {
+            if !reached.reactive_callbacks.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    callback.origin.span.clone(),
+                    format!(
+                        "lowered reactive callback {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, plan) in self.coroutine_plans.iter() {
+            if !reached.coroutine_plans.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    plan.origin.span.clone(),
+                    format!(
+                        "lowered coroutine plan {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, coro) in self.coros.iter() {
+            if !reached.coros.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    coro.origin.span.clone(),
+                    format!(
+                        "lowered coro {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+        for (id, await_) in self.awaits.iter() {
+            if !reached.awaits.contains(&id) {
+                diagnostics.push(Diagnostic::new(
+                    await_.origin.span.clone(),
+                    format!(
+                        "lowered await {} is not reachable from any runtime root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
         diagnostics
     }
 
@@ -7008,12 +7885,162 @@ impl LoweredProgram {
             LoweredExpressionKind::CallableValue(value) => {
                 self.visit_owned_callable_value(*value, reached)
             }
-            LoweredExpressionKind::Deferred(_)
+            LoweredExpressionKind::Resource(use_) => self.visit_owned_resource_use(*use_, reached),
+            LoweredExpressionKind::With(with) => self.visit_owned_with(*with, reached),
+            LoweredExpressionKind::Coro(coro) => self.visit_owned_coro(*coro, reached),
+            LoweredExpressionKind::Await(await_) => self.visit_owned_await(*await_, reached),
+            LoweredExpressionKind::Stage26Deferred(_)
+            | LoweredExpressionKind::Deferred(_)
             | LoweredExpressionKind::Name(_)
             | LoweredExpressionKind::Integer(_)
             | LoweredExpressionKind::Float(_)
             | LoweredExpressionKind::String(_)
             | LoweredExpressionKind::CString(_) => {}
+        }
+    }
+
+    fn visit_owned_resource_provider(
+        &self,
+        id: LoweredResourceProviderId,
+        reached: &mut Reachability,
+    ) {
+        if !reached.resource_providers.insert(id) {
+            return;
+        }
+        let Some(provider) = self.resource_providers.get(id) else {
+            return;
+        };
+        if let Some(parent) = provider.parent {
+            self.visit_owned_resource_provider(parent, reached);
+        }
+        if let LoweredProviderTarget::Expression(expression) = provider.target {
+            self.visit_owned_expression(expression, reached);
+        }
+    }
+
+    fn visit_owned_resource_use(&self, id: LoweredResourceUseId, reached: &mut Reachability) {
+        if !reached.resource_uses.insert(id) {
+            return;
+        }
+        let Some(use_) = self.resource_uses.get(id) else {
+            return;
+        };
+        if let Some(provider) = use_.provider {
+            self.visit_owned_resource_provider(provider, reached);
+        }
+    }
+
+    fn visit_owned_with(&self, id: LoweredWithId, reached: &mut Reachability) {
+        if !reached.withs.insert(id) {
+            return;
+        }
+        let Some(with) = self.withs.get(id) else {
+            return;
+        };
+        self.visit_owned_resource_provider(with.provider, reached);
+        self.visit_owned_expression(with.value, reached);
+        self.visit_owned_block(with.body, reached);
+    }
+
+    fn visit_owned_reactive_callback(
+        &self,
+        id: LoweredReactiveCallbackId,
+        reached: &mut Reachability,
+    ) {
+        if !reached.reactive_callbacks.insert(id) {
+            return;
+        }
+        let Some(callback) = self.reactive_callbacks.get(id) else {
+            return;
+        };
+        if let Some(callable) = callback.callable {
+            self.visit_owned_expression(callable, reached);
+        }
+        for use_ in &callback.resources {
+            self.visit_owned_resource_use(*use_, reached);
+        }
+    }
+
+    fn visit_owned_reactive_operation(
+        &self,
+        id: LoweredReactiveOperationId,
+        reached: &mut Reachability,
+    ) {
+        if !reached.reactive_operations.insert(id) {
+            return;
+        }
+        let Some(operation) = self.reactive_operations.get(id) else {
+            return;
+        };
+        match operation.kind {
+            LoweredReactiveOperationKind::Reaction {
+                callback,
+                reactive_provider,
+            }
+            | LoweredReactiveOperationKind::Until {
+                predicate: callback,
+                reactive_provider,
+            } => {
+                self.visit_owned_reactive_callback(callback, reached);
+                if let Some(provider) = reactive_provider {
+                    self.visit_owned_resource_provider(provider, reached);
+                }
+            }
+            LoweredReactiveOperationKind::Batch { callback } => {
+                self.visit_owned_reactive_callback(callback, reached);
+            }
+            LoweredReactiveOperationKind::SignalCreate { .. }
+            | LoweredReactiveOperationKind::SignalRead { .. }
+            | LoweredReactiveOperationKind::SignalNotify { .. }
+            | LoweredReactiveOperationKind::DerivedCreate { .. }
+            | LoweredReactiveOperationKind::Scope
+            | LoweredReactiveOperationKind::Snapshot => {}
+        }
+    }
+
+    fn visit_owned_coroutine_plan(&self, id: LoweredCoroutinePlanId, reached: &mut Reachability) {
+        if !reached.coroutine_plans.insert(id) {
+            return;
+        }
+        let Some(plan) = self.coroutine_plans.get(id) else {
+            return;
+        };
+        self.visit_owned_block(plan.body, reached);
+        for await_ in &plan.awaits {
+            self.visit_owned_await(*await_, reached);
+        }
+    }
+
+    fn visit_owned_coro(&self, id: LoweredCoroId, reached: &mut Reachability) {
+        if !reached.coros.insert(id) {
+            return;
+        }
+        let Some(coro) = self.coros.get(id) else {
+            return;
+        };
+        self.visit_owned_coroutine_plan(coro.plan, reached);
+    }
+
+    fn visit_owned_await(&self, id: LoweredAwaitId, reached: &mut Reachability) {
+        if !reached.awaits.insert(id) {
+            return;
+        }
+        let Some(await_) = self.awaits.get(id) else {
+            return;
+        };
+        self.visit_owned_expression(await_.operand, reached);
+        if let LoweredAwaitKind::ChildCoroutine {
+            plan,
+            deferred_resources,
+            ..
+        } = &await_.kind
+        {
+            if let Some(plan) = plan {
+                self.visit_owned_coroutine_plan(*plan, reached);
+            }
+            for use_ in deferred_resources {
+                self.visit_owned_resource_use(*use_, reached);
+            }
         }
     }
 
@@ -7556,7 +8583,29 @@ impl LoweredProgram {
             LoweredExpressionKind::CallableValue(value) => {
                 self.collect_loop_callable_value(*value, depth, reached, diagnostics)
             }
-            LoweredExpressionKind::Deferred(_)
+            LoweredExpressionKind::With(with) => {
+                if let Some(with) = self.withs.get(*with) {
+                    self.collect_loop_expression(with.value, depth, reached, diagnostics);
+                    self.collect_loop_items(with.body, depth, reached, diagnostics);
+                }
+            }
+            LoweredExpressionKind::Coro(coro) => {
+                if let Some(plan) = self
+                    .coros
+                    .get(*coro)
+                    .and_then(|coro| self.coroutine_plans.get(coro.plan))
+                {
+                    self.collect_loop_items(plan.body, depth, reached, diagnostics);
+                }
+            }
+            LoweredExpressionKind::Await(await_) => {
+                if let Some(await_) = self.awaits.get(*await_) {
+                    self.collect_loop_expression(await_.operand, depth, reached, diagnostics);
+                }
+            }
+            LoweredExpressionKind::Stage26Deferred(_)
+            | LoweredExpressionKind::Deferred(_)
+            | LoweredExpressionKind::Resource(_)
             | LoweredExpressionKind::Name(_)
             | LoweredExpressionKind::Integer(_)
             | LoweredExpressionKind::Float(_)
@@ -8167,18 +9216,20 @@ fn module_origin(module: &SourceModule) -> Origin {
 /// `Expression` variant fails to compile here until it has an explicit
 /// owned/deferred/rejected decision, and the coverage classifier test keeps
 /// the enumerated variant list in agreement.
-fn classify_expression(expression: &Expression) -> ExpressionDisposition {
-    use DeferredExpressionFamily::{Coroutine, Resource};
-    use ExpressionDisposition::{Deferred, Ordinary, Rejected};
+fn classify_expression(module: &TypedModule, expression: &Expression) -> ExpressionDisposition {
+    use ExpressionDisposition::{Ordinary, Rejected, Stage26};
     use Stage24Family as Family;
+    use Stage26Route as Route;
     match expression {
         Expression::Function(_) => Ordinary(Family::Function),
         Expression::Call(_) => Ordinary(Family::Call),
         Expression::Satisfies(_) => Ordinary(Family::Satisfies),
         Expression::Match(_) => Ordinary(Family::Match),
         Expression::Loop(_) => Ordinary(Family::Loop),
-        Expression::Coro(_) | Expression::Await(_) => Deferred(Coroutine),
-        Expression::Resource(_) | Expression::With(_) => Deferred(Resource),
+        Expression::Coro(_) => Stage26(Route::CoroutineCreation),
+        Expression::Await(await_) => Stage26(classify_await_route(module, await_)),
+        Expression::Resource(_) => Stage26(Route::ResourceUse),
+        Expression::With(_) => Stage26(Route::ResourceProvider),
         Expression::Block(_) => Ordinary(Family::Block),
         Expression::Product(_) => Ordinary(Family::Product),
         Expression::RepeatedProduct(_) => Ordinary(Family::RepeatedProduct),
@@ -8196,6 +9247,98 @@ fn classify_expression(expression: &Expression) -> ExpressionDisposition {
         Expression::CString(_) => Ordinary(Family::CString),
         Expression::Integer(_) => Ordinary(Family::Integer),
         Expression::Float(_) => Ordinary(Family::Float),
+    }
+}
+
+/// The route of an `await` operand: external `Task` and `Wait` handles park on
+/// an external record, everything else is a child coroutine frame. The
+/// checked operand type selects the route exactly as code generation does.
+fn classify_await_route(
+    module: &TypedModule,
+    await_: &staple_syntax::AwaitExpression,
+) -> Stage26Route {
+    let Some(operand_type) = module.type_of_expression(await_.operand.syntax().id) else {
+        return Stage26Route::AwaitChildCoroutine;
+    };
+    if module.task_result(operand_type).is_some() {
+        return Stage26Route::AwaitTask;
+    }
+    if module.wait_result(operand_type).is_some() {
+        return Stage26Route::AwaitWait;
+    }
+    Stage26Route::AwaitChildCoroutine
+}
+
+/// The reactive or coroutine route of one compiler intrinsic. The exhaustive
+/// match fails to compile when a new intrinsic lacks a route.
+fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
+    use crate::IntrinsicFunction as Intrinsic;
+    match intrinsic {
+        Intrinsic::ReactiveScope => Some(IntrinsicRoute::Reactive(ReactiveIntrinsicRoute::Scope)),
+        Intrinsic::Reaction => Some(IntrinsicRoute::Reactive(ReactiveIntrinsicRoute::Reaction)),
+        Intrinsic::Batch => Some(IntrinsicRoute::Reactive(ReactiveIntrinsicRoute::Batch)),
+        Intrinsic::Until => Some(IntrinsicRoute::Reactive(ReactiveIntrinsicRoute::Until)),
+        Intrinsic::Snapshot => Some(IntrinsicRoute::Reactive(ReactiveIntrinsicRoute::Snapshot)),
+        Intrinsic::CoroutineBlockOn => {
+            Some(IntrinsicRoute::Coroutine(CoroutineIntrinsicRoute::BlockOn))
+        }
+        Intrinsic::SchedulerCreate => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::SchedulerCreate,
+        )),
+        Intrinsic::TaskScope => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::TaskScope,
+        )),
+        Intrinsic::Spawn => Some(IntrinsicRoute::Coroutine(CoroutineIntrinsicRoute::Spawn)),
+        Intrinsic::Pump => Some(IntrinsicRoute::Coroutine(CoroutineIntrinsicRoute::Pump)),
+        Intrinsic::YieldNow => Some(IntrinsicRoute::Coroutine(CoroutineIntrinsicRoute::YieldNow)),
+        Intrinsic::TaskIsFinished => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::TaskIsFinished,
+        )),
+        Intrinsic::TaskCancel => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::TaskCancel,
+        )),
+        Intrinsic::Completion => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::Completion,
+        )),
+        Intrinsic::CompletionWithCancel => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::CompletionWithCancel,
+        )),
+        Intrinsic::CompletionToken => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::CompletionToken,
+        )),
+        Intrinsic::CompletionTokenResolve => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::CompletionTokenResolve,
+        )),
+        Intrinsic::CompletionTokenCancel => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::CompletionTokenCancel,
+        )),
+        Intrinsic::ResolverComplete => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::ResolverComplete,
+        )),
+        Intrinsic::ResolverCancel => Some(IntrinsicRoute::Coroutine(
+            CoroutineIntrinsicRoute::ResolverCancel,
+        )),
+        Intrinsic::ToString { .. }
+        | Intrinsic::IntegerBinary { .. }
+        | Intrinsic::IntegerCompare { .. }
+        | Intrinsic::FloatBinary { .. }
+        | Intrinsic::FloatCompare { .. }
+        | Intrinsic::StringFromCString
+        | Intrinsic::StringToCString
+        | Intrinsic::StringAdd
+        | Intrinsic::SliceLength
+        | Intrinsic::SliceGetRef
+        | Intrinsic::BufferWithCapacity
+        | Intrinsic::BufferLength
+        | Intrinsic::BufferCapacity
+        | Intrinsic::BufferPush
+        | Intrinsic::BufferPop
+        | Intrinsic::BufferGet
+        | Intrinsic::BufferFreeze
+        | Intrinsic::BufferTransfer
+        | Intrinsic::BufferClone
+        | Intrinsic::RefReplace
+        | Intrinsic::Drop => None,
     }
 }
 
@@ -8439,6 +9582,14 @@ struct Reachability {
     items: HashSet<ItemId>,
     calls: HashSet<LoweredCallId>,
     callable_values: HashSet<LoweredCallableValueId>,
+    resource_providers: HashSet<LoweredResourceProviderId>,
+    resource_uses: HashSet<LoweredResourceUseId>,
+    withs: HashSet<LoweredWithId>,
+    reactive_operations: HashSet<LoweredReactiveOperationId>,
+    reactive_callbacks: HashSet<LoweredReactiveCallbackId>,
+    coroutine_plans: HashSet<LoweredCoroutinePlanId>,
+    coros: HashSet<LoweredCoroId>,
+    awaits: HashSet<LoweredAwaitId>,
 }
 
 /// Whether a trait evidence recipe addresses the given trait and, when
@@ -10612,7 +11763,9 @@ mod tests {
 
     #[test]
     fn coverage_classifier_decides_every_expression_variant() {
-        use ExpressionDisposition::{Deferred, Ordinary, Rejected};
+        use ExpressionDisposition::{Ordinary, Rejected, Stage26};
+        use Stage26Route as Route;
+        let module = checked_program("let value: I32 = 1\n");
         let representatives = representative_expressions();
         let mut names = representatives
             .iter()
@@ -10631,8 +11784,10 @@ mod tests {
             let expected = match *name {
                 "Function" => Ordinary(Stage24Family::Function),
                 "Call" => Ordinary(Stage24Family::Call),
-                "Resource" | "With" => Deferred(DeferredExpressionFamily::Resource),
-                "Coro" | "Await" => Deferred(DeferredExpressionFamily::Coroutine),
+                "Resource" => Stage26(Route::ResourceUse),
+                "With" => Stage26(Route::ResourceProvider),
+                "Coro" => Stage26(Route::CoroutineCreation),
+                "Await" => Stage26(Route::AwaitChildCoroutine),
                 "Unary" | "Binary" | "SyntaxArgument" | "VisibilityArgument" | "Quote"
                 | "Splice" => Rejected,
                 "Satisfies" => Ordinary(Stage24Family::Satisfies),
@@ -10652,7 +11807,7 @@ mod tests {
                 "Float" => Ordinary(Stage24Family::Float),
                 other => panic!("unclassified expression variant {other}"),
             };
-            assert_eq!(classify_expression(expression), expected, "{name}");
+            assert_eq!(classify_expression(&module, expression), expected, "{name}");
         }
     }
 
@@ -10662,6 +11817,20 @@ mod tests {
             .iter()
             .filter_map(|(_, expression)| match expression.kind {
                 LoweredExpressionKind::Deferred(family) => Some(family),
+                LoweredExpressionKind::Stage26Deferred(route) => Some(route.deferred_family()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The explicit Stage 2.6 routes a lowered program recorded. Routes replace
+    /// their records one step at a time, so the set shrinks as Steps 2-6 land.
+    fn stage26_routes(program: &LoweredProgram) -> Vec<Stage26Route> {
+        program
+            .expressions
+            .iter()
+            .filter_map(|(_, expression)| match expression.kind {
+                LoweredExpressionKind::Stage26Deferred(route) => Some(route),
                 _ => None,
             })
             .collect()
@@ -10695,6 +11864,134 @@ mod tests {
         );
         assert!(deferred.contains(&DeferredExpressionFamily::Resource));
         assert!(deferred.contains(&DeferredExpressionFamily::Coroutine));
+    }
+
+    #[test]
+    fn stage26_route_table_covers_every_deferred_route() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "type Counter = ctor (value: I32)\n",
+            "def increment: () ->{mut Counter} () = () => {\n",
+            "  (resource Counter).value = (resource Counter).value + 1\n",
+            "}\n",
+            "def child: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def spawned: I32 -> Coroutine{} I32 = base => coro { base + 1 }\n",
+            "def wait_observer: move Wait I32 -> Coroutine{} () = move w => coro {\n",
+            "  let _ = await w; ()\n",
+            "}\n",
+            "def driver: () -> Coroutine{Tasks} I32 = () => coro {\n",
+            "  let c = await (child ())\n",
+            "  let task = spawn (spawned c)\n",
+            "  let outcome = await task\n",
+            "  let _ = outcome; c\n",
+            "}\n",
+            "let mut counter = Counter (value: 0)\n",
+            "with mut Counter = counter { increment () }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let routes = stage26_routes(&program);
+        for route in Stage26Route::ALL {
+            assert!(
+                routes.contains(&route),
+                "the route fixture should lower `{route:?}`; have {routes:?}"
+            );
+        }
+        for route in Stage26Route::ALL {
+            assert_eq!(
+                route.deferred_family(),
+                match route {
+                    Stage26Route::ResourceUse | Stage26Route::ResourceProvider =>
+                        DeferredExpressionFamily::Resource,
+                    _ => DeferredExpressionFamily::Coroutine,
+                }
+            );
+        }
+        let mut families = routes
+            .iter()
+            .map(|route| route.record_family())
+            .collect::<Vec<_>>();
+        families.sort_unstable();
+        families.dedup();
+        assert_eq!(
+            families,
+            vec!["Await", "Coro", "ResourceUse", "With"],
+            "every route names exactly one owned record family"
+        );
+    }
+
+    #[test]
+    fn intrinsic_route_table_covers_reactive_and_coroutine_intrinsics() {
+        use crate::IntrinsicFunction as I;
+        use CoroutineIntrinsicRoute as Coro;
+        use IntrinsicRoute::{Coroutine as CoroRoute, Reactive as ReactiveRoute};
+        use ReactiveIntrinsicRoute as React;
+
+        let table = [
+            (I::ReactiveScope, ReactiveRoute(React::Scope)),
+            (I::Reaction, ReactiveRoute(React::Reaction)),
+            (I::Batch, ReactiveRoute(React::Batch)),
+            (I::Until, ReactiveRoute(React::Until)),
+            (I::Snapshot, ReactiveRoute(React::Snapshot)),
+            (I::CoroutineBlockOn, CoroRoute(Coro::BlockOn)),
+            (I::SchedulerCreate, CoroRoute(Coro::SchedulerCreate)),
+            (I::TaskScope, CoroRoute(Coro::TaskScope)),
+            (I::Spawn, CoroRoute(Coro::Spawn)),
+            (I::Pump, CoroRoute(Coro::Pump)),
+            (I::YieldNow, CoroRoute(Coro::YieldNow)),
+            (I::TaskIsFinished, CoroRoute(Coro::TaskIsFinished)),
+            (I::TaskCancel, CoroRoute(Coro::TaskCancel)),
+            (I::Completion, CoroRoute(Coro::Completion)),
+            (
+                I::CompletionWithCancel,
+                CoroRoute(Coro::CompletionWithCancel),
+            ),
+            (I::CompletionToken, CoroRoute(Coro::CompletionToken)),
+            (
+                I::CompletionTokenResolve,
+                CoroRoute(Coro::CompletionTokenResolve),
+            ),
+            (
+                I::CompletionTokenCancel,
+                CoroRoute(Coro::CompletionTokenCancel),
+            ),
+            (I::ResolverComplete, CoroRoute(Coro::ResolverComplete)),
+            (I::ResolverCancel, CoroRoute(Coro::ResolverCancel)),
+        ];
+        for (intrinsic, expected) in table {
+            let route =
+                intrinsic_route(intrinsic).expect("reactive/coroutine intrinsic has a route");
+            assert_eq!(
+                route, expected,
+                "intrinsic {intrinsic:?} has an explicit route"
+            );
+        }
+        let mut reactive_routes = table
+            .iter()
+            .filter_map(|(intrinsic, _)| match intrinsic_route(*intrinsic) {
+                Some(IntrinsicRoute::Reactive(route)) => Some(route),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        reactive_routes.sort_by_key(|route| format!("{route:?}"));
+        reactive_routes.dedup();
+        assert_eq!(reactive_routes.len(), React::ALL.len());
+
+        let mut coroutine_routes = table
+            .iter()
+            .filter_map(|(intrinsic, _)| match intrinsic_route(*intrinsic) {
+                Some(IntrinsicRoute::Coroutine(route)) => Some(route),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        coroutine_routes.sort_by_key(|route| format!("{route:?}"));
+        coroutine_routes.dedup();
+        assert_eq!(coroutine_routes.len(), Coro::ALL.len());
+
+        assert!(intrinsic_route(I::Drop).is_none());
+        assert!(intrinsic_route(I::StringAdd).is_none());
     }
 
     #[test]
@@ -13608,6 +14905,9 @@ mod tests {
             LoweredExpressionKind::Deferred(DeferredExpressionFamily::Coroutine) => {
                 "deferred.coroutine".to_owned()
             }
+            LoweredExpressionKind::Stage26Deferred(route) => {
+                format!("stage26.{}", route.record_family())
+            }
             LoweredExpressionKind::Block(_) => "block".to_owned(),
             LoweredExpressionKind::Name(_) => "name".to_owned(),
             LoweredExpressionKind::Integer(_) => "integer".to_owned(),
@@ -13625,6 +14925,10 @@ mod tests {
             LoweredExpressionKind::StringTemplate(_) => "string-template".to_owned(),
             LoweredExpressionKind::Call(_) => "call".to_owned(),
             LoweredExpressionKind::CallableValue(_) => "callable-value".to_owned(),
+            LoweredExpressionKind::Resource(_) => "resource".to_owned(),
+            LoweredExpressionKind::With(_) => "with".to_owned(),
+            LoweredExpressionKind::Coro(_) => "coro".to_owned(),
+            LoweredExpressionKind::Await(_) => "await".to_owned(),
         }
     }
 
@@ -13649,8 +14953,6 @@ mod tests {
             "call",
             "callable-value",
             "cstring",
-            "deferred.coroutine",
-            "deferred.resource",
             "float",
             "index",
             "integer",
@@ -13661,6 +14963,10 @@ mod tests {
             "product",
             "repeated-product",
             "satisfies",
+            "stage26.Await",
+            "stage26.Coro",
+            "stage26.ResourceUse",
+            "stage26.With",
             "string",
             "string-template",
         ] {
