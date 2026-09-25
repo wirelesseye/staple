@@ -18,7 +18,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - All CLI and compiler code-generation tests now pass through `Lowerer`.
 - `cargo check --workspace` and `cargo test --workspace` pass. The workspace test run covers 937 tests.
 - **Stage 2 is complete.** Stage 2.1 through Stage 2.7 are done. Lowering owns validated declaration catalogs plus lowered patterns, assignment places, runtime items, function bodies, module initializer bodies, concrete lowered forms for every ordinary expression and control-flow family (literals, names, access, products/spreads/defaults, blocks, `satisfies`, logicals, loops, matches, indexing, and string templates), explicit callable, call, closure-construction, substitution, and trait-evidence records for every call and function value, and owned resource providers/uses, `with` scopes, signal/derived/reactive operations, coroutine plans, `coro` creations, and ordered `await` sites. Every `Expression` variant has one exhaustive owned/rejected decision with no remaining deferral; validation covers arena identity and bounds, single-owner attribution, function/body and capture consistency, concrete runtime metadata, callable completeness, trait evidence, literal payloads, provider/use consistency, reactive identity, effect-resource ordering, and coroutine body/thunk/await consistency; a source-coverage traversal proves every runtime construct has exactly one lowered counterpart; and repeated lowering is deterministic. Stage 3 (structural instance keys and the specialization worklist) is next; Stage 5 still removes the temporary legacy payload after migrating the backend.
-- The detailed Stage 2 implementation sequence is maintained in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md).
+- The completed Stage 2 sequence is recorded in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md). The next implementation sequence is in [STAGE_3_SPECIALIZATION_BREAKDOWN.md](STAGE_3_SPECIALIZATION_BREAKDOWN.md).
 
 ## Public Interfaces
 
@@ -85,7 +85,7 @@ Progress:
 
 > **Complex stage:** The AST and backend support many specialized constructs, including defaults, reactive bindings, structural indexing, ownership cleanup, and coroutines. This stage may need separate breakdown plans by expression family and runtime subsystem during implementation.
 
-### Stage 3 - Add Structural Instance Keys and the Specialization Worklist (Remaining)
+### Stage 3 - Add Structural Instance Keys and the Specialization Worklist (Next; Breakdown Ready)
 
 - Keep generic definitions as lowering-time templates and emit fully substituted `LoweredFunctionInstance` bodies.
 - Define `InstanceKey` from:
@@ -98,6 +98,7 @@ Progress:
 - Discover dependencies deterministically from calls, function values, closures, captures, defaults, trait methods, and compiler-generated operations.
 - Preserve current roots: all currently emitted nongeneric functions and module initializers remain roots; generic bodies are emitted only for reachable concrete uses.
 - Assign deterministic instance IDs and generated symbol names based on stable traversal and semantic keys.
+- Follow the detailed sequence and gates in [STAGE_3_SPECIALIZATION_BREAKDOWN.md](STAGE_3_SPECIALIZATION_BREAKDOWN.md).
 
 > **Complex stage:** Nested generic closures, captured outer parameters, result-only parameters, effects, trait prerequisites, and recursive references can affect instance identity. This stage may require its own breakdown plan covering key construction, free-parameter collection, and worklist convergence.
 
