@@ -9214,6 +9214,11 @@ impl LoweredProgram {
                         ),
                     ));
                 }
+            } else {
+                diagnostics.push(Diagnostic::new(
+                    function.origin.span.clone(),
+                    format!("function {key:?} has no lowered body block"),
+                ));
             }
             if let Some(previous) = patterns.insert(function.parameter_pattern, key) {
                 diagnostics.push(Diagnostic::new(
@@ -12141,6 +12146,12 @@ impl<'a> SourceCoverage<'a> {
                             ),
                         ));
                     }
+                    if lowered.body.is_none() {
+                        self.diagnostics.push(Diagnostic::new(
+                            syntax.span.clone(),
+                            format!("function `{}` has no lowered body block", function.name),
+                        ));
+                    }
                 }
                 None => self.diagnostics.push(Diagnostic::new(
                     syntax.span.clone(),
@@ -12298,6 +12309,57 @@ impl<'a> SourceCoverage<'a> {
 
     fn visit_block(&mut self, owner: ExpressionOwner, block: &staple_syntax::BlockExpression) {
         let last = block.items.len().checked_sub(1);
+        let key = ExpressionKey {
+            syntax: block.syntax.id,
+            owner,
+            context: ExpressionContext::Primary,
+        };
+        let Some(lowered) = self
+            .program
+            .block_lookup
+            .get(&key)
+            .and_then(|id| self.program.blocks.get(*id))
+        else {
+            self.missing(&block.syntax.span, "block", block.syntax.id);
+            return;
+        };
+        let lowered_items = lowered.items.clone();
+        let runtime = block
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                (runtime_item(item)
+                    && !(Some(index) == last && matches!(item, Item::Expression(_))))
+                .then_some(item)
+            })
+            .collect::<Vec<_>>();
+        if runtime.len() != lowered_items.len() {
+            self.diagnostics.push(Diagnostic::new(
+                block.syntax.span.clone(),
+                format!(
+                    "block {} lowered {} runtime items for {} source items",
+                    block.syntax.id.0,
+                    lowered_items.len(),
+                    runtime.len()
+                ),
+            ));
+        }
+        for (index, item) in runtime.iter().enumerate() {
+            if !lowered_items
+                .get(index)
+                .and_then(|id| self.program.items.get(*id))
+                .is_some_and(|lowered| lowered.origin.syntax == item.syntax().id)
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    item.syntax().span.clone(),
+                    format!(
+                        "block {} runtime item {index} does not match its lowered counterpart",
+                        block.syntax.id.0
+                    ),
+                ));
+            }
+        }
         for (index, item) in block.items.iter().enumerate() {
             if Some(index) == last
                 && let Item::Expression(expression) = item
@@ -12314,7 +12376,9 @@ impl<'a> SourceCoverage<'a> {
     /// so their bodies are owned by the function catalog instead.
     fn visit_expression(&mut self, owner: ExpressionOwner, expression: &Expression) {
         let syntax = expression.syntax();
-        if let Some(thunk) = self.module.implicit_thunk_for(syntax.id) {
+        if let Some(thunk) = self.module.implicit_thunk_for(syntax.id)
+            && owner != ExpressionOwner::Function(thunk.id)
+        {
             if self.program.functions.get(thunk.id).is_none() {
                 self.diagnostics.push(Diagnostic::new(
                     syntax.span.clone(),
@@ -18376,6 +18440,92 @@ mod tests {
                     .message
                     .contains("has no checked source function")),
             "an invented function template should diagnose"
+        );
+    }
+
+    #[test]
+    fn source_coverage_walks_implicit_thunk_body_children() {
+        let module = checked_program(complete_coverage_source());
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate_source_coverage(&module).is_empty());
+        let key = module
+            .implicit_thunks()
+            .find_map(|thunk| {
+                let Expression::Block(block) = &thunk.body else {
+                    return None;
+                };
+                block.items.iter().find_map(|item| {
+                    let Item::Expression(expression) = item else {
+                        return None;
+                    };
+                    let key = ExpressionKey {
+                        syntax: expression.syntax().id,
+                        owner: ExpressionOwner::Function(thunk.id),
+                        context: ExpressionContext::Primary,
+                    };
+                    program.expression_lookup.contains_key(&key).then_some(key)
+                })
+            })
+            .expect("an implicit thunk with a lowered body child");
+        program.expression_lookup.remove(&key);
+        assert!(
+            program
+                .validate_source_coverage(&module)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("has no lowered counterpart")),
+            "a missing expression inside an implicit thunk must diagnose"
+        );
+    }
+
+    #[test]
+    fn source_coverage_checks_nested_runtime_items() {
+        let module = checked_program(complete_coverage_source());
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate_source_coverage(&module).is_empty());
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name == "blocked")
+            .expect("fixture's block-bodied function");
+        let body = program.functions.get(function.id).unwrap().body.unwrap();
+        let block = program.blocks.get_mut(body).unwrap();
+        assert!(!block.items.is_empty());
+        block.items.remove(0);
+        assert!(
+            program
+                .validate_source_coverage(&module)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("runtime items for")),
+            "a missing nested binding item must diagnose"
+        );
+    }
+
+    #[test]
+    fn validation_requires_every_function_body_block() {
+        let module = checked_program(complete_coverage_source());
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name == "blocked")
+            .expect("fixture's block-bodied function");
+        program.functions.get_mut(function.id).unwrap().body = None;
+        assert!(
+            program
+                .validate()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("has no lowered body block")),
+            "a missing function body must fail structural validation"
+        );
+        assert!(
+            program
+                .validate_source_coverage(&module)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("has no lowered body block")),
+            "a missing function body must fail checked-source coverage"
         );
     }
 
