@@ -24,6 +24,8 @@ Build the concrete function-instance graph from the owned Stage 2 `LoweredProgra
 
 **Gate:** Key tests distinguish nominal identities, effect rows, ownership markers, capture-dependent outer substitutions, and selected implementations; equivalent checked types with different display/default metadata deduplicate.
 
+**Step 1 — route/input matrix: complete.** The focused sequence and the frozen inventory notes are in [STAGE_3_1_SPECIALIZATION_KEYS_PLAN.md](STAGE_3_1_SPECIALIZATION_KEYS_PLAN.md). All nine `ensure_function_specialization` call sites, the single `ensure_constructor_adapter` call site, and the `structural_trait_method_code` selector were traced to owned Stage 2 records (`LoweredCall`, `LoweredCallableValue`, `LoweredClosureConstruction`, `CallSubstitutions`, `TraitEvidence`, `LoweredStringFormatting`, `LoweredInterpolation`, `LoweredCoroutinePlan`). A negative matrix keeps indirect closure calls, externs, intrinsics, compiler helpers, ordinary constructor calls, eager nongeneric roots, coroutine body thunks, and GC finalizers out of source-function instance creation. Input gaps for Stage 3.2/4 (substitution composition, trait-method instantiation, generated-body helper selection, coroutine/finalizer artifacts) are recorded rather than worked around.
+
 > **Complexity note:** Canonicalizing recursive nominal types and effect substitutions without expanding representations may need a focused design pass.
 
 ## Stage 3.2 - Resolve Substitutions and Relevant Parameters
