@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, Stage 2.3, Stage 2.4, all of Stage 2.5, and all of Stage 2.6 are complete. Stage 2.7 (complete validation, coverage, and transition checks) is next.
+**Status:** Complete. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, Stage 2.3, Stage 2.4, all of Stage 2.5, all of Stage 2.6, and Stage 2.7 (complete validation, coverage, and transition checks) are complete. Stage 3 (structural instance keys and the specialization worklist) is next.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -280,7 +280,7 @@ Progress:
 
 > **Complexity note:** Reactive and coroutine lowering each span several backend subsystems. Either subsystem may need its own implementation plan before this substage starts.
 
-## Stage 2.7 - Complete Validation, Coverage, and Transition Checks
+## Stage 2.7 - Complete Validation, Coverage, and Transition Checks (Done)
 
 - Expand validation to check arena bounds, unique semantic IDs, function/body ownership, child-node ownership, concrete non-template metadata, callable completeness, trait evidence, symbol availability, capture consistency, and initializer ordering.
 - Add a traversal that proves every runtime source node belongs to exactly one lowered owner and has a lowered counterpart.
@@ -289,6 +289,19 @@ Progress:
 - Update the main plan's status and completed-verification sections after every merged substage.
 
 **Gate:** The full workspace suite lowers every successful fixture, all new validator/coverage tests pass, and no accepted runtime construct is represented only in the legacy payload.
+
+Completed:
+
+- `validate_arena_identity` checks that every arena handle addresses its own insertion slot, every catalog index is dense, and every occurrence/plan lookup agrees with the arena it indexes (block syntax, plan body syntax, and plan thunk identity).
+- The ownership traversal now attributes every reachable node to exactly one runtime owner. Function effect providers, entry providers, initializers, functions, and coroutine plans seed the traversal with their owner; expression occurrences must agree with their occurrence key, and coroutine plans always belong to their body thunk even when linked from another function's `coro`/`await`. Cross-owner references and unreachable nodes both diagnose.
+- `validate_function_body_ownership` proves each function body block and parameter pattern has exactly one owner, that body blocks are never shared with a module initializer, and that a template's body block origin matches its recorded body syntax.
+- `validate_concrete_metadata` rejects `Inferred`/`Error` placeholders in runtime expression, pattern, place, call, callable-value, provider, use, callback, reactive, coroutine-plan, and await types while keeping declared generic parameters and diverged `Never` values legal. Nested `Inferred` slots (effect rows, slice element wildcards) remain checker sentinels.
+- `validate_capture_consistency` checks every function, reactive-callback, and coroutine-plan capture against the symbol catalog: captures resolve, never duplicate, never alias the capturing function's own parameters or owner, and their shared-cell fact agrees with the symbol's storage classification.
+- Added `SourceCoverage`, a Stage 2.7 completeness traversal that mirrors the lowering walk over the checked program. It proves every declared function and implicit thunk has exactly one lowered template with a matching body syntax, every module initializer owns exactly its runtime source items in source order, and every runtime expression, pattern, and assignment place has a lowered counterpart under the same owner. Implicit thunks are covered through the function catalog, literal product call arguments through their decomposed element values, juxtaposed chain inner calls through the outer plan, and symbol-selected access/callee children are skipped exactly as lowering skips them. `Lowerer::lower` runs the traversal after internal validation succeeds, so every CLI and codegen fixture exercises it.
+- Added `source_constructs_have_exactly_one_lowered_counterpart`, which lowers a fixture spanning every expression family plus resources, reactive operations, implicit thunks, captures, and coroutines and asserts empty internal and source-coverage diagnostics, exact function/thunk catalog cardinality, and at least one capturing closure.
+- Added `validator_rejects_corrupted_runtime_ownership_and_coverage`, which directly corrupts shared function bodies, cross-owner expression references, stale block lookups, inference placeholders, missing expression counterparts, missing initializer items, and invented function templates, and asserts each new diagnostic fires.
+- Added `lowered_metadata_matches_checked_side_tables`, a transition comparison covering every `Primary` expression occurrence's checked type, effects, coercion, and moved symbols plus every function template's checked signature and capture order. Existing transition tests continue to cover call plans, ownership facts, and coroutine plans.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (1057 tests: 224 CLI including compile/run, object emission, and LLVM verification; 487 compiler integration; 108 module; 115 compiler unit; and supporting suites), and `git diff --check`. **Stage 2 is complete; Stage 3 is next.**
 
 ## Testing Matrix
 

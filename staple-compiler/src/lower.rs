@@ -6719,6 +6719,10 @@ impl LoweredProgram {
         diagnostics.extend(self.traits.validate("trait"));
         diagnostics.extend(self.trait_methods.validate("trait method"));
         diagnostics.extend(self.validate_occurrence_lookups());
+        diagnostics.extend(self.validate_arena_identity());
+        diagnostics.extend(self.validate_function_body_ownership());
+        diagnostics.extend(self.validate_concrete_metadata());
+        diagnostics.extend(self.validate_capture_consistency());
         diagnostics.extend(self.validate_arena_references());
         diagnostics.extend(self.validate_ownership());
         diagnostics.extend(self.validate_modules_and_initializers());
@@ -6735,6 +6739,15 @@ impl LoweredProgram {
         diagnostics.extend(self.validate_calls_and_callable_values());
         diagnostics.extend(self.validate_resource_and_coroutine_records());
         diagnostics
+    }
+
+    /// Proves every runtime source construct has exactly one lowered
+    /// counterpart by walking the checked program's functions, module
+    /// initializers, items, expressions, patterns, and assignment places. A
+    /// construct that survives only in the transitional `TypedModule` payload
+    /// diagnoses here instead of surfacing during Stage 5.
+    fn validate_source_coverage(&self, module: &TypedModule) -> Vec<Diagnostic> {
+        SourceCoverage::run(self, module)
     }
 
     /// Checks the Stage 2.6 resource provider/use, `with`, reactive, and
@@ -9065,6 +9078,499 @@ impl LoweredProgram {
         diagnostics
     }
 
+    /// Checks that every arena handle addresses its own insertion slot and
+    /// that each auxiliary lookup index has exactly one entry per indexed
+    /// node. Arenas are append-only, so this is a defensive backstop for
+    /// directly mutated fixtures rather than a runtime invariant.
+    fn validate_arena_identity(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        macro_rules! check_arena {
+            ($arena:expr, $kind:literal) => {
+                for (position, (id, node)) in $arena.iter().enumerate() {
+                    if id.index() != position {
+                        diagnostics.push(Diagnostic::new(
+                            node.origin.span.clone(),
+                            format!(
+                                "lowered {} id {} is out of insertion position {position}",
+                                $kind,
+                                id.index()
+                            ),
+                        ));
+                    }
+                }
+            };
+        }
+        check_arena!(self.expressions, "expression");
+        check_arena!(self.patterns, "pattern");
+        check_arena!(self.places, "place");
+        check_arena!(self.blocks, "block");
+        check_arena!(self.items, "item");
+        check_arena!(self.trait_implementations, "trait implementation");
+        check_arena!(self.calls, "call");
+        check_arena!(self.callable_values, "callable value");
+        check_arena!(self.resource_providers, "resource provider");
+        check_arena!(self.resource_uses, "resource use");
+        check_arena!(self.withs, "with");
+        check_arena!(self.reactive_operations, "reactive operation");
+        check_arena!(self.reactive_callbacks, "reactive callback");
+        check_arena!(self.coroutine_plans, "coroutine plan");
+        check_arena!(self.coros, "coro");
+        check_arena!(self.awaits, "await");
+        check_arena!(self.initializers, "initializer");
+        macro_rules! check_catalog {
+            ($catalog:expr, $kind:literal) => {
+                for (position, (id, _, node)) in $catalog.iter().enumerate() {
+                    if id.index() != position {
+                        diagnostics.push(Diagnostic::new(
+                            node.origin.span.clone(),
+                            format!(
+                                "lowered {} catalog id {} is out of insertion position {position}",
+                                $kind,
+                                id.index()
+                            ),
+                        ));
+                    }
+                }
+            };
+        }
+        check_catalog!(self.modules, "module");
+        check_catalog!(self.functions, "function");
+        check_catalog!(self.symbols, "symbol");
+        check_catalog!(self.types, "type");
+        check_catalog!(self.traits, "trait");
+        check_catalog!(self.trait_methods, "trait method");
+        for (key, id) in &self.block_lookup {
+            match self.blocks.get(*id) {
+                Some(block) if block.origin.syntax == key.syntax => {}
+                Some(_) => diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    "block occurrence lookup points at a different block syntax".to_owned(),
+                )),
+                None => diagnostics.push(invalid_reference(
+                    &Origin::compiler(),
+                    "block lookup",
+                    "block",
+                    id.index(),
+                )),
+            }
+        }
+        for (key, id) in &self.coroutine_plan_lookup {
+            match self.coroutine_plans.get(*id) {
+                Some(plan) if plan.body_syntax == *key => {}
+                Some(_) => diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    "coroutine plan lookup points at a different body syntax".to_owned(),
+                )),
+                None => diagnostics.push(invalid_reference(
+                    &Origin::compiler(),
+                    "coroutine plan lookup",
+                    "coroutine plan",
+                    id.index(),
+                )),
+            }
+        }
+        for (thunk, id) in &self.coroutine_plan_by_thunk {
+            match self.coroutine_plans.get(*id) {
+                Some(plan) if plan.thunk == *thunk => {}
+                Some(_) => diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    "coroutine plan thunk lookup points at a different thunk".to_owned(),
+                )),
+                None => diagnostics.push(invalid_reference(
+                    &Origin::compiler(),
+                    "coroutine plan thunk lookup",
+                    "coroutine plan",
+                    id.index(),
+                )),
+            }
+        }
+        diagnostics
+    }
+
+    /// Checks that a function body or module initializer block belongs to
+    /// exactly one owner and that a template's recorded body origin matches the
+    /// block it points at. Parameter patterns are likewise owned once.
+    fn validate_function_body_ownership(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut bodies = HashMap::<BlockId, FunctionId>::new();
+        let mut patterns = HashMap::<PatternId, FunctionId>::new();
+        for (_, key, function) in self.functions.iter() {
+            if let Some(body) = function.body {
+                if let Some(previous) = bodies.insert(body, key) {
+                    diagnostics.push(Diagnostic::new(
+                        function.origin.span.clone(),
+                        format!(
+                            "function {key:?} shares its body block with function {previous:?}"
+                        ),
+                    ));
+                }
+                if let Some(block) = self.blocks.get(body)
+                    && block.origin.syntax != function.body_syntax
+                {
+                    diagnostics.push(Diagnostic::new(
+                        function.origin.span.clone(),
+                        format!(
+                            "function {key:?} body block origin does not match its body syntax id"
+                        ),
+                    ));
+                }
+            }
+            if let Some(previous) = patterns.insert(function.parameter_pattern, key) {
+                diagnostics.push(Diagnostic::new(
+                    function.origin.span.clone(),
+                    format!(
+                        "function {key:?} shares its parameter pattern with function {previous:?}"
+                    ),
+                ));
+            }
+        }
+        let mut initializers = HashMap::<BlockId, ModuleId>::new();
+        for (_, initializer) in self.initializers.iter() {
+            if let Some(previous) = initializers.insert(initializer.body, initializer.module) {
+                diagnostics.push(Diagnostic::new(
+                    initializer.origin.span.clone(),
+                    format!(
+                        "module {:?} shares its initializer block with module {previous:?}",
+                        initializer.module
+                    ),
+                ));
+            }
+        }
+        for (block, function) in bodies {
+            if let Some(module) = initializers.get(&block) {
+                diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!(
+                        "block {} is both function {function:?}'s body and module {module:?}'s initializer",
+                        block.index()
+                    ),
+                ));
+            }
+        }
+        diagnostics
+    }
+
+    /// Rejects unresolved inference placeholders in runtime metadata. Lowering
+    /// runs only on successfully checked programs, so an `Inferred` or `Error`
+    /// type on a runtime node means a semantic decision was lost instead of
+    /// recorded. Declared generic parameters and `Never` (diverged code) stay
+    /// legal.
+    fn validate_concrete_metadata(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        fn reject(
+            diagnostics: &mut Vec<Diagnostic>,
+            origin: &Origin,
+            label: &str,
+            value_type: &CheckedType,
+        ) {
+            if type_has_placeholder(value_type) {
+                diagnostics.push(Diagnostic::new(
+                    origin.span.clone(),
+                    format!(
+                        "lowered {label} contains an unresolved inference placeholder in `{value_type}`"
+                    ),
+                ));
+            }
+        }
+        fn reject_function(
+            diagnostics: &mut Vec<Diagnostic>,
+            origin: &Origin,
+            label: &str,
+            function_type: &CheckedFunctionType,
+        ) {
+            reject(diagnostics, origin, label, &function_type.parameter);
+            reject(diagnostics, origin, label, &function_type.result);
+            for resource in &function_type.effects.resources {
+                reject(diagnostics, origin, label, &resource.value_type);
+            }
+        }
+        for (_, expression) in self.expressions.iter() {
+            if matches!(
+                expression.kind,
+                LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::Stage26Deferred(_)
+            ) {
+                continue;
+            }
+            reject(
+                &mut diagnostics,
+                &expression.origin,
+                "expression type",
+                &expression.value_type,
+            );
+            for resource in &expression.effects.resources {
+                reject(
+                    &mut diagnostics,
+                    &expression.origin,
+                    "expression effect resource",
+                    &resource.value_type,
+                );
+            }
+            match &expression.kind {
+                LoweredExpressionKind::Product(product) => {
+                    for element in &product.final_type.elements {
+                        reject(
+                            &mut diagnostics,
+                            &expression.origin,
+                            "product field type",
+                            &element.value_type,
+                        );
+                    }
+                }
+                LoweredExpressionKind::Match(match_) => reject(
+                    &mut diagnostics,
+                    &expression.origin,
+                    "match source type",
+                    &match_.source,
+                ),
+                LoweredExpressionKind::Logical(logical) => reject(
+                    &mut diagnostics,
+                    &expression.origin,
+                    "logical `Bool` type",
+                    &logical.bool_type,
+                ),
+                LoweredExpressionKind::Index(index) => {
+                    if let Some(method_type) = &index.method_type {
+                        reject_function(
+                            &mut diagnostics,
+                            &expression.origin,
+                            "`Index` method type",
+                            method_type,
+                        );
+                    }
+                    for argument in &index.arguments {
+                        reject(
+                            &mut diagnostics,
+                            &expression.origin,
+                            "`Index` dispatch argument",
+                            argument,
+                        );
+                    }
+                }
+                LoweredExpressionKind::StringTemplate(template) => {
+                    for part in &template.parts {
+                        if let LoweredStringTemplatePart::Interpolation(interpolation) = part {
+                            reject(
+                                &mut diagnostics,
+                                &expression.origin,
+                                "interpolation value type",
+                                &interpolation.value_type,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (_, pattern) in self.patterns.iter() {
+            reject(
+                &mut diagnostics,
+                &pattern.origin,
+                "pattern type",
+                &pattern.value_type,
+            );
+        }
+        for (_, place) in self.places.iter() {
+            reject(
+                &mut diagnostics,
+                &place.origin,
+                "place type",
+                &place.value_type,
+            );
+        }
+        for (_, call) in self.calls.iter() {
+            reject_function(
+                &mut diagnostics,
+                &call.origin,
+                "call function type",
+                &call.function_type,
+            );
+            reject(
+                &mut diagnostics,
+                &call.origin,
+                "call result type",
+                &call.result_type,
+            );
+        }
+        for (_, value) in self.callable_values.iter() {
+            reject_function(
+                &mut diagnostics,
+                &value.origin,
+                "callable value function type",
+                &value.function_type,
+            );
+        }
+        for (_, provider) in self.resource_providers.iter() {
+            reject(
+                &mut diagnostics,
+                &provider.origin,
+                "resource provider type",
+                &provider.resource.value_type,
+            );
+        }
+        for (_, use_) in self.resource_uses.iter() {
+            reject(
+                &mut diagnostics,
+                &use_.origin,
+                "resource use type",
+                &use_.resource.value_type,
+            );
+        }
+        for (_, callback) in self.reactive_callbacks.iter() {
+            reject_function(
+                &mut diagnostics,
+                &callback.origin,
+                "reactive callback function type",
+                &callback.function_type,
+            );
+        }
+        for (_, operation) in self.reactive_operations.iter() {
+            if let LoweredReactiveOperationKind::DerivedCreate { function_type, .. } =
+                &operation.kind
+            {
+                reject_function(
+                    &mut diagnostics,
+                    &operation.origin,
+                    "derived evaluator function type",
+                    function_type,
+                );
+            }
+        }
+        for (_, plan) in self.coroutine_plans.iter() {
+            reject(
+                &mut diagnostics,
+                &plan.origin,
+                "coroutine result type",
+                &plan.result_type,
+            );
+            for resource in &plan.deferred_effects.resources {
+                reject(
+                    &mut diagnostics,
+                    &plan.origin,
+                    "coroutine deferred resource",
+                    &resource.value_type,
+                );
+            }
+            for awaited in &plan.await_result_types {
+                reject(
+                    &mut diagnostics,
+                    &plan.origin,
+                    "coroutine awaited type",
+                    awaited,
+                );
+            }
+        }
+        for (_, await_) in self.awaits.iter() {
+            reject(
+                &mut diagnostics,
+                &await_.origin,
+                "await result type",
+                &await_.result_type,
+            );
+            match &await_.kind {
+                LoweredAwaitKind::ChildCoroutine { child_result, .. } => reject(
+                    &mut diagnostics,
+                    &await_.origin,
+                    "await child result type",
+                    child_result,
+                ),
+                LoweredAwaitKind::Task { result } | LoweredAwaitKind::Wait { result } => reject(
+                    &mut diagnostics,
+                    &await_.origin,
+                    "await outcome type",
+                    result,
+                ),
+            }
+        }
+        diagnostics
+    }
+
+    /// Checks capture lists against the symbol catalog: every capture resolves,
+    /// no capture duplicates another or one of the capturing function's own
+    /// parameters, a function never captures one of its own symbols, and the
+    /// shared-cell requirement agrees with the symbol's storage classification.
+    fn validate_capture_consistency(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let check_captures = |diagnostics: &mut Vec<Diagnostic>,
+                              origin: &Origin,
+                              captures: &[LoweredCapture],
+                              owner: Option<FunctionId>,
+                              parameters: &[SymbolId]| {
+            let mut seen = HashSet::new();
+            for capture in captures {
+                if !seen.insert(capture.symbol) {
+                    diagnostics.push(Diagnostic::new(
+                        origin.span.clone(),
+                        format!("capture symbol {} appears more than once", capture.symbol.0),
+                    ));
+                }
+                if parameters.contains(&capture.symbol) {
+                    diagnostics.push(Diagnostic::new(
+                        origin.span.clone(),
+                        format!(
+                            "capture symbol {} is also a parameter of its own function",
+                            capture.symbol.0
+                        ),
+                    ));
+                }
+                match self.symbols.get(capture.symbol) {
+                    Some(symbol) => {
+                        if let Some(owner) = owner
+                            && symbol.owner == Some(owner)
+                        {
+                            diagnostics.push(Diagnostic::new(
+                                origin.span.clone(),
+                                format!("function captures its own symbol {}", capture.symbol.0),
+                            ));
+                        }
+                        if capture.requires_cell != symbol.captured_cell {
+                            diagnostics.push(Diagnostic::new(
+                                origin.span.clone(),
+                                format!(
+                                    "capture {} shared-cell fact disagrees with its symbol storage",
+                                    capture.symbol.0
+                                ),
+                            ));
+                        }
+                    }
+                    None => diagnostics.push(invalid_reference(
+                        origin,
+                        "capture",
+                        "symbol",
+                        capture.symbol.0,
+                    )),
+                }
+            }
+        };
+        for (_, key, function) in self.functions.iter() {
+            check_captures(
+                &mut diagnostics,
+                &function.origin,
+                &function.captures,
+                Some(key),
+                &function.parameters,
+            );
+        }
+        for (_, callback) in self.reactive_callbacks.iter() {
+            check_captures(
+                &mut diagnostics,
+                &callback.origin,
+                &callback.captures,
+                None,
+                &[],
+            );
+        }
+        for (_, plan) in self.coroutine_plans.iter() {
+            check_captures(
+                &mut diagnostics,
+                &plan.origin,
+                &plan.captures,
+                Some(plan.thunk),
+                &[],
+            );
+        }
+        diagnostics
+    }
+
     /// Walks every arena node through typed arena edges starting from module
     /// initializers and function bodies, and reports nodes that are not
     /// reachable from any root. Deliberate sharing through the occurrence
@@ -9078,10 +9584,12 @@ impl LoweredProgram {
         // that select them.
         for (id, provider) in self.resource_providers.iter() {
             if provider.kind != LoweredProviderOriginKind::Source {
+                reached.owner = Some(provider.owner);
                 self.visit_owned_resource_provider(id, &mut reached);
             }
         }
         for (_, initializer) in self.initializers.iter() {
+            reached.owner = Some(ExpressionOwner::Module(initializer.module));
             self.visit_owned_block(initializer.body, &mut reached);
         }
         // A coroutine plan is owned by its body thunk's catalog entry, and the
@@ -9093,6 +9601,7 @@ impl LoweredProgram {
             }
         }
         for (_, _, function) in self.functions.iter() {
+            reached.owner = Some(ExpressionOwner::Function(function.semantic_id));
             self.visit_owned_pattern(function.parameter_pattern, &mut reached);
             if let Some(body) = function.body {
                 self.visit_owned_block(body, &mut reached);
@@ -9276,16 +9785,18 @@ impl LoweredProgram {
                 ));
             }
         }
+        diagnostics.extend(reached.conflicts);
         diagnostics
     }
 
     fn visit_owned_block(&self, id: BlockId, reached: &mut Reachability) {
-        if !reached.blocks.insert(id) {
-            return;
-        }
         let Some(block) = self.blocks.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::Block(id), &block.origin);
+        if !reached.blocks.insert(id) {
+            return;
+        }
         for item in &block.items {
             self.visit_owned_item(*item, reached);
         }
@@ -9295,12 +9806,13 @@ impl LoweredProgram {
     }
 
     fn visit_owned_item(&self, id: ItemId, reached: &mut Reachability) {
-        if !reached.items.insert(id) {
-            return;
-        }
         let Some(item) = self.items.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::Item(id), &item.origin);
+        if !reached.items.insert(id) {
+            return;
+        }
         match &item.kind {
             LoweredItemKind::Binding(binding) => {
                 if let Some(value) = binding.value {
@@ -9335,12 +9847,25 @@ impl LoweredProgram {
     }
 
     fn visit_owned_expression(&self, id: ExpressionId, reached: &mut Reachability) {
-        if !reached.expressions.insert(id) {
-            return;
-        }
         let Some(expression) = self.expressions.get(id) else {
             return;
         };
+        let key_owner = expression.key.owner;
+        if let Some(owner) = reached.owner
+            && owner != key_owner
+        {
+            reached.conflicts.push(Diagnostic::new(
+                expression.origin.span.clone(),
+                format!(
+                    "lowered expression occurrence is owned by {key_owner:?} but is reached from {owner:?}"
+                ),
+            ));
+        }
+        reached.claim(OwnedNode::Expression(id), key_owner, &expression.origin);
+        if !reached.expressions.insert(id) {
+            return;
+        }
+        reached.owner = Some(key_owner);
         match &expression.kind {
             LoweredExpressionKind::Block(block) => self.visit_owned_block(*block, reached),
             LoweredExpressionKind::Satisfies(satisfies) => {
@@ -9414,12 +9939,13 @@ impl LoweredProgram {
         id: LoweredResourceProviderId,
         reached: &mut Reachability,
     ) {
-        if !reached.resource_providers.insert(id) {
-            return;
-        }
         let Some(provider) = self.resource_providers.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::ResourceProvider(id), &provider.origin);
+        if !reached.resource_providers.insert(id) {
+            return;
+        }
         if let Some(parent) = provider.parent {
             self.visit_owned_resource_provider(parent, reached);
         }
@@ -9429,24 +9955,26 @@ impl LoweredProgram {
     }
 
     fn visit_owned_resource_use(&self, id: LoweredResourceUseId, reached: &mut Reachability) {
-        if !reached.resource_uses.insert(id) {
-            return;
-        }
         let Some(use_) = self.resource_uses.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::ResourceUse(id), &use_.origin);
+        if !reached.resource_uses.insert(id) {
+            return;
+        }
         if let Some(provider) = use_.provider {
             self.visit_owned_resource_provider(provider, reached);
         }
     }
 
     fn visit_owned_with(&self, id: LoweredWithId, reached: &mut Reachability) {
-        if !reached.withs.insert(id) {
-            return;
-        }
         let Some(with) = self.withs.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::With(id), &with.origin);
+        if !reached.withs.insert(id) {
+            return;
+        }
         self.visit_owned_resource_provider(with.provider, reached);
         self.visit_owned_expression(with.value, reached);
         self.visit_owned_block(with.body, reached);
@@ -9457,12 +9985,13 @@ impl LoweredProgram {
         id: LoweredReactiveCallbackId,
         reached: &mut Reachability,
     ) {
-        if !reached.reactive_callbacks.insert(id) {
-            return;
-        }
         let Some(callback) = self.reactive_callbacks.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::ReactiveCallback(id), &callback.origin);
+        if !reached.reactive_callbacks.insert(id) {
+            return;
+        }
         if let Some(callable) = callback.callable {
             self.visit_owned_expression(callable, reached);
         }
@@ -9476,12 +10005,13 @@ impl LoweredProgram {
         id: LoweredReactiveOperationId,
         reached: &mut Reachability,
     ) {
-        if !reached.reactive_operations.insert(id) {
-            return;
-        }
         let Some(operation) = self.reactive_operations.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::ReactiveOperation(id), &operation.origin);
+        if !reached.reactive_operations.insert(id) {
+            return;
+        }
         match operation.kind {
             LoweredReactiveOperationKind::Reaction {
                 callback,
@@ -9510,37 +10040,45 @@ impl LoweredProgram {
     }
 
     fn visit_owned_coroutine_plan(&self, id: LoweredCoroutinePlanId, reached: &mut Reachability) {
-        if !reached.coroutine_plans.insert(id) {
-            return;
-        }
         let Some(plan) = self.coroutine_plans.get(id) else {
             return;
         };
+        // A plan and its body belong to the body thunk, not to whichever
+        // enclosing function links the plan through a `coro` or `await`.
+        let owner = ExpressionOwner::Function(plan.thunk);
+        reached.claim(OwnedNode::CoroutinePlan(id), owner, &plan.origin);
+        if !reached.coroutine_plans.insert(id) {
+            return;
+        }
+        let previous = reached.owner.replace(owner);
         if let Some(body) = plan.body {
             self.visit_owned_block(body, reached);
         }
         for await_ in &plan.awaits {
             self.visit_owned_await(*await_, reached);
         }
+        reached.owner = previous;
     }
 
     fn visit_owned_coro(&self, id: LoweredCoroId, reached: &mut Reachability) {
-        if !reached.coros.insert(id) {
-            return;
-        }
         let Some(coro) = self.coros.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::Coro(id), &coro.origin);
+        if !reached.coros.insert(id) {
+            return;
+        }
         self.visit_owned_coroutine_plan(coro.plan, reached);
     }
 
     fn visit_owned_await(&self, id: LoweredAwaitId, reached: &mut Reachability) {
-        if !reached.awaits.insert(id) {
-            return;
-        }
         let Some(await_) = self.awaits.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::Await(id), &await_.origin);
+        if !reached.awaits.insert(id) {
+            return;
+        }
         self.visit_owned_expression(await_.operand, reached);
         if let LoweredAwaitKind::ChildCoroutine {
             plan,
@@ -9558,12 +10096,13 @@ impl LoweredProgram {
     }
 
     fn visit_owned_call(&self, id: LoweredCallId, reached: &mut Reachability) {
-        if !reached.calls.insert(id) {
-            return;
-        }
         let Some(call) = self.calls.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::Call(id), &call.origin);
+        if !reached.calls.insert(id) {
+            return;
+        }
         if let Some(callee) = call.callee {
             self.visit_owned_expression(callee, reached);
         }
@@ -9598,24 +10137,26 @@ impl LoweredProgram {
     }
 
     fn visit_owned_callable_value(&self, id: LoweredCallableValueId, reached: &mut Reachability) {
-        if !reached.callable_values.insert(id) {
-            return;
-        }
         let Some(value) = self.callable_values.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::CallableValue(id), &value.origin);
+        if !reached.callable_values.insert(id) {
+            return;
+        }
         if let LoweredCallableTarget::IndirectClosure { callee } = &value.target {
             self.visit_owned_expression(*callee, reached);
         }
     }
 
     fn visit_owned_pattern(&self, id: PatternId, reached: &mut Reachability) {
-        if !reached.patterns.insert(id) {
-            return;
-        }
         let Some(pattern) = self.patterns.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::Pattern(id), &pattern.origin);
+        if !reached.patterns.insert(id) {
+            return;
+        }
         match &pattern.kind {
             LoweredPatternKind::Wildcard | LoweredPatternKind::Literal { .. } => {}
             LoweredPatternKind::Binding { .. } => {}
@@ -9635,12 +10176,13 @@ impl LoweredProgram {
     }
 
     fn visit_owned_place(&self, id: PlaceId, reached: &mut Reachability) {
-        if !reached.places.insert(id) {
-            return;
-        }
         let Some(place) = self.places.get(id) else {
             return;
         };
+        reached.claim_current(OwnedNode::Place(id), &place.origin);
+        if !reached.places.insert(id) {
+            return;
+        }
         match &place.kind {
             LoweredPlaceKind::Temporary { expression } => {
                 self.visit_owned_expression(*expression, reached);
@@ -11119,8 +11661,52 @@ fn integer_literal_bit_width(integer_type: IntegerType) -> u32 {
     }
 }
 
-/// Nodes reached by the ownership traversal from runtime roots.
-#[derive(Default)]
+/// One arena node identity, used to attribute every reachable node to exactly
+/// one runtime owner during the ownership traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum OwnedNode {
+    Expression(ExpressionId),
+    Pattern(PatternId),
+    Place(PlaceId),
+    Block(BlockId),
+    Item(ItemId),
+    Call(LoweredCallId),
+    CallableValue(LoweredCallableValueId),
+    ResourceProvider(LoweredResourceProviderId),
+    ResourceUse(LoweredResourceUseId),
+    With(LoweredWithId),
+    ReactiveOperation(LoweredReactiveOperationId),
+    ReactiveCallback(LoweredReactiveCallbackId),
+    CoroutinePlan(LoweredCoroutinePlanId),
+    Coro(LoweredCoroId),
+    Await(LoweredAwaitId),
+}
+
+impl OwnedNode {
+    fn label(self) -> &'static str {
+        match self {
+            OwnedNode::Expression(_) => "expression",
+            OwnedNode::Pattern(_) => "pattern",
+            OwnedNode::Place(_) => "place",
+            OwnedNode::Block(_) => "block",
+            OwnedNode::Item(_) => "item",
+            OwnedNode::Call(_) => "call",
+            OwnedNode::CallableValue(_) => "callable value",
+            OwnedNode::ResourceProvider(_) => "resource provider",
+            OwnedNode::ResourceUse(_) => "resource use",
+            OwnedNode::With(_) => "with",
+            OwnedNode::ReactiveOperation(_) => "reactive operation",
+            OwnedNode::ReactiveCallback(_) => "reactive callback",
+            OwnedNode::CoroutinePlan(_) => "coroutine plan",
+            OwnedNode::Coro(_) => "coro",
+            OwnedNode::Await(_) => "await",
+        }
+    }
+}
+
+/// Nodes reached by the ownership traversal from runtime roots. Every node is
+/// attributed to exactly one runtime owner so cross-owner references, not just
+/// unreachable nodes, can be diagnosed.
 struct Reachability {
     expressions: HashSet<ExpressionId>,
     patterns: HashSet<PatternId>,
@@ -11137,6 +11723,68 @@ struct Reachability {
     coroutine_plans: HashSet<LoweredCoroutinePlanId>,
     coros: HashSet<LoweredCoroId>,
     awaits: HashSet<LoweredAwaitId>,
+    /// The runtime owner currently being traversed. Cross-owner links (a
+    /// `coro` creation reaching its body thunk's plan) save and restore it.
+    owner: Option<ExpressionOwner>,
+    /// First owner that reached each node, proving single ownership.
+    owners: HashMap<OwnedNode, ExpressionOwner>,
+    conflicts: Vec<Diagnostic>,
+}
+
+impl Default for Reachability {
+    fn default() -> Self {
+        Self {
+            expressions: HashSet::new(),
+            patterns: HashSet::new(),
+            places: HashSet::new(),
+            blocks: HashSet::new(),
+            items: HashSet::new(),
+            calls: HashSet::new(),
+            callable_values: HashSet::new(),
+            resource_providers: HashSet::new(),
+            resource_uses: HashSet::new(),
+            withs: HashSet::new(),
+            reactive_operations: HashSet::new(),
+            reactive_callbacks: HashSet::new(),
+            coroutine_plans: HashSet::new(),
+            coros: HashSet::new(),
+            awaits: HashSet::new(),
+            owner: None,
+            owners: HashMap::new(),
+            conflicts: Vec::new(),
+        }
+    }
+}
+
+impl Reachability {
+    /// Attributes one reachable node to its runtime owner. A node reached from
+    /// two different owners (or from a different owner than an expression's
+    /// own occurrence key) is a lowering bug and diagnoses.
+    fn claim(&mut self, node: OwnedNode, owner: ExpressionOwner, origin: &Origin) {
+        match self.owners.entry(node) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(owner);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) if *entry.get() != owner => {
+                self.conflicts.push(Diagnostic::new(
+                    origin.span.clone(),
+                    format!(
+                        "lowered {} is owned by {:?} but is also reached from {:?}",
+                        node.label(),
+                        entry.get(),
+                        owner
+                    ),
+                ));
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {}
+        }
+    }
+
+    fn claim_current(&mut self, node: OwnedNode, origin: &Origin) {
+        if let Some(owner) = self.owner {
+            self.claim(node, owner, origin);
+        }
+    }
 }
 
 /// Whether a trait evidence recipe addresses the given trait and, when
@@ -11174,6 +11822,15 @@ fn types_agree(expected: &CheckedType, actual: &CheckedType) -> bool {
             actual,
             CheckedType::Inferred | CheckedType::Error | CheckedType::Never
         )
+}
+
+/// Whether a checked type is itself an unresolved inference placeholder.
+/// `Inferred` and `Error` must never survive as a runtime node's whole type;
+/// declared parameters and `Never` (diverged code) are legal. Nested
+/// `Inferred` slots are checker sentinels for effect rows and slice elements,
+/// so they are not rejected here.
+fn type_has_placeholder(value_type: &CheckedType) -> bool {
+    matches!(value_type, CheckedType::Inferred | CheckedType::Error)
 }
 
 /// The checked function type declared for a symbol, used when a callable
@@ -11397,6 +12054,446 @@ fn initializer_symbol_diagnostics(
     diagnostics
 }
 
+/// Whether a source item has runtime effect. Declaration-only items are
+/// compile-time-only and are omitted by lowering.
+fn runtime_item(item: &Item) -> bool {
+    matches!(
+        item,
+        Item::Binding(_)
+            | Item::PatternBinding(_)
+            | Item::Assignment(_)
+            | Item::Return(_)
+            | Item::Break(_)
+            | Item::Continue(_)
+            | Item::Expression(_)
+    )
+}
+
+/// The Stage 2.7 completeness traversal. It mirrors the lowering walk over the
+/// checked program and diagnoses any runtime source function, item, expression,
+/// pattern, or assignment place without a lowered counterpart, plus any lowered
+/// node invented without a source. Implicit thunks are owned by their function
+/// template, so their callback bodies are covered through the function catalog.
+struct SourceCoverage<'a> {
+    program: &'a LoweredProgram,
+    module: &'a TypedModule,
+    diagnostics: Vec<Diagnostic>,
+    visited: HashSet<(ExpressionOwner, SyntaxId)>,
+    lowered_patterns: HashSet<SyntaxId>,
+    lowered_places: HashSet<SyntaxId>,
+}
+
+impl<'a> SourceCoverage<'a> {
+    fn run(program: &'a LoweredProgram, module: &'a TypedModule) -> Vec<Diagnostic> {
+        let mut coverage = Self {
+            program,
+            module,
+            diagnostics: Vec::new(),
+            visited: HashSet::new(),
+            lowered_patterns: program
+                .patterns
+                .iter()
+                .map(|(_, pattern)| pattern.origin.syntax)
+                .collect(),
+            lowered_places: program
+                .places
+                .iter()
+                .map(|(_, place)| place.origin.syntax)
+                .collect(),
+        };
+        coverage.check_functions();
+        coverage.check_modules();
+        coverage.diagnostics
+    }
+
+    fn missing(&mut self, span: &Span, what: &str, syntax: SyntaxId) {
+        self.diagnostics.push(Diagnostic::new(
+            span.clone(),
+            format!(
+                "runtime source {what} (syntax {}) has no lowered counterpart",
+                syntax.0
+            ),
+        ));
+    }
+
+    /// Every declared function and implicit thunk has exactly one lowered
+    /// template whose body syntax matches, and every lowered template has a
+    /// checked source function.
+    fn check_functions(&mut self) {
+        let mut sources = HashSet::new();
+        for function in self
+            .module
+            .functions()
+            .iter()
+            .chain(self.module.implicit_thunks())
+        {
+            sources.insert(function.id);
+            let owner = ExpressionOwner::Function(function.id);
+            let syntax = function.body.syntax();
+            match self.program.functions.get(function.id) {
+                Some(lowered) => {
+                    if lowered.body_syntax != syntax.id {
+                        self.diagnostics.push(Diagnostic::new(
+                            syntax.span.clone(),
+                            format!(
+                                "function `{}` lowered body syntax disagrees with its checked body",
+                                function.name
+                            ),
+                        ));
+                    }
+                }
+                None => self.diagnostics.push(Diagnostic::new(
+                    syntax.span.clone(),
+                    format!(
+                        "function `{}` (function id {}) has no lowered template",
+                        function.name, function.id.0
+                    ),
+                )),
+            }
+            self.visit_pattern(&function.pattern);
+            self.visit_expression(owner, &function.body);
+        }
+        for (_, key, function) in self.program.functions.iter() {
+            if !sources.contains(&key) {
+                self.diagnostics.push(Diagnostic::new(
+                    function.origin.span.clone(),
+                    format!("lowered function {key:?} has no checked source function"),
+                ));
+            }
+        }
+    }
+
+    /// Every module initializer owns exactly the runtime source items of its
+    /// module, in source order, and every such item is walked for coverage.
+    fn check_modules(&mut self) {
+        let source_program = self.module.resolved().program();
+        let sources = source_program.modules();
+        for module_id in source_program.initialization_order() {
+            let Some(source) = sources.get(module_id.0) else {
+                continue;
+            };
+            let owner = ExpressionOwner::Module(*module_id);
+            let Some(info) = self.program.modules.get(*module_id) else {
+                self.diagnostics.push(Diagnostic::new(
+                    source.syntax.syntax.span.clone(),
+                    format!("runtime module {module_id:?} has no lowered catalog entry"),
+                ));
+                continue;
+            };
+            if let Some(initializer) = self.program.initializers.get(info.initializer) {
+                let lowered = self
+                    .program
+                    .blocks
+                    .get(initializer.body)
+                    .map(|block| block.items.clone())
+                    .unwrap_or_default();
+                let runtime = source
+                    .syntax
+                    .items
+                    .iter()
+                    .filter(|item| runtime_item(item))
+                    .collect::<Vec<_>>();
+                if runtime.len() != lowered.len() {
+                    self.diagnostics.push(Diagnostic::new(
+                        source.syntax.syntax.span.clone(),
+                        format!(
+                            "module {module_id:?} lowered {} runtime items for {} source items",
+                            lowered.len(),
+                            runtime.len()
+                        ),
+                    ));
+                }
+                for (index, item) in runtime.iter().enumerate() {
+                    let Some(lowered) = lowered
+                        .get(index)
+                        .and_then(|id| self.program.items.get(*id))
+                    else {
+                        continue;
+                    };
+                    if lowered.origin.syntax != item.syntax().id {
+                        self.diagnostics.push(Diagnostic::new(
+                            item.syntax().span.clone(),
+                            format!(
+                                "module {module_id:?} runtime item {index} does not match its lowered counterpart"
+                            ),
+                        ));
+                    }
+                }
+            }
+            for item in &source.syntax.items {
+                self.visit_item(owner, item);
+            }
+        }
+    }
+
+    fn visit_item(&mut self, owner: ExpressionOwner, item: &Item) {
+        match item {
+            Item::Binding(binding) => {
+                if let Some(value) = &binding.value {
+                    self.visit_expression(owner, value);
+                }
+            }
+            Item::PatternBinding(binding) => {
+                self.visit_pattern(&binding.pattern);
+                self.visit_expression(owner, &binding.value);
+            }
+            Item::Assignment(assignment) => {
+                self.visit_place_origin(&assignment.target);
+                self.visit_expression(owner, &assignment.value);
+            }
+            Item::Return(item) => self.visit_expression(owner, &item.value),
+            Item::Break(item) => {
+                if let Some(value) = &item.value {
+                    self.visit_expression(owner, value);
+                }
+            }
+            Item::Continue(_) => {}
+            Item::Expression(expression) => self.visit_expression(owner, expression),
+            _ => {}
+        }
+    }
+
+    /// An assignment target lowers to a place rather than an expression. Single
+    /// element wrappers are transparent to place lowering, matching `lower_place`.
+    fn visit_place_origin(&mut self, expression: &Expression) {
+        match expression {
+            Expression::Product(product) if product.elements.len() == 1 => {
+                self.visit_place_origin(&product.elements[0].value);
+            }
+            Expression::Satisfies(satisfies) => self.visit_place_origin(&satisfies.value),
+            other => {
+                let syntax = other.syntax();
+                if !self.lowered_places.contains(&syntax.id) {
+                    self.missing(&syntax.span, "assignment place", syntax.id);
+                }
+            }
+        }
+    }
+
+    fn visit_pattern(&mut self, pattern: &Pattern) {
+        let syntax = pattern.syntax();
+        if self.module.type_of_pattern(syntax.id).is_none() {
+            // Compiler-synthesized implicit-thunk parameters lower from the
+            // checked signature instead of checked pattern metadata.
+            return;
+        }
+        if !self.lowered_patterns.contains(&syntax.id) {
+            self.missing(&syntax.span, "pattern", syntax.id);
+            return;
+        }
+        match pattern {
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    self.visit_pattern(element);
+                }
+            }
+            Pattern::Nominal(nominal) => self.visit_pattern(&nominal.argument),
+            Pattern::At(at) => {
+                self.visit_pattern(&Pattern::Binding(at.binding.as_ref().clone()));
+                self.visit_pattern(&at.pattern);
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_block(&mut self, owner: ExpressionOwner, block: &staple_syntax::BlockExpression) {
+        let last = block.items.len().checked_sub(1);
+        for (index, item) in block.items.iter().enumerate() {
+            if Some(index) == last
+                && let Item::Expression(expression) = item
+            {
+                self.visit_expression(owner, expression);
+            } else {
+                self.visit_item(owner, item);
+            }
+        }
+    }
+
+    /// Every runtime expression occurrence has a lowered node under the same
+    /// owner with a `Primary` context. Implicit thunks are function templates,
+    /// so their bodies are owned by the function catalog instead.
+    fn visit_expression(&mut self, owner: ExpressionOwner, expression: &Expression) {
+        let syntax = expression.syntax();
+        if let Some(thunk) = self.module.implicit_thunk_for(syntax.id) {
+            if self.program.functions.get(thunk.id).is_none() {
+                self.diagnostics.push(Diagnostic::new(
+                    syntax.span.clone(),
+                    format!(
+                        "runtime implicit thunk (function id {}) has no lowered template",
+                        thunk.id.0
+                    ),
+                ));
+            }
+            return;
+        }
+        if !matches!(
+            classify_expression(self.module, expression),
+            ExpressionDisposition::Ordinary(_) | ExpressionDisposition::Stage26(_)
+        ) {
+            // Rejected and deferred families are diagnosed by the validator.
+            return;
+        }
+        if !self.visited.insert((owner, syntax.id)) {
+            return;
+        }
+        let key = ExpressionKey {
+            syntax: syntax.id,
+            owner,
+            context: ExpressionContext::Primary,
+        };
+        if self.program.expression_lookup.get(&key).is_none() {
+            self.diagnostics.push(Diagnostic::new(
+                syntax.span.clone(),
+                format!(
+                    "runtime source {} expression (syntax {}) has no lowered counterpart",
+                    expression_variant_name(expression),
+                    syntax.id.0
+                ),
+            ));
+            return;
+        }
+        match expression {
+            Expression::Block(block) => self.visit_block(owner, block),
+            Expression::Satisfies(satisfies) => self.visit_expression(owner, &satisfies.value),
+            Expression::Match(match_) => {
+                self.visit_expression(owner, &match_.subject);
+                if self.module.match_for(syntax.id).is_some() {
+                    for arm in &match_.arms {
+                        self.visit_pattern(&arm.pattern);
+                        self.visit_expression(owner, &arm.body);
+                    }
+                }
+            }
+            Expression::Loop(loop_) => self.visit_block(owner, &loop_.body),
+            Expression::Coro(_) => {}
+            Expression::Await(await_) => self.visit_expression(owner, &await_.operand),
+            Expression::Resource(_) => {}
+            Expression::With(with) => {
+                self.visit_expression(owner, &with.value);
+                self.visit_block(owner, &with.body);
+            }
+            Expression::Product(product) => {
+                for element in &product.elements {
+                    self.visit_expression(owner, &element.value);
+                }
+            }
+            Expression::RepeatedProduct(repeated) => {
+                self.visit_expression(owner, &repeated.value);
+            }
+            Expression::Call(call) => self.visit_call(owner, call),
+            Expression::Access(access) => {
+                if self.module.trait_dispatch_for(syntax.id).is_none()
+                    && self.module.symbol_for(syntax.id).is_none()
+                {
+                    self.visit_expression(owner, &access.value);
+                }
+            }
+            Expression::Index(index) => {
+                self.visit_expression(owner, &index.value);
+                self.visit_expression(owner, &index.index);
+            }
+            Expression::Logical(logical) => {
+                self.visit_expression(owner, &logical.left);
+                self.visit_expression(owner, &logical.right);
+            }
+            Expression::StringTemplate(template) => {
+                for part in &template.parts {
+                    if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
+                        self.visit_expression(owner, &interpolation.expression);
+                    }
+                }
+            }
+            Expression::Function(_)
+            | Expression::Name(_)
+            | Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
+            Expression::Unary(_)
+            | Expression::Binary(_)
+            | Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_) => {}
+        }
+    }
+
+    /// A call argument lowers either as a whole expression or, when it is a
+    /// literal product, as its decomposed ABI slots. Element values and spread
+    /// operands are the lowered occurrences in the decomposed case; implicit
+    /// thunks are skipped by `visit_expression`.
+    fn visit_call_argument(&mut self, owner: ExpressionOwner, argument: &Expression) {
+        if let Expression::Product(product) = argument {
+            for element in &product.elements {
+                self.visit_expression(owner, &element.value);
+            }
+            return;
+        }
+        self.visit_expression(owner, argument);
+    }
+
+    /// Mirrors the call lowering walk. Only indirect callees, juxtaposed chain
+    /// roots, and argument expressions become occurrences; explicit callees are
+    /// symbol references, primitive macros decode their literal, and implicit
+    /// thunk arguments are function templates covered through the catalog.
+    fn visit_call(&mut self, owner: ExpressionOwner, call: &staple_syntax::CallExpression) {
+        let route = match self.program.classify_call_route(self.module, owner, call) {
+            Ok(route) => route,
+            Err(diagnostic) => {
+                self.diagnostics.push(diagnostic);
+                return;
+            }
+        };
+        match route {
+            // Primitive macros decode their literal argument, curried calls are
+            // rejected during resolution, and compiler helpers are selected by
+            // checked operations rather than source call syntax.
+            CallRoute::PrimitiveMacro | CallRoute::CurriedDefault | CallRoute::CompilerHelper => {}
+            CallRoute::Juxtaposed | CallRoute::JuxtaposedIntrinsic => {
+                let Some(plan) = self.module.juxtaposed_call_plan(call.syntax.id) else {
+                    return;
+                };
+                let expected = match plan.function.parameter.as_ref() {
+                    CheckedType::Product(product) => product.elements.len(),
+                    _ => 0,
+                };
+                if plan.arguments.len() != expected {
+                    return;
+                }
+                let mut current = call;
+                let mut root = call.callee.as_ref();
+                for index in 0..plan.consumed_calls {
+                    self.visit_call_argument(owner, &current.argument);
+                    if index + 1 == plan.consumed_calls {
+                        break;
+                    }
+                    let Expression::Call(previous) = root else {
+                        break;
+                    };
+                    current = previous;
+                    root = previous.callee.as_ref();
+                }
+                if route == CallRoute::Juxtaposed {
+                    self.visit_expression(owner, root);
+                }
+            }
+            CallRoute::Indirect => {
+                self.visit_expression(owner, &call.callee);
+                self.visit_call_argument(owner, &call.argument);
+            }
+            CallRoute::Intrinsic
+            | CallRoute::GenericDirect
+            | CallRoute::External
+            | CallRoute::Constructor
+            | CallRoute::TraitImplementation
+            | CallRoute::DeclaredTraitBound
+            | CallRoute::StructuralTraitMethod => {
+                self.visit_call_argument(owner, &call.argument);
+            }
+        }
+    }
+}
+
 fn invalid_reference(origin: &Origin, owner: &str, target: &str, index: usize) -> Diagnostic {
     Diagnostic::new(
         origin.span.clone(),
@@ -11436,6 +12533,9 @@ impl Lowerer {
             diagnostics.extend(program.snapshot(module));
         }
         diagnostics.extend(program.validate());
+        if diagnostics.is_empty() {
+            diagnostics.extend(program.validate_source_coverage(module));
+        }
         if diagnostics.is_empty() {
             Ok(LoweredModule {
                 program,
@@ -16843,6 +17943,25 @@ mod tests {
                 })
             })
             .expect("the generic template keeps its parameter type");
+        let generic_interpolation = generic
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                LoweredStringTemplatePart::Interpolation(interpolation)
+                    if matches!(interpolation.value_type, CheckedType::Parameter { .. }) =>
+                {
+                    Some(interpolation)
+                }
+                _ => None,
+            })
+            .expect("the generic interpolation");
+        assert_eq!(generic_interpolation.trait_id, display_trait);
+        assert!(
+            program
+                .trait_methods
+                .get(generic_interpolation.method)
+                .is_some_and(|method| method.trait_id == display_trait)
+        );
         let nominal = templates
             .iter()
             .find(|template| {
@@ -17016,6 +18135,313 @@ mod tests {
             assert!(
                 kinds.iter().any(|kind| kind == expected),
                 "the coverage fixture should lower a `{expected}` expression; have {kinds:?}"
+            );
+        }
+    }
+
+    /// The Stage 2.7 completeness gate: every runtime construct of a fixture
+    /// that exercises every expression family, resources, reactive operations,
+    /// implicit thunks, captures, and coroutines has exactly one lowered
+    /// counterpart, and no lowered node lacks a source.
+    #[test]
+    fn source_constructs_have_exactly_one_lowered_counterpart() {
+        let source = format!(
+            "{}{}",
+            complete_coverage_source(),
+            concat!(
+                "let signal counter = 0\n",
+                "let doubled = counter + counter\n",
+                "with Reactive = reactive_scope () {\n",
+                "  reaction { let current = counter; () }\n",
+                "  batch { counter = 1 }\n",
+                "  let observed = snapshot counter\n",
+                "}\n",
+                "def captured: () -> () -> I32 = () => {\n",
+                "  let mut count: I32 = 0\n",
+                "  () => { count = count + 1; count }\n",
+                "}\n",
+            )
+        );
+        let module = checked_program(&source);
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let coverage = program.validate_source_coverage(&module);
+        assert!(coverage.is_empty(), "{coverage:?}");
+
+        // Every checked function and implicit thunk is cataloged exactly once.
+        assert_eq!(
+            program.functions.iter().count(),
+            module.functions().len() + module.implicit_thunks().count()
+        );
+        assert!(
+            module.implicit_thunks().count() > 0,
+            "the fixture should exercise implicit thunks"
+        );
+        assert!(
+            program
+                .functions
+                .iter()
+                .any(|(_, _, function)| !function.captures.is_empty()),
+            "the fixture should exercise a capturing closure"
+        );
+    }
+
+    /// Every new validation pass diagnoses directly mutated fixtures instead of
+    /// panicking on malformed compiler state.
+    #[test]
+    fn validator_rejects_corrupted_runtime_ownership_and_coverage() {
+        let module = checked_program(complete_coverage_source());
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        assert!(program.validate_source_coverage(&module).is_empty());
+
+        // Two functions sharing one body block.
+        {
+            let functions = program
+                .functions
+                .iter()
+                .filter_map(|(_, key, function)| function.body.is_some().then_some(key))
+                .take(2)
+                .collect::<Vec<_>>();
+            let [first, second] = functions[..] else {
+                panic!("the fixture should lower at least two function bodies");
+            };
+            assert_ne!(
+                program.functions.get(first).unwrap().body,
+                program.functions.get(second).unwrap().body
+            );
+            let body = program.functions.get(second).unwrap().body;
+            if let Some(function) = program.functions.get_mut(first) {
+                function.body = body;
+            }
+        }
+        assert!(
+            program
+                .validate()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("shares its body block")),
+            "shared function bodies should diagnose"
+        );
+
+        // An expression owned by one function reached from another function.
+        let (expression, owner) = program
+            .expressions
+            .iter()
+            .find_map(|(id, expression)| match expression.key.owner {
+                ExpressionOwner::Function(function) => Some((id, function)),
+                ExpressionOwner::Module(_) => None,
+            })
+            .expect("a function-owned expression");
+        let other_body = program
+            .functions
+            .iter()
+            .find_map(|(_, key, function)| (key != owner).then_some(function.body).flatten())
+            .expect("another function body");
+        let injected = program
+            .blocks
+            .get(other_body)
+            .is_some_and(|block| block.result != Some(expression));
+        assert!(injected, "the other body should not already reference it");
+        if let Some(block) = program.blocks.get_mut(other_body) {
+            block.result = Some(expression);
+        }
+        assert!(
+            program
+                .validate()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("is owned by")
+                    && diagnostic.message.contains("reached from")),
+            "a cross-owner expression reference should diagnose"
+        );
+
+        // A block lookup that points at a different block syntax.
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        if let Some((key, id)) = program
+            .block_lookup
+            .iter()
+            .next()
+            .map(|(key, id)| (*key, *id))
+        {
+            program.block_lookup.remove(&key);
+            program.block_lookup.insert(
+                ExpressionKey {
+                    syntax: SyntaxId::COMPILER,
+                    ..key
+                },
+                id,
+            );
+        }
+        assert!(
+            program
+                .validate()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("different block syntax")),
+            "a stale block lookup should diagnose"
+        );
+
+        // An unresolved inference placeholder in runtime metadata.
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        let expression = program
+            .expressions
+            .iter()
+            .next()
+            .map(|(id, _)| id)
+            .expect("a lowered expression");
+        if let Some(expression) = program.expressions.get_mut(expression) {
+            expression.value_type = CheckedType::Inferred;
+        }
+        assert!(
+            program.validate().iter().any(|diagnostic| diagnostic
+                .message
+                .contains("unresolved inference placeholder")),
+            "an inference placeholder should diagnose"
+        );
+
+        // A source expression with its lowered counterpart removed.
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        let key = program
+            .expressions
+            .iter()
+            .next()
+            .map(|(_, expression)| expression.key)
+            .expect("a lowered expression occurrence");
+        program.expression_lookup.remove(&key);
+        assert!(
+            program
+                .validate_source_coverage(&module)
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.message.contains("has no lowered counterpart")
+                        || diagnostic
+                            .message
+                            .contains("does not match its lowered counterpart")
+                }),
+            "a missing source counterpart should diagnose"
+        );
+
+        // A module initializer with one runtime item removed.
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        let initializer = program
+            .initializers
+            .iter()
+            .find(|(_, initializer)| {
+                program
+                    .blocks
+                    .get(initializer.body)
+                    .is_some_and(|block| !block.items.is_empty())
+            })
+            .map(|(id, _)| id)
+            .expect("an initializer with runtime items");
+        let body = program.initializers.get(initializer).unwrap().body;
+        program.blocks.get_mut(body).unwrap().items.pop();
+        assert!(
+            program
+                .validate_source_coverage(&module)
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("runtime items for")),
+            "a missing initializer item should diagnose"
+        );
+
+        // A lowered function with no checked source function.
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        let template = program
+            .functions
+            .iter()
+            .next()
+            .map(|(_, _, function)| function.clone())
+            .expect("a lowered function");
+        let origin = template.origin.clone();
+        let _ = program
+            .functions
+            .insert("function", FunctionId(9_999), origin, template);
+        assert!(
+            program
+                .validate_source_coverage(&module)
+                .iter()
+                .any(|diagnostic| diagnostic
+                    .message
+                    .contains("has no checked source function")),
+            "an invented function template should diagnose"
+        );
+    }
+
+    /// Transition comparison for every lowered expression's checked metadata
+    /// and every function template's signature and captures. Diverged
+    /// occurrences legitimately fall back to `Never` and empty effects.
+    #[test]
+    fn lowered_metadata_matches_checked_side_tables() {
+        let module = checked_program(complete_coverage_source());
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        for (_, expression) in program.expressions.iter() {
+            if expression.key.context != ExpressionContext::Primary {
+                continue;
+            }
+            let syntax = expression.key.syntax;
+            match module.type_of_expression(syntax) {
+                Some(expected) => assert_eq!(
+                    &expression.value_type, expected,
+                    "expression type for syntax {} should match the checker",
+                    syntax.0
+                ),
+                None => assert_eq!(expression.value_type, CheckedType::Never),
+            }
+            match module.effects_of_expression(syntax) {
+                Some(expected) => assert_eq!(
+                    &expression.effects, expected,
+                    "expression effects for syntax {} should match the checker",
+                    syntax.0
+                ),
+                None => assert_eq!(expression.effects, CheckedEffectSet::default()),
+            }
+            assert_eq!(
+                expression.coercion.as_ref(),
+                module.coercion_for(syntax),
+                "expression coercion for syntax {} should match the checker",
+                syntax.0
+            );
+            let mut moved = module.moved_symbols(syntax).collect::<Vec<_>>();
+            moved.sort_by_key(|symbol| symbol.0);
+            assert_eq!(
+                expression.moved_symbols, moved,
+                "moved symbols for syntax {} should match the checker",
+                syntax.0
+            );
+        }
+
+        for (_, key, function) in program.functions.iter() {
+            let source = module
+                .function_by_id(key)
+                .expect("every lowered function has a checked source function");
+            assert_eq!(
+                function
+                    .captures
+                    .iter()
+                    .map(|capture| capture.symbol)
+                    .collect::<Vec<_>>(),
+                source.captures,
+                "capture order for function {key:?} should match the checker"
+            );
+            assert_eq!(
+                Some(&function.signature),
+                module.type_of_function(key),
+                "signature for function {key:?} should match the checker"
             );
         }
     }
