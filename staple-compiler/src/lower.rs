@@ -1071,8 +1071,8 @@ pub(crate) struct LoweredCoroutinePlan {
     pub origin: Origin,
     /// The `coro` body block syntax that keys the plan.
     pub body_syntax: SyntaxId,
-    /// The lowered coroutine body block.
-    pub body: BlockId,
+    /// The lowered coroutine body block, linked once its thunk body lowers.
+    pub body: Option<BlockId>,
     /// The implicit thunk that owns the body.
     pub thunk: FunctionId,
     /// Ordered captures copied from the thunk catalog.
@@ -1113,6 +1113,9 @@ pub(crate) enum LoweredAwaitKind {
         /// Ordered resource uses acquired for the child's deferred effects at
         /// activation time.
         deferred_resources: Vec<LoweredResourceUseId>,
+        /// The operand is a call to the `until` intrinsic, which parks
+        /// off-queue and can be safely cleaned up during cancellation.
+        until: bool,
     },
     /// An external `Task` handle.
     Task { result: CheckedType },
@@ -1929,6 +1932,10 @@ pub(crate) struct LoweredProgram {
     reactive_operations: Arena<LoweredReactiveOperation, LoweredReactiveOperationId>,
     reactive_callbacks: Arena<LoweredReactiveCallback, LoweredReactiveCallbackId>,
     coroutine_plans: Arena<LoweredCoroutinePlan, LoweredCoroutinePlanId>,
+    /// Lookup only; traversal always uses the plan arena.
+    coroutine_plan_lookup: HashMap<SyntaxId, LoweredCoroutinePlanId>,
+    /// Lookup only: body-thunk function to its plan.
+    coroutine_plan_by_thunk: HashMap<FunctionId, LoweredCoroutinePlanId>,
     coros: Arena<LoweredCoro, LoweredCoroId>,
     awaits: Arena<LoweredAwait, LoweredAwaitId>,
     initializers: Arena<LoweredInitializer, InitializerId>,
@@ -2358,14 +2365,23 @@ impl LoweredProgram {
                 &mut diagnostics,
             );
         }
+        // Plans exist before any body lowers: a `coro` creation site and every
+        // `await` inside the body must find its plan while lowering.
         for (function, implicit_thunk) in &pending {
+            if *implicit_thunk {
+                self.snapshot_coroutine_plan(module, function, &mut diagnostics);
+            }
+        }
+        for (function, _) in &pending {
             match self.lower_function_body(module, function) {
                 Ok(body) => {
                     if let Some(entry) = self.functions.get_mut(function.id) {
                         entry.body = Some(body);
                     }
-                    if *implicit_thunk {
-                        self.snapshot_coroutine_plan(module, function, body, &mut diagnostics);
+                    if let Some(plan) = self.coroutine_plan_by_thunk.get(&function.id).copied()
+                        && let Some(plan) = self.coroutine_plans.get_mut(plan)
+                    {
+                        plan.body = Some(body);
                     }
                 }
                 Err(diagnostic) => diagnostics.push(diagnostic),
@@ -2375,16 +2391,15 @@ impl LoweredProgram {
     }
 
     /// Copies the checker's coroutine plan for one coroutine body thunk into an
-    /// owned lowered record keyed by its body syntax. The plan links the body
-    /// block, the owning implicit thunk, ordered captures, checked result and
-    /// deferred effects, resume count, frame bindings, awaited result types,
-    /// and wait/`until` cancellation classifications. Await sites populate in
-    /// Step 6.
+    /// owned lowered record keyed by its body syntax. The plan links the
+    /// owning implicit thunk, ordered captures, checked result and deferred
+    /// effects, resume count, frame bindings, awaited result types, and
+    /// wait/`until` cancellation classifications; its body block links after
+    /// the thunk body lowers and await sites append as they lower.
     fn snapshot_coroutine_plan(
         &mut self,
         module: &TypedModule,
         function: &ResolvedFunction,
-        body: BlockId,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         let body_syntax = function.body.syntax().id;
@@ -2419,10 +2434,10 @@ impl LoweredProgram {
         let captures = catalog.captures.clone();
         let result_type = plan.result_type.clone();
         let deferred_effects = plan.deferred_effects.clone();
-        self.coroutine_plans.push(LoweredCoroutinePlan {
+        let plan_id = self.coroutine_plans.push(LoweredCoroutinePlan {
             origin,
             body_syntax: plan.body_syntax,
-            body,
+            body: None,
             thunk: function.id,
             captures,
             result_type,
@@ -2434,6 +2449,8 @@ impl LoweredProgram {
             until_await_states: plan.until_await_states.clone(),
             awaits: Vec::new(),
         });
+        self.coroutine_plan_lookup.insert(plan.body_syntax, plan_id);
+        self.coroutine_plan_by_thunk.insert(function.id, plan_id);
     }
 
     fn snapshot_function_metadata(
@@ -3966,8 +3983,170 @@ impl LoweredProgram {
             (Stage26Route::ResourceProvider, Expression::With(with)) => self
                 .lower_with(module, owner, context, with)
                 .map(LoweredExpressionKind::With),
-            (_, _) => Ok(LoweredExpressionKind::Stage26Deferred(route)),
+            (Stage26Route::CoroutineCreation, Expression::Coro(coro)) => {
+                self.lower_coro(coro).map(LoweredExpressionKind::Coro)
+            }
+            (_, Expression::Await(await_)) => self
+                .lower_await(module, owner, route, await_)
+                .map(LoweredExpressionKind::Await),
+            (_, _) => Err(Diagnostic::new(
+                expression.syntax().span.clone(),
+                format!("Stage 2.6 route {route:?} does not match its syntax variant"),
+            )),
         }
+    }
+
+    /// Lowers a `coro { ... }` creation: the body plan plus the capture
+    /// environment construction. Frame layout, rooting, and deferred-effect
+    /// ownership stay classifications, not target offsets.
+    fn lower_coro(
+        &mut self,
+        coro: &staple_syntax::CoroExpression,
+    ) -> Result<LoweredCoroId, Diagnostic> {
+        let body_syntax = coro.body.syntax.id;
+        let Some(plan) = self.coroutine_plan_lookup.get(&body_syntax).copied() else {
+            return Err(Diagnostic::new(
+                coro.syntax.span.clone(),
+                "cannot lower a coroutine without its body plan",
+            ));
+        };
+        let environment = match self.coroutine_plans.get(plan) {
+            Some(plan) if !plan.captures.is_empty() => LoweredClosureEnvironment::Fresh,
+            Some(_) => LoweredClosureEnvironment::None,
+            None => {
+                return Err(Diagnostic::new(
+                    coro.syntax.span.clone(),
+                    "coroutine body plan is missing from the plan arena",
+                ));
+            }
+        };
+        Ok(self.coros.push(LoweredCoro {
+            origin: Origin {
+                syntax: coro.syntax.id,
+                span: coro.syntax.span.clone(),
+            },
+            plan,
+            environment,
+        }))
+    }
+
+    /// Lowers one `await` site inside its owning coroutine plan. The site
+    /// records its one-based resume state, checked operand kind, child
+    /// deferred-resource bindings, and outcome/result type.
+    fn lower_await(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        route: Stage26Route,
+        await_: &staple_syntax::AwaitExpression,
+    ) -> Result<LoweredAwaitId, Diagnostic> {
+        let span = await_.syntax.span.clone();
+        let ExpressionOwner::Function(function) = owner else {
+            return Err(Diagnostic::new(span, "`await` outside a coroutine body"));
+        };
+        let Some(plan_id) = self.coroutine_plan_by_thunk.get(&function).copied() else {
+            return Err(Diagnostic::new(span, "`await` outside a coroutine body"));
+        };
+        let operand =
+            self.lower_expression(module, owner, ExpressionContext::Primary, &await_.operand)?;
+        let operand_type = module
+            .type_of_expression(await_.operand.syntax().id)
+            .cloned();
+        let kind = match route {
+            Stage26Route::AwaitTask => {
+                let result = operand_type
+                    .as_ref()
+                    .and_then(|ty| module.task_result(ty))
+                    .cloned()
+                    .unwrap_or(CheckedType::Error);
+                LoweredAwaitKind::Task { result }
+            }
+            Stage26Route::AwaitWait => {
+                let result = operand_type
+                    .as_ref()
+                    .and_then(|ty| module.wait_result(ty))
+                    .cloned()
+                    .unwrap_or(CheckedType::Error);
+                LoweredAwaitKind::Wait { result }
+            }
+            Stage26Route::AwaitChildCoroutine => {
+                let Some((child_deferred, child_result)) = operand_type
+                    .as_ref()
+                    .and_then(|ty| module.coroutine_parts(ty))
+                    .map(|(effects, result)| (effects.clone(), result.clone()))
+                else {
+                    return Err(Diagnostic::new(span, "`await` requires a coroutine"));
+                };
+                let mut deferred_resources = Vec::with_capacity(child_deferred.resources.len());
+                for resource in &child_deferred.resources {
+                    deferred_resources.push(self.bind_resource_requirement(
+                        module,
+                        await_.operand.syntax().id,
+                        await_.operand.syntax().span.clone(),
+                        LoweredResourceUseKind::HiddenArgument,
+                        resource.clone(),
+                        Some(function),
+                    )?);
+                }
+                let plan = self
+                    .expressions
+                    .get(operand)
+                    .and_then(|expression| match &expression.kind {
+                        LoweredExpressionKind::Coro(coro) => self.coros.get(*coro),
+                        _ => None,
+                    })
+                    .map(|coro| coro.plan);
+                LoweredAwaitKind::ChildCoroutine {
+                    plan,
+                    child_result,
+                    deferred_resources,
+                    until: await_operand_is_until(module, &await_.operand),
+                }
+            }
+            other => {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("`await` route {other:?} is not an await route"),
+                ));
+            }
+        };
+        let state = self
+            .coroutine_plans
+            .get(plan_id)
+            .map(|plan| plan.awaits.len() + 1)
+            .unwrap_or(0);
+        let resume_points = self
+            .coroutine_plans
+            .get(plan_id)
+            .map(|plan| plan.resume_points)
+            .unwrap_or(0);
+        if state == 0 || state > resume_points {
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "await resume state {state} is outside the coroutine's 1..={resume_points} resume states"
+                ),
+            ));
+        }
+        let result_type = module
+            .type_of_expression(await_.syntax.id)
+            .cloned()
+            .unwrap_or(CheckedType::Never);
+        let await_id = self.awaits.push(LoweredAwait {
+            origin: Origin {
+                syntax: await_.syntax.id,
+                span: await_.syntax.span.clone(),
+            },
+            operand,
+            result_type,
+            owning_plan: plan_id,
+            resume_state: state,
+            kind,
+        });
+        if let Some(plan) = self.coroutine_plans.get_mut(plan_id) {
+            plan.awaits.push(await_id);
+        }
+        Ok(await_id)
     }
 
     /// Lowers a symbol-selected name occurrence. Functions, constructors,
@@ -6932,14 +7111,19 @@ impl LoweredProgram {
                 }
             }
         }
-        for (_, plan) in self.coroutine_plans.iter() {
-            if !self.blocks.contains(plan.body) {
-                diagnostics.push(invalid_reference(
+        for (plan_id, plan) in self.coroutine_plans.iter() {
+            match plan.body {
+                Some(body) if !self.blocks.contains(body) => diagnostics.push(invalid_reference(
                     &plan.origin,
                     "coroutine plan",
                     "block",
-                    plan.body.index(),
-                ));
+                    body.index(),
+                )),
+                Some(_) => {}
+                None => diagnostics.push(Diagnostic::new(
+                    plan.origin.span.clone(),
+                    "coroutine plan has no linked body block",
+                )),
             }
             let mut thunk_captures: Option<&[LoweredCapture]> = None;
             match self.functions.get(plan.thunk) {
@@ -6966,7 +7150,7 @@ impl LoweredProgram {
                             ));
                         }
                     }
-                    if thunk.body != Some(plan.body) {
+                    if plan.body != thunk.body || plan.body.is_none() {
                         diagnostics.push(Diagnostic::new(
                             plan.origin.span.clone(),
                             "coroutine plan body disagrees with its thunk body block",
@@ -7030,9 +7214,7 @@ impl LoweredProgram {
                     ),
                 ));
             }
-            // Await sites populate in Step 6; a plan can never hold more than
-            // its resume count.
-            if plan.awaits.len() > plan.resume_points {
+            if plan.awaits.len() != plan.resume_points {
                 diagnostics.push(Diagnostic::new(
                     plan.origin.span.clone(),
                     format!(
@@ -7041,6 +7223,31 @@ impl LoweredProgram {
                         plan.resume_points
                     ),
                 ));
+            }
+            for (index, await_) in plan.awaits.iter().enumerate() {
+                match self.awaits.get(*await_) {
+                    Some(record) if record.owning_plan == plan_id => {
+                        if record.resume_state != index + 1 {
+                            diagnostics.push(Diagnostic::new(
+                                record.origin.span.clone(),
+                                format!(
+                                    "await at plan position {index} records resume state {}",
+                                    record.resume_state
+                                ),
+                            ));
+                        }
+                    }
+                    Some(record) => diagnostics.push(Diagnostic::new(
+                        record.origin.span.clone(),
+                        "await site is listed in a plan it does not own",
+                    )),
+                    None => diagnostics.push(invalid_reference(
+                        &plan.origin,
+                        "coroutine plan",
+                        "await",
+                        await_.index(),
+                    )),
+                }
             }
             for state in plan
                 .wait_await_states
@@ -7095,6 +7302,41 @@ impl LoweredProgram {
                             format!(
                                 "await resume state {} is outside 1..={}",
                                 await_.resume_state, plan.resume_points
+                            ),
+                        ));
+                        continue;
+                    }
+                    let state = await_.resume_state;
+                    let wait_state = plan.wait_await_states.contains(&state);
+                    let until_state = plan.until_await_states.contains(&state);
+                    let expected = match &await_.kind {
+                        LoweredAwaitKind::Task { .. } => {
+                            (!wait_state && !until_state, "an external task")
+                        }
+                        LoweredAwaitKind::Wait { .. } => {
+                            (wait_state && !until_state, "an external wait")
+                        }
+                        LoweredAwaitKind::ChildCoroutine { until, .. } => {
+                            ((*until) == until_state && !wait_state, "a child coroutine")
+                        }
+                    };
+                    if !expected.0 {
+                        diagnostics.push(Diagnostic::new(
+                            await_.origin.span.clone(),
+                            format!(
+                                "await at resume state {state} is not classified as {}",
+                                expected.1
+                            ),
+                        ));
+                    }
+                    if let Some(expected_type) = plan.await_result_types.get(state - 1)
+                        && !types_agree(expected_type, &await_.result_type)
+                    {
+                        diagnostics.push(Diagnostic::new(
+                            await_.origin.span.clone(),
+                            format!(
+                                "await result `{}` disagrees with the plan's awaited type `{expected_type}`",
+                                await_.result_type
                             ),
                         ));
                     }
@@ -9212,7 +9454,9 @@ impl LoweredProgram {
         let Some(plan) = self.coroutine_plans.get(id) else {
             return;
         };
-        self.visit_owned_block(plan.body, reached);
+        if let Some(body) = plan.body {
+            self.visit_owned_block(body, reached);
+        }
         for await_ in &plan.awaits {
             self.visit_owned_await(*await_, reached);
         }
@@ -9809,7 +10053,9 @@ impl LoweredProgram {
                     .get(*coro)
                     .and_then(|coro| self.coroutine_plans.get(coro.plan))
                 {
-                    self.collect_loop_items(plan.body, depth, reached, diagnostics);
+                    if let Some(body) = plan.body {
+                        self.collect_loop_items(body, depth, reached, diagnostics);
+                    }
                 }
             }
             LoweredExpressionKind::Await(await_) => {
@@ -10481,6 +10727,22 @@ fn classify_await_route(
         return Stage26Route::AwaitWait;
     }
     Stage26Route::AwaitChildCoroutine
+}
+
+/// Whether an `await` operand is a call to the `until` intrinsic. Mirrors the
+/// coroutine scanner's single-element-product look-through.
+fn await_operand_is_until(module: &TypedModule, operand: &Expression) -> bool {
+    let operand = match operand {
+        Expression::Product(product) if product.elements.len() == 1 => &product.elements[0].value,
+        other => other,
+    };
+    let Expression::Call(call) = operand else {
+        return false;
+    };
+    module
+        .symbol_for(call.callee.syntax().id)
+        .and_then(|symbol| module.resolved().intrinsic_function(symbol))
+        == Some(IntrinsicFunction::Until)
 }
 
 /// The reactive or coroutine route of one compiler intrinsic. The exhaustive
@@ -13108,7 +13370,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatcher_defers_later_stage_families_explicitly() {
+    fn dispatcher_lowers_every_stage_family_without_deferrals() {
         let module = checked_program(concat!(
             "use std.coroutine.(Coroutine)\n",
             "type Counter = ctor (value: I32)\n",
@@ -13130,14 +13392,9 @@ mod tests {
         assert!(check.is_empty(), "{check:?}");
         let deferred = deferred_families(&program);
         assert!(
-            !deferred.contains(&DeferredExpressionFamily::Callable),
-            "every call and callable value lowers to an owned node"
+            deferred.is_empty(),
+            "every callable, resource, and coroutine expression lowers to an owned node; have {deferred:?}"
         );
-        assert!(
-            !deferred.contains(&DeferredExpressionFamily::Resource),
-            "resource reads and `with` lower to owned nodes"
-        );
-        assert!(deferred.contains(&DeferredExpressionFamily::Coroutine));
     }
 
     #[test]
@@ -13166,18 +13423,10 @@ mod tests {
         assert!(program.snapshot(&module).is_empty());
         assert!(program.validate().is_empty());
 
-        let routes = stage26_routes(&program);
-        for route in [
-            Stage26Route::CoroutineCreation,
-            Stage26Route::AwaitChildCoroutine,
-            Stage26Route::AwaitTask,
-            Stage26Route::AwaitWait,
-        ] {
-            assert!(
-                routes.contains(&route),
-                "the route fixture should still defer `{route:?}`; have {routes:?}"
-            );
-        }
+        assert!(
+            stage26_routes(&program).is_empty(),
+            "every Stage 2.6 route lowers to an owned record"
+        );
         let mut kinds = program
             .expressions
             .iter()
@@ -13185,10 +13434,10 @@ mod tests {
             .collect::<Vec<_>>();
         kinds.sort_unstable();
         kinds.dedup();
-        for expected in ["resource", "with"] {
+        for expected in ["resource", "with", "coro", "await"] {
             assert!(
                 kinds.iter().any(|kind| kind == expected),
-                "resource expressions should lower concretely; have {kinds:?}"
+                "every Stage 2.6 expression should lower concretely; have {kinds:?}"
             );
         }
         for route in Stage26Route::ALL {
@@ -16417,8 +16666,8 @@ mod tests {
             "repeated-product",
             "satisfies",
             "resource",
-            "stage26.Await",
-            "stage26.Coro",
+            "await",
+            "coro",
             "with",
             "string",
             "string-template",
@@ -17374,7 +17623,7 @@ mod tests {
 
         let thunk = program.functions.get(plan.thunk).expect("body thunk");
         assert!(thunk.class.coroutine_body);
-        assert_eq!(thunk.body, Some(plan.body));
+        assert_eq!(thunk.body, plan.body);
         assert_eq!(thunk.captures.len(), plan.captures.len());
         assert_eq!(
             thunk
@@ -17485,6 +17734,238 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("must be a statement")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+    }
+
+    fn lowered_coros(program: &LoweredProgram) -> Vec<&LoweredCoro> {
+        program.coros.iter().map(|(_, coro)| coro).collect()
+    }
+
+    #[test]
+    fn coro_creation_links_plan_and_capture_environment() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "def capturing: () -> Coroutine{} I32 = () => {\n",
+            "  let base = 40\n",
+            "  coro { base + 2 }\n",
+            "}\n",
+            "def bare: () -> Coroutine{} I32 = () => coro { 1 }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let coros = lowered_coros(&program);
+        assert_eq!(coros.len(), 2);
+        let capturing = program
+            .coros
+            .iter()
+            .find_map(|(_, coro)| {
+                let plan = program.coroutine_plans.get(coro.plan)?;
+                (!plan.captures.is_empty()).then_some(coro)
+            })
+            .expect("the capturing coro");
+        assert_eq!(
+            program
+                .coroutine_plans
+                .get(capturing.plan)
+                .unwrap()
+                .captures
+                .len(),
+            1
+        );
+        assert_eq!(capturing.environment, LoweredClosureEnvironment::Fresh);
+
+        let bare = program
+            .coros
+            .iter()
+            .find_map(|(_, coro)| {
+                let plan = program.coroutine_plans.get(coro.plan)?;
+                plan.captures.is_empty().then_some(coro)
+            })
+            .expect("the captureless coro");
+        assert_eq!(bare.environment, LoweredClosureEnvironment::None);
+    }
+
+    #[test]
+    fn await_sites_populate_plans_in_order_with_kinds() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "def child: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def driver: () -> Coroutine{Tasks} I32 = () => coro {\n",
+            "  let first = await (child ())\n",
+            "  let task = spawn (child ())\n",
+            "  let outcome = await task\n",
+            "  let _ = outcome\n",
+            "  first\n",
+            "}\n",
+            "let signal flag = 0\n",
+            "def waiter: () -> Coroutine{Reactive} () = () => coro {\n",
+            "  let _ = await (until { flag >= 0 })\n",
+            "  ()\n",
+            "}\n",
+            "def observer: move Wait I32 -> Coroutine{} () = move w => coro {\n",
+            "  let _ = await w; ()\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let driver = plans_by_resume_points(&program, 2);
+        assert_eq!(driver.len(), 1);
+        let plan = driver[0];
+        assert_eq!(plan.awaits.len(), 2);
+        let first = program.awaits.get(plan.awaits[0]).expect("first await");
+        assert_eq!(first.resume_state, 1);
+        assert!(matches!(
+            &first.kind,
+            LoweredAwaitKind::ChildCoroutine {
+                child_result,
+                deferred_resources,
+                until: false,
+                ..
+            } if *child_result == CheckedType::I32 && deferred_resources.is_empty()
+        ));
+        let second = program.awaits.get(plan.awaits[1]).expect("second await");
+        assert_eq!(second.resume_state, 2);
+        assert!(matches!(
+            &second.kind,
+            LoweredAwaitKind::Task { result } if *result == CheckedType::I32
+        ));
+
+        let until_plan = plans_by_resume_points(&program, 1)
+            .into_iter()
+            .find(|plan| !plan.until_await_states.is_empty())
+            .expect("the until plan");
+        let until_await = program
+            .awaits
+            .get(until_plan.awaits[0])
+            .expect("until await");
+        assert!(matches!(
+            &until_await.kind,
+            LoweredAwaitKind::ChildCoroutine { until: true, .. }
+        ));
+
+        let wait_plan = plans_by_resume_points(&program, 1)
+            .into_iter()
+            .find(|plan| !plan.wait_await_states.is_empty())
+            .expect("the wait plan");
+        let wait_await = program.awaits.get(wait_plan.awaits[0]).expect("wait await");
+        assert!(matches!(
+            &wait_await.kind,
+            LoweredAwaitKind::Wait { result } if *result == CheckedType::I32
+        ));
+    }
+
+    #[test]
+    fn child_deferred_resources_bind_at_the_await_not_at_creation() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "type Counter = ctor (value: I32)\n",
+            "def increment: () ->{mut Counter} () = () => {\n",
+            "  (resource Counter).value = (resource Counter).value + 1\n",
+            "}\n",
+            "def task: () -> Coroutine{mut Counter} I32 = () => coro {\n",
+            "  increment ()\n",
+            "  0\n",
+            "}\n",
+            "def driver: () -> Coroutine{mut Counter} I32 = () => coro {\n",
+            "  let child = task ()\n",
+            "  await child\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        // The child's plan owns a deferred resource...
+        let child_plan = plans_by_resume_points(&program, 0)
+            .into_iter()
+            .find(|plan| !plan.deferred_effects.resources.is_empty())
+            .expect("the child plan defers a resource");
+        assert_eq!(child_plan.deferred_effects.resources.len(), 1);
+
+        // ...but the creation site only records its capture environment.
+        let creation = lowered_coros(&program)
+            .into_iter()
+            .find(|coro| coro.plan == program.coroutine_plan_lookup[&child_plan.body_syntax])
+            .expect("the child creation site");
+        assert_eq!(creation.environment, LoweredClosureEnvironment::None);
+
+        // The deferred resource binds when the driver awaits the child.
+        let driver_plan = plans_by_resume_points(&program, 1)
+            .into_iter()
+            .find(|plan| !plan.awaits.is_empty())
+            .expect("the driver plan");
+        let await_ = program
+            .awaits
+            .get(driver_plan.awaits[0])
+            .expect("the driver await");
+        let LoweredAwaitKind::ChildCoroutine {
+            deferred_resources, ..
+        } = &await_.kind
+        else {
+            panic!("the driver awaits a child coroutine");
+        };
+        assert_eq!(deferred_resources.len(), 1);
+        let use_ = program
+            .resource_uses
+            .get(deferred_resources[0])
+            .expect("the deferred resource use");
+        assert_eq!(use_.kind, LoweredResourceUseKind::HiddenArgument);
+        assert_eq!(use_.pass_mode, LoweredArgumentPassMode::BorrowedPointer);
+        let provider = program
+            .resource_providers
+            .get(use_.provider.expect("provider"))
+            .expect("provider record");
+        assert_eq!(provider.owner, ExpressionOwner::Function(driver_plan.thunk));
+    }
+
+    #[test]
+    fn validator_rejects_misclassified_awaits() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "def child: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def driver: () -> Coroutine{} I32 = () => coro {\n",
+            "  await (child ())\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let await_id = program.awaits.iter().next().expect("an await").0;
+        program.awaits.values[await_id.index()].kind = LoweredAwaitKind::Wait {
+            result: CheckedType::I32,
+        };
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("not classified as")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let plan_id = program
+            .coroutine_plans
+            .iter()
+            .find_map(|(id, plan)| (plan.resume_points == 1).then_some(id))
+            .expect("the driver plan");
+        program.coroutine_plans.values[plan_id.index()]
+            .awaits
+            .clear();
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("awaits for")),
             "unexpected diagnostics: {diagnostics:?}"
         );
     }
