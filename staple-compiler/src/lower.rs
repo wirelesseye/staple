@@ -8294,9 +8294,25 @@ impl LoweredProgram {
                         "callable expression was not lowered",
                     ));
                 }
-                LoweredExpressionKind::Deferred(_)
-                | LoweredExpressionKind::Stage26Deferred(_)
-                | LoweredExpressionKind::String(_) => {}
+                LoweredExpressionKind::Deferred(DeferredExpressionFamily::Resource) => {
+                    diagnostics.push(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "resource expression was not lowered",
+                    ));
+                }
+                LoweredExpressionKind::Deferred(DeferredExpressionFamily::Coroutine) => {
+                    diagnostics.push(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "coroutine expression was not lowered",
+                    ));
+                }
+                LoweredExpressionKind::Stage26Deferred(route) => {
+                    diagnostics.push(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        format!("Stage 2.6 `{route:?}` expression was not lowered"),
+                    ));
+                }
+                LoweredExpressionKind::String(_) => {}
                 LoweredExpressionKind::Integer(integer) => {
                     let width = integer_literal_bit_width(integer.integer_type);
                     let value_bits = if integer.integer_type.is_signed() {
@@ -12887,6 +12903,30 @@ mod tests {
         for (_, value) in program.callable_values.iter() {
             lines.push(format!("callable value {value:?}"));
         }
+        for (_, provider) in program.resource_providers.iter() {
+            lines.push(format!("resource provider {provider:?}"));
+        }
+        for (_, use_) in program.resource_uses.iter() {
+            lines.push(format!("resource use {use_:?}"));
+        }
+        for (_, with) in program.withs.iter() {
+            lines.push(format!("with {with:?}"));
+        }
+        for (_, operation) in program.reactive_operations.iter() {
+            lines.push(format!("reactive operation {operation:?}"));
+        }
+        for (_, callback) in program.reactive_callbacks.iter() {
+            lines.push(format!("reactive callback {callback:?}"));
+        }
+        for (_, plan) in program.coroutine_plans.iter() {
+            lines.push(format!("coroutine plan {plan:?}"));
+        }
+        for (_, coro) in program.coros.iter() {
+            lines.push(format!("coro {coro:?}"));
+        }
+        for (_, await_) in program.awaits.iter() {
+            lines.push(format!("await {await_:?}"));
+        }
         lines.push(format!("semantic ids {:?}", program.semantic_ids));
         lines.push(format!("string formatting {:?}", program.string_formatting));
         lines
@@ -12919,6 +12959,261 @@ mod tests {
         let first_snapshot = normalized_program_snapshot(&first);
         assert!(!first_snapshot.is_empty());
         assert_eq!(first_snapshot, normalized_program_snapshot(&second));
+    }
+
+    #[test]
+    fn stage_2_6_records_agree_with_checked_metadata_and_are_stable() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "type Counter = ctor (value: I32)\n",
+            "def increment: () ->{mut Counter} () = () => {\n",
+            "  (resource Counter).value = (resource Counter).value + 1\n",
+            "}\n",
+            "let signal count = 0\n",
+            "let doubled = count + count\n",
+            "def task: () -> Coroutine{mut Counter} I32 = () => coro {\n",
+            "  increment ()\n",
+            "  0\n",
+            "}\n",
+            "def driver: () -> Coroutine{mut Counter} I32 = () => coro {\n",
+            "  let child = task ()\n",
+            "  await child\n",
+            "}\n",
+            "with Reactive = reactive_scope () {\n",
+            "  reaction { let current = count; () }\n",
+            "  batch { count = 1 }\n",
+            "  let observed = snapshot count\n",
+            "}\n",
+            "let mut counter = Counter (value: 0)\n",
+            "with mut Counter = counter { increment () }\n",
+        ));
+        let mut first = LoweredProgram::default();
+        let mut second = LoweredProgram::default();
+        let diagnostics = first.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(first.validate().is_empty());
+        assert!(second.snapshot(&module).is_empty());
+        assert!(second.validate().is_empty());
+        assert_eq!(
+            normalized_program_snapshot(&first),
+            normalized_program_snapshot(&second),
+            "repeated lowering is deterministic for every Stage 2.6 record"
+        );
+
+        // The executable entry installs exactly the checker's resources.
+        let entry = first
+            .initializers
+            .iter()
+            .find_map(|(_, initializer)| initializer.executable_entry.then_some(initializer))
+            .expect("the executable entry");
+        let expected_entry_resources = entry_resources(&module);
+        assert_eq!(entry.resources.len(), expected_entry_resources.len());
+        for (actual, expected) in entry.resources.iter().zip(&expected_entry_resources) {
+            assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.resource, expected.resource);
+        }
+
+        // Providers agree with their checked resource or effect-row position.
+        for (_, provider) in first.resource_providers.iter() {
+            match provider.target {
+                LoweredProviderTarget::Expression(_) => {
+                    // The provider's origin syntax is its `with` expression.
+                    assert_eq!(
+                        Some(&provider.resource),
+                        module.resource_for_expression(provider.origin.syntax)
+                    );
+                }
+                LoweredProviderTarget::EffectParameter { position } => {
+                    let function = first
+                        .functions
+                        .iter()
+                        .find_map(|(_, _, function)| {
+                            (function.body_syntax == provider.origin.syntax).then_some(function)
+                        })
+                        .expect("the provider's owning function");
+                    assert_eq!(
+                        provider.resource,
+                        function.signature.effects.resources[position]
+                    );
+                }
+                LoweredProviderTarget::Entry => {
+                    let entry = first
+                        .initializers
+                        .iter()
+                        .find_map(|(_, initializer)| {
+                            initializer.executable_entry.then_some(initializer)
+                        })
+                        .expect("the executable entry");
+                    assert!(entry.resources.iter().any(|resource| {
+                        resource.resource == provider.resource
+                            && matches!(
+                                (resource.kind, provider.scope_exit),
+                                (LoweredEntryResourceKind::Io, LoweredScopeExit::Ordinary)
+                                    | (
+                                        LoweredEntryResourceKind::Reactive,
+                                        LoweredScopeExit::Reactive
+                                    )
+                            )
+                    }));
+                }
+            }
+        }
+
+        // Every resource use checks against its occurrence metadata.
+        for (_, use_) in first.resource_uses.iter() {
+            if let Some(checked) = module.resource_for_expression(use_.origin.syntax) {
+                assert_eq!(&use_.resource, checked);
+            }
+        }
+
+        // Reactive callbacks link the checker's implicit thunks and captures.
+        for (_, callback) in first.reactive_callbacks.iter() {
+            let Some(thunk) = callback.thunk else {
+                continue;
+            };
+            let checked = module
+                .implicit_thunk_for(callback.origin.syntax)
+                .expect("checked callback thunk");
+            assert_eq!(thunk, checked.id);
+            assert_eq!(
+                callback
+                    .captures
+                    .iter()
+                    .map(|capture| capture.symbol)
+                    .collect::<Vec<_>>(),
+                checked.captures
+            );
+        }
+
+        // Signal and derived bindings match the checked symbol classification.
+        for (_, item) in first.items.iter() {
+            let LoweredItemKind::Binding(binding) = &item.kind else {
+                continue;
+            };
+            let Some(symbol) = binding.symbol else {
+                continue;
+            };
+            if module.resolved().is_signal_symbol(symbol) {
+                assert!(matches!(
+                    binding
+                        .reactive
+                        .and_then(|operation| first.reactive_operations.get(operation))
+                        .map(|operation| &operation.kind),
+                    Some(LoweredReactiveOperationKind::SignalCreate { symbol: target, .. })
+                        if *target == symbol
+                ));
+            }
+            if module.is_derived_symbol(symbol) {
+                let Some(LoweredReactiveOperationKind::DerivedCreate {
+                    evaluator,
+                    function_type,
+                    ..
+                }) = binding
+                    .reactive
+                    .and_then(|operation| first.reactive_operations.get(operation))
+                    .map(|operation| &operation.kind)
+                else {
+                    panic!("derived binding should record its evaluator");
+                };
+                let checked = module
+                    .derived_evaluator(symbol)
+                    .expect("checked derived evaluator");
+                assert_eq!(*evaluator, checked.id);
+                assert_eq!(Some(function_type), module.type_of_function(checked.id));
+            }
+        }
+
+        // Coroutine plans copy every scanner field exactly.
+        for (_, plan) in first.coroutine_plans.iter() {
+            let checked = module
+                .coroutine_plan(plan.body_syntax)
+                .expect("checked coroutine plan");
+            assert_eq!(plan.result_type, checked.result_type);
+            assert_eq!(plan.deferred_effects, checked.deferred_effects);
+            assert_eq!(plan.resume_points, checked.resume_points);
+            assert_eq!(plan.frame_bindings, checked.frame_bindings);
+            assert_eq!(plan.await_result_types, checked.await_result_types);
+            assert_eq!(plan.wait_await_states, checked.wait_await_states);
+            assert_eq!(plan.until_await_states, checked.until_await_states);
+            let thunk = module
+                .implicit_thunk_for(plan.body_syntax)
+                .expect("checked body thunk");
+            assert_eq!(plan.thunk, thunk.id);
+            assert_eq!(
+                plan.captures
+                    .iter()
+                    .map(|capture| capture.symbol)
+                    .collect::<Vec<_>>(),
+                thunk.captures
+            );
+        }
+
+        // Await sites mirror the checked operand classification.
+        for (_, await_) in first.awaits.iter() {
+            let operand_syntax = first
+                .expressions
+                .get(await_.operand)
+                .expect("await operand")
+                .key
+                .syntax;
+            let operand_type = module
+                .type_of_expression(operand_syntax)
+                .expect("checked await operand type");
+            match &await_.kind {
+                LoweredAwaitKind::Task { result } => {
+                    assert_eq!(Some(result), module.task_result(operand_type));
+                }
+                LoweredAwaitKind::Wait { result } => {
+                    assert_eq!(Some(result), module.wait_result(operand_type));
+                }
+                LoweredAwaitKind::ChildCoroutine { child_result, .. } => {
+                    assert_eq!(
+                        Some(child_result),
+                        module
+                            .coroutine_parts(operand_type)
+                            .map(|(_, result)| result)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn validator_rejects_remaining_resource_and_coroutine_deferrals() {
+        let mut program = LoweredProgram::default();
+        for (family, message) in [
+            (
+                DeferredExpressionFamily::Resource,
+                "resource expression was not lowered",
+            ),
+            (
+                DeferredExpressionFamily::Coroutine,
+                "coroutine expression was not lowered",
+            ),
+        ] {
+            let key = ExpressionKey {
+                syntax: SyntaxId(900_000 + family as usize),
+                owner: ExpressionOwner::Module(ModuleId(0)),
+                context: ExpressionContext::Primary,
+            };
+            let id = program.expressions.push(LoweredExpression {
+                key,
+                origin: Origin::compiler(),
+                value_type: CheckedType::Never,
+                effects: CheckedEffectSet::default(),
+                coercion: None,
+                moved_symbols: Vec::new(),
+                kind: LoweredExpressionKind::Deferred(family),
+            });
+            program.expression_lookup.insert(key, id);
+            assert!(
+                program
+                    .validate()
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(message)),
+                "the {family:?} deferral should diagnose"
+            );
+        }
     }
 
     #[test]
