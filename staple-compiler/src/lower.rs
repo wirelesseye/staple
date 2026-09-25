@@ -847,9 +847,9 @@ pub(crate) struct LoweredCall {
     pub function_type: CheckedFunctionType,
     /// Ordered visible arguments with their final ABI slots.
     pub arguments: Vec<LoweredCallArgument>,
-    /// Ordered hidden resource requirements from the checked effect row.
-    /// Lexical provider resolution is Stage 2.6 work.
-    pub resources: Vec<CheckedResource>,
+    /// Ordered hidden resource requirements from the checked effect row,
+    /// resolved to their selected lexical providers in effect-row order.
+    pub resource_bindings: Vec<LoweredResourceUseId>,
     /// Checked mutation and move markers for the parameter slots.
     pub mutations: Vec<CheckedMutation>,
     pub moves: Vec<CheckedMutation>,
@@ -1170,6 +1170,20 @@ impl CallRoute {
         CallRoute::PrimitiveMacro,
         CallRoute::CompilerHelper,
     ];
+
+    /// Whether this route passes hidden effect-row resources as ABI arguments.
+    /// External and intrinsic calls resolve no hidden resource arguments;
+    /// reactive intrinsics select an ambient provider inside their operation
+    /// record instead. Constructors carry no effects.
+    pub(crate) fn passes_hidden_resources(self) -> bool {
+        !matches!(
+            self,
+            CallRoute::External
+                | CallRoute::Intrinsic
+                | CallRoute::JuxtaposedIntrinsic
+                | CallRoute::Constructor
+        )
+    }
 
     /// The single explicit callable category this route produces. The
     /// exhaustive match is the compile-time half of the decision table.
@@ -2938,6 +2952,22 @@ impl LoweredProgram {
                 "cannot lower a resource occurrence without checked resource metadata",
             ));
         };
+        self.bind_resource_requirement(module, syntax, span, kind, resource, None)
+    }
+
+    /// Binds one checked resource requirement to its selected provider and
+    /// records how the value passes. `hidden_mutable` is the requirement's
+    /// checked mutability for a hidden call/effect argument; `None` derives it
+    /// from the requirement itself for reads and places.
+    fn bind_resource_requirement(
+        &mut self,
+        module: &TypedModule,
+        syntax: SyntaxId,
+        span: Span,
+        kind: LoweredResourceUseKind,
+        resource: CheckedResource,
+        function: Option<FunctionId>,
+    ) -> Result<LoweredResourceUseId, Diagnostic> {
         let Some(provider) = self.active_provider_for(&resource.value_type) else {
             return Err(Diagnostic::new(
                 span,
@@ -2949,10 +2979,31 @@ impl LoweredProgram {
             .get(provider)
             .is_some_and(|provider| provider.indirect);
         let pass_mode = match kind {
-            LoweredResourceUseKind::MutablePlace => LoweredArgumentPassMode::MutablePlace,
-            LoweredResourceUseKind::Read | LoweredResourceUseKind::HiddenArgument => {
-                LoweredArgumentPassMode::Value
+            LoweredResourceUseKind::MutablePlace => {
+                if !indirect {
+                    return Err(Diagnostic::new(
+                        span,
+                        format!("resource `{}` is not mutable", resource.value_type),
+                    ));
+                }
+                LoweredArgumentPassMode::MutablePlace
             }
+            LoweredResourceUseKind::HiddenArgument => {
+                let borrow =
+                    resource.mutable || !module.is_copy_in_function(&resource.value_type, function);
+                if borrow {
+                    if !indirect {
+                        return Err(Diagnostic::new(
+                            span,
+                            format!("resource `{}` is not borrowable", resource.value_type),
+                        ));
+                    }
+                    LoweredArgumentPassMode::BorrowedPointer
+                } else {
+                    LoweredArgumentPassMode::Value
+                }
+            }
+            LoweredResourceUseKind::Read => LoweredArgumentPassMode::Value,
         };
         Ok(self.resource_uses.push(LoweredResourceUse {
             origin: Origin { syntax, span },
@@ -2962,6 +3013,32 @@ impl LoweredProgram {
             pass_mode,
             indirect,
         }))
+    }
+
+    /// Resolves a call's hidden effect-row requirements in checked order,
+    /// after its visible arguments have already been lowered. Every binding
+    /// references a provider visible at the call site; a missing provider is a
+    /// source diagnostic.
+    fn lower_call_resource_bindings(
+        &mut self,
+        module: &TypedModule,
+        owner: ExpressionOwner,
+        origin: &Origin,
+        effects: &CheckedEffectSet,
+    ) -> Result<Vec<LoweredResourceUseId>, Diagnostic> {
+        let mut bindings = Vec::with_capacity(effects.resources.len());
+        for resource in &effects.resources {
+            let binding = self.bind_resource_requirement(
+                module,
+                origin.syntax,
+                origin.span.clone(),
+                LoweredResourceUseKind::HiddenArgument,
+                resource.clone(),
+                owner_function(owner),
+            )?;
+            bindings.push(binding);
+        }
+        Ok(bindings)
     }
 
     /// Lowers a `with`: the provider value evaluates once, the provider is
@@ -5355,8 +5432,15 @@ impl LoweredProgram {
         if let Some(callee) = callee {
             steps.insert(0, LoweredCallStep::Callee { expression: callee });
         }
-        let resources = function_type.effects.resources.clone();
-        for index in 0..resources.len() {
+        let resource_bindings = if route.passes_hidden_resources() {
+            self.lower_call_resource_bindings(module, owner, &origin, &function_type.effects)?
+        } else {
+            // External, intrinsic, and constructor calls have no hidden
+            // resource ABI arguments; reactive intrinsics resolve their ambient
+            // provider inside their reactive operation record (Step 4).
+            Vec::new()
+        };
+        for index in 0..resource_bindings.len() {
             steps.push(LoweredCallStep::Resource { resource: index });
         }
         steps.push(LoweredCallStep::Invoke);
@@ -5366,7 +5450,7 @@ impl LoweredProgram {
             callee,
             function_type: function_type.clone(),
             arguments,
-            resources,
+            resource_bindings,
             mutations: function_type.mutations.clone(),
             moves: function_type.moves.clone(),
             initialization_checks,
@@ -5465,8 +5549,12 @@ impl LoweredProgram {
             steps.push(call_argument_step(index, index, entry.expression));
             arguments.push(entry);
         }
-        let resources = function_type.effects.resources.clone();
-        for index in 0..resources.len() {
+        let resource_bindings = if intrinsic_call {
+            Vec::new()
+        } else {
+            self.lower_call_resource_bindings(module, owner, &origin, &function_type.effects)?
+        };
+        for index in 0..resource_bindings.len() {
             steps.push(LoweredCallStep::Resource { resource: index });
         }
         steps.push(LoweredCallStep::Invoke);
@@ -5476,7 +5564,7 @@ impl LoweredProgram {
             callee: callee_field,
             function_type: function_type.clone(),
             arguments,
-            resources,
+            resource_bindings,
             mutations: function_type.mutations.clone(),
             moves: function_type.moves.clone(),
             initialization_checks: Vec::new(),
@@ -6564,12 +6652,12 @@ impl LoweredProgram {
                         Some(*expression)
                     }
                     LoweredCallStep::Resource { resource } => {
-                        if *resource >= call.resources.len() {
+                        if *resource >= call.resource_bindings.len() {
                             diagnostics.push(Diagnostic::new(
                                 call.origin.span.clone(),
                                 format!(
                                     "call step targets out-of-range resource {resource} of {}",
-                                    call.resources.len()
+                                    call.resource_bindings.len()
                                 ),
                             ));
                         }
@@ -6748,7 +6836,35 @@ impl LoweredProgram {
             (_, None) => {}
         }
 
-        if call.resources != call.function_type.effects.resources {
+        let expected_resources = &call.function_type.effects.resources;
+        let mut bound_resources = Vec::with_capacity(call.resource_bindings.len());
+        for binding in &call.resource_bindings {
+            match self.resource_uses.get(*binding) {
+                Some(use_) => bound_resources.push(&use_.resource),
+                None => diagnostics.push(invalid_reference(
+                    &call.origin,
+                    "call",
+                    "resource use",
+                    binding.index(),
+                )),
+            }
+        }
+        let passes_hidden_resources = !matches!(
+            call.target,
+            LoweredCallableTarget::ExternalFunction { .. }
+                | LoweredCallableTarget::Intrinsic { .. }
+                | LoweredCallableTarget::Constructor { .. }
+        );
+        let agrees = if passes_hidden_resources {
+            bound_resources.len() == expected_resources.len()
+                && bound_resources
+                    .iter()
+                    .zip(expected_resources)
+                    .all(|(bound, expected)| **bound == *expected)
+        } else {
+            call.resource_bindings.is_empty()
+        };
+        if !agrees {
             diagnostics.push(Diagnostic::new(
                 call.origin.span.clone(),
                 "call resources disagree with its checked effect row",
@@ -6906,7 +7022,7 @@ impl LoweredProgram {
                 "call has no invocation step",
             ));
         }
-        if resources != (0..call.resources.len()).collect::<Vec<_>>() {
+        if resources != (0..call.resource_bindings.len()).collect::<Vec<_>>() {
             diagnostics.push(Diagnostic::new(
                 call.origin.span.clone(),
                 "call resource steps are missing, duplicated, or out of order",
@@ -8395,6 +8511,9 @@ impl LoweredProgram {
         };
         if let Some(callee) = call.callee {
             self.visit_owned_expression(callee, reached);
+        }
+        for binding in &call.resource_bindings {
+            self.visit_owned_resource_use(*binding, reached);
         }
         for argument in &call.arguments {
             if let Some(expression) = argument.expression {
@@ -10739,6 +10858,39 @@ mod tests {
             .unwrap_or_else(|| panic!("`{name}` should have a lowered function"))
     }
 
+    /// The lowered call that invokes `function`, whether the call is direct or
+    /// goes through a first-class closure value (the backend's normal route
+    /// for declared non-generic functions).
+    fn lowered_call_to<'a>(
+        program: &'a LoweredProgram,
+        module: &TypedModule,
+        function: FunctionId,
+    ) -> &'a LoweredCall {
+        program
+            .calls
+            .iter()
+            .find_map(|(_, call)| {
+                let matches = match &call.target {
+                    LoweredCallableTarget::DirectFunction {
+                        function: target, ..
+                    } => *target == function,
+                    LoweredCallableTarget::IndirectClosure { callee } => program
+                        .expressions
+                        .get(*callee)
+                        .and_then(|expression| {
+                            module
+                                .resolved()
+                                .symbol_for(expression.key.syntax)
+                                .and_then(|symbol| module.function_for_symbol(symbol))
+                        })
+                        .is_some_and(|target| target == function),
+                    _ => false,
+                };
+                matches.then_some(call)
+            })
+            .unwrap_or_else(|| panic!("a call to function {} should lower", function.0))
+    }
+
     fn binding_symbol(module: &TypedModule, name: &str) -> SymbolId {
         module
             .syntax()
@@ -13037,7 +13189,7 @@ mod tests {
                 }))
         );
         assert!(calls.iter().any(|call| !call.mutations.is_empty()));
-        assert!(calls.iter().any(|call| !call.resources.is_empty()));
+        assert!(calls.iter().any(|call| !call.resource_bindings.is_empty()));
 
         for call in &calls {
             assert!(
@@ -13049,7 +13201,7 @@ mod tests {
                     .iter()
                     .filter(|step| matches!(step, LoweredCallStep::Resource { .. }))
                     .count(),
-                call.resources.len()
+                call.resource_bindings.len()
             );
             let mut slots = HashSet::new();
             for argument in &call.arguments {
@@ -13064,6 +13216,145 @@ mod tests {
     }
 
     #[test]
+    fn call_resource_bindings_follow_effect_row_order_and_scope() {
+        let module = checked_program(concat!(
+            "type A = ctor (value: I32)\n",
+            "type B = ctor (value: I32)\n",
+            "def consume: () ->{A, B} I32 = () => (resource A).value + (resource B).value\n",
+            "def driver: () -> I32 = () => {\n",
+            "  let a = A (value: 1)\n",
+            "  let b = B (value: 2)\n",
+            "  with A = a { with B = b { consume () } }\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let (consume_id, _) = lowered_function(&program, "consume");
+        let call = lowered_call_to(&program, &module, consume_id);
+        assert_eq!(
+            call.resource_bindings.len(),
+            call.function_type.effects.resources.len()
+        );
+        let bindings = call
+            .resource_bindings
+            .iter()
+            .map(|binding| program.resource_uses.get(*binding).expect("binding"))
+            .collect::<Vec<_>>();
+        assert_eq!(bindings.len(), 2);
+        for (binding, expected) in bindings.iter().zip(&call.function_type.effects.resources) {
+            assert_eq!(binding.kind, LoweredResourceUseKind::HiddenArgument);
+            assert_eq!(binding.resource, *expected);
+            assert_eq!(binding.pass_mode, LoweredArgumentPassMode::Value);
+            assert!(binding.provider.is_some(), "the `with` scope supplies it");
+        }
+        // Both requirements are `Copy`, so each resolves to its own `with`.
+        assert_ne!(bindings[0].provider, bindings[1].provider);
+        let (driver_id, _) = lowered_function(&program, "driver");
+        for binding in &bindings {
+            let provider = program
+                .resource_providers
+                .get(binding.provider.expect("provider"))
+                .expect("provider record");
+            assert_eq!(provider.owner, ExpressionOwner::Function(driver_id));
+            assert_eq!(provider.kind, LoweredProviderOriginKind::Source);
+        }
+        // The resource steps follow every explicit argument, keep effect-row
+        // order, and precede the invocation.
+        assert!(matches!(call.steps.last(), Some(LoweredCallStep::Invoke)));
+        let resource_steps = call
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                LoweredCallStep::Resource { resource } => Some(*resource),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(resource_steps, vec![0, 1]);
+    }
+
+    #[test]
+    fn mutable_call_resource_bindings_borrow_the_provider_place() {
+        let module = checked_program(concat!(
+            "type Counter = ctor (value: I32)\n",
+            "def increment: () ->{mut Counter} () = () => {\n",
+            "  (resource Counter).value = (resource Counter).value + 1\n",
+            "}\n",
+            "let mut counter = Counter (value: 0)\n",
+            "with mut Counter = counter { increment () }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let (increment_id, _) = lowered_function(&program, "increment");
+        let call = lowered_call_to(&program, &module, increment_id);
+        assert_eq!(call.resource_bindings.len(), 1);
+        let binding = program
+            .resource_uses
+            .get(call.resource_bindings[0])
+            .expect("binding");
+        assert_eq!(binding.kind, LoweredResourceUseKind::HiddenArgument);
+        assert_eq!(binding.pass_mode, LoweredArgumentPassMode::BorrowedPointer);
+        assert!(binding.indirect);
+        let provider = program
+            .resource_providers
+            .get(binding.provider.expect("provider"))
+            .expect("provider record");
+        assert!(provider.borrow);
+        assert_eq!(provider.storage, LoweredProviderStorage::Place);
+    }
+
+    #[test]
+    fn calls_without_hidden_resource_abis_stay_unbound() {
+        let module = checked_program(transition_fixture());
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        for (_, call) in program.calls.iter() {
+            match &call.target {
+                LoweredCallableTarget::ExternalFunction { .. }
+                | LoweredCallableTarget::Intrinsic { .. }
+                | LoweredCallableTarget::Constructor { .. } => {
+                    assert!(
+                        call.resource_bindings.is_empty(),
+                        "external, intrinsic, and constructor calls have no hidden resource ABI"
+                    );
+                }
+                _ => assert_eq!(
+                    call.resource_bindings.len(),
+                    call.function_type.effects.resources.len(),
+                    "effectful calls bind every ordered requirement"
+                ),
+            }
+        }
+
+        // A generic effect variable substitutes later; no provider is invented.
+        let module = checked_program(concat!(
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "let answer = evaluate { 42 }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        assert!(
+            program
+                .calls
+                .iter()
+                .any(|(_, call)| call.function_type.effects.variable.is_some())
+        );
+        for (_, call) in program.calls.iter() {
+            if call.function_type.effects.variable.is_some() {
+                assert!(
+                    call.resource_bindings.is_empty(),
+                    "an unresolved effect template keeps no concrete binding"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn call_facts_agree_with_checked_function_types() {
         let module = checked_program(call_fixture());
         let mut program = LoweredProgram::default();
@@ -13071,7 +13362,18 @@ mod tests {
         assert!(program.validate().is_empty());
 
         for (_, call) in program.calls.iter() {
-            assert_eq!(call.resources, call.function_type.effects.resources);
+            assert_eq!(
+                call.resource_bindings
+                    .iter()
+                    .map(|binding| program
+                        .resource_uses
+                        .get(*binding)
+                        .expect("resource binding")
+                        .resource
+                        .clone())
+                    .collect::<Vec<_>>(),
+                call.function_type.effects.resources
+            );
             assert_eq!(call.mutations, call.function_type.mutations);
             assert_eq!(call.moves, call.function_type.moves);
             assert_eq!(call.result_type, *call.function_type.result);
@@ -13629,7 +13931,18 @@ mod tests {
         assert!(program.validate().is_empty());
 
         for (_, call) in program.calls.iter() {
-            assert_eq!(call.resources, call.function_type.effects.resources);
+            assert_eq!(
+                call.resource_bindings
+                    .iter()
+                    .map(|binding| program
+                        .resource_uses
+                        .get(*binding)
+                        .expect("resource binding")
+                        .resource
+                        .clone())
+                    .collect::<Vec<_>>(),
+                call.function_type.effects.resources
+            );
             assert_eq!(call.mutations, call.function_type.mutations);
             assert_eq!(call.moves, call.function_type.moves);
             assert_eq!(call.result_type, *call.function_type.result);
@@ -13754,11 +14067,11 @@ mod tests {
         let resource_call = program
             .calls
             .iter()
-            .find(|(_, call)| !call.resources.is_empty())
+            .find(|(_, call)| !call.resource_bindings.is_empty())
             .map(|(id, _)| id)
             .expect("a resource-bearing call");
         if let Some(entry) = program.calls.get_mut(resource_call) {
-            entry.resources.clear();
+            entry.resource_bindings.clear();
         }
         assert!(program.validate().iter().any(|diagnostic| {
             diagnostic
@@ -13829,7 +14142,7 @@ mod tests {
         let resource_call = baseline
             .calls
             .iter()
-            .find(|(_, call)| !call.resources.is_empty());
+            .find(|(_, call)| !call.resource_bindings.is_empty());
         let (resource_id, _) = resource_call.expect("a resource-bearing call");
         let mut program = baseline;
         program
