@@ -9,6 +9,8 @@
 
 #![allow(dead_code)] // Stage 3.1 defines and tests keys before Stage 3.3 uses them.
 
+use std::collections::{HashMap, HashSet};
+
 use staple_syntax::Diagnostic;
 
 use crate::{
@@ -805,6 +807,458 @@ pub(crate) enum ArtifactRequestKey {
 pub(crate) enum SpecializationKey {
     Instance(InstanceKey),
     Artifact(ArtifactRequestKey),
+}
+
+/// Version byte of the canonical key encoding. Any change to the encoding
+/// rules requires bumping this constant so old and new bytes can never be
+/// silently compared as the same identity.
+pub(crate) const SPECIALIZATION_KEY_ENCODING_VERSION: u8 = 1;
+
+const INSTANCE_FAMILY_TAG: u8 = 0;
+const ARTIFACT_FAMILY_TAG: u8 = 1;
+const CONSTRUCTOR_ADAPTER_ARTIFACT_TAG: u8 = 0;
+const STRUCTURAL_METHOD_ARTIFACT_TAG: u8 = 1;
+
+impl CanonicalType {
+    /// Appends the explicitly tagged canonical encoding of this value. The
+    /// encoding is injective over the structural model: tags, lengths, and
+    /// ordered fields make every semantic distinction byte-distinct.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            CanonicalType::Never => out.push(0),
+            CanonicalType::I8 => out.push(1),
+            CanonicalType::I16 => out.push(2),
+            CanonicalType::I32 => out.push(3),
+            CanonicalType::I64 => out.push(4),
+            CanonicalType::U8 => out.push(5),
+            CanonicalType::U16 => out.push(6),
+            CanonicalType::U32 => out.push(7),
+            CanonicalType::U64 => out.push(8),
+            CanonicalType::ISize => out.push(9),
+            CanonicalType::USize => out.push(10),
+            CanonicalType::F32 => out.push(11),
+            CanonicalType::F64 => out.push(12),
+            CanonicalType::NumberLiteral(value) => {
+                out.push(13);
+                encode_u64(*value, out);
+            }
+            CanonicalType::String => out.push(14),
+            CanonicalType::StringLiteralSet(values) => {
+                out.push(15);
+                encode_usize(values.len(), out);
+                for value in values {
+                    encode_string(value, out);
+                }
+            }
+            CanonicalType::Ref(payload) => {
+                out.push(16);
+                payload.encode(out);
+            }
+            CanonicalType::Slice(payload) => {
+                out.push(17);
+                payload.encode(out);
+            }
+            CanonicalType::Buffer(payload) => {
+                out.push(18);
+                payload.encode(out);
+            }
+            CanonicalType::Array { element, count } => {
+                out.push(19);
+                element.encode(out);
+                count.encode(out);
+            }
+            CanonicalType::CString => out.push(20),
+            CanonicalType::CChar => out.push(21),
+            CanonicalType::Parameter(parameter) => {
+                out.push(22);
+                encode_usize(parameter.0, out);
+            }
+            CanonicalType::Nominal {
+                kind,
+                id,
+                arguments,
+            } => {
+                out.push(23);
+                out.push(match kind {
+                    CanonicalNominalKind::TypeConstructor => 0,
+                    CanonicalNominalKind::Opaque => 1,
+                    CanonicalNominalKind::Distinct => 2,
+                });
+                encode_usize(id.0, out);
+                encode_types(arguments, out);
+            }
+            CanonicalType::CPointer { pointee } => {
+                out.push(24);
+                pointee.encode(out);
+            }
+            CanonicalType::Product { elements, variadic } => {
+                out.push(25);
+                encode_usize(elements.len(), out);
+                for element in elements {
+                    match &element.name {
+                        Some(name) => {
+                            out.push(1);
+                            encode_string(name, out);
+                        }
+                        None => out.push(0),
+                    }
+                    element.value_type.encode(out);
+                }
+                out.push(u8::from(*variadic));
+            }
+            CanonicalType::Sum { alternatives } => {
+                out.push(26);
+                encode_types(alternatives, out);
+            }
+            CanonicalType::Function(function) => {
+                out.push(27);
+                function.encode(out);
+            }
+        }
+    }
+}
+
+impl CanonicalFunctionType {
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.push(0);
+        self.parameter.encode(out);
+        out.push(match self.parameter_style {
+            CanonicalParameterStyle::Single => 0,
+            CanonicalParameterStyle::Juxtaposed => 1,
+        });
+        encode_usize(self.mutations.len(), out);
+        for mutation in &self.mutations {
+            encode_mutation(*mutation, out);
+        }
+        encode_usize(self.moves.len(), out);
+        for mutation in &self.moves {
+            encode_mutation(*mutation, out);
+        }
+        self.effects.encode(out);
+        self.result.encode(out);
+    }
+}
+
+impl CanonicalEffectSet {
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.push(1);
+        match self.variable {
+            Some(variable) => {
+                out.push(1);
+                encode_usize(variable.0, out);
+            }
+            None => out.push(0),
+        }
+        encode_usize(self.resources.len(), out);
+        for resource in &self.resources {
+            resource.encode(out);
+        }
+        match self.state {
+            Some(state) => {
+                out.push(1);
+                out.push(match state {
+                    CanonicalStateEffect::Read => 0,
+                    CanonicalStateEffect::Write => 1,
+                    CanonicalStateEffect::ReadWrite => 2,
+                });
+            }
+            None => out.push(0),
+        }
+    }
+}
+
+impl CanonicalResource {
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.push(2);
+        self.value_type.encode(out);
+        out.push(u8::from(self.mutable));
+    }
+}
+
+impl CanonicalEvidence {
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            CanonicalEvidence::ExplicitImplementation {
+                trait_id,
+                method,
+                function,
+                arguments,
+            } => {
+                out.push(0);
+                encode_usize(trait_id.0, out);
+                encode_usize(method.0, out);
+                encode_usize(function.0, out);
+                encode_types(arguments, out);
+            }
+            CanonicalEvidence::Structural {
+                trait_id,
+                method,
+                structural,
+                arguments,
+            } => {
+                out.push(1);
+                encode_usize(trait_id.0, out);
+                encode_usize(method.0, out);
+                out.push(structural_tag(*structural));
+                encode_types(arguments, out);
+            }
+        }
+    }
+}
+
+impl InstanceKey {
+    /// The versioned canonical byte encoding of this key. Equal keys always
+    /// produce identical bytes; distinct keys cannot share bytes because every
+    /// identity input is tagged and length-prefixed in order.
+    pub(crate) fn canonical_encoding(&self) -> Vec<u8> {
+        let mut out = vec![SPECIALIZATION_KEY_ENCODING_VERSION, INSTANCE_FAMILY_TAG];
+        encode_usize(self.function.0, &mut out);
+        encode_usize(self.substitutions.len(), &mut out);
+        for substitution in &self.substitutions {
+            match substitution {
+                InstanceSubstitution::Type { parameter, value } => {
+                    out.push(0);
+                    encode_usize(parameter.0, &mut out);
+                    value.encode(&mut out);
+                }
+                InstanceSubstitution::Effect { parameter, effects } => {
+                    out.push(1);
+                    encode_usize(parameter.0, &mut out);
+                    effects.encode(&mut out);
+                }
+            }
+        }
+        match &self.evidence {
+            Some(evidence) => {
+                out.push(1);
+                evidence.encode(&mut out);
+            }
+            None => out.push(0),
+        }
+        out
+    }
+}
+
+impl ConstructorAdapterKey {
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.push(CONSTRUCTOR_ADAPTER_ARTIFACT_TAG);
+        encode_usize(self.symbol.0, out);
+        encode_usize(self.type_id.0, out);
+        out.push(adapter_tag(self.adapter));
+        self.callable_type.encode(out);
+    }
+}
+
+impl StructuralMethodKey {
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.push(STRUCTURAL_METHOD_ARTIFACT_TAG);
+        out.push(structural_tag(self.structural));
+        encode_usize(self.trait_id.0, out);
+        encode_usize(self.method.0, out);
+        encode_types(&self.arguments, out);
+        self.callable_type.encode(out);
+    }
+}
+
+impl ArtifactRequestKey {
+    /// The versioned canonical byte encoding of this artifact key, with the
+    /// variant tag keeping constructor and structural namespaces distinct.
+    pub(crate) fn canonical_encoding(&self) -> Vec<u8> {
+        let mut out = vec![SPECIALIZATION_KEY_ENCODING_VERSION, ARTIFACT_FAMILY_TAG];
+        match self {
+            ArtifactRequestKey::ConstructorAdapter(key) => key.encode(&mut out),
+            ArtifactRequestKey::StructuralMethod(key) => key.encode(&mut out),
+        }
+        out
+    }
+}
+
+impl SpecializationKey {
+    /// The versioned canonical byte encoding across both key families.
+    pub(crate) fn canonical_encoding(&self) -> Vec<u8> {
+        match self {
+            SpecializationKey::Instance(key) => key.canonical_encoding(),
+            SpecializationKey::Artifact(key) => key.canonical_encoding(),
+        }
+    }
+}
+
+fn encode_u64(value: u64, out: &mut Vec<u8>) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn encode_usize(value: usize, out: &mut Vec<u8>) {
+    encode_u64(value as u64, out);
+}
+
+fn encode_string(value: &str, out: &mut Vec<u8>) {
+    encode_usize(value.len(), out);
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn encode_types(values: &[CanonicalType], out: &mut Vec<u8>) {
+    encode_usize(values.len(), out);
+    for value in values {
+        value.encode(out);
+    }
+}
+
+fn encode_mutation(mutation: CanonicalMutation, out: &mut Vec<u8>) {
+    match mutation {
+        CanonicalMutation::Whole => out.push(0),
+        CanonicalMutation::Element(index) => {
+            out.push(1);
+            encode_usize(index, out);
+        }
+    }
+}
+
+fn adapter_tag(adapter: CanonicalAdapterKind) -> u8 {
+    match adapter {
+        CanonicalAdapterKind::None => 0,
+        CanonicalAdapterKind::Constructor => 1,
+        CanonicalAdapterKind::External => 2,
+        CanonicalAdapterKind::Curried => 3,
+        CanonicalAdapterKind::NestedClosure => 4,
+        CanonicalAdapterKind::ImplicitThunk => 5,
+    }
+}
+
+fn structural_tag(structural: StructuralTraitMethod) -> u8 {
+    match structural {
+        StructuralTraitMethod::Debug => 0,
+        StructuralTraitMethod::Index => 1,
+        StructuralTraitMethod::DerefIndex => 2,
+        StructuralTraitMethod::MutateIndex => 3,
+        StructuralTraitMethod::DerefMutateIndex => 4,
+        StructuralTraitMethod::IntoIterator => 5,
+        StructuralTraitMethod::Iterator => 6,
+    }
+}
+
+/// The append-only position of a reserved key. Ordinals are assigned in
+/// first-discovery order within their family and never reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct SpecializationOrdinal(usize);
+
+impl SpecializationOrdinal {
+    pub(crate) fn index(self) -> usize {
+        self.0
+    }
+}
+
+/// A defensive name-collision report. The ordinal-based naming scheme cannot
+/// currently collide, but the catalog verifies it instead of assuming it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpecializationNameCollision {
+    pub name: String,
+}
+
+/// The Stage 3.3 deterministic catalog: interns instance and artifact keys in
+/// first-discovery order and plans stable emitted symbol names.
+///
+/// Stage 3.3 must call `reserve_instance` before visiting an instance body so
+/// self-recursion and mutual recursion reuse the already-reserved ordinal
+/// instead of interning a second one. `planned_names` is the emission order
+/// contract: family order (`instances`, then `artifacts`) followed by ordinal.
+/// Names depend only on the ordinal and the structural kind, never on
+/// `HashMap` iteration, `Debug` output, or a hash value.
+#[derive(Debug, Default)]
+pub(crate) struct SpecializationCatalog {
+    instances: Vec<InstanceKey>,
+    instance_lookup: HashMap<InstanceKey, usize>,
+    artifacts: Vec<ArtifactRequestKey>,
+    artifact_lookup: HashMap<ArtifactRequestKey, usize>,
+}
+
+impl SpecializationCatalog {
+    pub(crate) fn reserve_instance(&mut self, key: InstanceKey) -> SpecializationOrdinal {
+        if let Some(ordinal) = self.instance_lookup.get(&key) {
+            return SpecializationOrdinal(*ordinal);
+        }
+        let ordinal = SpecializationOrdinal(self.instances.len());
+        self.instance_lookup.insert(key.clone(), ordinal.0);
+        self.instances.push(key);
+        ordinal
+    }
+
+    pub(crate) fn reserve_artifact(&mut self, key: ArtifactRequestKey) -> SpecializationOrdinal {
+        if let Some(ordinal) = self.artifact_lookup.get(&key) {
+            return SpecializationOrdinal(*ordinal);
+        }
+        let ordinal = SpecializationOrdinal(self.artifacts.len());
+        self.artifact_lookup.insert(key.clone(), ordinal.0);
+        self.artifacts.push(key);
+        ordinal
+    }
+
+    pub(crate) fn instance(&self, ordinal: SpecializationOrdinal) -> Option<&InstanceKey> {
+        self.instances.get(ordinal.0)
+    }
+
+    pub(crate) fn artifact(&self, ordinal: SpecializationOrdinal) -> Option<&ArtifactRequestKey> {
+        self.artifacts.get(ordinal.0)
+    }
+
+    pub(crate) fn instances(&self) -> impl Iterator<Item = (SpecializationOrdinal, &InstanceKey)> {
+        self.instances
+            .iter()
+            .enumerate()
+            .map(|(index, key)| (SpecializationOrdinal(index), key))
+    }
+
+    pub(crate) fn artifacts(
+        &self,
+    ) -> impl Iterator<Item = (SpecializationOrdinal, &ArtifactRequestKey)> {
+        self.artifacts
+            .iter()
+            .enumerate()
+            .map(|(index, key)| (SpecializationOrdinal(index), key))
+    }
+
+    /// The planned emitted symbol names in emission order. Names are
+    /// collision-checked: a repeated name is reported instead of silently
+    /// aliasing two semantic keys.
+    pub(crate) fn planned_names(&self) -> Result<Vec<String>, SpecializationNameCollision> {
+        let mut names = Vec::with_capacity(self.instances.len() + self.artifacts.len());
+        let mut seen = HashSet::new();
+        for (ordinal, _) in self.instances() {
+            let name = format!("__staple_instance_{}", ordinal.0);
+            if !seen.insert(name.clone()) {
+                return Err(SpecializationNameCollision { name });
+            }
+            names.push(name);
+        }
+        for (ordinal, key) in self.artifacts() {
+            let name = match key {
+                ArtifactRequestKey::ConstructorAdapter(_) => {
+                    format!("__staple_constructor_adapter_{}", ordinal.0)
+                }
+                ArtifactRequestKey::StructuralMethod(method) => format!(
+                    "__staple_structural_{}_{}",
+                    structural_name(method.structural),
+                    ordinal.0
+                ),
+            };
+            if !seen.insert(name.clone()) {
+                return Err(SpecializationNameCollision { name });
+            }
+            names.push(name);
+        }
+        Ok(names)
+    }
+}
+
+fn structural_name(structural: StructuralTraitMethod) -> &'static str {
+    match structural {
+        StructuralTraitMethod::Debug => "debug",
+        StructuralTraitMethod::Index => "index",
+        StructuralTraitMethod::DerefIndex => "deref_index",
+        StructuralTraitMethod::MutateIndex => "mutate_index",
+        StructuralTraitMethod::DerefMutateIndex => "deref_mutate_index",
+        StructuralTraitMethod::IntoIterator => "into_iterator",
+        StructuralTraitMethod::Iterator => "iterator",
+    }
 }
 
 fn origin_diagnostic(origin: &Origin, message: impl Into<String>) -> Diagnostic {
@@ -1933,6 +2387,223 @@ mod tests {
             .span,
             requesting_origin().span
         );
+    }
+
+    fn simple_callable() -> CheckedFunctionType {
+        function_type(
+            CheckedType::I32,
+            FunctionParameterStyle::Single,
+            Vec::new(),
+            Vec::new(),
+            CheckedEffectSet::default(),
+            CheckedType::I32,
+        )
+    }
+
+    fn structural_artifact_key() -> ArtifactRequestKey {
+        ArtifactRequestKey::StructuralMethod(
+            StructuralMethodKey::new(
+                StructuralTraitMethod::Index,
+                TraitId(3),
+                TraitMethodId(4),
+                &[CheckedType::I32],
+                &simple_callable(),
+                &requesting_origin(),
+            )
+            .expect("concrete structural artifact"),
+        )
+    }
+
+    #[test]
+    fn canonical_encoding_is_versioned_stable_and_injective() {
+        let instance = instance_key(1, vec![type_substitution(1, CheckedType::I32)], None);
+        let encoding = instance.canonical_encoding();
+        assert_eq!(encoding[0], SPECIALIZATION_KEY_ENCODING_VERSION);
+        assert_eq!(
+            encoding,
+            instance_key(1, vec![type_substitution(1, CheckedType::I32)], None)
+                .canonical_encoding()
+        );
+        assert_eq!(
+            SpecializationKey::Instance(instance.clone()).canonical_encoding(),
+            encoding
+        );
+        assert_eq!(
+            instance_key(
+                1,
+                vec![
+                    type_substitution(2, CheckedType::I64),
+                    type_substitution(1, CheckedType::I32),
+                ],
+                None
+            )
+            .canonical_encoding(),
+            instance_key(
+                1,
+                vec![
+                    type_substitution(1, CheckedType::I32),
+                    type_substitution(2, CheckedType::I64),
+                ],
+                None
+            )
+            .canonical_encoding(),
+            "construction order never changes the encoding"
+        );
+
+        let other = instance_key(1, vec![type_substitution(1, CheckedType::I64)], None);
+        assert_ne!(encoding, other.canonical_encoding());
+        assert_ne!(
+            encoding,
+            instance_key(
+                1,
+                vec![effect_substitution(1, &CheckedEffectSet::default())],
+                None
+            )
+            .canonical_encoding(),
+            "type and effect entries with the same parameter still differ"
+        );
+        assert_ne!(
+            encoding,
+            instance_key(
+                1,
+                vec![type_substitution(1, CheckedType::I32)],
+                Some(CanonicalEvidence::Structural {
+                    trait_id: TraitId(1),
+                    method: TraitMethodId(2),
+                    structural: StructuralTraitMethod::Debug,
+                    arguments: vec![concrete(&CheckedType::I32)],
+                })
+            )
+            .canonical_encoding(),
+            "evidence participates in the encoding"
+        );
+
+        let artifact = ArtifactRequestKey::ConstructorAdapter(
+            ConstructorAdapterKey::new(
+                SymbolId(1),
+                TypeId(1),
+                LoweredCallableAdapter::Constructor,
+                &simple_callable(),
+                &requesting_origin(),
+            )
+            .expect("concrete constructor artifact"),
+        );
+        let artifact_encoding = artifact.canonical_encoding();
+        assert_eq!(artifact_encoding[0], SPECIALIZATION_KEY_ENCODING_VERSION);
+        assert_ne!(artifact_encoding, encoding);
+        assert_eq!(
+            SpecializationKey::Artifact(artifact.clone()).canonical_encoding(),
+            artifact_encoding
+        );
+        assert_ne!(
+            SpecializationKey::Instance(instance).canonical_encoding(),
+            SpecializationKey::Artifact(artifact).canonical_encoding(),
+            "the family tag separates instances from artifacts"
+        );
+    }
+
+    #[test]
+    fn catalog_assigns_append_only_first_discovery_ordinals() {
+        let mut catalog = SpecializationCatalog::default();
+        let first = instance_key(1, vec![type_substitution(1, CheckedType::I32)], None);
+        let second = instance_key(2, Vec::new(), None);
+        let first_ordinal = catalog.reserve_instance(first.clone());
+        let second_ordinal = catalog.reserve_instance(second.clone());
+        assert_eq!(first_ordinal.index(), 0);
+        assert_eq!(second_ordinal.index(), 1);
+        assert_eq!(
+            catalog.reserve_instance(first.clone()),
+            first_ordinal,
+            "re-reserving returns the same ordinal instead of appending"
+        );
+        assert_eq!(catalog.instances().count(), 2);
+        assert_eq!(catalog.instance(first_ordinal), Some(&first));
+        assert_eq!(catalog.instance(second_ordinal), Some(&second));
+
+        let artifact = structural_artifact_key();
+        let artifact_ordinal = catalog.reserve_artifact(artifact.clone());
+        assert_eq!(
+            artifact_ordinal.index(),
+            0,
+            "artifact ordinals are their own append-only family"
+        );
+        assert_eq!(catalog.reserve_artifact(artifact.clone()), artifact_ordinal);
+        assert_eq!(catalog.artifact(artifact_ordinal), Some(&artifact));
+        assert_eq!(
+            catalog.planned_names().expect("unique names"),
+            vec![
+                "__staple_instance_0".to_owned(),
+                "__staple_instance_1".to_owned(),
+                "__staple_structural_index_0".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn repeated_runs_produce_identical_keys_order_and_names() {
+        fn build() -> SpecializationCatalog {
+            let mut catalog = SpecializationCatalog::default();
+            let mut by_parameter = HashMap::new();
+            by_parameter.insert(TypeParameterId(2), CheckedType::I64);
+            by_parameter.insert(TypeParameterId(1), CheckedType::I32);
+            let substitutions = by_parameter
+                .iter()
+                .map(|(parameter, value_type)| InstanceSubstitution::Type {
+                    parameter: *parameter,
+                    value: concrete(value_type),
+                })
+                .collect();
+            catalog.reserve_instance(
+                InstanceKey::new(FunctionId(7), substitutions, None).expect("well-formed key"),
+            );
+            catalog.reserve_artifact(structural_artifact_key());
+            catalog
+        }
+
+        let left = build();
+        let right = build();
+        assert_eq!(
+            left.planned_names().expect("unique names"),
+            right.planned_names().expect("unique names")
+        );
+        assert_eq!(
+            left.instances()
+                .map(|(_, key)| key.canonical_encoding())
+                .collect::<Vec<_>>(),
+            right
+                .instances()
+                .map(|(_, key)| key.canonical_encoding())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            left.instances().count(),
+            1,
+            "differently ordered construction collapses to one deterministic key"
+        );
+    }
+
+    #[derive(Default)]
+    struct ConstantHasher;
+
+    impl std::hash::Hasher for ConstantHasher {
+        fn finish(&self) -> u64 {
+            0
+        }
+
+        fn write(&mut self, _: &[u8]) {}
+    }
+
+    #[test]
+    fn constant_hashes_cannot_alias_distinct_keys() {
+        let mut map: HashMap<InstanceKey, usize, std::hash::BuildHasherDefault<ConstantHasher>> =
+            Default::default();
+        let first = instance_key(1, vec![type_substitution(1, CheckedType::I32)], None);
+        let second = instance_key(1, vec![type_substitution(1, CheckedType::I64)], None);
+        map.insert(first.clone(), 1);
+        map.insert(second.clone(), 2);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&first), Some(&1));
+        assert_eq!(map.get(&second), Some(&2));
     }
 
     #[test]

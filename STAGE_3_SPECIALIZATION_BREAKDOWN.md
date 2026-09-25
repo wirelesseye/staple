@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** Not started. Stage 2 is complete at `aac6500`.
+**Status:** Stage 3.1 (inventory specialization inputs and define canonical keys) is complete. Stage 2 completed at `aac6500`; Stage 3.1 built the route/input matrix, canonical structural keys, instance and artifact request keys, and the deterministic catalog contract. Stage 3.2 (resolve substitutions and relevant parameters) is next.
 
 Build the concrete function-instance graph from the owned Stage 2 `LoweredProgram` before LLVM emission. Each reachable function template gets one instance per distinct code-relevant substitution and selected evidence. Stage 3 records instance references on lowered calls and callable values, substitutes their bodies, and validates the graph. Stage 4 extends discovery to compiler-generated helper bodies; Stage 5 makes LLVM consume the graph and removes its old specialization queue. The legacy backend bridge stays active until Stage 5.
 
@@ -30,6 +30,8 @@ Build the concrete function-instance graph from the owned Stage 2 `LoweredProgra
 
 **Step 3 — instance and artifact request keys: complete.** `InstanceKey` is `FunctionId` plus ordered, stably sorted `InstanceSubstitution` entries and optional canonical evidence; duplicate, conflicting, and unresolved entries are rejected. `InstanceRequest` keeps the raw Stage 2 `CallSubstitutions`/`TraitEvidence` and resolves only when every input is concrete, failing declared-bound and negative evidence at the requesting origin. Evidence identity uses semantic trait/method IDs, the selected method `FunctionId` (so two implementations with matching signatures stay distinct), structural kind, and canonical arguments. `ConstructorAdapterKey`, `StructuralMethodKey`, `ArtifactRequestKey`, and `SpecializationKey` keep constructor, structural, and source-function namespaces distinct; the legacy structural cache was checked and its narrower `(kind, Debug arguments)` identity is superseded by explicit trait/method/callable-type inputs. Tests cover order-insensitive dedup, rejection paths, signature-identical outer substitutions, selected implementations, and namespace separation.
 
+**Step 4 — deterministic identity and handoff: complete.** `InstanceKey`, `ArtifactRequestKey`, and `SpecializationKey` have an explicitly versioned canonical byte encoding (tags, lengths, structural order) that never depends on `Debug` or `DefaultHasher`. `SpecializationCatalog` interns keys with append-only, family-scoped ordinals in first-discovery order; Stage 3.3 reserves a key before visiting its body so recursion reuses the reserved ordinal. `planned_names` fixes emission order (instances then artifacts, ordinal order) and collision-checks stable, structurally named symbols. Tests cover encoding stability/injectivity across key families, append-only dedup and name plans, repeated-run determinism under different `HashMap` construction orders, and constant-hash non-aliasing. The full gate passes: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (1076 tests), and `git diff --check`. **Stage 3.1 is complete; Stage 3.2 (resolve substitutions and relevant parameters) is next.**
+
 > **Complexity note:** Canonicalizing recursive nominal types and effect substitutions without expanding representations may need a focused design pass.
 
 ## Stage 3.2 - Resolve Substitutions and Relevant Parameters
@@ -41,6 +43,8 @@ Build the concrete function-instance graph from the owned Stage 2 `LoweredProgra
 - Keep same-function recursive calls on the current key, enforcing the existing prohibition on polymorphic recursion.
 
 **Gate:** Unit tests cover result-only parameters, empty and nonempty effect rows, nested closure captures, irrelevant outer parameters, conditional trait implementations, prerequisites, structural evidence, and same-key recursion.
+
+**Handoff from Stage 3.1:** Use `InstanceRequest::new` + `resolve`, `ConstructorAdapterKey::new`, and `StructuralMethodKey::new`; concrete conversion already rejects leftover parameters, effect variables, `Inferred`, and `Error`. Stage 3.2 owns relevant-parameter collection, `CallSubstitutions`/environment composition, effect normalization before keying, and `DeclaredBound` resolution; unresolved requests stay `InstanceRequest` values. Stage 3.3 hands off at `SpecializationCatalog::reserve_instance`/`reserve_artifact`, called before visiting a body so recursion converges. The full boundary is recorded in [STAGE_3_1_SPECIALIZATION_KEYS_PLAN.md](STAGE_3_1_SPECIALIZATION_KEYS_PLAN.md).
 
 > **Complexity note:** Free-parameter collection and evidence resolution are the highest-risk parts of this stage; plan them separately during implementation if their invariants need more detail.
 
