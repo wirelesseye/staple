@@ -2060,6 +2060,19 @@ pub(crate) struct LoweredProgram {
     /// function body or module initializer lowers. The last matching provider
     /// by checked value type is the one the legacy backend would select.
     active_resource_providers: Vec<LoweredResourceProviderId>,
+    /// Test-only: the rounds and total growth the last closed artifact catalog
+    /// observed, so the substage notes can record the observed maxima rather
+    /// than assert the defensive bounds blindly.
+    #[cfg(test)]
+    pub(crate) closure_stats: Option<ClosureStats>,
+}
+
+/// Test-only closure-run statistics.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClosureStats {
+    pub rounds: usize,
+    pub growth: usize,
 }
 
 impl LoweredProgram {

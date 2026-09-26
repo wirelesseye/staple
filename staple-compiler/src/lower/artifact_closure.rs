@@ -237,7 +237,10 @@ impl ArtifactFamilyHooks for ProductionHooks {
     }
 
     fn expands_body(&self, key: &ArtifactRequestKey) -> bool {
-        matches!(key, ArtifactRequestKey::ConstructorAdapter(_))
+        matches!(
+            key,
+            ArtifactRequestKey::ConstructorAdapter(_) | ArtifactRequestKey::StructuralMethod(_)
+        )
     }
 }
 
@@ -430,6 +433,20 @@ impl LoweredProgram {
                 let diagnostics = self.bind_artifact_plan_callees();
                 if !diagnostics.is_empty() {
                     return diagnostics;
+                }
+                #[cfg(test)]
+                {
+                    self.closure_stats = Some(super::ClosureStats {
+                        rounds: _round + 1,
+                        growth: self
+                            .instances
+                            .len()
+                            .saturating_sub(budget.baseline_instances)
+                            + self
+                                .artifacts
+                                .len()
+                                .saturating_sub(budget.baseline_artifacts),
+                    });
                 }
                 return self.finish_closure();
             }
