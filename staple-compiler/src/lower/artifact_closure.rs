@@ -203,12 +203,21 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 )]);
             }
         };
-        // Every family keeps its placeholder plan in Stage 4.2. The match is
-        // exhaustive so a new key family is never silently ignored; each later
-        // substage replaces its own arm.
+        // Stage 4.3 registers the constructor-adapter expander here; the
+        // remaining families keep their placeholder plan until their own
+        // substage replaces its arm. The match is exhaustive so a new key
+        // family is never silently ignored.
         match key {
-            ArtifactRequestKey::ConstructorAdapter(_)
-            | ArtifactRequestKey::StructuralMethod(_)
+            ArtifactRequestKey::ConstructorAdapter(_) => {
+                let LoweredArtifactPlan::ConstructorAdapter(plan) = plan else {
+                    return Err(vec![Diagnostic::new(
+                        record.origin.span.clone(),
+                        "constructor-adapter artifact carries a mismatched plan".to_string(),
+                    )]);
+                };
+                super::structural_artifacts::expand_constructor_adapter(program, artifact, plan)
+            }
+            ArtifactRequestKey::StructuralMethod(_)
             | ArtifactRequestKey::DropGlue(_)
             | ArtifactRequestKey::GcFinalizer(_)
             | ArtifactRequestKey::CoroutineCodes(_)
@@ -217,6 +226,10 @@ impl ArtifactFamilyHooks for ProductionHooks {
             | ArtifactRequestKey::DerivedRunner(_)
             | ArtifactRequestKey::ExternAdapter(_) => Ok((plan, Vec::new())),
         }
+    }
+
+    fn expands_body(&self, key: &ArtifactRequestKey) -> bool {
+        matches!(key, ArtifactRequestKey::ConstructorAdapter(_))
     }
 }
 

@@ -29,6 +29,7 @@ mod artifact_plan;
 mod graph_validation;
 mod instance_body;
 mod instance_resolution;
+mod structural_artifacts;
 mod worklist;
 
 // Stage 3.2 resolver API consumed by Stage 3.3. The implementation stays in a
@@ -14423,7 +14424,7 @@ mod tests {
     }
 
     #[test]
-    fn closure_with_production_hooks_preserves_stage_3_snapshots() {
+    fn closure_with_production_hooks_preserves_stage_3_identity() {
         let source = concat!(
             "use std.coroutine.*\n",
             "def identity: <T where Copy T> T -> T = value => value\n",
@@ -14447,13 +14448,54 @@ mod tests {
         assert!(baseline.validate_instance_bodies().is_empty());
 
         let lowered = Lowerer::new().lower(&module).expect("lowering succeeds");
-        assert_eq!(
-            normalized_program_snapshot(&baseline),
-            normalized_program_snapshot(&lowered.program),
-            "ProductionHooks keep the Stage 3 catalog byte-identical"
-        );
+        // Stage 4.3 expands constructor-adapter plans but adds no Stage 3
+        // instances or artifacts: ordinals, names, and keys are unchanged.
+        // Only the owned plan bodies differ, so compare identity rather than
+        // the full plan snapshot.
         assert_eq!(baseline.instances.len(), lowered.program.instances.len());
         assert_eq!(baseline.artifacts.len(), lowered.program.artifacts.len());
+        assert_eq!(
+            baseline
+                .instances
+                .iter()
+                .map(|(id, instance)| (id.index(), instance.name.clone()))
+                .collect::<Vec<_>>(),
+            lowered
+                .program
+                .instances
+                .iter()
+                .map(|(id, instance)| (id.index(), instance.name.clone()))
+                .collect::<Vec<_>>(),
+            "Stage 3 instance ordinals and names are unchanged"
+        );
+        assert_eq!(
+            baseline
+                .artifacts
+                .iter()
+                .map(|(id, artifact)| (id.index(), artifact.name.clone()))
+                .collect::<Vec<_>>(),
+            lowered
+                .program
+                .artifacts
+                .iter()
+                .map(|(id, artifact)| (id.index(), artifact.name.clone()))
+                .collect::<Vec<_>>(),
+            "Stage 3 artifact ordinals and names are unchanged"
+        );
+        let mut expanded_adapters = 0;
+        for (_, artifact) in lowered.program.artifacts.iter() {
+            if let Some(LoweredArtifactPlan::ConstructorAdapter(plan)) = &artifact.plan {
+                assert!(
+                    !matches!(plan.construction, ConstructorConstruction::Unexpanded),
+                    "ProductionHooks expand every constructor adapter"
+                );
+                expanded_adapters += 1;
+            }
+        }
+        assert!(
+            expanded_adapters > 0,
+            "the fixture reserves a constructor adapter"
+        );
         assert!(
             lowered
                 .program

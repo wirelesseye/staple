@@ -1,6 +1,6 @@
 # Stage 4.3 Plan: Structural Methods, Constructor Adapters, and Formatting
 
-**Status:** In progress. Step 1 (plan schema, planned callees, and binding pass) is complete. Stage 4.2 is complete through `5e7555e`: the fixed-point closure engine (`lower/artifact_closure.rs`), `ArtifactFamilyHooks` with placeholder `ProductionHooks`, closure use/edge storage, and `validate_artifact_closure` are in place. Stage 4.3 is the first substage to register real expanders.
+**Status:** In progress. Steps 1-2 (plan schema, planned callees, binding pass, and constructor adapters) are complete. Stage 4.2 is complete through `5e7555e`: the fixed-point closure engine (`lower/artifact_closure.rs`), `ArtifactFamilyHooks` with placeholder `ProductionHooks`, closure use/edge storage, and `validate_artifact_closure` are in place. Stage 4.3 is the first substage to register real expanders.
 
 ## Goal and boundary
 
@@ -169,6 +169,15 @@ These requests use Stage 4.4 key families before 4.4 lands. That works because t
 - Implement `expand_constructor_adapter`. Take the parameter slot types from the concrete callable type's flattened parameter, the same flattening `build_product_value(&parameters[1..])` observes. Take the product from those types. Classify construction as `ManagedRef` when the concrete result is `CheckedType::Ref(payload)`, and cross-check this against the Stage 2 constructor target's recursive-construction class. Request the payload finalizer if one is needed.
 - Fixtures: an ordinary nominal constructor value, a `Ref` constructor value with a droppable payload and with a `Copy` payload, a constructor value in a generic instance at two types (two keys), and named and positional product parameters.
 - **Gate:** every constructor adapter's plan is complete and validated. Finalizer keys appear exactly when legacy `build_ref_value` would set a finalizer. The fixtures and the workspace suite pass.
+
+**Step 2 notes (complete):**
+
+- **Module.** New private `lower/structural_artifacts.rs` owns `expand_constructor_adapter`. `ProductionHooks::expand` dispatches the `ConstructorAdapter` arm to it and `expands_body` now reports that family, so validation rejects any constructor plan left `Unexpanded` after closure.
+- **Flattening.** `flatten_parameters` mirrors `compile_parameter_types`/`flattened_parameter_types` (a top-level product parameter inlines its elements; anything else is one slot) and `build_product` mirrors `build_product_value` (one slot is that value unchanged; other arities are an anonymous product in slot order). The plan records logical `CheckedType`s; Stage 5 re-derives LLVM flattening from `callable_type`.
+- **Construction classification.** A concrete `CheckedType::Ref` result becomes `ManagedRef { parameters, product, payload, finalizer }`; every other result becomes `Value { parameters, product }`. The classification is cross-checked against `LoweredTypeMetadata::recursive_construction`: a `Ref` result requires `ManagedReference`, a non-`Ref` result rejects it, and a disagreement is a lowering diagnostic.
+- **Finalizer.** `ManagedRef` requests `GcFinalizer::Payload` with the 4.1 placeholder plan exactly when `program.concrete_needs_drop(payload)` holds, mirroring `build_ref_value`'s `type_needs_drop` gate. The fixture test compares the planned finalizer presence with legacy `TypedModule::type_needs_drop` for both a user-`Drop` payload and a `Copy` payload.
+- **Fixtures.** Four tests in `structural_artifacts` cover an ordinary nominal constructor (flattened parameters and rebuilt product), a managed `Ref` over a droppable and a `Copy` payload, a generic constructor value instantiated at two types (two adapters), and a named-parameter constructor (positional slots). The Stage 4.2 `closure_with_production_hooks_preserves_stage_3_snapshots` test became `..._preserves_stage_3_identity`: constructor plans now differ from the request-time marker by design, so it asserts unchanged instance/artifact ordinals and names instead of snapshot byte-equality.
+- **Gate:** met. All four fixtures and the full workspace suite pass; every constructor adapter in the catalog is expanded and validated.
 
 ### Step 3: `Index`, `MutateIndex`, `IntoIterator`, and `Iterator`
 
