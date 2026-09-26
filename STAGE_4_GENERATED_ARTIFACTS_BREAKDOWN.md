@@ -129,7 +129,7 @@ Read from `codegen.rs` at `df249ce`; line numbers drift, function names are auth
 
 ## Stage 4.3 - Structural Trait Methods, Constructor Adapters, and Formatting
 
-> **Separate plan recommended** (`STAGE_4_3_STRUCTURAL_AND_FORMATTING_PLAN.md`) covering the seven `StructuralTraitMethod` kinds individually.
+> **Separate plan:** [STAGE_4_3_STRUCTURAL_AND_FORMATTING_PLAN.md](STAGE_4_3_STRUCTURAL_AND_FORMATTING_PLAN.md), covering the seven `StructuralTraitMethod` kinds individually.
 
 - Constructor adapters: plan records constructor `SymbolId`/`TypeId`, recursive-construction class (`Ref` vs ordinary), concrete callable type, and the parameter-to-representation mapping the backend uses.
 - Structural methods, each with an owned plan built from `StructuralMethodKey` and owned type/trait catalogs (never `TypedModule`):
