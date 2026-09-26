@@ -68,6 +68,12 @@ pub(crate) struct LoweredFunctionInstance {
     /// The concrete Stage 3.4 body. `None` until materialization runs and for
     /// instances whose template has no runtime body (externs, intrinsics).
     pub body: Option<super::instance_body::LoweredInstanceBody>,
+    /// Transient traversal state, like `LoweredProgram::loop_depth`: whether the
+    /// Stage 3.3/4.2 traversal has visited this instance. The worklist and the
+    /// closure loop resume over the append-only arena, so an instance that is
+    /// already traversed must never be traversed again. Not part of instance
+    /// identity.
+    pub traversed: bool,
 }
 
 /// How one function instance entered the graph.
@@ -289,12 +295,251 @@ pub(crate) enum LoweredHelperRequester {
     Instance(FunctionInstanceId),
 }
 
-/// The built worklist before it is installed on the lowered program.
+/// The built worklist before it is installed on the lowered program. This is
+/// the recorder's persisted state: installing it hands the graph to the
+/// program, taking it back detaches the graph for the next recording phase.
 pub(super) struct SpecializationParts {
     pub instances: Arena<LoweredFunctionInstance, FunctionInstanceId>,
     pub artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
     pub helper_requests: Vec<LoweredCompilerHelperRequest>,
     pub catalog: SpecializationCatalog,
+}
+
+/// The append-only interning and edge-recording state shared by the Stage 3.3
+/// worklist traversal and the Stage 4.2 closure loop. Exactly one recorder
+/// owns the graph at a time; between recording phases the graph persists on
+/// the program as `SpecializationParts`. Only this type reserves ordinals,
+/// creates instance/artifact records, and writes edges.
+pub(super) struct GraphRecorder {
+    /// Instances in first-discovery order; the arena index is the ordinal.
+    instances: Arena<LoweredFunctionInstance, FunctionInstanceId>,
+    /// Artifacts in first-discovery order; the arena index is the ordinal.
+    artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
+    /// Compiler-helper requests the graph carries unresolved. Stage 4.2
+    /// removes this representation once helper targets are diagnosed.
+    helper_requests: Vec<LoweredCompilerHelperRequest>,
+    /// The append-only instance/artifact key catalog.
+    catalog: SpecializationCatalog,
+    /// Instances awaiting traversal, in discovery order.
+    queue: Vec<FunctionInstanceId>,
+    /// Traversal watermark into `queue`. The queue is append-only within a
+    /// recording session, so a cursor is enough to visit each instance once.
+    cursor: usize,
+}
+
+impl GraphRecorder {
+    fn new() -> Self {
+        GraphRecorder {
+            instances: Arena::default(),
+            artifacts: Arena::default(),
+            helper_requests: Vec::new(),
+            catalog: SpecializationCatalog::default(),
+            queue: Vec::new(),
+            cursor: 0,
+        }
+    }
+
+    fn from_parts(parts: SpecializationParts) -> Self {
+        GraphRecorder {
+            instances: parts.instances,
+            artifacts: parts.artifacts,
+            helper_requests: parts.helper_requests,
+            catalog: parts.catalog,
+            queue: Vec::new(),
+            cursor: 0,
+        }
+    }
+
+    fn into_parts(self) -> SpecializationParts {
+        SpecializationParts {
+            instances: self.instances,
+            artifacts: self.artifacts,
+            helper_requests: self.helper_requests,
+            catalog: self.catalog,
+        }
+    }
+
+    fn enqueue(&mut self, instance: FunctionInstanceId) {
+        self.queue.push(instance);
+    }
+
+    /// The instances that are queued but not yet traversed, in order. They are
+    /// exactly the pending list a resumed traversal must visit.
+    #[cfg(test)]
+    fn pending(&self) -> Vec<FunctionInstanceId> {
+        self.queue[self.cursor..].to_vec()
+    }
+
+    /// Interns one resolved source-function request and queues a newly created
+    /// instance for traversal. The returned flag reports whether the key was
+    /// new, so callers can tell a first discovery from a deduplicated reuse.
+    fn intern_resolved(
+        &mut self,
+        program: &LoweredProgram,
+        resolved: ResolvedInstanceRequest,
+        request: LoweredInstanceRequest,
+    ) -> (FunctionInstanceId, bool) {
+        let key = resolved.key.clone();
+        let ordinal = self.catalog.reserve_instance(key);
+        let id = FunctionInstanceId::from_index(ordinal.index());
+        if id.index() >= self.instances.len() {
+            let origin = function_origin(program, resolved.key.function());
+            // Only the template's own relevant parameters stay in the
+            // instance environment. The unpruned environment also carries the
+            // requesting site's trait-parameter mappings, which are not
+            // declared by this template and would otherwise collide with the
+            // same trait parameter's mappings at nested sites.
+            let environment = resolved.environment.pruned(&resolved.relevant);
+            self.instances.push(LoweredFunctionInstance {
+                origin,
+                template: resolved.key.function(),
+                ordinal,
+                name: String::new(),
+                request,
+                environment,
+                relevant: resolved.relevant,
+                evidence: resolved.evidence,
+                dependencies: Vec::new(),
+                artifacts: Vec::new(),
+                body: None,
+                traversed: false,
+            });
+            self.queue.push(id);
+            return (id, true);
+        }
+        (id, false)
+    }
+
+    fn record_instance_edge(
+        &mut self,
+        owner: TraversalOwner,
+        instance: FunctionInstanceId,
+        origin: &Origin,
+        kind: LoweredInstanceDependencyKind,
+    ) {
+        let edge = LoweredInstanceDependency {
+            instance,
+            origin: origin.clone(),
+            kind,
+        };
+        match owner {
+            TraversalOwner::Instance(owner) => {
+                if let Some(record) = self.instances.get_mut(owner) {
+                    record.dependencies.push(edge);
+                }
+            }
+            TraversalOwner::Artifact(owner) => {
+                if let Some(record) = self.artifacts.get_mut(owner) {
+                    record.instances.push(edge);
+                }
+            }
+            TraversalOwner::Initializer(_) => {}
+        }
+    }
+
+    /// Reserves one artifact key and records its owning edge. A new key
+    /// creates the record with the supplied plan and request root; an existing
+    /// key records the additional edge on the owner. The returned flag reports
+    /// whether the artifact was newly created, so the closure loop knows which
+    /// artifacts still need expansion.
+    fn request_artifact(
+        &mut self,
+        key: ArtifactRequestKey,
+        plan: Option<LoweredArtifactPlan>,
+        origin: &Origin,
+        owner: TraversalOwner,
+        kind: LoweredArtifactDependencyKind,
+    ) -> (ArtifactOrdinal, bool) {
+        let ordinal = self.catalog.reserve_artifact(key);
+        let mut created = false;
+        if ordinal.index() >= self.artifacts.len() {
+            let request = match owner {
+                TraversalOwner::Initializer(initializer) => {
+                    LoweredArtifactRequestRoot::Initializer {
+                        initializer,
+                        origin: origin.clone(),
+                    }
+                }
+                TraversalOwner::Instance(instance) => LoweredArtifactRequestRoot::Instance {
+                    instance,
+                    kind,
+                    origin: origin.clone(),
+                },
+                TraversalOwner::Artifact(artifact) => LoweredArtifactRequestRoot::Artifact {
+                    artifact,
+                    kind,
+                    origin: origin.clone(),
+                },
+            };
+            self.artifacts.push(LoweredArtifactRequest {
+                ordinal,
+                name: String::new(),
+                origin: origin.clone(),
+                request,
+                plan,
+                artifacts: Vec::new(),
+                instances: Vec::new(),
+            });
+            created = true;
+        }
+        let edge = LoweredArtifactDependency {
+            artifact: ordinal,
+            origin: origin.clone(),
+            kind,
+        };
+        match owner {
+            TraversalOwner::Instance(instance) => {
+                if let Some(record) = self.instances.get_mut(instance) {
+                    record.artifacts.push(edge);
+                }
+            }
+            TraversalOwner::Artifact(artifact) => {
+                if let Some(record) = self.artifacts.get_mut(artifact) {
+                    record.artifacts.push(edge);
+                }
+            }
+            TraversalOwner::Initializer(_) => {}
+        }
+        (ordinal, created)
+    }
+
+    fn assign_names(&mut self) -> Result<(), Vec<Diagnostic>> {
+        let names = match self.catalog.planned_names() {
+            Ok(names) => names,
+            Err(SpecializationNameCollision { name }) => {
+                return Err(vec![Diagnostic::new(
+                    Span::Compiler,
+                    format!("specialization name collision: `{name}`"),
+                )]);
+            }
+        };
+        let instance_count = self.instances.len();
+        for (index, name) in names.iter().take(instance_count).enumerate() {
+            if let Some(record) = self
+                .instances
+                .get_mut(FunctionInstanceId::from_index(index))
+            {
+                record.name = name.clone();
+            }
+        }
+        for (index, name) in names.iter().skip(instance_count).enumerate() {
+            if let Some(record) = self
+                .artifacts
+                .get_mut(LoweredArtifactRequestId::from_index(index))
+            {
+                record.name = name.clone();
+            }
+        }
+        Ok(())
+    }
+}
+
+fn function_origin(program: &LoweredProgram, function: FunctionId) -> Origin {
+    program
+        .functions
+        .get(function)
+        .map(|function| function.origin.clone())
+        .unwrap_or_else(Origin::compiler)
 }
 
 /// Builds the deterministic worklist for one lowered program.
@@ -377,12 +622,7 @@ impl TraversalVisited {
 
 struct WorklistBuilder<'a> {
     program: &'a LoweredProgram,
-    catalog: SpecializationCatalog,
-    instances: Arena<LoweredFunctionInstance, FunctionInstanceId>,
-    artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
-    helper_requests: Vec<LoweredCompilerHelperRequest>,
-    queue: Vec<FunctionInstanceId>,
-    cursor: usize,
+    recorder: GraphRecorder,
     diagnostics: Vec<Diagnostic>,
     visited: TraversalVisited,
 }
@@ -391,12 +631,16 @@ impl<'a> WorklistBuilder<'a> {
     fn new(program: &'a LoweredProgram) -> Self {
         WorklistBuilder {
             program,
-            catalog: SpecializationCatalog::default(),
-            instances: Arena::default(),
-            artifacts: Arena::default(),
-            helper_requests: Vec::new(),
-            queue: Vec::new(),
-            cursor: 0,
+            recorder: GraphRecorder::new(),
+            diagnostics: Vec::new(),
+            visited: TraversalVisited::default(),
+        }
+    }
+
+    fn from_parts(program: &'a LoweredProgram, parts: SpecializationParts) -> Self {
+        WorklistBuilder {
+            program,
+            recorder: GraphRecorder::from_parts(parts),
             diagnostics: Vec::new(),
             visited: TraversalVisited::default(),
         }
@@ -409,13 +653,30 @@ impl<'a> WorklistBuilder<'a> {
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
         }
-        self.assign_names()?;
-        Ok(SpecializationParts {
-            instances: self.instances,
-            artifacts: self.artifacts,
-            helper_requests: self.helper_requests,
-            catalog: self.catalog,
-        })
+        self.recorder.assign_names()?;
+        Ok(self.recorder.into_parts())
+    }
+
+    /// Resumes the worklist over an existing graph: `pending` must name
+    /// instances that were newly interned after the last drain and were never
+    /// traversed. Seeding nothing, it traverses only `pending` plus anything
+    /// newly queued, then re-assigns catalog names. Traversing an instance
+    /// twice never recurs; the instance record keeps the watermark.
+    pub(super) fn resume(
+        program: &'a LoweredProgram,
+        parts: SpecializationParts,
+        pending: Vec<FunctionInstanceId>,
+    ) -> Result<SpecializationParts, Vec<Diagnostic>> {
+        let mut builder = WorklistBuilder::from_parts(program, parts);
+        for instance in pending {
+            builder.recorder.enqueue(instance);
+        }
+        builder.process_queue();
+        if !builder.diagnostics.is_empty() {
+            return Err(builder.diagnostics);
+        }
+        builder.recorder.assign_names()?;
+        Ok(builder.recorder.into_parts())
     }
 
     /// Root order begins with module initializer bodies in program
@@ -436,8 +697,10 @@ impl<'a> WorklistBuilder<'a> {
     /// Root order continues with the same concrete templates the current
     /// backend emits eagerly: signature-free templates and implicit thunks
     /// with no declared parameter. Coroutine body thunks stay demand-driven,
-    /// and unused generic templates are never seeded.
-    fn seed_eager_templates(&mut self) {
+    /// and unused generic templates are never seeded. Returns the roots this
+    /// call newly interned, so a resumed traversal can visit exactly the
+    /// instances that have not been traversed yet.
+    fn seed_eager_templates(&mut self) -> Vec<FunctionInstanceId> {
         let eager = self
             .program
             .functions
@@ -453,13 +716,21 @@ impl<'a> WorklistBuilder<'a> {
             .filter(|(_, id, _)| self.program.relevant_parameters(*id).is_empty())
             .map(|(_, id, function)| (id, function.signature.clone()))
             .collect::<Vec<_>>();
+        let mut roots = Vec::new();
         for (function, signature) in eager {
-            self.request_eager(function, signature);
+            if let Some(id) = self.request_eager(function, signature) {
+                roots.push(id);
+            }
         }
+        roots
     }
 
-    fn request_eager(&mut self, function: FunctionId, signature: CheckedFunctionType) {
-        let origin = self.function_origin(function);
+    fn request_eager(
+        &mut self,
+        function: FunctionId,
+        signature: CheckedFunctionType,
+    ) -> Option<FunctionInstanceId> {
+        let origin = function_origin(self.program, function);
         let request = InstanceResolutionRequest {
             function,
             origin: origin.clone(),
@@ -470,21 +741,35 @@ impl<'a> WorklistBuilder<'a> {
         };
         match self.program.resolve_instance_request(&request) {
             Ok(resolved) => {
-                self.intern_resolved(resolved, LoweredInstanceRequest::EagerTemplate);
+                let (id, created) = self.recorder.intern_resolved(
+                    self.program,
+                    resolved,
+                    LoweredInstanceRequest::EagerTemplate,
+                );
+                created.then_some(id)
             }
-            Err(diagnostic) => self.diagnostics.push(diagnostic),
+            Err(diagnostic) => {
+                self.diagnostics.push(diagnostic);
+                None
+            }
         }
     }
 
     fn process_queue(&mut self) {
-        while self.cursor < self.queue.len() {
-            let instance = self.queue[self.cursor];
-            self.cursor += 1;
+        while self.recorder.cursor < self.recorder.queue.len() {
+            let instance = self.recorder.queue[self.recorder.cursor];
+            self.recorder.cursor += 1;
             self.traverse_instance(instance);
         }
     }
 
     fn traverse_instance(&mut self, instance: FunctionInstanceId) {
+        if let Some(record) = self.recorder.instances.get_mut(instance) {
+            if record.traversed {
+                return;
+            }
+            record.traversed = true;
+        }
         let enclosing = self.resolved_request(instance);
         let function = enclosing.key.function();
         let body = self
@@ -503,10 +788,12 @@ impl<'a> WorklistBuilder<'a> {
     /// current-environment requests.
     fn resolved_request(&self, instance: FunctionInstanceId) -> ResolvedInstanceRequest {
         let record = self
+            .recorder
             .instances
             .get(instance)
             .expect("worklist queue holds interned instances");
         let key = self
+            .recorder
             .catalog
             .instance(record.ordinal)
             .expect("interned instance has a catalog key")
@@ -526,80 +813,11 @@ impl<'a> WorklistBuilder<'a> {
         }
     }
 
-    fn function_origin(&self, function: FunctionId) -> Origin {
-        self.program
-            .functions
-            .get(function)
-            .map(|function| function.origin.clone())
-            .unwrap_or_else(Origin::compiler)
-    }
-
     fn function_signature(&self, function: FunctionId) -> Option<CheckedFunctionType> {
         self.program
             .functions
             .get(function)
             .map(|function| function.signature.clone())
-    }
-
-    fn intern_resolved(
-        &mut self,
-        resolved: ResolvedInstanceRequest,
-        request: LoweredInstanceRequest,
-    ) -> FunctionInstanceId {
-        let key = resolved.key.clone();
-        let ordinal = self.catalog.reserve_instance(key);
-        let id = FunctionInstanceId::from_index(ordinal.index());
-        if id.index() >= self.instances.len() {
-            let origin = self.function_origin(resolved.key.function());
-            // Only the template's own relevant parameters stay in the
-            // instance environment. The unpruned environment also carries the
-            // requesting site's trait-parameter mappings, which are not
-            // declared by this template and would otherwise collide with the
-            // same trait parameter's mappings at nested sites.
-            let environment = resolved.environment.pruned(&resolved.relevant);
-            self.instances.push(LoweredFunctionInstance {
-                origin,
-                template: resolved.key.function(),
-                ordinal,
-                name: String::new(),
-                request,
-                environment,
-                relevant: resolved.relevant,
-                evidence: resolved.evidence,
-                dependencies: Vec::new(),
-                artifacts: Vec::new(),
-                body: None,
-            });
-            self.queue.push(id);
-        }
-        id
-    }
-
-    fn record_instance_edge(
-        &mut self,
-        owner: TraversalOwner,
-        instance: FunctionInstanceId,
-        origin: &Origin,
-        kind: LoweredInstanceDependencyKind,
-    ) {
-        let edge = LoweredInstanceDependency {
-            instance,
-            origin: origin.clone(),
-            kind,
-        };
-        match owner {
-            TraversalOwner::Instance(owner) => {
-                if let Some(record) = self.instances.get_mut(owner) {
-                    record.dependencies.push(edge);
-                }
-            }
-            TraversalOwner::Artifact(owner) => {
-                if let Some(record) = self.artifacts.get_mut(owner) {
-                    record.instances.push(edge);
-                }
-            }
-            TraversalOwner::Initializer(_) => {}
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -639,8 +857,10 @@ impl<'a> WorklistBuilder<'a> {
         match self.program.resolve_instance_request(&request) {
             Ok(resolved) => {
                 let request_root = owner.instance_request(kind, origin);
-                let id = self.intern_resolved(resolved, request_root);
-                self.record_instance_edge(owner, id, origin, kind);
+                let (id, _) = self
+                    .recorder
+                    .intern_resolved(self.program, resolved, request_root);
+                self.recorder.record_instance_edge(owner, id, origin, kind);
                 Some(id)
             }
             Err(diagnostic) => {
@@ -658,54 +878,8 @@ impl<'a> WorklistBuilder<'a> {
         owner: TraversalOwner,
         kind: LoweredArtifactDependencyKind,
     ) {
-        let ordinal = self.catalog.reserve_artifact(key);
-        if ordinal.index() >= self.artifacts.len() {
-            let request = match owner {
-                TraversalOwner::Initializer(initializer) => {
-                    LoweredArtifactRequestRoot::Initializer {
-                        initializer,
-                        origin: origin.clone(),
-                    }
-                }
-                TraversalOwner::Instance(instance) => LoweredArtifactRequestRoot::Instance {
-                    instance,
-                    kind,
-                    origin: origin.clone(),
-                },
-                TraversalOwner::Artifact(artifact) => LoweredArtifactRequestRoot::Artifact {
-                    artifact,
-                    kind,
-                    origin: origin.clone(),
-                },
-            };
-            self.artifacts.push(LoweredArtifactRequest {
-                ordinal,
-                name: String::new(),
-                origin: origin.clone(),
-                request,
-                plan,
-                artifacts: Vec::new(),
-                instances: Vec::new(),
-            });
-        }
-        let edge = LoweredArtifactDependency {
-            artifact: ordinal,
-            origin: origin.clone(),
-            kind,
-        };
-        match owner {
-            TraversalOwner::Instance(instance) => {
-                if let Some(record) = self.instances.get_mut(instance) {
-                    record.artifacts.push(edge);
-                }
-            }
-            TraversalOwner::Artifact(artifact) => {
-                if let Some(record) = self.artifacts.get_mut(artifact) {
-                    record.artifacts.push(edge);
-                }
-            }
-            TraversalOwner::Initializer(_) => {}
-        }
+        self.recorder
+            .request_artifact(key, plan, origin, owner, kind);
     }
 
     fn request_helper(&mut self, function: FunctionId, origin: &Origin, owner: TraversalOwner) {
@@ -729,41 +903,13 @@ impl<'a> WorklistBuilder<'a> {
                 return;
             }
         };
-        self.helper_requests.push(LoweredCompilerHelperRequest {
-            function,
-            origin: origin.clone(),
-            requested_by,
-        });
-    }
-
-    fn assign_names(&mut self) -> Result<(), Vec<Diagnostic>> {
-        let names = match self.catalog.planned_names() {
-            Ok(names) => names,
-            Err(SpecializationNameCollision { name }) => {
-                return Err(vec![Diagnostic::new(
-                    Span::Compiler,
-                    format!("specialization name collision: `{name}`"),
-                )]);
-            }
-        };
-        let instance_count = self.instances.len();
-        for (index, name) in names.iter().take(instance_count).enumerate() {
-            if let Some(record) = self
-                .instances
-                .get_mut(FunctionInstanceId::from_index(index))
-            {
-                record.name = name.clone();
-            }
-        }
-        for (index, name) in names.iter().skip(instance_count).enumerate() {
-            if let Some(record) = self
-                .artifacts
-                .get_mut(LoweredArtifactRequestId::from_index(index))
-            {
-                record.name = name.clone();
-            }
-        }
-        Ok(())
+        self.recorder
+            .helper_requests
+            .push(LoweredCompilerHelperRequest {
+                function,
+                origin: origin.clone(),
+                requested_by,
+            });
     }
 
     // ------------------------------------------------------------------
@@ -1780,16 +1926,33 @@ pub(super) fn concretize_function_type(
 }
 
 impl LoweredProgram {
+    /// Installs a recorder's graph state on the program.
+    pub(super) fn install_graph(&mut self, parts: SpecializationParts) {
+        self.instances = parts.instances;
+        self.artifacts = parts.artifacts;
+        self.helper_requests = parts.helper_requests;
+        self.specializations = parts.catalog;
+    }
+
+    /// Detaches the graph state for recorder use. The program keeps empty
+    /// arenas until `install_graph` returns the recorded graph, exactly as the
+    /// worklist traversal sees it while it borrows the templates.
+    pub(super) fn take_graph(&mut self) -> SpecializationParts {
+        SpecializationParts {
+            instances: std::mem::take(&mut self.instances),
+            artifacts: std::mem::take(&mut self.artifacts),
+            helper_requests: std::mem::take(&mut self.helper_requests),
+            catalog: std::mem::take(&mut self.specializations),
+        }
+    }
+
     /// Builds and installs the Stage 3.3 worklist. Every failure is a source
     /// diagnostic at the requesting site; a partially built graph is
     /// discarded.
     pub(super) fn build_specialization_worklist(&mut self) -> Vec<Diagnostic> {
         match build(self) {
             Ok(parts) => {
-                self.instances = parts.instances;
-                self.artifacts = parts.artifacts;
-                self.helper_requests = parts.helper_requests;
-                self.specializations = parts.catalog;
+                self.install_graph(parts);
                 Vec::new()
             }
             Err(diagnostics) => diagnostics,
@@ -2734,7 +2897,7 @@ mod tests {
             &origin,
             TraversalOwner::Artifact(LoweredArtifactRequestId::for_test(0)),
         );
-        assert!(builder.helper_requests.is_empty());
+        assert!(builder.recorder.helper_requests.is_empty());
         assert!(
             builder.diagnostics.iter().any(|diagnostic| diagnostic
                 .message
@@ -2855,6 +3018,37 @@ mod tests {
             callback.is_some(),
             "the reaction callback thunk becomes an instance"
         );
+    }
+
+    #[test]
+    fn split_build_and_resume_match_the_full_build() {
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def forward: <T where Copy T> T -> T = value => identity value\n",
+            "let first: I32 = forward 1\n",
+            "type Point = ctor (I32, I32)\n",
+            "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+            "let p = (1, 2)\n",
+            "let text = \"${p:?}\"\n",
+        );
+        let (_, baseline) = lower(source);
+
+        let module = checked_program(source);
+        let mut split = LoweredProgram::default();
+        assert!(split.snapshot(&module).is_empty());
+        assert!(split.validate().is_empty());
+        let (parts, pending) = {
+            let mut builder = WorklistBuilder::new(&split);
+            builder.seed_initializers();
+            builder.seed_eager_templates();
+            let pending = builder.recorder.pending();
+            (builder.recorder.into_parts(), pending)
+        };
+        let parts = WorklistBuilder::resume(&split, parts, pending).expect("resume succeeds");
+        split.install_graph(parts);
+
+        assert_eq!(graph_snapshot(&baseline), graph_snapshot(&split));
+        assert!(split.validate_specializations().is_empty());
     }
 
     #[test]

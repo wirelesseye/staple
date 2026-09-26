@@ -1,6 +1,6 @@
 # Stage 4.2 Plan: Fixed-Point Artifact Closure Engine
 
-**Status:** Not started. Stage 4.1 is complete through `9601bfb` (artifact key families, `LoweredArtifactPlan` placeholders, artifact-owned edge lists, `LoweredInstanceRequest::Artifact`, `LoweredArtifactRequestRoot::Artifact`, `FormattingWrite`). Stage 4.2 is next; Stages 4.3–4.6 plug their families into the API defined here.
+**Status:** In progress. Stage 4.1 is complete through `9601bfb` (artifact key families, `LoweredArtifactPlan` placeholders, artifact-owned edge lists, `LoweredInstanceRequest::Artifact`, `LoweredArtifactRequestRoot::Artifact`, `FormattingWrite`). Stage 4.2 Step 1 (extract `GraphRecorder`, install/take helpers, `WorklistBuilder::resume`) is complete; Steps 2–6 are next; Stages 4.3–4.6 plug their families into the API defined here.
 
 ## Goal and boundary
 
@@ -165,6 +165,8 @@ Validation runs after the closure loop in `Lowerer::lower`, next to the existing
 - Move the interning, edge-recording, queue, and naming state from `WorklistBuilder` into `GraphRecorder`, with no behavior change. Add `LoweredProgram::{install_graph, take_graph}` and use them in `build_specialization_worklist`.
 - Add `WorklistBuilder::resume` and the `traversed` watermark.
 - **Gate:** all existing tests pass unchanged. A new test builds the graph once with `build`, and again with `build` restricted to initializers plus `resume` over the eager roots. The two normalized snapshots must be identical.
+
+**Step 1 notes (complete).** `GraphRecorder` in `lower/worklist.rs` now owns the instance/artifact arenas, helper list, catalog, pending queue, and cursor; `WorklistBuilder` keeps only the program borrow, recorder, diagnostics, and traversal-visited sets, and delegates interning, edge recording, artifact requests, and naming. `LoweredProgram::{install_graph, take_graph}` move the recorder's persisted state (`SpecializationParts`) on and off the program. `WorklistBuilder::resume(program, parts, pending)` seeds nothing, enqueues `pending`, drains the queue, and re-assigns names. The traversal watermark is a transient `traversed: bool` on `LoweredFunctionInstance` rather than a recorder cursor, because the graph round-trips through `SpecializationParts` on every detach/install and the flag survives that round trip exactly like the rest of the record; `traverse_instance` returns early when it is set. `seed_eager_templates`/`request_eager` now report the roots they newly intern, which is what `resume` needs. New test `split_build_and_resume_match_the_full_build` seeds initializers, interns eager roots without draining, then resumes and requires an identical normalized graph snapshot and a clean `validate_specializations`. Existing worklist tests, `cargo fmt --all -- --check`, `cargo check --workspace`, and `cargo test --workspace` (1187 tests) pass.
 
 ### Step 2 — Incremental materialization
 
