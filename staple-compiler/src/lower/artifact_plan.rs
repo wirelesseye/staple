@@ -9,20 +9,37 @@
 //! exhaustive matches on `family_name` force every new artifact family to
 //! declare its plan variant here.
 //!
+//! A plan built at request time (`ConstructorConstruction::Unexpanded`,
+//! `StructuralBody::Unexpanded`) is the minimal form: it carries every
+//! identity field `matches_key` rebuilds but no body decisions, because body
+//! building belongs to the family expander. Expansion replaces the marker
+//! with the owned plan; validation rejects a plan whose family expander ran
+//! but left the marker in place.
+//!
+//! Callees whose catalog ids do not exist yet during expansion are named by
+//! key (`PlannedInstance`/`PlannedArtifact`) with the id left empty. The
+//! closure engine binds them after the catalog reaches a fixed point.
+//!
 //! Target-specific LLVM layout stays in the backend; a plan records lowered
 //! identities and concrete checked values only.
 
-#![allow(dead_code)] // Stage 4.3-4.6 fill the placeholder fields.
+#![allow(dead_code)] // Stage 4.4-4.6 fill the placeholder fields.
 
-use super::{ArenaId, FunctionInstanceId};
-use crate::specialization::{
-    ArtifactRequestKey, ArtifactSite, ArtifactSiteOwner, CanonicalFunctionType, CanonicalType,
-    GcFinalizerKey,
+use super::{
+    ArenaId, FunctionInstanceId, LoweredArtifactDependencyKind, LoweredCallableAdapter,
+    LoweredInstanceDependencyKind,
 };
-use crate::{CheckedFunctionType, CheckedType, Origin, StructuralTraitMethod, SymbolId};
+use crate::specialization::{
+    ArtifactOrdinal, ArtifactRequestKey, ArtifactSite, ArtifactSiteOwner, CanonicalAdapterKind,
+    CanonicalFunctionType, CanonicalType, GcFinalizerKey, InstanceKey,
+};
+use crate::{
+    CheckedFunctionType, CheckedType, Origin, StructuralTraitMethod, SymbolId, TraitId,
+    TraitMethodId, TypeId,
+};
 
 /// The owned plan of one generated artifact, one variant per artifact family.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoweredArtifactPlan {
     /// A constructor value's callable adapter. Stage 4.3 adds the recursive
     /// construction class and the parameter-to-representation mapping.
@@ -48,6 +65,55 @@ pub(crate) enum LoweredArtifactPlan {
     /// An extern closure adapter. Stage 4.6 adds the callable sites that use
     /// it and the eager-declaration parity notes.
     ExternAdapter(ExternAdapterPlan),
+}
+
+/// A plan-local callee reference: an instance or artifact key whose catalog id
+/// is only known once the closure reaches a fixed point. Expansion fills the
+/// key and leaves the id empty; `bind_artifact_plan_callees` writes the id
+/// back.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PlannedCallee {
+    Instance(PlannedInstance),
+    Artifact(PlannedArtifact),
+}
+
+/// One source-function instance a plan calls.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlannedInstance {
+    /// The instance identity. The expander resolves this before building the
+    /// plan, so the matching `ClosureRequest::Instance` is always emitted.
+    pub key: InstanceKey,
+    /// The interned instance id, filled by
+    /// `LoweredProgram::bind_artifact_plan_callees`.
+    pub instance: Option<FunctionInstanceId>,
+    /// The dependency kind the plan's instance edge records.
+    pub kind: LoweredInstanceDependencyKind,
+}
+
+/// One generated artifact a plan requests.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlannedArtifact {
+    /// The artifact identity. The expander emits the matching
+    /// `ClosureRequest::Artifact` with the family's placeholder plan.
+    pub key: ArtifactRequestKey,
+    /// The interned artifact ordinal, filled by
+    /// `LoweredProgram::bind_artifact_plan_callees`.
+    pub artifact: Option<ArtifactOrdinal>,
+    /// The dependency kind the plan's artifact edge records.
+    pub kind: LoweredArtifactDependencyKind,
+}
+
+/// An immutable view of one planned callee.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PlannedCalleeRef<'a> {
+    Instance(&'a PlannedInstance),
+    Artifact(&'a PlannedArtifact),
+}
+
+/// A mutable view of one planned callee, used by the binding pass.
+pub(crate) enum PlannedCalleeRefMut<'a> {
+    Instance(&'a mut PlannedInstance),
+    Artifact(&'a mut PlannedArtifact),
 }
 
 impl LoweredArtifactPlan {
@@ -78,8 +144,9 @@ impl LoweredArtifactPlan {
 
     /// Whether this plan belongs to the same artifact family as `key` and its
     /// identity inputs rebuild exactly that key: instance and owner positions
-    /// must agree, and checked types must canonicalize to the key's values.
-    /// A plan whose types cannot canonicalize concretely never agrees.
+    /// must agree, every identity-carrying plan field must agree, and checked
+    /// types must canonicalize to the key's values. A plan whose types cannot
+    /// canonicalize concretely never agrees.
     pub(crate) fn matches_key(&self, key: &ArtifactRequestKey, origin: &Origin) -> bool {
         let same_type =
             |value: &CheckedType, expected: &CanonicalType| match CanonicalType::concrete(
@@ -98,11 +165,27 @@ impl LoweredArtifactPlan {
             (
                 LoweredArtifactPlan::ConstructorAdapter(plan),
                 ArtifactRequestKey::ConstructorAdapter(key),
-            ) => same_function(&plan.callable_type, &key.callable_type),
+            ) => {
+                plan.symbol == key.symbol
+                    && plan.type_id == key.type_id
+                    && CanonicalAdapterKind::from(plan.adapter) == key.adapter
+                    && same_function(&plan.callable_type, &key.callable_type)
+            }
             (
                 LoweredArtifactPlan::StructuralMethod(plan),
                 ArtifactRequestKey::StructuralMethod(key),
-            ) => plan.structural == key.structural,
+            ) => {
+                plan.structural == key.structural
+                    && plan.trait_id == key.trait_id
+                    && plan.method == key.method
+                    && plan.arguments.len() == key.arguments.len()
+                    && plan
+                        .arguments
+                        .iter()
+                        .zip(&key.arguments)
+                        .all(|(argument, expected)| same_type(argument, expected))
+                    && same_function(&plan.callable_type, &key.callable_type)
+            }
             (LoweredArtifactPlan::DropGlue(plan), ArtifactRequestKey::DropGlue(key)) => {
                 same_type(&plan.value_type, key)
             }
@@ -154,29 +237,413 @@ impl LoweredArtifactPlan {
             _ => false,
         }
     }
+
+    /// Every callee this plan names, in request order. The expander emits the
+    /// matching closure requests in the same order, so validation can match
+    /// planned callees to artifact-owned edges one-to-one. An unexpanded plan
+    /// names no callees.
+    pub(crate) fn planned_callees(&self) -> Vec<PlannedCalleeRef<'_>> {
+        let mut callees = Vec::new();
+        self.visit_callees(&mut |callee| callees.push(callee));
+        callees
+    }
+
+    /// Every callee this plan names, mutably, in request order. The binding
+    /// pass and the fixed-point comparison use this form.
+    pub(crate) fn planned_callees_mut(&mut self) -> Vec<PlannedCalleeRefMut<'_>> {
+        let mut callees = Vec::new();
+        self.visit_callees_mut(&mut |callee| callees.push(callee));
+        callees
+    }
+
+    /// Whether this plan's schema records its callees as `PlannedCallee`s, so
+    /// the closure validator can match them one-to-one with artifact-owned
+    /// edges. Families whose schema has no callee slots yet (Stage 4.4-4.6
+    /// fill them) keep their Stage 4.2 request-based representation.
+    pub(crate) fn supports_planned_callees(&self) -> bool {
+        matches!(
+            self,
+            LoweredArtifactPlan::ConstructorAdapter(_) | LoweredArtifactPlan::StructuralMethod(_)
+        )
+    }
+
+    /// Whether expansion replaced the request-time marker for this family.
+    /// Families without a marker (every Stage 4.1 placeholder) are always
+    /// expanded.
+    pub(crate) fn is_expanded(&self) -> bool {
+        match self {
+            LoweredArtifactPlan::ConstructorAdapter(plan) => {
+                !matches!(plan.construction, ConstructorConstruction::Unexpanded)
+            }
+            LoweredArtifactPlan::StructuralMethod(plan) => {
+                !matches!(plan.body, StructuralBody::Unexpanded)
+            }
+            _ => true,
+        }
+    }
+
+    /// Compares two plans modulo the bound catalog ids. The closure re-check
+    /// uses this: a re-expansion must rebuild the same plan shape even though
+    /// only the stored plan has its callees bound.
+    pub(crate) fn eq_ignoring_bindings(&self, other: &Self) -> bool {
+        fn clear(plan: &mut LoweredArtifactPlan) {
+            for callee in plan.planned_callees_mut() {
+                match callee {
+                    PlannedCalleeRefMut::Instance(instance) => instance.instance = None,
+                    PlannedCalleeRefMut::Artifact(artifact) => artifact.artifact = None,
+                }
+            }
+        }
+        let mut left = self.clone();
+        let mut right = other.clone();
+        clear(&mut left);
+        clear(&mut right);
+        left == right
+    }
+
+    fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
+        match self {
+            LoweredArtifactPlan::ConstructorAdapter(plan) => plan.visit_callees(visit),
+            LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees(visit),
+            _ => {}
+        }
+    }
+
+    fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
+        match self {
+            LoweredArtifactPlan::ConstructorAdapter(plan) => plan.visit_callees_mut(visit),
+            LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees_mut(visit),
+            _ => {}
+        }
+    }
 }
 
 /// The plan shape of a constructor value's adapter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ConstructorAdapterPlan {
-    /// The concrete callable type the adapter exposes.
+    /// The constructor's semantic symbol; part of the artifact key.
+    pub symbol: SymbolId,
+    /// The constructor's nominal type; part of the artifact key.
+    pub type_id: TypeId,
+    /// The adapter kind; part of the artifact key.
+    pub adapter: LoweredCallableAdapter,
+    /// The concrete callable type the adapter exposes; part of the artifact
+    /// key. The adapter takes the flattened parameter slots in order and
+    /// returns the construction below.
     pub callable_type: CheckedFunctionType,
+    /// The construction the adapter performs. `Unexpanded` at request time.
+    pub construction: ConstructorConstruction,
+}
+
+/// How a constructor adapter turns its flattened parameters into its result.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ConstructorConstruction {
+    /// Request-time only: the family expander replaces this marker.
+    Unexpanded,
+    /// Rebuild the product and return it unchanged (ordinary nominal
+    /// wrapping).
+    Value {
+        /// The flattened parameter slot types, in slot order.
+        parameters: Vec<CheckedType>,
+        /// The product rebuilt from `parameters`.
+        product: CheckedType,
+    },
+    /// GC-allocate the product as a `Ref` payload, optionally with a payload
+    /// finalizer when the payload needs drop.
+    ManagedRef {
+        /// The flattened parameter slot types, in slot order.
+        parameters: Vec<CheckedType>,
+        /// The product rebuilt from `parameters`, which is the `Ref` payload.
+        product: CheckedType,
+        /// The `Ref` payload type (`product`).
+        payload: CheckedType,
+        /// The payload's GC finalizer, requested when the payload needs drop.
+        finalizer: Option<PlannedArtifact>,
+    },
+}
+
+impl ConstructorAdapterPlan {
+    fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
+        if let ConstructorConstruction::ManagedRef {
+            finalizer: Some(finalizer),
+            ..
+        } = &self.construction
+        {
+            visit(PlannedCalleeRef::Artifact(finalizer));
+        }
+    }
+
+    fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
+        if let ConstructorConstruction::ManagedRef {
+            finalizer: Some(finalizer),
+            ..
+        } = &mut self.construction
+        {
+            visit(PlannedCalleeRefMut::Artifact(finalizer));
+        }
+    }
 }
 
 /// The plan shape of a compiler-generated structural method.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StructuralMethodPlan {
+    /// The structural kind; part of the artifact key.
     pub structural: StructuralTraitMethod,
+    /// The selected trait; part of the artifact key.
+    pub trait_id: TraitId,
+    /// The selected trait method; part of the artifact key.
+    pub method: TraitMethodId,
+    /// The completed concrete trait arguments; part of the artifact key.
+    pub arguments: Vec<CheckedType>,
+    /// The concrete method type the body implements; part of the artifact key.
+    pub callable_type: CheckedFunctionType,
+    /// The owned body decisions. `Unexpanded` at request time.
+    pub body: StructuralBody,
+}
+
+/// One structural method's owned body.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum StructuralBody {
+    /// Request-time only: the family expander replaces this marker.
+    Unexpanded,
+    /// Product `Debug`: write the recorded literal steps and delegate each
+    /// element to `Debug.fmt`.
+    ProductDebug {
+        /// The exact literal/element steps in emission order.
+        steps: Vec<DebugStep>,
+        /// The `Formatter.write` instance every literal step calls.
+        write: PlannedInstance,
+    },
+    /// Sum `Debug`: one delegate per alternative in tag order; no literals.
+    SumDebug {
+        /// The per-alternative delegates in tag order.
+        alternatives: Vec<DebugDelegate>,
+    },
+    /// Heterogeneous product `Index`: bounds trap, switch per element, coerce,
+    /// merge.
+    IndexSwitch {
+        /// The per-index elements in element order.
+        elements: Vec<IndexedElement>,
+        /// The indexed output type every element coerces into.
+        output: CheckedType,
+    },
+    /// Homogeneous product `Index`: direct element load over a stack copy.
+    IndexLoad {
+        /// The homogeneous element type.
+        element: CheckedType,
+        /// The product length.
+        length: usize,
+        /// The indexed output type.
+        output: CheckedType,
+    },
+    /// `MutateIndex`: bounds trap, element slot, optional drop of the old
+    /// element, then store.
+    MutateReplace {
+        /// The mutated element type.
+        element: CheckedType,
+        /// The product length.
+        length: usize,
+        /// The drop glue for the previous element when it needs drop.
+        drop_previous: Option<PlannedArtifact>,
+    },
+    /// `DerefIndex` fast path: a non-variadic homogeneous `Copy` product read
+    /// directly through the reference.
+    DerefIndexLoad {
+        /// The homogeneous element type.
+        element: CheckedType,
+        /// The product length.
+        length: usize,
+        /// The indexed output type.
+        output: CheckedType,
+    },
+    /// `DerefIndex`/`DerefMutateIndex` delegation: load the payload and call
+    /// the payload type's own `Index`/`MutateIndex`.
+    DerefDelegate {
+        /// The referenced payload type.
+        payload: CheckedType,
+        /// The delegated selection and its concrete method type.
+        delegate: TraitDelegate,
+    },
+    /// `IntoIterator`: rebuild the source product and pair it with cursor `0`.
+    IntoIterator {
+        /// The source product type.
+        source: CheckedType,
+        /// The derived iterator type `(source, USize)`.
+        iterator: CheckedType,
+    },
+    /// `Iterator.next`: `Done` when the cursor is out of range, otherwise a
+    /// per-element switch yielding `(item, (product, cursor + 1))`.
+    Next {
+        /// The iterated inner product type.
+        product: CheckedType,
+        /// The iterator type `(product, USize)`.
+        iterator: CheckedType,
+        /// The yielded item type.
+        item: CheckedType,
+        /// The per-element coercions into `item`, in element order.
+        elements: Vec<IndexedElement>,
+        /// The result sum type.
+        result: CheckedType,
+        /// The `Done` alternative.
+        done: SumAlternative,
+        /// The `Yield` alternative.
+        yield_: SumAlternative,
+    },
+}
+
+fn visit_planned<'a>(callee: &'a PlannedCallee, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
+    match callee {
+        PlannedCallee::Instance(instance) => visit(PlannedCalleeRef::Instance(instance)),
+        PlannedCallee::Artifact(artifact) => visit(PlannedCalleeRef::Artifact(artifact)),
+    }
+}
+
+fn visit_planned_mut<'a>(
+    callee: &'a mut PlannedCallee,
+    visit: &mut impl FnMut(PlannedCalleeRefMut<'a>),
+) {
+    match callee {
+        PlannedCallee::Instance(instance) => visit(PlannedCalleeRefMut::Instance(instance)),
+        PlannedCallee::Artifact(artifact) => visit(PlannedCalleeRefMut::Artifact(artifact)),
+    }
+}
+
+impl StructuralMethodPlan {
+    fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
+        match &self.body {
+            StructuralBody::Unexpanded
+            | StructuralBody::IndexSwitch { .. }
+            | StructuralBody::IndexLoad { .. }
+            | StructuralBody::DerefIndexLoad { .. }
+            | StructuralBody::IntoIterator { .. }
+            | StructuralBody::Next { .. } => {}
+            StructuralBody::ProductDebug { steps, write } => {
+                visit(PlannedCalleeRef::Instance(write));
+                for step in steps {
+                    if let DebugStep::Element { delegate, .. } = step {
+                        visit_planned(&delegate.callee, visit);
+                    }
+                }
+            }
+            StructuralBody::SumDebug { alternatives } => {
+                for delegate in alternatives {
+                    visit_planned(&delegate.callee, visit);
+                }
+            }
+            StructuralBody::MutateReplace { drop_previous, .. } => {
+                if let Some(drop_previous) = drop_previous {
+                    visit(PlannedCalleeRef::Artifact(drop_previous));
+                }
+            }
+            StructuralBody::DerefDelegate { delegate, .. } => {
+                visit_planned(&delegate.callee, visit);
+            }
+        }
+    }
+
+    fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
+        match &mut self.body {
+            StructuralBody::Unexpanded
+            | StructuralBody::IndexSwitch { .. }
+            | StructuralBody::IndexLoad { .. }
+            | StructuralBody::DerefIndexLoad { .. }
+            | StructuralBody::IntoIterator { .. }
+            | StructuralBody::Next { .. } => {}
+            StructuralBody::ProductDebug { steps, write } => {
+                visit(PlannedCalleeRefMut::Instance(write));
+                for step in steps {
+                    if let DebugStep::Element { delegate, .. } = step {
+                        visit_planned_mut(&mut delegate.callee, visit);
+                    }
+                }
+            }
+            StructuralBody::SumDebug { alternatives } => {
+                for delegate in alternatives {
+                    visit_planned_mut(&mut delegate.callee, visit);
+                }
+            }
+            StructuralBody::MutateReplace { drop_previous, .. } => {
+                if let Some(drop_previous) = drop_previous {
+                    visit(PlannedCalleeRefMut::Artifact(drop_previous));
+                }
+            }
+            StructuralBody::DerefDelegate { delegate, .. } => {
+                visit_planned_mut(&mut delegate.callee, visit);
+            }
+        }
+    }
+}
+
+/// One product-`Debug` step in emission order.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DebugStep {
+    /// A literal string written through the `Formatter.write` instance.
+    Write(String),
+    /// One element: `Debug.fmt(element)`.
+    Element {
+        /// The element's position in the product.
+        index: usize,
+        /// The selected delegate and its concrete method type.
+        delegate: DebugDelegate,
+    },
+}
+
+/// One product element's or sum alternative's selected `Debug` method.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DebugDelegate {
+    /// The debugged value type (element or alternative payload type).
+    pub value_type: CheckedType,
+    /// The selected callee: an explicit `Debug` implementation instance or a
+    /// nested structural `Debug` artifact.
+    pub callee: PlannedCallee,
+    /// The concrete method type the delegated call uses.
+    pub callee_type: CheckedFunctionType,
+}
+
+/// One delegated trait-method selection.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TraitDelegate {
+    /// The trait the selection belongs to (`Index` or `MutateIndex`).
+    pub trait_id: TraitId,
+    /// The selected method.
+    pub method: TraitMethodId,
+    /// The completed concrete trait arguments.
+    pub arguments: Vec<CheckedType>,
+    /// The selected callee.
+    pub callee: PlannedCallee,
+    /// The concrete method type the delegated call uses.
+    pub callee_type: CheckedFunctionType,
+}
+
+/// One element of a switch or load body.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexedElement {
+    /// The element's position in the product.
+    pub index: usize,
+    /// The element type.
+    pub element: CheckedType,
+    /// The coercion into the output or item type, as `(from, to)`, recorded
+    /// only when the two types differ.
+    pub coercion: Option<(CheckedType, CheckedType)>,
+}
+
+/// One `IterStep` alternative.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SumAlternative {
+    /// The alternative's position in the result sum.
+    pub index: usize,
+    /// The alternative type (a `Distinct` representation).
+    pub alternative: CheckedType,
 }
 
 /// The plan shape of one drop-glue body.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DropGluePlan {
     pub value_type: CheckedType,
 }
 
 /// The plan shape of one garbage-collector finalizer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum GcFinalizerPlan {
     Payload {
         value_type: CheckedType,
@@ -196,7 +663,7 @@ pub(crate) enum GcFinalizerPlan {
 }
 
 /// The plan shape of one coroutine body's resume/cleanup pair.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CoroutineCodesPlan {
     /// The coroutine body thunk instance this pair belongs to; its position
     /// is the key's instance ordinal.
@@ -204,7 +671,7 @@ pub(crate) struct CoroutineCodesPlan {
 }
 
 /// The plan shape of one reactive runner.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReactiveRunnerPlan {
     /// The record whose body arena `site` indexes.
     pub owner: ArtifactSiteOwner,
@@ -213,7 +680,7 @@ pub(crate) struct ReactiveRunnerPlan {
 }
 
 /// The plan shape of one extern closure adapter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ExternAdapterPlan {
     pub symbol: SymbolId,
     pub callable_type: CheckedFunctionType,

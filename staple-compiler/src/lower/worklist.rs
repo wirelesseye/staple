@@ -30,15 +30,16 @@ use crate::{
 
 use super::instance_resolution::{InstanceResolutionRequest, InstanceResolutionTarget};
 use super::{
-    Arena, ArenaId, BlockId, CallSubstitutions, ConstructorAdapterPlan, ExpressionId,
-    FunctionInstanceId, InitializerId, ItemId, LoweredArtifactPlan, LoweredArtifactRequestId,
-    LoweredAwaitId, LoweredCall, LoweredCallEnvironment, LoweredCallId, LoweredCallStep,
-    LoweredCallableAdapter, LoweredCallableTarget, LoweredCallableValueId,
+    Arena, ArenaId, BlockId, CallSubstitutions, ConstructorAdapterPlan, ConstructorConstruction,
+    ExpressionId, FunctionInstanceId, InitializerId, ItemId, LoweredArtifactPlan,
+    LoweredArtifactRequestId, LoweredAwaitId, LoweredCall, LoweredCallEnvironment, LoweredCallId,
+    LoweredCallStep, LoweredCallableAdapter, LoweredCallableTarget, LoweredCallableValueId,
     LoweredClosureEnvironment, LoweredCoroId, LoweredCoroutinePlanId, LoweredExpressionKind,
     LoweredItemKind, LoweredPlaceKind, LoweredProductStep, LoweredProgram,
     LoweredReactiveCallbackId, LoweredReactiveOperationId, LoweredReactiveOperationKind,
     LoweredStringTemplatePart, LoweredWithId, Origin, PatternId, PlaceId, RelevantParameters,
-    ResolvedInstanceRequest, StructuralMethodPlan, SubstitutionEnvironment, TraitEvidence,
+    ResolvedInstanceRequest, StructuralBody, StructuralMethodPlan, SubstitutionEnvironment,
+    TraitEvidence,
 };
 
 /// One reachable function instance in first-discovery order.
@@ -1623,7 +1624,11 @@ impl<'a> WorklistBuilder<'a> {
         match ConstructorAdapterKey::new(symbol, type_id, adapter, &concrete, origin) {
             Ok(key) => {
                 let plan = LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
+                    symbol,
+                    type_id,
+                    adapter,
                     callable_type: concrete,
+                    construction: ConstructorConstruction::Unexpanded,
                 });
                 self.request_artifact(
                     ArtifactRequestKey::ConstructorAdapter(key),
@@ -1755,6 +1760,11 @@ impl<'a> WorklistBuilder<'a> {
                     Ok(key) => {
                         let plan = LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
                             structural: *structural,
+                            trait_id: *trait_id,
+                            method: *method,
+                            arguments: arguments.clone(),
+                            callable_type,
+                            body: StructuralBody::Unexpanded,
                         });
                         self.request_artifact(
                             ArtifactRequestKey::StructuralMethod(key),

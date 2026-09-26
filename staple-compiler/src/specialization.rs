@@ -3164,8 +3164,9 @@ mod tests {
     #[test]
     fn every_artifact_key_family_has_a_matching_placeholder_plan() {
         use crate::{
-            ConstructorAdapterPlan, CoroutineCodesPlan, DropGluePlan, ExternAdapterPlan,
-            GcFinalizerPlan, LoweredArtifactPlan, ReactiveRunnerPlan, StructuralMethodPlan,
+            ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, DropGluePlan,
+            ExternAdapterPlan, GcFinalizerPlan, LoweredArtifactPlan, ReactiveRunnerPlan,
+            StructuralBody, StructuralMethodPlan,
         };
         let keys = stage_4_artifact_families();
         let node = nominal(7, "Node");
@@ -3176,10 +3177,19 @@ mod tests {
         };
         let plans = vec![
             LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
+                symbol: SymbolId(1),
+                type_id: TypeId(7),
+                adapter: LoweredCallableAdapter::Constructor,
                 callable_type: simple_callable(),
+                construction: ConstructorConstruction::Unexpanded,
             }),
             LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
                 structural: StructuralTraitMethod::Index,
+                trait_id: TraitId(3),
+                method: TraitMethodId(4),
+                arguments: vec![CheckedType::I32],
+                callable_type: simple_callable(),
+                body: StructuralBody::Unexpanded,
             }),
             LoweredArtifactPlan::DropGlue(DropGluePlan {
                 value_type: node.clone(),
@@ -3254,6 +3264,11 @@ mod tests {
             (
                 LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
                     structural: StructuralTraitMethod::Debug,
+                    trait_id: TraitId(3),
+                    method: TraitMethodId(4),
+                    arguments: vec![CheckedType::I32],
+                    callable_type: simple_callable(),
+                    body: StructuralBody::Unexpanded,
                 }),
                 structural_artifact_key(),
             ),

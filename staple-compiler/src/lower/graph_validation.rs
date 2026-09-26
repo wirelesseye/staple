@@ -531,9 +531,10 @@ mod tests {
     };
 
     use super::super::{
-        LoweredBoundTarget, LoweredCallStep, LoweredCallableCategory, LoweredCallableTarget,
-        LoweredExpressionKind, LoweredInstanceDependency, LoweredInstanceDependencyKind,
-        LoweredInstanceRequest, LoweredRepeatCount, TraitEvidence,
+        LoweredArtifactRequestRoot, LoweredBindingSite, LoweredBoundTarget, LoweredCallStep,
+        LoweredCallableCategory, LoweredCallableTarget, LoweredExpressionKind,
+        LoweredInstanceDependency, LoweredInstanceDependencyKind, LoweredInstanceRequest,
+        LoweredRepeatCount, TraitEvidence,
     };
     use super::*;
 
@@ -1177,6 +1178,100 @@ mod tests {
         assert!(
             bound_artifacts >= 1,
             "constructor and structural sites bind their artifacts: {bound_artifacts}"
+        );
+    }
+
+    /// Stage 4.3's first claim: every constructor-value and structural-method
+    /// site in a materialized instance body is already bound to its artifact
+    /// by the Stage 3.3 worklist and Stage 3.4 binder, and every constructor
+    /// or structural artifact is a Stage 3 request root. No 4.3 scanner or
+    /// use-site variant is needed.
+    #[test]
+    fn constructor_and_structural_sites_need_no_stage_4_3_scanner() {
+        let lowered = lower(concat!(
+            "type Point = ctor (I32, I32)\n",
+            "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+            "def debug_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
+            "def index_pair: (I32, I32) -> I32 = pair => pair[0]\n",
+            "def mutate_pair: (I32, I32) -> (I32, I32) = pair => {\n",
+            "  let mut copy = pair\n",
+            "  copy[0] = 3\n",
+            "  copy\n",
+            "}\n",
+            "def count_pair: (I32, I32) -> I32 = pair => {\n",
+            "  let mut total = 0\n",
+            "  for item in pair { total = total + item }\n",
+            "  total\n",
+            "}\n",
+            "let text = debug_pair (1, 2)\n",
+            "let element = index_pair (1, 2)\n",
+            "let mutated = mutate_pair (1, 2)\n",
+            "let total = count_pair (1, 2)\n",
+        ));
+        let program = &lowered.program;
+        let mut constructor_sites = 0;
+        let mut structural_sites = 0;
+        for (_, instance) in program.instances.iter() {
+            let Some(body) = &instance.body else {
+                continue;
+            };
+            for (site, target) in &body.bindings {
+                if let LoweredBindingSite::CallableValue(id) = site
+                    && let Some(value) = body.callable_value(*id)
+                    && matches!(value.target, LoweredCallableTarget::Constructor { .. })
+                {
+                    assert!(
+                        matches!(target, LoweredBoundTarget::Artifact(_)),
+                        "a constructor-value site binds its adapter artifact"
+                    );
+                    constructor_sites += 1;
+                }
+                if let Some(TraitEvidence::Structural { .. }) = body.resolved_evidence(*site) {
+                    assert!(
+                        matches!(target, LoweredBoundTarget::Artifact(_)),
+                        "a structural selection binds its structural artifact"
+                    );
+                    structural_sites += 1;
+                }
+            }
+        }
+        assert!(
+            constructor_sites > 0,
+            "the fixture uses a constructor value"
+        );
+        assert!(
+            structural_sites >= 4,
+            "the fixture exercises Debug/Index/MutateIndex/IntoIterator/Iterator: {structural_sites}"
+        );
+
+        // Every constructor and structural artifact entered as a Stage 3
+        // request root (from an initializer or an instance body), never as a
+        // closure-phase discovery, so 4.3 registers no scanner.
+        let mut roots = 0;
+        for (_, artifact) in program.artifacts.iter() {
+            let Some(key) = program.specializations.artifact(artifact.ordinal) else {
+                continue;
+            };
+            if !matches!(
+                key,
+                ArtifactRequestKey::ConstructorAdapter(_) | ArtifactRequestKey::StructuralMethod(_)
+            ) {
+                continue;
+            }
+            assert!(
+                matches!(
+                    artifact.request,
+                    LoweredArtifactRequestRoot::Instance { .. }
+                        | LoweredArtifactRequestRoot::Initializer { .. }
+                ),
+                "artifact `{}` is not a Stage 3 request root",
+                key.family_name()
+            );
+            roots += 1;
+        }
+        assert!(
+            roots > 0,
+            "the fixture reserves constructor/structural artifacts"
         );
     }
 

@@ -31,7 +31,8 @@ use super::{
     ArenaId, FunctionInstanceId, InitializerId, LoweredArtifactDependency,
     LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
     LoweredArtifactRequestRoot, LoweredInstanceDependency, LoweredInstanceDependencyKind,
-    LoweredInstanceRequest, LoweredProgram, Origin, ResolvedInstanceRequest,
+    LoweredInstanceRequest, LoweredProgram, Origin, PlannedCalleeRef, PlannedCalleeRefMut,
+    ResolvedInstanceRequest,
 };
 use crate::specialization::{ArtifactOrdinal, ArtifactRequestKey};
 
@@ -133,6 +134,14 @@ pub(super) trait ArtifactFamilyHooks {
         program: &LoweredProgram,
         artifact: LoweredArtifactRequestId,
     ) -> ExpansionResult;
+
+    /// Whether this hook set fills the owned body for `key`'s family.
+    /// Validation only rejects a plan that still carries the request-time
+    /// marker in a family whose expander is registered; a hook set or a
+    /// family that keeps the Stage 4.1 placeholder plan is exempt.
+    fn expands_body(&self, _key: &ArtifactRequestKey) -> bool {
+        false
+    }
 }
 
 /// The production hook set. Stage 4.2 scanners request nothing and expanders
@@ -397,6 +406,10 @@ impl LoweredProgram {
             }
 
             if new_instances.is_empty() {
+                let diagnostics = self.bind_artifact_plan_callees();
+                if !diagnostics.is_empty() {
+                    return diagnostics;
+                }
                 return self.finish_closure();
             }
 
@@ -418,6 +431,54 @@ impl LoweredProgram {
             &last_request,
             format!("artifact closure did not converge after {MAX_CLOSURE_ROUNDS} rounds"),
         )]
+    }
+
+    /// Resolves every planned callee key in every artifact plan to its final
+    /// catalog id. Runs once the closure loop reaches a fixed point, after all
+    /// instances and artifacts are interned and before names are assigned.
+    ///
+    /// A key with no catalog entry is a bug in the expander: expansion always
+    /// emits the `ClosureRequest` that interns the key it names, so the
+    /// diagnostic points at the plan rather than at a malformed request.
+    fn bind_artifact_plan_callees(&mut self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (_, artifact) in self.artifacts.iter_mut() {
+            let Some(plan) = artifact.plan.as_mut() else {
+                continue;
+            };
+            for callee in plan.planned_callees_mut() {
+                match callee {
+                    PlannedCalleeRefMut::Instance(planned) => {
+                        match self.specializations.instance_ordinal(&planned.key) {
+                            Some(ordinal) => {
+                                planned.instance =
+                                    Some(FunctionInstanceId::from_index(ordinal.index()));
+                            }
+                            None => diagnostics.push(Diagnostic::new(
+                                artifact.origin.span.clone(),
+                                format!(
+                                    "generated artifact {} names a planned instance callee that was never interned",
+                                    artifact.ordinal.index()
+                                ),
+                            )),
+                        }
+                    }
+                    PlannedCalleeRefMut::Artifact(planned) => {
+                        match self.specializations.artifact_ordinal(&planned.key) {
+                            Some(ordinal) => planned.artifact = Some(ordinal),
+                            None => diagnostics.push(Diagnostic::new(
+                                artifact.origin.span.clone(),
+                                format!(
+                                    "generated artifact {} names a planned artifact callee that was never interned",
+                                    artifact.ordinal.index()
+                                ),
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+        diagnostics
     }
 
     /// Re-assigns catalog names over the final graph and returns any name
@@ -839,6 +900,7 @@ impl LoweredProgram {
         self.check_artifact_expansion(&mut diagnostics);
         self.check_requester_integrity(&mut diagnostics);
         self.check_use_edge_agreement(&mut diagnostics);
+        self.check_planned_callees(hooks, &mut diagnostics);
         self.check_request_root_acyclicity(&mut diagnostics);
         self.check_closure_fixed_point(hooks, &mut diagnostics);
         diagnostics
@@ -1018,6 +1080,113 @@ impl LoweredProgram {
                     }
                 }
             }
+        }
+    }
+
+    /// Every artifact plan must be fully expanded for a family whose expander
+    /// is registered, and every callee a plan names must be bound to its
+    /// catalog id and matched one-to-one, in plan order, by an artifact-owned
+    /// edge of the same target and kind. No artifact-owned edge may lack a
+    /// planned callee.
+    fn check_planned_callees(
+        &self,
+        hooks: &dyn ArtifactFamilyHooks,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        for (id, artifact) in self.artifacts.iter() {
+            let Some(plan) = &artifact.plan else {
+                continue; // `validate_specializations` reports the missing plan.
+            };
+            let Some(key) = self.specializations.artifact(artifact.ordinal) else {
+                continue; // `validate_specializations` reports the missing key.
+            };
+            let owner = format!("generated artifact {}", id.index());
+            if hooks.expands_body(key) && !plan.is_expanded() {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    format!("{owner} still carries the request-time plan marker after closure"),
+                ));
+                continue;
+            }
+            if !plan.supports_planned_callees() {
+                // Stage 4.4-4.6 families still carry raw requests on the
+                // artifact; their plan schema gains callee slots when their
+                // own substage lands.
+                continue;
+            }
+
+            let mut expected_instances = Vec::new();
+            let mut expected_artifacts = Vec::new();
+            for callee in plan.planned_callees() {
+                match callee {
+                    PlannedCalleeRef::Instance(planned) => match planned.instance {
+                        Some(instance) => {
+                            let bound_correctly =
+                                self.instances.get(instance).is_some_and(|record| {
+                                    self.specializations.instance(record.ordinal)
+                                        == Some(&planned.key)
+                                });
+                            if !bound_correctly {
+                                diagnostics.push(Diagnostic::new(
+                                    artifact.origin.span.clone(),
+                                    format!(
+                                        "{owner} binds a planned instance callee to instance {} whose key is not the planned key",
+                                        instance.index()
+                                    ),
+                                ));
+                            }
+                            expected_instances.push((instance.index(), planned.kind.description()));
+                        }
+                        None => diagnostics.push(Diagnostic::new(
+                            artifact.origin.span.clone(),
+                            format!("{owner} has an unbound planned instance callee"),
+                        )),
+                    },
+                    PlannedCalleeRef::Artifact(planned) => match planned.artifact {
+                        Some(ordinal) => {
+                            if self.specializations.artifact(ordinal) != Some(&planned.key) {
+                                diagnostics.push(Diagnostic::new(
+                                    artifact.origin.span.clone(),
+                                    format!(
+                                        "{owner} binds a planned artifact callee to artifact {} whose key is not the planned key",
+                                        ordinal.index()
+                                    ),
+                                ));
+                            }
+                            expected_artifacts.push((ordinal.index(), planned.kind.description()));
+                        }
+                        None => diagnostics.push(Diagnostic::new(
+                            artifact.origin.span.clone(),
+                            format!("{owner} has an unbound planned artifact callee"),
+                        )),
+                    },
+                }
+            }
+
+            let actual_instances = artifact
+                .instances
+                .iter()
+                .map(|edge| (edge.instance.index(), edge.kind.description()))
+                .collect::<Vec<_>>();
+            let actual_artifacts = artifact
+                .artifacts
+                .iter()
+                .map(|edge| (edge.artifact.index(), edge.kind.description()))
+                .collect::<Vec<_>>();
+            agree_callees_with_edges(
+                &owner,
+                "instance",
+                &expected_instances,
+                &actual_instances,
+                diagnostics,
+            );
+            agree_callees_with_edges(
+                &owner,
+                "artifact",
+                &expected_artifacts,
+                &actual_artifacts,
+                diagnostics,
+            );
         }
     }
 
@@ -1278,13 +1447,31 @@ impl LoweredProgram {
                 Err(mut problems) => diagnostics.append(&mut problems),
             }
         }
-        for (id, _) in self.artifacts.iter() {
+        for (id, artifact) in self.artifacts.iter() {
             match hooks.expand(self, id) {
-                Ok((_plan, requests)) => self.check_fixed_point_requests(
-                    FixedPointOwner::Artifact(id),
-                    &requests,
-                    diagnostics,
-                ),
+                Ok((plan, requests)) => {
+                    // A re-expansion must rebuild the same plan shape modulo
+                    // the catalog ids the binding pass filled in. A mismatch
+                    // means the expander reads catalog state or is
+                    // nondeterministic, which the fixed-point contract
+                    // forbids.
+                    if let Some(stored) = &artifact.plan
+                        && !plan.eq_ignoring_bindings(stored)
+                    {
+                        diagnostics.push(Diagnostic::new(
+                            artifact.origin.span.clone(),
+                            format!(
+                                "closure did not reach a fixed point: artifact {} re-expanded to a different plan",
+                                id.index()
+                            ),
+                        ));
+                    }
+                    self.check_fixed_point_requests(
+                        FixedPointOwner::Artifact(id),
+                        &requests,
+                        diagnostics,
+                    )
+                }
                 Err(mut problems) => diagnostics.append(&mut problems),
             }
         }
@@ -1413,6 +1600,43 @@ impl LoweredProgram {
     }
 }
 
+/// Compares a plan's ordered callee expectations with an artifact's ordered
+/// edges, reporting every missing edge, every extra edge, and every
+/// target/kind disagreement at its position.
+fn agree_callees_with_edges(
+    owner: &str,
+    family: &str,
+    expected: &[(usize, &'static str)],
+    actual: &[(usize, &'static str)],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let shared = expected.len().min(actual.len());
+    for index in 0..shared {
+        let (expected_target, expected_kind) = expected[index];
+        let (actual_target, actual_kind) = actual[index];
+        if expected_target != actual_target || expected_kind != actual_kind {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!(
+                    "{owner} planned {family} callee {index} is ({expected_target}, {expected_kind}) but its edge is ({actual_target}, {actual_kind})"
+                ),
+            ));
+        }
+    }
+    for (target, kind) in &expected[shared..] {
+        diagnostics.push(Diagnostic::new(
+            Span::Compiler,
+            format!("{owner} has a planned {family} callee ({target}, {kind}) with no artifact-owned edge"),
+        ));
+    }
+    for (target, kind) in &actual[shared..] {
+        diagnostics.push(Diagnostic::new(
+            Span::Compiler,
+            format!("{owner} has an artifact-owned {family} edge ({target}, {kind}) with no planned callee"),
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
@@ -1421,11 +1645,14 @@ mod tests {
 
     use crate::specialization::{
         ArtifactSite, ArtifactSiteOwner, CanonicalType, GcFinalizerKey, ReactiveRunnerKey,
+        StructuralMethodKey,
     };
     use crate::{
-        CallSubstitutions, CallTypeSubstitution, CheckedType, DropGluePlan, FunctionId,
-        GcFinalizerPlan, InstanceResolutionRequest, InstanceResolutionTarget, NameResolver,
-        ProgramLoader, ReactiveRunnerPlan, TypeChecker, TypedModule, substitute_type,
+        CallSubstitutions, CallTypeSubstitution, CheckedType, DebugDelegate, DebugStep,
+        DropGluePlan, FunctionId, GcFinalizerPlan, InstanceResolutionRequest,
+        InstanceResolutionTarget, NameResolver, PlannedArtifact, PlannedCallee, PlannedInstance,
+        ProgramLoader, ReactiveRunnerPlan, StructuralBody, StructuralMethodPlan,
+        StructuralTraitMethod, TraitId, TraitMethodId, TypeChecker, TypedModule, substitute_type,
     };
 
     use super::*;
@@ -2826,6 +3053,370 @@ mod tests {
                 .iter()
                 .any(|message| message
                     .contains("expander-produced instance requests carry no use site")),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// Builds a complete `StructuralMethod` plan whose `ProductDebug` body
+    /// names a `Formatter.write` instance and one artifact delegate, together
+    /// with the matching key.
+    fn planned_debug_plan(
+        program: &LoweredProgram,
+        seed: FunctionInstanceId,
+        origin: &Origin,
+        write: PlannedInstance,
+        delegate: PlannedCallee,
+    ) -> (ArtifactRequestKey, LoweredArtifactPlan) {
+        let callable_type = program
+            .instances
+            .get(seed)
+            .and_then(|instance| instance.body.as_ref())
+            .expect("the fixture seed has a materialized body")
+            .signature
+            .clone();
+        let key = ArtifactRequestKey::StructuralMethod(
+            StructuralMethodKey::new(
+                StructuralTraitMethod::Debug,
+                TraitId(3),
+                TraitMethodId(4),
+                &[CheckedType::I32],
+                &callable_type,
+                origin,
+            )
+            .expect("the synthetic structural key is concrete"),
+        );
+        let plan = LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
+            structural: StructuralTraitMethod::Debug,
+            trait_id: TraitId(3),
+            method: TraitMethodId(4),
+            arguments: vec![CheckedType::I32],
+            callable_type: callable_type.clone(),
+            body: StructuralBody::ProductDebug {
+                steps: vec![DebugStep::Element {
+                    index: 0,
+                    delegate: DebugDelegate {
+                        value_type: CheckedType::I32,
+                        callee: delegate,
+                        callee_type: callable_type.clone(),
+                    },
+                }],
+                write,
+            },
+        });
+        (key, plan)
+    }
+
+    #[test]
+    fn closure_binds_planned_callees_after_the_fixed_point() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base_instances = program.instances.len();
+        let base_artifacts = program.artifacts.len();
+        let planned_type = CheckedType::Ref(Box::new(CheckedType::U8));
+        let resolved = resolve_root_instance(&program, "identity", planned_type, &origin);
+        let write = PlannedInstance {
+            key: resolved.key.clone(),
+            instance: None,
+            kind: LoweredInstanceDependencyKind::FormattingWrite,
+        };
+        let drop_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let drop_key = ArtifactRequestKey::DropGlue(
+            CanonicalType::concrete(&drop_type, &origin).expect("type"),
+        );
+        let delegate = PlannedCallee::Artifact(PlannedArtifact {
+            key: drop_key.clone(),
+            artifact: None,
+            kind: LoweredArtifactDependencyKind::DropGlue,
+        });
+        let (key, plan) = planned_debug_plan(&program, seed, &origin, write, delegate);
+
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![ClosureRequest::Artifact {
+                key,
+                plan,
+                kind: LoweredArtifactDependencyKind::StructuralMethod,
+                origin: origin.clone(),
+                use_site: Some(ArtifactUseSite::Test(0)),
+            }]],
+        );
+        hooks.artifact_requests.insert(
+            base_artifacts,
+            vec![vec![
+                ClosureRequest::Instance {
+                    resolved,
+                    kind: LoweredInstanceDependencyKind::FormattingWrite,
+                    origin: origin.clone(),
+                    use_site: None,
+                },
+                ClosureRequest::Artifact {
+                    key: drop_key,
+                    plan: LoweredArtifactPlan::DropGlue(DropGluePlan {
+                        value_type: drop_type,
+                    }),
+                    kind: LoweredArtifactDependencyKind::DropGlue,
+                    origin: origin.clone(),
+                    use_site: None,
+                },
+            ]],
+        );
+        close(&mut program, &hooks);
+
+        assert_eq!(program.instances.len(), base_instances + 1);
+        assert_eq!(program.artifacts.len(), base_artifacts + 2);
+        let bound_instance = FunctionInstanceId::from_index(base_instances);
+        let drop_artifact = LoweredArtifactRequestId::from_index(base_artifacts + 1);
+        let drop_ordinal = program
+            .artifacts
+            .get(drop_artifact)
+            .expect("artifact")
+            .ordinal;
+        let record = program
+            .artifacts
+            .get(LoweredArtifactRequestId::from_index(base_artifacts))
+            .expect("structural artifact");
+        let Some(LoweredArtifactPlan::StructuralMethod(plan)) = &record.plan else {
+            panic!("the structural artifact keeps a structural plan");
+        };
+        let StructuralBody::ProductDebug { steps, write } = &plan.body else {
+            panic!("the expander kept the planned product-Debug body");
+        };
+        assert_eq!(write.instance, Some(bound_instance));
+        assert_eq!(write.kind, LoweredInstanceDependencyKind::FormattingWrite);
+        let DebugStep::Element { delegate, .. } = &steps[0] else {
+            panic!("the planned step is an element");
+        };
+        let PlannedCallee::Artifact(drop) = &delegate.callee else {
+            panic!("the planned delegate is an artifact");
+        };
+        assert_eq!(drop.artifact, Some(drop_ordinal));
+
+        // The bound callees match the artifact-owned edges one-to-one.
+        assert_eq!(record.instances.len(), 1);
+        assert_eq!(record.instances[0].instance, bound_instance);
+        assert_eq!(
+            record.instances[0].kind,
+            LoweredInstanceDependencyKind::FormattingWrite
+        );
+        assert_eq!(record.artifacts.len(), 1);
+        assert_eq!(record.artifacts[0].artifact, drop_ordinal);
+        assert_eq!(
+            record.artifacts[0].kind,
+            LoweredArtifactDependencyKind::DropGlue
+        );
+    }
+
+    #[test]
+    fn closure_plans_with_uninterned_callees_are_diagnosed() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base_artifacts = program.artifacts.len();
+        // A planned instance the expander never requests: nothing interns it.
+        let missing_type = CheckedType::Ref(Box::new(CheckedType::U16));
+        let resolved = resolve_root_instance(&program, "identity", missing_type, &origin);
+        let write = PlannedInstance {
+            key: resolved.key.clone(),
+            instance: None,
+            kind: LoweredInstanceDependencyKind::FormattingWrite,
+        };
+        let drop_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let drop_key = ArtifactRequestKey::DropGlue(
+            CanonicalType::concrete(&drop_type, &origin).expect("type"),
+        );
+        let delegate = PlannedCallee::Artifact(PlannedArtifact {
+            key: drop_key,
+            artifact: None,
+            kind: LoweredArtifactDependencyKind::DropGlue,
+        });
+        let (key, plan) = planned_debug_plan(&program, seed, &origin, write, delegate);
+
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![ClosureRequest::Artifact {
+                key,
+                plan,
+                kind: LoweredArtifactDependencyKind::StructuralMethod,
+                origin: origin.clone(),
+                use_site: Some(ArtifactUseSite::Test(0)),
+            }]],
+        );
+        // The artifact expands to nothing, so neither planned callee is
+        // interned and the binding pass must diagnose both.
+        let diagnostics = program.close_artifact_catalog(&hooks);
+        let messages = messages(&diagnostics);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("planned instance callee that was never interned")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("planned artifact callee that was never interned")),
+            "{messages:?}"
+        );
+        assert_eq!(program.artifacts.len(), base_artifacts + 1);
+    }
+
+    #[test]
+    fn closure_edges_without_planned_callees_are_diagnosed() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base_artifacts = program.artifacts.len();
+        let callable_type = program
+            .instances
+            .get(seed)
+            .and_then(|instance| instance.body.as_ref())
+            .expect("seed body")
+            .signature
+            .clone();
+        let key = ArtifactRequestKey::StructuralMethod(
+            StructuralMethodKey::new(
+                StructuralTraitMethod::Debug,
+                TraitId(3),
+                TraitMethodId(4),
+                &[CheckedType::I32],
+                &callable_type,
+                &origin,
+            )
+            .expect("concrete key"),
+        );
+        // A complete plan that names no callee.
+        let plan = LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
+            structural: StructuralTraitMethod::Debug,
+            trait_id: TraitId(3),
+            method: TraitMethodId(4),
+            arguments: vec![CheckedType::I32],
+            callable_type,
+            body: StructuralBody::IndexLoad {
+                element: CheckedType::I32,
+                length: 1,
+                output: CheckedType::I32,
+            },
+        });
+        let drop_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let drop_key = ArtifactRequestKey::DropGlue(
+            CanonicalType::concrete(&drop_type, &origin).expect("type"),
+        );
+
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![ClosureRequest::Artifact {
+                key,
+                plan,
+                kind: LoweredArtifactDependencyKind::StructuralMethod,
+                origin: origin.clone(),
+                use_site: Some(ArtifactUseSite::Test(0)),
+            }]],
+        );
+        // The expander requests an artifact its plan does not name.
+        hooks.artifact_requests.insert(
+            base_artifacts,
+            vec![vec![ClosureRequest::Artifact {
+                key: drop_key,
+                plan: LoweredArtifactPlan::DropGlue(DropGluePlan {
+                    value_type: drop_type,
+                }),
+                kind: LoweredArtifactDependencyKind::DropGlue,
+                origin: origin.clone(),
+                use_site: None,
+            }]],
+        );
+        assert!(program.close_artifact_catalog(&hooks).is_empty());
+        let diagnostics = program.validate_artifact_closure(&hooks);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("artifact-owned artifact edge")
+                    && message.contains("with no planned callee")),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// Hooks whose artifact re-expansion returns a different plan the second
+    /// time, proving the fixed-point plan comparison detects nondeterminism.
+    struct PlanChangingHooks {
+        seed: FunctionInstanceId,
+        origin: Origin,
+        first: LoweredArtifactPlan,
+        second: LoweredArtifactPlan,
+        calls: Cell<usize>,
+    }
+
+    impl ArtifactFamilyHooks for PlanChangingHooks {
+        fn scan_initializer(
+            &self,
+            _program: &LoweredProgram,
+            _initializer: InitializerId,
+        ) -> ScanResult {
+            Ok(Vec::new())
+        }
+
+        fn scan_instance(
+            &self,
+            _program: &LoweredProgram,
+            instance: FunctionInstanceId,
+        ) -> ScanResult {
+            if instance != self.seed {
+                return Ok(Vec::new());
+            }
+            Ok(vec![ClosureRequest::Artifact {
+                key: ArtifactRequestKey::DropGlue(
+                    CanonicalType::concrete(&CheckedType::I32, &self.origin).expect("type"),
+                ),
+                plan: self.first.clone(),
+                kind: LoweredArtifactDependencyKind::DropGlue,
+                origin: self.origin.clone(),
+                use_site: Some(ArtifactUseSite::Test(0)),
+            }])
+        }
+
+        fn expand(
+            &self,
+            _program: &LoweredProgram,
+            _artifact: LoweredArtifactRequestId,
+        ) -> ExpansionResult {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            if call == 0 {
+                Ok((self.first.clone(), Vec::new()))
+            } else {
+                Ok((self.second.clone(), Vec::new()))
+            }
+        }
+    }
+
+    #[test]
+    fn closure_fixed_point_detects_a_changed_plan() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let first = LoweredArtifactPlan::DropGlue(DropGluePlan {
+            value_type: CheckedType::I32,
+        });
+        let second = LoweredArtifactPlan::DropGlue(DropGluePlan {
+            value_type: CheckedType::I64,
+        });
+        let hooks = PlanChangingHooks {
+            seed,
+            origin,
+            first,
+            second,
+            calls: Cell::new(0),
+        };
+        assert!(program.close_artifact_catalog(&hooks).is_empty());
+        let diagnostics = program.validate_artifact_closure(&hooks);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("re-expanded to a different plan")),
             "{diagnostics:?}"
         );
     }

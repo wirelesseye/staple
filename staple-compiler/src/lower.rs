@@ -69,8 +69,10 @@ pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredIn
 // filled by the substage that owns each artifact family.
 #[allow(unused_imports)] // Stage 4.2+ attach and validate these plans.
 pub(crate) use artifact_plan::{
-    ConstructorAdapterPlan, CoroutineCodesPlan, DropGluePlan, ExternAdapterPlan, GcFinalizerPlan,
-    LoweredArtifactPlan, ReactiveRunnerPlan, StructuralMethodPlan,
+    ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, DebugDelegate, DebugStep,
+    DropGluePlan, ExternAdapterPlan, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan,
+    PlannedArtifact, PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance,
+    ReactiveRunnerPlan, StructuralBody, StructuralMethodPlan, SumAlternative, TraitDelegate,
 };
 
 macro_rules! arena_id {
@@ -173,6 +175,13 @@ impl<T, I: ArenaId> Arena<T, I> {
     fn iter(&self) -> impl Iterator<Item = (I, &T)> {
         self.values
             .iter()
+            .enumerate()
+            .map(|(index, value)| (I::from_index(index), value))
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = (I, &mut T)> {
+        self.values
+            .iter_mut()
             .enumerate()
             .map(|(index, value)| (I::from_index(index), value))
     }
@@ -14295,6 +14304,9 @@ mod tests {
                 "artifact {} key={key_family} plan={plan_family}",
                 artifact.name
             ));
+            if let Some(plan) = &artifact.plan {
+                lines.push(format!("  plan {plan:?}"));
+            }
             for dependency in &artifact.artifacts {
                 lines.push(format!(
                     "  artifact edge {} {}",
