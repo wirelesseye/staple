@@ -50,6 +50,16 @@ struct ModuleEmitter<'module, 'context> {
         CheckedFunctionType,
         HashMap<TypeParameterId, CheckedType>,
     )>,
+    /// Test-only: typed constructor-adapter discoveries in creation order.
+    #[cfg(test)]
+    legacy_constructor_adapters: Vec<(SymbolId, CheckedFunctionType)>,
+    /// Test-only: typed structural-method discoveries in creation order.
+    #[cfg(test)]
+    legacy_structural_methods: Vec<(
+        crate::StructuralTraitMethod,
+        Vec<CheckedType>,
+        CheckedFunctionType,
+    )>,
     active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
     expression_type_overrides: HashMap<staple_syntax::SyntaxId, CheckedType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
@@ -299,6 +309,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             constructor_codes: HashMap::new(),
             structural_trait_codes: HashMap::new(),
             specialization_queue: Vec::new(),
+            #[cfg(test)]
+            legacy_constructor_adapters: Vec::new(),
+            #[cfg(test)]
+            legacy_structural_methods: Vec::new(),
             active_type_substitutions: HashMap::new(),
             expression_type_overrides: HashMap::new(),
             function_symbols: HashMap::new(),
@@ -335,7 +349,8 @@ impl<'context> CodeGenerator<'context> {
     ) -> Result<String, Vec<Diagnostic>> {
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        ModuleEmitter::new(self.context, module.typed(), &target_machine)
+        let emitter = ModuleEmitter::new(self.context, module.typed(), &target_machine);
+        emitter
             .compile(&target_machine)
             .map(|module| module.print_to_string().to_string())
             .map_err(|diagnostic| vec![diagnostic])
@@ -355,7 +370,8 @@ impl<'context> CodeGenerator<'context> {
         }
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        let llvm_module = ModuleEmitter::new(self.context, module.typed(), &target_machine)
+        let emitter = ModuleEmitter::new(self.context, module.typed(), &target_machine);
+        let llvm_module = emitter
             .compile(&target_machine)
             .map_err(|diagnostic| vec![diagnostic])?;
         target_machine
@@ -369,11 +385,57 @@ impl<'context> CodeGenerator<'context> {
     }
 }
 
+/// Stage 3.5 test-only view of the legacy LLVM backend's discoveries: the
+/// source-function specialization queue (function, concrete type, recorded
+/// substitutions), constructor adapters, and structural methods. Production
+/// emission never reads this record.
+#[cfg(test)]
+pub(crate) struct LegacyEmissions {
+    pub(crate) specializations: Vec<(
+        FunctionId,
+        CheckedFunctionType,
+        HashMap<TypeParameterId, CheckedType>,
+    )>,
+    pub(crate) constructor_adapters: Vec<(SymbolId, CheckedFunctionType)>,
+    pub(crate) structural_methods: Vec<(
+        crate::StructuralTraitMethod,
+        Vec<CheckedType>,
+        CheckedFunctionType,
+    )>,
+}
+
+/// Compiles one lowered module with the legacy backend and returns its typed
+/// discoveries for the Stage 3.5 transition comparison.
+#[cfg(test)]
+pub(crate) fn legacy_emissions(
+    context: &inkwell::context::Context,
+    module: &LoweredModule,
+) -> Result<LegacyEmissions, Vec<Diagnostic>> {
+    let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
+    let mut emitter = ModuleEmitter::new(context, module.typed(), &target_machine);
+    emitter
+        .run(&target_machine)
+        .map_err(|diagnostic| vec![diagnostic])?;
+    Ok(LegacyEmissions {
+        specializations: emitter.specialization_queue.clone(),
+        constructor_adapters: emitter.legacy_constructor_adapters.clone(),
+        structural_methods: emitter.legacy_structural_methods.clone(),
+    })
+}
+
 impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile(
         mut self,
         target_machine: &TargetMachine,
     ) -> CodeGenerationResult<LlvmModule<'context>> {
+        self.run(target_machine)?;
+        Ok(self.llvm_module)
+    }
+
+    /// Emits every function into `self.llvm_module`. Split from `compile` so
+    /// the Stage 3.5 test-only comparison can read the emitter's recorded
+    /// discoveries after emission without cloning the module.
+    fn run(&mut self, target_machine: &TargetMachine) -> CodeGenerationResult<()> {
         self.llvm_module.set_triple(&target_machine.get_triple());
         self.llvm_module
             .set_data_layout(&target_machine.get_target_data().get_data_layout());
@@ -409,7 +471,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.llvm_module.verify().map_err(|message| {
             Diagnostic::new(Span::Compiler, format!("invalid LLVM module: {message}"))
         })?;
-        Ok(self.llvm_module)
+        Ok(())
     }
 
     fn install_gc_runtime(&self) -> CodeGenerationResult<()> {
@@ -942,6 +1004,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Some(inkwell::module::Linkage::Internal),
         );
         self.constructor_codes.insert((symbol, key), function);
+        #[cfg(test)]
+        self.legacy_constructor_adapters
+            .push((symbol, function_type.clone()));
 
         let previous_block = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
@@ -3690,6 +3755,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         );
         let function = self.llvm_module.add_function(&name, llvm_type, None);
         self.structural_trait_codes.insert(key, function);
+        #[cfg(test)]
+        self.legacy_structural_methods.push((
+            structural,
+            arguments.to_vec(),
+            function_type.clone(),
+        ));
         let previous = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);

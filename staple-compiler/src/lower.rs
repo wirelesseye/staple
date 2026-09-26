@@ -24,6 +24,7 @@ use crate::{
     TypeParameterId, TypedModule, contains_type_parameter, infer_type_parameters,
 };
 
+mod graph_validation;
 mod instance_body;
 mod instance_resolution;
 mod worklist;
@@ -12686,6 +12687,9 @@ impl Lowerer {
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.validate_specializations());
+        }
+        if diagnostics.is_empty() {
+            diagnostics.extend(program.validate_specialization_graph());
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.validate_source_coverage(module));

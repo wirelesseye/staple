@@ -4,7 +4,9 @@
 //! program. Roots are module initializer bodies in program initialization
 //! order followed by the concrete function templates the current backend
 //! emits eagerly (every template whose checked signature contains no declared
-//! type parameter, excluding coroutine body thunks, which stay demand-driven).
+//! type parameter and whose relevant-parameter set is empty, so a nested
+//! closure that captures an enclosing parameter is never seeded without its
+//! construction site's environment). Coroutine body thunks stay demand-driven.
 //!
 //! Every requested `InstanceKey` is interned in the `SpecializationCatalog`
 //! before the instance body is visited, so self-recursion and mutual recursion
@@ -332,6 +334,11 @@ impl<'a> WorklistBuilder<'a> {
             .filter(|(_, _, function)| {
                 !contains_type_parameter(&CheckedType::Function(function.signature.clone()))
             })
+            // A concrete signature is not sufficient: a nested closure whose
+            // body or captures still depend on an enclosing parameter needs its
+            // construction site's environment, so it stays demand-driven
+            // instead of becoming a root without an enclosing instance.
+            .filter(|(_, id, _)| self.program.relevant_parameters(*id).is_empty())
             .map(|(_, id, function)| (id, function.signature.clone()))
             .collect::<Vec<_>>();
         for (function, signature) in eager {
@@ -1911,6 +1918,44 @@ mod tests {
             instances_of(&program, function_id(&program, "unused")).is_empty(),
             "an unused generic template is never seeded"
         );
+    }
+
+    #[test]
+    fn concrete_signature_closures_with_enclosing_parameters_stay_demand_driven() {
+        let (_, program) = lower(concat!(
+            "def show_thunk: <T where Copy T, Display T> move T -> (() -> String) = move value => () => \"value=$value\"\n",
+            "let shown = show_thunk 1\n",
+        ));
+        assert!(
+            program.instances.iter().all(|(_, instance)| {
+                instance.relevant.is_empty()
+                    || !matches!(instance.request, LoweredInstanceRequest::EagerTemplate)
+            }),
+            "a template with relevant parameters is never seeded as a root"
+        );
+        let nested = program
+            .instances
+            .iter()
+            .find(|(_, instance)| {
+                !instance.relevant.is_empty()
+                    && program
+                        .functions
+                        .get(instance.template)
+                        .is_some_and(|function| {
+                            !contains_type_parameter(&CheckedType::Function(
+                                function.signature.clone(),
+                            ))
+                        })
+            })
+            .map(|(_, instance)| instance)
+            .expect("the concrete-signature nested closure is still discovered");
+        assert!(matches!(
+            nested.request,
+            LoweredInstanceRequest::Dependency {
+                kind: LoweredInstanceDependencyKind::CallableValue,
+                ..
+            }
+        ));
     }
 
     #[test]
