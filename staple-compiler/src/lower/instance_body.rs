@@ -3812,6 +3812,176 @@ mod tests {
         assert!(instances[0].1.body.is_some());
     }
 
+    /// Every trait-dependent site in every body must carry resolved evidence,
+    /// and its binding must point at a Stage 3.3 instance or artifact.
+    fn assert_trait_sites_are_resolved(program: &LoweredProgram) {
+        for (_, instance) in program.instances.iter() {
+            let body = instance.body.as_ref().expect("instance body");
+            for (site, evidence) in &body.evidence {
+                assert!(
+                    !matches!(
+                        evidence,
+                        TraitEvidence::DeclaredBound { .. }
+                            | TraitEvidence::RejectedImplementation { .. }
+                    ),
+                    "body evidence at {site:?} is not a concrete selection"
+                );
+                assert!(
+                    body.binding(*site).is_some(),
+                    "body evidence at {site:?} has no binding"
+                );
+            }
+            for (_, call) in body.calls.iter() {
+                if let Some(evidence) = &call.evidence {
+                    if matches!(
+                        call.target.category(),
+                        LoweredCallableCategory::TraitImplementation
+                            | LoweredCallableCategory::StructuralTraitMethod
+                    ) {
+                        assert!(
+                            !matches!(
+                                evidence,
+                                TraitEvidence::DeclaredBound { .. }
+                                    | TraitEvidence::RejectedImplementation { .. }
+                            ),
+                            "a trait call keeps a deferred recipe"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recursive_calls_bind_to_their_own_instance() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "def recursive: <T where Copy T> T -> T = value => recursive value\n",
+            "let result: I32 = recursive 1\n",
+        ));
+        materialize(&mut program);
+        let recursive = function_id(&program, "recursive");
+        let (id, instance) = program
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.template == recursive)
+            .expect("recursive instance");
+        let body = instance.body.as_ref().unwrap();
+        let mut saw_back_edge = false;
+        for (call_id, _) in body.calls.iter() {
+            let site = LoweredBindingSite::Call(call_id);
+            if let Some(LoweredBoundTarget::Instance(target)) = body.binding(site) {
+                assert_eq!(*target, id, "recursion reuses the interned instance");
+                saw_back_edge = true;
+            }
+        }
+        assert!(saw_back_edge, "the recursive call is a concrete back-edge");
+        assert_trait_sites_are_resolved(&program);
+    }
+
+    #[test]
+    fn constructor_and_structural_sites_bind_to_artifacts() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "type Point = ctor (I32, I32)\n",
+            "def make: () -> ((I32, I32) -> Point) = () => Point\n",
+            "def describe: (I32, I32) -> String = value => \"${value:?}\"\n",
+            "let text: String = describe (1, 2)\n",
+            "let built: (I32, I32) -> Point = make ()\n",
+        ));
+        materialize(&mut program);
+        let mut constructor = 0;
+        let mut structural = 0;
+        for (_, instance) in program.instances.iter() {
+            let body = instance.body.as_ref().unwrap();
+            for (_, target) in body.bindings.iter() {
+                if let LoweredBoundTarget::Artifact(ordinal) = target {
+                    match program.specializations.artifact(*ordinal) {
+                        Some(ArtifactRequestKey::ConstructorAdapter(_)) => constructor += 1,
+                        Some(ArtifactRequestKey::StructuralMethod(_)) => structural += 1,
+                        _ => panic!("unexpected artifact family"),
+                    }
+                }
+            }
+        }
+        assert!(constructor >= 1, "a constructor value binds an adapter");
+        assert!(structural >= 1, "a structural selection binds an artifact");
+        assert_trait_sites_are_resolved(&program);
+    }
+
+    #[test]
+    fn indirect_calls_bind_as_routes_without_new_instances() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "def apply: (() -> I32) -> I32 = f => f ()\n",
+            "let result = apply (() => 1)\n",
+        ));
+        materialize(&mut program);
+        let apply = function_id(&program, "apply");
+        let instance = program
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.template == apply)
+            .map(|(_, instance)| instance)
+            .expect("apply instance");
+        let body = instance.body.as_ref().unwrap();
+        let routes = body
+            .bindings
+            .iter()
+            .filter_map(|(site, target)| match (site, target) {
+                (_, LoweredBoundTarget::Route(category)) => Some(*category),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            routes.contains(&LoweredCallableCategory::IndirectClosure),
+            "the call through the parameter stays indirect"
+        );
+        assert!(
+            !program.instances.iter().any(|(_, instance)| program
+                .functions
+                .get(instance.template)
+                .is_some_and(|function| function.name.contains("anonymous"))),
+            "an indirect invocation creates no anonymous instance"
+        );
+        assert_trait_sites_are_resolved(&program);
+    }
+
+    #[test]
+    fn formatting_sites_store_concrete_evidence() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
+            "let result: String = render 1\n",
+        ));
+        materialize(&mut program);
+        let render = function_id(&program, "render");
+        let instance = program
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.template == render)
+            .map(|(_, instance)| instance)
+            .expect("render instance");
+        let body = instance.body.as_ref().unwrap();
+        let interpolation = body
+            .evidence
+            .keys()
+            .find(|site| matches!(site, LoweredBindingSite::Interpolation { .. }))
+            .copied()
+            .expect("the interpolation records evidence");
+        assert!(matches!(
+            body.binding(interpolation),
+            Some(LoweredBoundTarget::Instance(_))
+        ));
+        assert!(
+            body.bindings.iter().any(|(site, target)| {
+                matches!(
+                    site,
+                    LoweredBindingSite::FormattingConstructor(_)
+                        | LoweredBindingSite::FormattingFinish(_)
+                ) && matches!(target, LoweredBoundTarget::Instance(_))
+            }),
+            "the formatter helpers bind to their instances"
+        );
+        assert_trait_sites_are_resolved(&program);
+    }
+
     #[test]
     fn nongeneric_instance_body_matches_its_template() {
         let (_, mut program) =
