@@ -1860,10 +1860,22 @@ mod tests {
         }
     }
 
+    /// The observed coverage of one transition fixture.
+    #[derive(Debug, Default)]
+    struct TransitionCoverage {
+        adapters: usize,
+        methods: usize,
+        kinds: std::collections::HashSet<StructuralTraitMethod>,
+        value_adapters: usize,
+        managed_ref_with_finalizer: usize,
+        managed_ref_without_finalizer: usize,
+    }
+
     /// Stage 4.3's transition comparison: every legacy-generated constructor
     /// adapter and structural body matches exactly one artifact plan with the
     /// same decisions, and every such plan matches a legacy body.
-    fn assert_legacy_artifacts_match_plans(source: &str) -> (usize, usize) {
+    fn assert_legacy_artifacts_match_plans(source: &str) -> TransitionCoverage {
+        let mut coverage = TransitionCoverage::default();
         let module = checked_program(source);
         let lowered = Lowerer::new()
             .lower(&module)
@@ -1913,6 +1925,11 @@ mod tests {
                         "finalizer presence for symbol {}",
                         adapter.symbol.0
                     );
+                    if finalizer.is_some() {
+                        coverage.managed_ref_with_finalizer += 1;
+                    } else {
+                        coverage.managed_ref_without_finalizer += 1;
+                    }
                 }
                 ConstructorConstruction::Value { .. } => {
                     assert!(
@@ -1921,14 +1938,17 @@ mod tests {
                         adapter.symbol.0
                     );
                     assert!(!adapter.finalizer_set);
+                    coverage.value_adapters += 1;
                 }
                 ConstructorConstruction::Unexpanded => {
                     panic!("constructor plan was never expanded")
                 }
             }
+            coverage.adapters += 1;
         }
 
         for method in &legacy.structural_methods {
+            coverage.kinds.insert(method.structural);
             let arguments = canonical_arguments(&method.arguments);
             let function_type = CanonicalFunctionType::concrete(&method.function_type, &origin)
                 .expect("concrete legacy method type");
@@ -2032,6 +2052,7 @@ mod tests {
                 }
                 StructuralBody::Unexpanded => panic!("structural plan was never expanded"),
             }
+            coverage.methods += 1;
         }
 
         // Vice versa: no catalog constructor or structural plan may exist
@@ -2063,16 +2084,12 @@ mod tests {
                 _ => {}
             }
         }
-        (
-            legacy.constructor_adapters.len(),
-            legacy.structural_methods.len(),
-        )
+        coverage
     }
 
     #[test]
     fn legacy_constructor_and_structural_bodies_match_artifact_plans() {
-        let mut total_adapters = 0;
-        let mut total_methods = 0;
+        let mut coverage = TransitionCoverage::default();
         for source in [
             concat!(
                 "type Point = ctor (I32, I32)\n",
@@ -2150,15 +2167,44 @@ mod tests {
                 "let text = show_mixed (Held 1, 2)\n",
             ),
         ] {
-            let (adapters, methods) = assert_legacy_artifacts_match_plans(source);
-            total_adapters += adapters;
-            total_methods += methods;
+            let source_coverage = assert_legacy_artifacts_match_plans(source);
+            coverage.adapters += source_coverage.adapters;
+            coverage.methods += source_coverage.methods;
+            coverage.kinds.extend(source_coverage.kinds);
+            coverage.value_adapters += source_coverage.value_adapters;
+            coverage.managed_ref_with_finalizer += source_coverage.managed_ref_with_finalizer;
+            coverage.managed_ref_without_finalizer += source_coverage.managed_ref_without_finalizer;
         }
-        assert!(total_adapters >= 5, "the fixtures cover constructor shapes");
         assert!(
-            total_methods >= 7,
-            "the fixtures cover every structural kind: {total_methods}"
+            coverage.adapters >= 5,
+            "the fixtures cover multiple constructor adapter identities: {coverage:?}"
         );
+        assert!(
+            coverage.value_adapters > 0,
+            "a wrapped-value adapter is compared: {coverage:?}"
+        );
+        assert!(
+            coverage.managed_ref_with_finalizer > 0,
+            "a managed-ref adapter with a finalizer is compared: {coverage:?}"
+        );
+        assert!(
+            coverage.managed_ref_without_finalizer > 0,
+            "a managed-ref adapter without a finalizer is compared: {coverage:?}"
+        );
+        for kind in [
+            StructuralTraitMethod::Debug,
+            StructuralTraitMethod::Index,
+            StructuralTraitMethod::DerefIndex,
+            StructuralTraitMethod::MutateIndex,
+            StructuralTraitMethod::DerefMutateIndex,
+            StructuralTraitMethod::IntoIterator,
+            StructuralTraitMethod::Iterator,
+        ] {
+            assert!(
+                coverage.kinds.contains(&kind),
+                "the transition comparison covers {kind:?}: {coverage:?}"
+            );
+        }
     }
 
     #[test]
