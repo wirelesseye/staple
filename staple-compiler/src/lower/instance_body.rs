@@ -20,9 +20,10 @@ use crate::specialization::{
     ArtifactOrdinal, ArtifactRequestKey, ConstructorAdapterKey, InstanceKey, StructuralMethodKey,
 };
 use crate::{
-    CheckedCoercion, CheckedEffectSet, CheckedFunctionType, CheckedProductType, CheckedPropagation,
-    CheckedResource, CheckedTraitBound, CheckedTraitDispatch, CheckedType, FunctionId, SymbolId,
-    TypeId, TypeParameterId, contains_type_parameter, substitute_effect_set, substitute_type,
+    CheckedCoercion, CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType,
+    CheckedPropagation, CheckedResource, CheckedTraitBound, CheckedTraitDispatch, CheckedType,
+    FunctionId, SymbolId, TypeId, TypeParameterId, contains_type_parameter, substitute_effect_set,
+    substitute_type,
 };
 
 use super::instance_resolution::{
@@ -771,6 +772,13 @@ impl<'a> BodyCloner<'a> {
                 assignment.signal_notify = assignment
                     .signal_notify
                     .map(|operation| self.clone_operation(operation));
+                let concrete_target = self
+                    .body
+                    .places
+                    .get(assignment.target)
+                    .map(|place| place.value_type.clone())
+                    .unwrap_or(CheckedType::Error);
+                assignment.drop_previous = self.program.concrete_needs_drop(&concrete_target);
                 LoweredItemKind::Assignment(assignment)
             }
             LoweredItemKind::Return(mut item) => {
@@ -784,6 +792,13 @@ impl<'a> BodyCloner<'a> {
             LoweredItemKind::Continue(item) => LoweredItemKind::Continue(item),
             LoweredItemKind::Expression(mut item) => {
                 item.expression = self.clone_expression(item.expression);
+                let concrete = self
+                    .body
+                    .expressions
+                    .get(item.expression)
+                    .map(|expression| expression.value_type.clone())
+                    .unwrap_or(CheckedType::Error);
+                item.drop_result = self.program.concrete_needs_drop(&concrete);
                 LoweredItemKind::Expression(item)
             }
         };
@@ -948,6 +963,16 @@ impl<'a> BodyCloner<'a> {
             LoweredExpressionKind::Loop(mut loop_) => {
                 loop_.body = self.clone_block(loop_.body);
                 loop_.result_type = self.ty(&loop_.result_type);
+                let body_result = self
+                    .body
+                    .blocks
+                    .get(loop_.body)
+                    .and_then(|block| block.result)
+                    .and_then(|result| self.body.expressions.get(result))
+                    .map(|expression| expression.value_type.clone());
+                if let Some(body_result) = body_result {
+                    loop_.drops_body_result = self.program.concrete_needs_drop(&body_result);
+                }
                 LoweredExpressionKind::Loop(loop_)
             }
             LoweredExpressionKind::Match(mut match_) => {
@@ -1218,6 +1243,108 @@ impl<'a> BodyCloner<'a> {
                 origin: Origin::compiler(),
                 kind: LoweredReactiveOperationKind::Snapshot,
             })
+    }
+
+    /// Recomputes concrete-sensitive call-argument pass decisions from the
+    /// substituted parameter types, mirroring the lowering rule.
+    fn recompute_call_arguments(&self, call: &mut LoweredCall) {
+        let whole_mutation = call
+            .function_type
+            .mutations
+            .contains(&CheckedMutation::Whole);
+        let whole_move = call.function_type.moves.contains(&CheckedMutation::Whole);
+        for argument in &mut call.arguments {
+            let expected = argument.expected.clone();
+            let mutation = whole_mutation
+                || argument.slot.is_some_and(|slot| {
+                    call.function_type
+                        .mutations
+                        .contains(&CheckedMutation::Element(slot))
+                });
+            let moves = whole_move
+                || argument.slot.is_some_and(|slot| {
+                    call.function_type
+                        .moves
+                        .contains(&CheckedMutation::Element(slot))
+                });
+            let indirect = mutation || (!moves && !self.program.concrete_is_copy(&expected));
+            argument.pass_mode = if mutation {
+                super::LoweredArgumentPassMode::MutablePlace
+            } else if indirect {
+                if argument.place.is_some() {
+                    super::LoweredArgumentPassMode::BorrowedPointer
+                } else {
+                    super::LoweredArgumentPassMode::MaterializedTemporary
+                }
+            } else {
+                super::LoweredArgumentPassMode::Value
+            };
+            argument.temporary = (mutation || indirect) && argument.place.is_none();
+            argument.drops_after_call =
+                mutation && argument.place.is_none() && self.program.concrete_needs_drop(&expected);
+        }
+    }
+
+    /// Recomputes a `with` provider's borrow and storage from the concrete
+    /// resource type and the provider value's place.
+    fn recompute_with_provider(
+        &mut self,
+        provider: LoweredResourceProviderId,
+        value: ExpressionId,
+    ) {
+        let Some(resource) = self
+            .body
+            .resource_providers
+            .get(provider)
+            .map(|provider| provider.resource.clone())
+        else {
+            return;
+        };
+        let borrow = resource.mutable || !self.program.concrete_is_copy(&resource.value_type);
+        let has_place = self.body_value_has_place(value);
+        if let Some(provider) = self.body.resource_providers.get_mut(provider) {
+            provider.borrow = borrow;
+            provider.storage = if borrow && has_place {
+                super::LoweredProviderStorage::Place
+            } else {
+                super::LoweredProviderStorage::Materialized
+            };
+        }
+    }
+
+    /// Whether an instance-local expression is rooted at addressable storage,
+    /// mirroring the checked `provider_value_has_place` rule.
+    fn body_value_has_place(&self, expression: ExpressionId) -> bool {
+        let Some(expression) = self.body.expressions.get(expression) else {
+            return false;
+        };
+        match &expression.kind {
+            LoweredExpressionKind::Name(_) => true,
+            LoweredExpressionKind::Satisfies(satisfies) => {
+                self.body_value_has_place(satisfies.value)
+            }
+            LoweredExpressionKind::Product(product) if product.fields.len() == 1 => {
+                self.body_value_has_place(product.fields[0])
+            }
+            LoweredExpressionKind::Resource(use_) => self
+                .body
+                .resource_uses
+                .get(*use_)
+                .and_then(|use_| use_.provider)
+                .and_then(|provider| self.body.resource_providers.get(provider))
+                .is_some_and(|provider| provider.indirect),
+            LoweredExpressionKind::Access(access) => match &access.kind {
+                super::LoweredAccessKind::Representation { dereference } => {
+                    !dereference.is_empty() || self.body_value_has_place(access.base)
+                }
+                super::LoweredAccessKind::Product { dereference, .. } => {
+                    !dereference.is_empty() || self.body_value_has_place(access.base)
+                }
+                super::LoweredAccessKind::Slice { .. } => true,
+                super::LoweredAccessKind::Scalar { .. } => false,
+            },
+            _ => false,
+        }
     }
 
     fn error_use(&mut self) -> LoweredResourceUseId {
@@ -1545,6 +1672,12 @@ impl<'a> BodyCloner<'a> {
             }
             other => other,
         };
+        if provider.kind == super::LoweredProviderOriginKind::FunctionParameter {
+            let indirect = provider.resource.mutable
+                || !self.program.concrete_is_copy(&provider.resource.value_type);
+            provider.indirect = indirect;
+            provider.borrow = indirect;
+        }
         let new = self.body.resource_providers.push(provider);
         self.resource_providers.insert(id, new);
         new
@@ -1561,6 +1694,7 @@ impl<'a> BodyCloner<'a> {
         let value = self.clone_expression(original.value);
         let body = self.clone_block(original.body);
         let provider = self.clone_resource_provider(original.provider);
+        self.recompute_with_provider(provider, value);
         let new = self.body.withs.push(LoweredWith {
             origin: original.origin,
             provider,
@@ -3980,6 +4114,155 @@ mod tests {
             "the formatter helpers bind to their instances"
         );
         assert_trait_sites_are_resolved(&program);
+    }
+
+    #[test]
+    fn copy_and_drop_facts_agree_with_checking() {
+        let (module, mut program) = lower_with_worklist(concat!(
+            "use std.cinterop.(CString, c_string)\n",
+            "def discard: <T> move T -> () = move value => { value; () }\n",
+            "def make_string: () -> (() -> String) = () => {\n",
+            "  let held = \"captured\"\n",
+            "  () => held\n",
+            "}\n",
+            "def looped: () -> I32 = () => {\n",
+            "  let mut total = 0\n",
+            "  while (total < 1) { total = total + 1 }\n",
+            "  total\n",
+            "}\n",
+            "let first: () = discard 1\n",
+            "let second: () = discard (c_string \"x\")\n",
+            "let closure: () -> String = make_string ()\n",
+            "let counted: I32 = looped ()\n",
+        ));
+        materialize(&mut program);
+        let mut saw_dropped_statement = false;
+        let mut saw_live_statement = false;
+        let mut saw_capture = false;
+        for (_, instance) in program.instances.iter() {
+            let body = instance.body.as_ref().unwrap();
+            for (_, item) in body.items.iter() {
+                match &item.kind {
+                    LoweredItemKind::Expression(statement) => {
+                        let value_type = body
+                            .expressions
+                            .get(statement.expression)
+                            .map(|expression| expression.value_type.clone())
+                            .unwrap_or(CheckedType::Error);
+                        assert_eq!(
+                            statement.drop_result,
+                            module.type_needs_drop(&value_type),
+                            "discarded value drop disagrees with checking"
+                        );
+                        saw_dropped_statement |= statement.drop_result;
+                        saw_live_statement |= !statement.drop_result;
+                    }
+                    LoweredItemKind::Assignment(assignment) => {
+                        let value_type = body
+                            .places
+                            .get(assignment.target)
+                            .map(|place| place.value_type.clone())
+                            .unwrap_or(CheckedType::Error);
+                        assert_eq!(
+                            assignment.drop_previous,
+                            module.type_needs_drop(&value_type),
+                            "assignment previous-value drop disagrees with checking"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            for (_, expression) in body.expressions.iter() {
+                if let LoweredExpressionKind::Loop(loop_) = &expression.kind {
+                    let body_result = body
+                        .blocks
+                        .get(loop_.body)
+                        .and_then(|block| block.result)
+                        .and_then(|result| body.expressions.get(result))
+                        .map(|result| result.value_type.clone());
+                    if let Some(body_result) = body_result {
+                        assert_eq!(
+                            loop_.drops_body_result,
+                            module.type_needs_drop(&body_result),
+                            "loop body-result drop disagrees with checking"
+                        );
+                    }
+                }
+            }
+            for (_, value) in body.callable_values.iter() {
+                if let Some(closure) = &value.closure {
+                    for capture in &closure.captures {
+                        assert_eq!(
+                            capture.drops_value,
+                            capture.owns_value && module.type_needs_drop(&capture.value_type),
+                            "capture drop disagrees with checking"
+                        );
+                        saw_capture = true;
+                    }
+                }
+            }
+            for (_, use_) in body.resource_uses.iter() {
+                if use_.kind == super::super::LoweredResourceUseKind::HiddenArgument {
+                    let borrow =
+                        use_.resource.mutable || !module.is_copy_type(&use_.resource.value_type);
+                    assert_eq!(
+                        use_.pass_mode == super::super::LoweredArgumentPassMode::BorrowedPointer,
+                        borrow,
+                        "resource pass mode disagrees with checking"
+                    );
+                }
+            }
+        }
+        assert!(
+            saw_dropped_statement,
+            "a move-only discarded value needs a drop"
+        );
+        assert!(saw_live_statement, "a copy discarded value does not");
+        assert!(saw_capture, "the closure capture check ran");
+    }
+
+    #[test]
+    fn call_step_layout_is_preserved() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "def combine: (I32, (I32, I32)) -> I32 = arguments => {\n",
+            "  let (first, (second, third)) = arguments\n",
+            "  first + second + third\n",
+            "}\n",
+            "combine (1, (2, 3))\n",
+        ));
+        materialize(&mut program);
+        let combine = function_id(&program, "combine");
+        let instance = program
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.template == combine)
+            .map(|(_, instance)| instance)
+            .expect("combine instance");
+        let body = instance.body.as_ref().unwrap();
+        let template_call = program
+            .calls
+            .iter()
+            .find(|(_, call)| call.origin.syntax == body.origin.syntax)
+            .map(|(_, call)| call);
+        if let Some(template_call) = template_call {
+            let body_calls = body.calls.iter().map(|(_, call)| call).collect::<Vec<_>>();
+            let body_call = body_calls
+                .iter()
+                .find(|call| call.origin.syntax == template_call.origin.syntax)
+                .expect("the call is cloned with its origin");
+            assert_eq!(body_call.arguments.len(), template_call.arguments.len());
+            assert_eq!(body_call.steps.len(), template_call.steps.len());
+            for (cloned, original) in body_call.steps.iter().zip(&template_call.steps) {
+                assert_eq!(
+                    std::mem::discriminant(cloned),
+                    std::mem::discriminant(original)
+                );
+            }
+            for (cloned, original) in body_call.arguments.iter().zip(&template_call.arguments) {
+                assert_eq!(cloned.slot, original.slot);
+                assert_eq!(cloned.temporary, original.temporary);
+            }
+        }
     }
 
     #[test]

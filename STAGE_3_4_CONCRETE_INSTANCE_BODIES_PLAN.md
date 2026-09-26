@@ -65,6 +65,8 @@ The instance body must expose concrete target variants rather than retaining a `
 
 **Gate:** Generic copy versus drop, captured move-only values, product defaults/spreads, effect-polymorphic resource calls, and coroutine cleanup/frame fixtures agree with legacy behavior.
 
+**Step 4 — complete.** `LoweredProgram::concrete_is_copy`/`concrete_needs_drop` mirror the checker's predicates over the owned trait/implementation catalogs and the coroutine/runtime type identities. Bodies recompute the fields whose value can change after substitution: discarded-expression drops, replaced-value drops, loop body-result drops, closure-capture ownership/drop flags, call-argument pass modes/temporaries/`drops_after_call`, hidden-resource pass modes from the concrete resource type, and function/`with` provider borrow/indirectness/storage. Ordered call steps, final ABI slots, source-level move/mutation decisions, and evaluation order stay fixed. A transition test compares every recomputed fact with `TypedModule::type_needs_drop`/`is_copy_type` for generic copy-vs-drop, assignment, loop, capture, and resource fixtures, and a layout test proves cloned call steps/slots/temporaries keep their template shapes.
+
 ### Step 5 — Validate, compare, and document the handoff
 
 - Add an exhaustive instance-body validator: local ID ownership and bounds; concrete checked values/effects; complete target/evidence references; dependency and artifact-edge agreement; capture and resource order; coroutine plan/await ownership and resume states; no template-only deferred variants. Run it after materialization inside `Lowerer::lower` without changing the legacy LLVM path.

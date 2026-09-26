@@ -1678,6 +1678,29 @@ impl LoweredProgram {
 }
 
 impl LoweredProgram {
+    /// Whether a fully substituted value type is `Copy`, using the owned trait
+    /// and implementation catalogs. A concrete instance has no declared
+    /// parameters, so only implementation-derived facts decide.
+    pub(crate) fn concrete_is_copy(&self, value_type: &CheckedType) -> bool {
+        TraitSelectionContext::new(self, Vec::new()).is_copy(value_type)
+    }
+
+    /// Whether a fully substituted value type needs a drop, mirroring
+    /// `TypedModule::type_needs_drop` with the owned trait catalogs and the
+    /// coroutine/runtime type identities.
+    pub(crate) fn concrete_needs_drop(&self, value_type: &CheckedType) -> bool {
+        let is_opaque = |candidate: Option<TypeId>| matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == candidate);
+        if is_opaque(self.semantic_ids.coroutine_type)
+            || is_opaque(self.semantic_ids.scheduler_type)
+            || is_opaque(self.semantic_ids.wait_type)
+            || is_opaque(self.semantic_ids.resolver_type)
+            || is_opaque(self.semantic_ids.completion_token_type)
+        {
+            return true;
+        }
+        concrete_type_needs_drop(self, value_type)
+    }
+
     /// Completes one declared trait bound for a concrete instance: substitutes
     /// the instance environment, then fills functional-dependency or inferred
     /// positions from the owned catalogs exactly as the resolver does for a
@@ -1745,6 +1768,37 @@ impl LoweredProgram {
             trait_id: substituted.trait_id,
             arguments: completed,
         })
+    }
+}
+
+fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) -> bool {
+    if program.semantic_ids.drop_trait.is_some_and(|drop_trait| {
+        program
+            .trait_implementations
+            .iter()
+            .any(|(_, implementation)| {
+                implementation.trait_id == drop_trait
+                    && implementation.arguments.len() == 1
+                    && implementation.arguments[0] == *value_type
+            })
+    }) {
+        return true;
+    }
+    match value_type {
+        CheckedType::CString => true,
+        CheckedType::Buffer(_) => false,
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| concrete_type_needs_drop(program, &element.value_type)),
+        CheckedType::Sum(sum) => sum
+            .alternatives
+            .iter()
+            .any(|alternative| concrete_type_needs_drop(program, alternative)),
+        CheckedType::Distinct { representation, .. } => {
+            concrete_type_needs_drop(program, representation)
+        }
+        _ => false,
     }
 }
 
