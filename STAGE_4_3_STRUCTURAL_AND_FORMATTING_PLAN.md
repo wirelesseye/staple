@@ -1,6 +1,6 @@
 # Stage 4.3 Plan: Structural Methods, Constructor Adapters, and Formatting
 
-**Status:** In progress. Steps 1-2 (plan schema, planned callees, binding pass, and constructor adapters) are complete. Stage 4.2 is complete through `5e7555e`: the fixed-point closure engine (`lower/artifact_closure.rs`), `ArtifactFamilyHooks` with placeholder `ProductionHooks`, closure use/edge storage, and `validate_artifact_closure` are in place. Stage 4.3 is the first substage to register real expanders.
+**Status:** In progress. Steps 1-3 (plan schema, planned callees, binding pass, constructor adapters, and the `Index`/`MutateIndex`/`IntoIterator`/`Iterator` bodies) are complete. Stage 4.2 is complete through `5e7555e`: the fixed-point closure engine (`lower/artifact_closure.rs`), `ArtifactFamilyHooks` with placeholder `ProductionHooks`, closure use/edge storage, and `validate_artifact_closure` are in place. Stage 4.3 is the first substage to register real expanders.
 
 ## Goal and boundary
 
@@ -192,6 +192,17 @@ These requests use Stage 4.4 key families before 4.4 lands. That works because t
   - an iterator whose item type needs coercion;
   - each kind in two generic instances.
 - **Gate:** every plan of these kinds is complete. `drop_previous` matches `type_needs_drop`. The `Done`/`Yield` indices match what legacy representation matching selects.
+
+**Step 3 notes (complete):**
+
+- **Dispatch.** `expand_structural_method` reads the request-time plan's completed `arguments` and `callable_type`. `Index`, `MutateIndex`, `IntoIterator`, and `Iterator` are expanded; `Debug`, `DerefIndex`, and `DerefMutateIndex` keep the marker until Step 4, so `ProductionHooks::expands_body` still reports only `ConstructorAdapter`.
+- **`Index`.** The same predicate as legacy (`product.homogeneous_element().is_none()`) selects `IndexSwitch` with per-element `(element, output)` coercions or `IndexLoad` with the homogeneous element, length, and output. `arguments[0]` is the target and `arguments[2]` the output.
+- **`MutateIndex`.** `MutateReplace` with the homogeneous element, product length, and `drop_previous` requested as `DropGlue(element)` exactly when `concrete_needs_drop` holds; the fixture also asserts the bound drop artifact's key.
+- **`IntoIterator`.** Records `source` (`arguments[0]`) and the derived `iterator` `(source, USize)`, cross-checked against `arguments[1]` so the completed functional-dependency position cannot silently disagree with legacy's rebuild.
+- **`Iterator`.** Records the inner `product` (from the iterator's first element), the `item` (`arguments[1]`), per-element coercions into `item`, the result sum, and the `Done`/`Yield` alternatives by matching `Distinct` representations (`iter` and `(item, iter)`). A missing or ambiguous match is a diagnostic instead of legacy's silent first match.
+- **Flattening observed.** Legacy `Index` receives its target whole (a nested product parameter is not split) and `next` receives `(P, USize)` flattened into two slots; the plan records logical types and Stage 5 re-derives flattening from `callable_type`.
+- **Fixtures.** `index_switches_heterogeneous_products_and_loads_homogeneous_ones`, `mutate_index_records_drop_previous_exactly_when_drop_is_needed` (comparing against legacy `TypedModule::type_needs_drop`), `iterator_plans_record_the_derived_shape_and_alternatives`, and `structural_kinds_expand_for_each_generic_instantiation` (each of the four kinds twice, once per instantiation).
+- **Gate:** met; the full workspace suite passes.
 
 ### Step 4: `DerefIndex`, `DerefMutateIndex`, and `Debug`
 

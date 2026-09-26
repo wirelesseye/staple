@@ -217,8 +217,16 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 };
                 super::structural_artifacts::expand_constructor_adapter(program, artifact, plan)
             }
-            ArtifactRequestKey::StructuralMethod(_)
-            | ArtifactRequestKey::DropGlue(_)
+            ArtifactRequestKey::StructuralMethod(_) => {
+                let LoweredArtifactPlan::StructuralMethod(plan) = plan else {
+                    return Err(vec![Diagnostic::new(
+                        record.origin.span.clone(),
+                        "structural-method artifact carries a mismatched plan".to_string(),
+                    )]);
+                };
+                super::structural_artifacts::expand_structural_method(program, artifact, plan)
+            }
+            ArtifactRequestKey::DropGlue(_)
             | ArtifactRequestKey::GcFinalizer(_)
             | ArtifactRequestKey::CoroutineCodes(_)
             | ArtifactRequestKey::ReactionRunner(_)
