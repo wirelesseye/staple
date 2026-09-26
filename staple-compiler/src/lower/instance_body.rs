@@ -86,6 +86,8 @@ pub(crate) enum LoweredBindingSite {
     FormattingConstructor(ExpressionId),
     /// The formatter finish function selected for a string template.
     FormattingFinish(ExpressionId),
+    /// The formatter write function a string template's literal parts use.
+    FormattingWrite(ExpressionId),
     /// An indexed assignment's `MutateIndex` dispatch.
     IndexedAssignment(ItemId),
     /// A derived binding's evaluator thunk.
@@ -1063,7 +1065,11 @@ impl<'a> BodyCloner<'a> {
                 );
             }
             LoweredExpressionKind::StringTemplate(original_template) => {
-                self.bind_formatting_helpers(new, &origin);
+                let has_literal = original_template
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, LoweredStringTemplatePart::Literal(_)));
+                self.bind_formatting_helpers(new, has_literal, &origin);
                 for (part_index, part) in original_template.parts.iter().enumerate() {
                     let LoweredStringTemplatePart::Interpolation(interpolation) = part else {
                         continue;
@@ -1649,7 +1655,8 @@ fn enclosing_request(
         .clone();
     let origin = match &record.request {
         LoweredInstanceRequest::Initializer { origin, .. }
-        | LoweredInstanceRequest::Dependency { origin, .. } => origin.clone(),
+        | LoweredInstanceRequest::Dependency { origin, .. }
+        | LoweredInstanceRequest::Artifact { origin, .. } => origin.clone(),
         LoweredInstanceRequest::EagerTemplate => record.origin.clone(),
     };
     ResolvedInstanceRequest {
@@ -2331,10 +2338,29 @@ impl<'a> BodyCloner<'a> {
         }
     }
 
-    fn bind_formatting_helpers(&mut self, template: ExpressionId, origin: &Origin) {
-        for (function, constructor) in [
-            (self.program.string_formatting.constructor, true),
-            (self.program.string_formatting.finish, false),
+    fn bind_formatting_helpers(
+        &mut self,
+        template: ExpressionId,
+        has_literal: bool,
+        origin: &Origin,
+    ) {
+        // Literal parts go through `Formatter.write`; a template with no
+        // literal part never calls it and records no instance edge.
+        let write = if has_literal {
+            self.program.string_formatting.write
+        } else {
+            None
+        };
+        for (function, site) in [
+            (
+                self.program.string_formatting.constructor,
+                LoweredBindingSite::FormattingConstructor(template),
+            ),
+            (write, LoweredBindingSite::FormattingWrite(template)),
+            (
+                self.program.string_formatting.finish,
+                LoweredBindingSite::FormattingFinish(template),
+            ),
         ] {
             let Some(function) = function else {
                 continue;
@@ -2350,11 +2376,6 @@ impl<'a> BodyCloner<'a> {
                     format!("formatter helper {} has no lowered template", function.0),
                 ));
                 continue;
-            };
-            let site = if constructor {
-                LoweredBindingSite::FormattingConstructor(template)
-            } else {
-                LoweredBindingSite::FormattingFinish(template)
             };
             if let Some(instance) = self.request_function(
                 function,
@@ -3950,6 +3971,9 @@ impl<'a> BodyValidator<'a> {
             LoweredBindingSite::FormattingFinish(_) => {
                 vec![LoweredInstanceDependencyKind::FormattingFinish]
             }
+            LoweredBindingSite::FormattingWrite(_) => {
+                vec![LoweredInstanceDependencyKind::FormattingWrite]
+            }
             LoweredBindingSite::DerivedEvaluator(_) => {
                 vec![LoweredInstanceDependencyKind::DerivedEvaluator]
             }
@@ -4019,6 +4043,7 @@ impl<'a> BodyValidator<'a> {
             LoweredBindingSite::Index(id)
             | LoweredBindingSite::FormattingConstructor(id)
             | LoweredBindingSite::FormattingFinish(id)
+            | LoweredBindingSite::FormattingWrite(id)
             | LoweredBindingSite::Interpolation { template: id, .. } => self
                 .body
                 .expressions
@@ -4056,6 +4081,7 @@ impl<'a> BodyValidator<'a> {
             LoweredBindingSite::Index(id)
             | LoweredBindingSite::FormattingConstructor(id)
             | LoweredBindingSite::FormattingFinish(id)
+            | LoweredBindingSite::FormattingWrite(id)
             | LoweredBindingSite::Interpolation { template: id, .. } => {
                 self.body.expressions.contains(id)
             }

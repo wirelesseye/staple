@@ -24,6 +24,7 @@ use crate::{
     TypeParameterId, TypedModule, contains_type_parameter, infer_type_parameters,
 };
 
+mod artifact_plan;
 mod graph_validation;
 mod instance_body;
 mod instance_resolution;
@@ -57,6 +58,14 @@ pub(crate) use instance_body::{
     LoweredInstanceParameter,
 };
 
+// Stage 4.1 artifact-plan API. Plans are attached to artifact requests and
+// filled by the substage that owns each artifact family.
+#[allow(unused_imports)] // Stage 4.2+ attach and validate these plans.
+pub(crate) use artifact_plan::{
+    ConstructorAdapterPlan, CoroutineCodesPlan, DropGluePlan, ExternAdapterPlan, GcFinalizerPlan,
+    LoweredArtifactPlan, ReactiveRunnerPlan, StructuralMethodPlan,
+};
+
 macro_rules! arena_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -81,7 +90,9 @@ macro_rules! arena_id {
     };
 }
 
-trait ArenaId: Copy {
+/// The shared dense-position accessor for lowered arena handles. Stage 4
+/// per-site artifact keys encode these positions, never source `SyntaxId`s.
+pub(crate) trait ArenaId: Copy {
     fn from_index(index: usize) -> Self;
     fn index(self) -> usize;
 }
@@ -1922,6 +1933,9 @@ pub(crate) struct LoweredSemanticIds {
     pub natural_trait: Option<TraitId>,
     pub sized_trait: Option<TraitId>,
     pub copy_trait: Option<TraitId>,
+    /// The checker-selected `Clone` trait, used by Stage 4's buffer-clone
+    /// artifact and evidence recording.
+    pub clone_trait: Option<TraitId>,
     pub drop_trait: Option<TraitId>,
     pub default_trait: Option<TraitId>,
     pub debug_trait: Option<TraitId>,
@@ -2042,6 +2056,7 @@ impl LoweredProgram {
             natural_trait: ids.natural_trait,
             sized_trait: ids.sized_trait,
             copy_trait: ids.copy_trait,
+            clone_trait: ids.clone_trait,
             drop_trait: ids.drop_trait,
             default_trait: ids.default_trait,
             debug_trait: ids.debug_trait,
@@ -11248,6 +11263,7 @@ fn validate_semantic_ids(
         ("natural", ids.natural_trait),
         ("sized", ids.sized_trait),
         ("copy", ids.copy_trait),
+        ("clone", ids.clone_trait),
         ("drop", ids.drop_trait),
         ("default", ids.default_trait),
         ("debug", ids.debug_trait),
@@ -14230,6 +14246,39 @@ mod tests {
         }
         for (_, await_) in program.awaits.iter() {
             lines.push(format!("await {await_:?}"));
+        }
+        for (_, instance) in program.instances.iter() {
+            lines.push(format!("function instance {instance:?}"));
+        }
+        for (_, artifact) in program.artifacts.iter() {
+            let key_family = program
+                .specializations
+                .artifact(artifact.ordinal)
+                .map(|key| key.family_name())
+                .unwrap_or("<missing>");
+            let plan_family = artifact
+                .plan
+                .as_ref()
+                .map(LoweredArtifactPlan::family_name)
+                .unwrap_or("<none>");
+            lines.push(format!(
+                "artifact {} key={key_family} plan={plan_family}",
+                artifact.name
+            ));
+            for dependency in &artifact.artifacts {
+                lines.push(format!(
+                    "  artifact edge {} {}",
+                    dependency.artifact.index(),
+                    dependency.kind.description()
+                ));
+            }
+            for dependency in &artifact.instances {
+                lines.push(format!(
+                    "  instance edge {} {}",
+                    dependency.instance.index(),
+                    dependency.kind.description()
+                ));
+            }
         }
         lines.push(format!("semantic ids {:?}", program.semantic_ids));
         lines.push(format!("string formatting {:?}", program.string_formatting));

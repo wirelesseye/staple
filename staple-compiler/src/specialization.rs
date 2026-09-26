@@ -14,8 +14,9 @@ use std::collections::{HashMap, HashSet};
 use staple_syntax::Diagnostic;
 
 use crate::{
-    CallSubstitutions, CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedResource,
-    CheckedStateEffect, CheckedType, FunctionId, LoweredCallableAdapter, Origin,
+    ArenaId, CallSubstitutions, CheckedEffectSet, CheckedFunctionType, CheckedMutation,
+    CheckedResource, CheckedStateEffect, CheckedType, FunctionId, InitializerId,
+    LoweredCallableAdapter, LoweredReactiveCallbackId, LoweredReactiveOperationId, Origin,
     StructuralTraitMethod, SymbolId, TraitEvidence, TraitId, TraitMethodId, TypeId,
     TypeParameterId,
 };
@@ -812,13 +813,119 @@ impl StructuralMethodKey {
     }
 }
 
-/// Generated-artifact request keys. The variant is the namespace: a
-/// constructor adapter and a structural method can never compare or hash
-/// equal, even when their numeric IDs coincide.
+/// The owning lowered record of a per-site generated artifact. Identity uses
+/// the owner's dense lowered position, never a display name or a hash, so the
+/// same lowered site in two instantiations of one generic template produces
+/// two distinct artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ArtifactSiteOwner {
+    /// A module initializer body.
+    Initializer(InitializerId),
+    /// A materialized source-function instance.
+    Instance(InstanceOrdinal),
+    /// A generated artifact's own plan, for nested artifacts.
+    Artifact(ArtifactOrdinal),
+}
+
+/// The identity of one drop-glue plan for a concrete value type. Type-keyed
+/// artifacts deduplicate structurally equal concrete types across owners.
+pub(crate) type DropGlueKey = CanonicalType;
+
+/// The identity of one garbage-collector finalizer body.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum GcFinalizerKey {
+    /// A managed `Ref` allocation's payload type.
+    Payload(CanonicalType),
+    /// A captured binding cell's value type.
+    Cell(CanonicalType),
+    /// A closure environment keyed by the closure's own function instance and
+    /// its ordered concrete capture types; `active_type_substitutions` never
+    /// participates in identity.
+    ClosureEnvironment {
+        closure: InstanceOrdinal,
+        captures: Vec<CanonicalType>,
+    },
+    /// A buffer keyed by its element type.
+    Buffer(CanonicalType),
+}
+
+/// The identity of one coroutine body's `resume`/`cleanup` pair, keyed by the
+/// body thunk's function instance. Two instantiations of one generic enclosing
+/// function get two pairs instead of aliasing through the body syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CoroutineCodesKey {
+    pub body: InstanceOrdinal,
+}
+
+/// The lowered site of a per-site artifact inside its owner. Sites are lowered
+/// arena positions, never source `SyntaxId`s; the owner disambiguates which
+/// body's arena a position indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ArtifactSite {
+    /// A lowered reactive callback record (reaction, batch, or `until`
+    /// predicate).
+    Callback(LoweredReactiveCallbackId),
+    /// A lowered reactive operation record (derived creation).
+    Operation(LoweredReactiveOperationId),
+    /// A site ordinal inside another artifact's own plan.
+    PlanLocal(usize),
+}
+
+/// The identity of one reactive runner body (reaction, `until`, or derived),
+/// keyed by the owning record and the lowered reactive-operation/binding site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ReactiveRunnerKey {
+    pub owner: ArtifactSiteOwner,
+    pub site: ArtifactSite,
+}
+
+/// The identity of one closure adapter for a non-variadic extern binding,
+/// keyed by the extern symbol and the concrete callable type it exposes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ExternAdapterKey {
+    pub symbol: SymbolId,
+    pub callable_type: CanonicalFunctionType,
+}
+
+/// Generated-artifact request keys. The variant is the namespace: keys from
+/// different families can never compare or hash equal, even when their numeric
+/// IDs coincide. `RuntimeHelper` is deliberately absent: runtime symbols have
+/// fixed names and no lowered bodies, so Stage 4 records them as a separate
+/// ordered requirement set rather than an artifact family.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ArtifactRequestKey {
     ConstructorAdapter(ConstructorAdapterKey),
     StructuralMethod(StructuralMethodKey),
+    DropGlue(DropGlueKey),
+    GcFinalizer(GcFinalizerKey),
+    CoroutineCodes(CoroutineCodesKey),
+    ReactionRunner(ReactiveRunnerKey),
+    UntilRunner(ReactiveRunnerKey),
+    DerivedRunner(ReactiveRunnerKey),
+    ExternAdapter(ExternAdapterKey),
+}
+
+impl ArtifactRequestKey {
+    /// The stable family name, used by validation, snapshots, and name plans.
+    /// The exhaustive match forces every new family to declare its identity.
+    pub(crate) fn family_name(&self) -> &'static str {
+        match self {
+            ArtifactRequestKey::ConstructorAdapter(_) => "constructor-adapter",
+            ArtifactRequestKey::StructuralMethod(_) => "structural-method",
+            ArtifactRequestKey::DropGlue(_) => "drop-glue",
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => "gc-finalizer-payload",
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(_)) => "gc-finalizer-cell",
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment { .. }) => {
+                "gc-finalizer-closure-environment"
+            }
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(_)) => "gc-finalizer-buffer",
+            ArtifactRequestKey::CoroutineCodes(_) => "coroutine-codes",
+            ArtifactRequestKey::ReactionRunner(_) => "reaction-runner",
+            ArtifactRequestKey::UntilRunner(_) => "until-runner",
+            ArtifactRequestKey::DerivedRunner(_) => "derived-runner",
+            ArtifactRequestKey::ExternAdapter(_) => "extern-adapter",
+        }
+    }
 }
 
 /// The complete namespace separation for Stage 3.3: source-function instances
@@ -831,13 +938,21 @@ pub(crate) enum SpecializationKey {
 
 /// Version byte of the canonical key encoding. Any change to the encoding
 /// rules requires bumping this constant so old and new bytes can never be
-/// silently compared as the same identity.
-pub(crate) const SPECIALIZATION_KEY_ENCODING_VERSION: u8 = 1;
+/// silently compared as the same identity. Stage 4.1 added the generated
+/// cleanup, coroutine, reactive-runner, and extern-adapter artifact families.
+pub(crate) const SPECIALIZATION_KEY_ENCODING_VERSION: u8 = 2;
 
 const INSTANCE_FAMILY_TAG: u8 = 0;
 const ARTIFACT_FAMILY_TAG: u8 = 1;
 const CONSTRUCTOR_ADAPTER_ARTIFACT_TAG: u8 = 0;
 const STRUCTURAL_METHOD_ARTIFACT_TAG: u8 = 1;
+const DROP_GLUE_ARTIFACT_TAG: u8 = 2;
+const GC_FINALIZER_ARTIFACT_TAG: u8 = 3;
+const COROUTINE_CODES_ARTIFACT_TAG: u8 = 4;
+const REACTION_RUNNER_ARTIFACT_TAG: u8 = 5;
+const UNTIL_RUNNER_ARTIFACT_TAG: u8 = 6;
+const DERIVED_RUNNER_ARTIFACT_TAG: u8 = 7;
+const EXTERN_ADAPTER_ARTIFACT_TAG: u8 = 8;
 
 impl CanonicalType {
     /// Appends the explicitly tagged canonical encoding of this value. The
@@ -1080,14 +1195,118 @@ impl StructuralMethodKey {
     }
 }
 
+impl ArtifactSiteOwner {
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            ArtifactSiteOwner::Initializer(initializer) => {
+                out.push(0);
+                encode_usize(initializer.index(), out);
+            }
+            ArtifactSiteOwner::Instance(instance) => {
+                out.push(1);
+                encode_usize(instance.index(), out);
+            }
+            ArtifactSiteOwner::Artifact(artifact) => {
+                out.push(2);
+                encode_usize(artifact.index(), out);
+            }
+        }
+    }
+}
+
+impl GcFinalizerKey {
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            GcFinalizerKey::Payload(payload) => {
+                out.push(0);
+                payload.encode(out);
+            }
+            GcFinalizerKey::Cell(value_type) => {
+                out.push(1);
+                value_type.encode(out);
+            }
+            GcFinalizerKey::ClosureEnvironment { closure, captures } => {
+                out.push(2);
+                encode_usize(closure.index(), out);
+                encode_types(captures, out);
+            }
+            GcFinalizerKey::Buffer(element) => {
+                out.push(3);
+                element.encode(out);
+            }
+        }
+    }
+}
+
+impl ArtifactSite {
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            ArtifactSite::Callback(callback) => {
+                out.push(0);
+                encode_usize(callback.index(), out);
+            }
+            ArtifactSite::Operation(operation) => {
+                out.push(1);
+                encode_usize(operation.index(), out);
+            }
+            ArtifactSite::PlanLocal(site) => {
+                out.push(2);
+                encode_usize(*site, out);
+            }
+        }
+    }
+}
+
+impl ReactiveRunnerKey {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.owner.encode(out);
+        self.site.encode(out);
+    }
+}
+
+impl ExternAdapterKey {
+    fn encode(&self, out: &mut Vec<u8>) {
+        encode_usize(self.symbol.0, out);
+        self.callable_type.encode(out);
+    }
+}
+
 impl ArtifactRequestKey {
     /// The versioned canonical byte encoding of this artifact key, with the
-    /// variant tag keeping constructor and structural namespaces distinct.
+    /// variant tag keeping every artifact family's namespace distinct.
     pub(crate) fn canonical_encoding(&self) -> Vec<u8> {
         let mut out = vec![SPECIALIZATION_KEY_ENCODING_VERSION, ARTIFACT_FAMILY_TAG];
         match self {
             ArtifactRequestKey::ConstructorAdapter(key) => key.encode(&mut out),
             ArtifactRequestKey::StructuralMethod(key) => key.encode(&mut out),
+            ArtifactRequestKey::DropGlue(value_type) => {
+                out.push(DROP_GLUE_ARTIFACT_TAG);
+                value_type.encode(&mut out);
+            }
+            ArtifactRequestKey::GcFinalizer(key) => {
+                out.push(GC_FINALIZER_ARTIFACT_TAG);
+                key.encode(&mut out);
+            }
+            ArtifactRequestKey::CoroutineCodes(key) => {
+                out.push(COROUTINE_CODES_ARTIFACT_TAG);
+                encode_usize(key.body.index(), &mut out);
+            }
+            ArtifactRequestKey::ReactionRunner(key) => {
+                out.push(REACTION_RUNNER_ARTIFACT_TAG);
+                key.encode(&mut out);
+            }
+            ArtifactRequestKey::UntilRunner(key) => {
+                out.push(UNTIL_RUNNER_ARTIFACT_TAG);
+                key.encode(&mut out);
+            }
+            ArtifactRequestKey::DerivedRunner(key) => {
+                out.push(DERIVED_RUNNER_ARTIFACT_TAG);
+                key.encode(&mut out);
+            }
+            ArtifactRequestKey::ExternAdapter(key) => {
+                out.push(EXTERN_ADAPTER_ARTIFACT_TAG);
+                key.encode(&mut out);
+            }
         }
         out
     }
@@ -1274,22 +1493,42 @@ impl SpecializationCatalog {
             names.push(name);
         }
         for (ordinal, key) in self.artifacts() {
-            let name = match key {
-                ArtifactRequestKey::ConstructorAdapter(_) => {
-                    format!("__staple_constructor_adapter_{}", ordinal.0)
-                }
-                ArtifactRequestKey::StructuralMethod(method) => format!(
-                    "__staple_structural_{}_{}",
-                    structural_name(method.structural),
-                    ordinal.0
-                ),
-            };
+            let name = format!("{}_{}", artifact_name_prefix(key), ordinal.0);
             if !seen.insert(name.clone()) {
                 return Err(SpecializationNameCollision { name });
             }
             names.push(name);
         }
         Ok(names)
+    }
+}
+
+/// The stable family prefix of one artifact's planned emitted symbol. Every
+/// prefix is distinct so an ordinal-based name can never alias another family.
+fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
+    match key {
+        ArtifactRequestKey::ConstructorAdapter(_) => "__staple_constructor_adapter".to_owned(),
+        ArtifactRequestKey::StructuralMethod(method) => {
+            format!("__staple_structural_{}", structural_name(method.structural))
+        }
+        ArtifactRequestKey::DropGlue(_) => "__staple_drop_glue".to_owned(),
+        ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => {
+            "__staple_gc_finalizer_payload".to_owned()
+        }
+        ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(_)) => {
+            "__staple_gc_finalizer_cell".to_owned()
+        }
+        ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment { .. }) => {
+            "__staple_gc_finalizer_closure".to_owned()
+        }
+        ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(_)) => {
+            "__staple_gc_finalizer_buffer".to_owned()
+        }
+        ArtifactRequestKey::CoroutineCodes(_) => "__staple_coroutine_codes".to_owned(),
+        ArtifactRequestKey::ReactionRunner(_) => "__staple_reaction_runner".to_owned(),
+        ArtifactRequestKey::UntilRunner(_) => "__staple_until_runner".to_owned(),
+        ArtifactRequestKey::DerivedRunner(_) => "__staple_derived_runner".to_owned(),
+        ArtifactRequestKey::ExternAdapter(_) => "__staple_extern_adapter".to_owned(),
     }
 }
 
@@ -2693,5 +2932,306 @@ mod tests {
             node_count(&shallow_key),
             "the expanded representation never enters the key"
         );
+    }
+
+    fn instance_owner(instance: usize) -> ArtifactSiteOwner {
+        ArtifactSiteOwner::Instance(InstanceOrdinal(instance))
+    }
+
+    fn callback_site(index: usize) -> ArtifactSite {
+        ArtifactSite::Callback(LoweredReactiveCallbackId::for_test(index))
+    }
+
+    fn stage_4_artifact_families() -> Vec<ArtifactRequestKey> {
+        let value_type = concrete(&nominal(7, "Node"));
+        let runner = ReactiveRunnerKey {
+            owner: instance_owner(0),
+            site: callback_site(0),
+        };
+        vec![
+            ArtifactRequestKey::ConstructorAdapter(
+                ConstructorAdapterKey::new(
+                    SymbolId(1),
+                    TypeId(7),
+                    LoweredCallableAdapter::Constructor,
+                    &simple_callable(),
+                    &requesting_origin(),
+                )
+                .expect("concrete constructor adapter"),
+            ),
+            structural_artifact_key(),
+            ArtifactRequestKey::DropGlue(value_type.clone()),
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(value_type.clone())),
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(value_type.clone())),
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment {
+                closure: InstanceOrdinal(0),
+                captures: vec![concrete(&CheckedType::I32)],
+            }),
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(value_type)),
+            ArtifactRequestKey::CoroutineCodes(CoroutineCodesKey {
+                body: InstanceOrdinal(0),
+            }),
+            ArtifactRequestKey::ReactionRunner(runner),
+            ArtifactRequestKey::UntilRunner(runner),
+            ArtifactRequestKey::DerivedRunner(runner),
+            ArtifactRequestKey::ExternAdapter(ExternAdapterKey {
+                symbol: SymbolId(1),
+                callable_type: canonical_function(&simple_callable()),
+            }),
+        ]
+    }
+
+    #[test]
+    fn stage_4_artifact_families_are_namespaced_and_encoded() {
+        let families = stage_4_artifact_families();
+        assert_eq!(
+            families.len(),
+            12,
+            "every Stage 4.1 artifact family has a representative key"
+        );
+        let mut names = HashSet::new();
+        let mut encodings = HashSet::new();
+        for key in &families {
+            assert!(
+                names.insert(key.family_name()),
+                "family name `{}` is unique",
+                key.family_name()
+            );
+            let encoding = key.canonical_encoding();
+            assert_eq!(
+                encoding[0], SPECIALIZATION_KEY_ENCODING_VERSION,
+                "every artifact encoding is versioned"
+            );
+            assert_eq!(
+                encoding[1], ARTIFACT_FAMILY_TAG,
+                "artifact encodings stay in the artifact family"
+            );
+            assert!(
+                encodings.insert(encoding),
+                "family `{}` has a distinct encoding",
+                key.family_name()
+            );
+        }
+        assert_eq!(
+            names.len(),
+            families.len(),
+            "no two key families share a family name"
+        );
+        let runners = [
+            ArtifactRequestKey::ReactionRunner(ReactiveRunnerKey {
+                owner: instance_owner(0),
+                site: callback_site(0),
+            }),
+            ArtifactRequestKey::UntilRunner(ReactiveRunnerKey {
+                owner: instance_owner(0),
+                site: callback_site(0),
+            }),
+            ArtifactRequestKey::DerivedRunner(ReactiveRunnerKey {
+                owner: instance_owner(0),
+                site: callback_site(0),
+            }),
+        ];
+        assert_ne!(
+            runners[0], runners[1],
+            "runner kinds never alias on the same owner and site"
+        );
+        assert_ne!(runners[1], runners[2]);
+        assert_ne!(
+            runners[0].canonical_encoding(),
+            runners[2].canonical_encoding()
+        );
+    }
+
+    #[test]
+    fn per_site_artifacts_separate_by_owner_and_site() {
+        let site = callback_site(0);
+        let first = ReactiveRunnerKey {
+            owner: instance_owner(0),
+            site,
+        };
+        let second = ReactiveRunnerKey {
+            owner: instance_owner(1),
+            site,
+        };
+        assert_ne!(
+            ArtifactRequestKey::ReactionRunner(first),
+            ArtifactRequestKey::ReactionRunner(second),
+            "the same lowered syntax in two instances produces two artifacts"
+        );
+        let owners = [
+            ArtifactSiteOwner::Initializer(InitializerId::for_test(0)),
+            ArtifactSiteOwner::Instance(InstanceOrdinal(0)),
+            ArtifactSiteOwner::Artifact(ArtifactOrdinal(0)),
+        ];
+        let mut encodings = HashSet::new();
+        for owner in owners {
+            let key = ArtifactRequestKey::UntilRunner(ReactiveRunnerKey { owner, site });
+            assert!(
+                encodings.insert(key.canonical_encoding()),
+                "each owner namespace separates"
+            );
+        }
+        assert_ne!(
+            ArtifactRequestKey::UntilRunner(first),
+            ArtifactRequestKey::UntilRunner(ReactiveRunnerKey {
+                owner: instance_owner(0),
+                site: callback_site(1),
+            }),
+            "distinct sites in one owner separate"
+        );
+        assert_eq!(
+            ArtifactRequestKey::UntilRunner(first),
+            ArtifactRequestKey::UntilRunner(ReactiveRunnerKey {
+                owner: instance_owner(0),
+                site: callback_site(0),
+            })
+        );
+
+        let captures = vec![concrete(&CheckedType::I32)];
+        assert_ne!(
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment {
+                closure: InstanceOrdinal(0),
+                captures: captures.clone(),
+            }),
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment {
+                closure: InstanceOrdinal(1),
+                captures,
+            }),
+            "closure finalizers separate by closure instance for identical captures"
+        );
+        let mut coroutine_encodings = HashSet::new();
+        for body in 0..2 {
+            coroutine_encodings.insert(
+                ArtifactRequestKey::CoroutineCodes(CoroutineCodesKey {
+                    body: InstanceOrdinal(body),
+                })
+                .canonical_encoding(),
+            );
+        }
+        assert_eq!(coroutine_encodings.len(), 2);
+    }
+
+    #[test]
+    fn type_keyed_artifacts_deduplicate_structurally_equal_types() {
+        let first = ArtifactRequestKey::DropGlue(concrete(&nominal(7, "Node")));
+        let display_alias = ArtifactRequestKey::DropGlue(concrete(&nominal(7, "AliasName")));
+        assert_eq!(
+            first, display_alias,
+            "display names never separate type-keyed artifacts"
+        );
+        assert_eq!(
+            first.canonical_encoding(),
+            display_alias.canonical_encoding()
+        );
+        assert_ne!(
+            first,
+            ArtifactRequestKey::DropGlue(concrete(&nominal(8, "Node")))
+        );
+        assert_ne!(
+            first,
+            ArtifactRequestKey::DropGlue(concrete(&CheckedType::I64))
+        );
+        assert_ne!(
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(concrete(&CheckedType::I32))),
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(concrete(&CheckedType::I32))),
+            "finalizer subkinds never deduplicate across kinds"
+        );
+        assert_ne!(
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(concrete(&CheckedType::I32))),
+            ArtifactRequestKey::DropGlue(concrete(&CheckedType::I32)),
+            "the family tag separates equally typed finalizer and drop glue"
+        );
+        let adapter = ArtifactRequestKey::ExternAdapter(ExternAdapterKey {
+            symbol: SymbolId(3),
+            callable_type: canonical_function(&simple_callable()),
+        });
+        assert_eq!(
+            adapter,
+            ArtifactRequestKey::ExternAdapter(ExternAdapterKey {
+                symbol: SymbolId(3),
+                callable_type: canonical_function(&simple_callable()),
+            })
+        );
+        assert_ne!(
+            adapter,
+            ArtifactRequestKey::ExternAdapter(ExternAdapterKey {
+                symbol: SymbolId(4),
+                callable_type: canonical_function(&simple_callable()),
+            })
+        );
+    }
+
+    #[test]
+    fn every_artifact_key_family_has_a_matching_placeholder_plan() {
+        use crate::{
+            ConstructorAdapterPlan, CoroutineCodesPlan, DropGluePlan, ExternAdapterPlan,
+            GcFinalizerPlan, LoweredArtifactPlan, ReactiveRunnerPlan, StructuralMethodPlan,
+        };
+        let keys = stage_4_artifact_families();
+        let plans = vec![
+            LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
+                callable_type: simple_callable(),
+            }),
+            LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
+                structural: StructuralTraitMethod::Index,
+            }),
+            LoweredArtifactPlan::DropGlue(DropGluePlan {
+                value_type: CheckedType::I32,
+            }),
+            LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload {
+                value_type: CheckedType::I32,
+            }),
+            LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Cell {
+                value_type: CheckedType::I32,
+            }),
+            LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::ClosureEnvironment {
+                closure: FunctionId(1),
+                captures: vec![CheckedType::I32],
+            }),
+            LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Buffer {
+                element: CheckedType::I32,
+            }),
+            LoweredArtifactPlan::CoroutineCodes(CoroutineCodesPlan {
+                body: FunctionId(1),
+            }),
+            LoweredArtifactPlan::ReactionRunner(ReactiveRunnerPlan {
+                site: callback_site(0),
+            }),
+            LoweredArtifactPlan::UntilRunner(ReactiveRunnerPlan {
+                site: callback_site(0),
+            }),
+            LoweredArtifactPlan::DerivedRunner(ReactiveRunnerPlan {
+                site: callback_site(0),
+            }),
+            LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
+                symbol: SymbolId(1),
+                callable_type: simple_callable(),
+            }),
+        ];
+        assert_eq!(plans.len(), keys.len());
+        let mut plan_names = HashSet::new();
+        for plan in &plans {
+            assert!(
+                plan_names.insert(plan.family_name()),
+                "plan family `{}` is unique",
+                plan.family_name()
+            );
+        }
+        let key_names = keys
+            .iter()
+            .map(ArtifactRequestKey::family_name)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            plan_names, key_names,
+            "the placeholder plan families mirror the key families exactly"
+        );
+        for (key, plan) in keys.iter().zip(&plans) {
+            assert!(
+                plan.matches_key(key),
+                "plan family `{}` matches key family `{}`",
+                plan.family_name(),
+                key.family_name()
+            );
+        }
     }
 }

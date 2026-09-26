@@ -30,14 +30,15 @@ use crate::{
 
 use super::instance_resolution::{InstanceResolutionRequest, InstanceResolutionTarget};
 use super::{
-    Arena, ArenaId, BlockId, CallSubstitutions, ExpressionId, FunctionInstanceId, InitializerId,
-    ItemId, LoweredArtifactRequestId, LoweredAwaitId, LoweredCall, LoweredCallEnvironment,
-    LoweredCallId, LoweredCallStep, LoweredCallableAdapter, LoweredCallableTarget,
-    LoweredCallableValueId, LoweredClosureEnvironment, LoweredCoroId, LoweredCoroutinePlanId,
-    LoweredExpressionKind, LoweredItemKind, LoweredPlaceKind, LoweredProductStep, LoweredProgram,
+    Arena, ArenaId, BlockId, CallSubstitutions, ConstructorAdapterPlan, ExpressionId,
+    FunctionInstanceId, InitializerId, ItemId, LoweredArtifactPlan, LoweredArtifactRequestId,
+    LoweredAwaitId, LoweredCall, LoweredCallEnvironment, LoweredCallId, LoweredCallStep,
+    LoweredCallableAdapter, LoweredCallableTarget, LoweredCallableValueId,
+    LoweredClosureEnvironment, LoweredCoroId, LoweredCoroutinePlanId, LoweredExpressionKind,
+    LoweredItemKind, LoweredPlaceKind, LoweredProductStep, LoweredProgram,
     LoweredReactiveCallbackId, LoweredReactiveOperationId, LoweredReactiveOperationKind,
     LoweredStringTemplatePart, LoweredWithId, Origin, PatternId, PlaceId, RelevantParameters,
-    ResolvedInstanceRequest, SubstitutionEnvironment, TraitEvidence,
+    ResolvedInstanceRequest, StructuralMethodPlan, SubstitutionEnvironment, TraitEvidence,
 };
 
 /// One reachable function instance in first-discovery order.
@@ -86,6 +87,12 @@ pub(crate) enum LoweredInstanceRequest {
         kind: LoweredInstanceDependencyKind,
         origin: Origin,
     },
+    /// First requested by a generated artifact's plan (Stage 4.2 closure).
+    Artifact {
+        artifact: LoweredArtifactRequestId,
+        kind: LoweredInstanceDependencyKind,
+        origin: Origin,
+    },
 }
 
 /// The lowered-record route that requested a function instance.
@@ -97,6 +104,8 @@ pub(crate) enum LoweredInstanceDependencyKind {
     FormattingConstructor,
     /// The formatter finish function selected for a string template.
     FormattingFinish,
+    /// The formatter write function a string template's literal parts use.
+    FormattingWrite,
     /// A function-valued name, selector, or closure construction.
     CallableValue,
     /// An implicit thunk adapted into a call argument.
@@ -118,6 +127,7 @@ impl LoweredInstanceDependencyKind {
             LoweredInstanceDependencyKind::DirectCall => "direct-call",
             LoweredInstanceDependencyKind::FormattingConstructor => "formatting-constructor",
             LoweredInstanceDependencyKind::FormattingFinish => "formatting-finish",
+            LoweredInstanceDependencyKind::FormattingWrite => "formatting-write",
             LoweredInstanceDependencyKind::CallableValue => "callable-value",
             LoweredInstanceDependencyKind::ImplicitThunkArgument => "implicit-thunk-argument",
             LoweredInstanceDependencyKind::TraitMethod => "trait-method",
@@ -136,7 +146,10 @@ pub(crate) struct LoweredInstanceDependency {
     pub kind: LoweredInstanceDependencyKind,
 }
 
-/// One constructor-adapter or structural-method request.
+/// One generated-artifact request with its owned plan and its own outgoing
+/// edges. Edges may originate from an artifact when a plan requests another
+/// artifact (nested drop glue, finalizers) or a source-function instance
+/// (selected trait methods).
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredArtifactRequest {
     pub ordinal: ArtifactOrdinal,
@@ -145,6 +158,13 @@ pub(crate) struct LoweredArtifactRequest {
     /// The requesting site.
     pub origin: Origin,
     pub request: LoweredArtifactRequestRoot,
+    /// The owned plan filling this artifact's generated body. Stage 4.2+ fills
+    /// the variant that matches the artifact's key family.
+    pub plan: Option<LoweredArtifactPlan>,
+    /// Artifact-to-artifact edges in the order the plan requested them.
+    pub artifacts: Vec<LoweredArtifactDependency>,
+    /// Artifact-to-instance edges in the order the plan requested them.
+    pub instances: Vec<LoweredInstanceDependency>,
 }
 
 /// Who first requested a generated artifact.
@@ -159,15 +179,58 @@ pub(crate) enum LoweredArtifactRequestRoot {
         kind: LoweredArtifactDependencyKind,
         origin: Origin,
     },
+    /// Another artifact's plan requested this one (Stage 4.2 closure).
+    Artifact {
+        artifact: LoweredArtifactRequestId,
+        kind: LoweredArtifactDependencyKind,
+        origin: Origin,
+    },
 }
 
-/// The lowered-record route that requested a generated artifact.
+/// The lowered-record route that requested a generated artifact. Every
+/// artifact family has a kind so artifact-owned edges stay self-describing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LoweredArtifactDependencyKind {
     /// A constructor value adapter.
     ConstructorAdapter,
     /// A compiler-generated structural trait method.
     StructuralMethod,
+    /// A generated drop-glue plan.
+    DropGlue,
+    /// A generated garbage-collector finalizer.
+    GcFinalizer,
+    /// A coroutine body's generated resume/cleanup pair.
+    CoroutineCodes,
+    /// A generated reaction runner.
+    ReactionRunner,
+    /// A generated `until` runner.
+    UntilRunner,
+    /// A generated derived-binding runner.
+    DerivedRunner,
+    /// A generated extern closure adapter.
+    ExternAdapter,
+}
+
+impl LoweredArtifactDependencyKind {
+    /// Stable description for diagnostics and snapshots.
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            LoweredArtifactDependencyKind::ConstructorAdapter => "constructor-adapter",
+            LoweredArtifactDependencyKind::StructuralMethod => "structural-method",
+            LoweredArtifactDependencyKind::DropGlue => "drop-glue",
+            LoweredArtifactDependencyKind::GcFinalizer => "gc-finalizer",
+            LoweredArtifactDependencyKind::CoroutineCodes => "coroutine-codes",
+            LoweredArtifactDependencyKind::ReactionRunner => "reaction-runner",
+            LoweredArtifactDependencyKind::UntilRunner => "until-runner",
+            LoweredArtifactDependencyKind::DerivedRunner => "derived-runner",
+            LoweredArtifactDependencyKind::ExternAdapter => "extern-adapter",
+        }
+    }
+
+    /// The matching artifact key family name.
+    pub(crate) fn family_name(self) -> &'static str {
+        self.description()
+    }
 }
 
 /// One artifact reference recorded on its requesting instance.
@@ -207,11 +270,13 @@ pub(super) fn build(program: &LoweredProgram) -> Result<SpecializationParts, Vec
     WorklistBuilder::new(program).build()
 }
 
-/// The record that requested an instance or artifact.
+/// The record that requested an instance or artifact. Artifacts own requests
+/// once the Stage 4.2 closure loop expands their plans.
 #[derive(Debug, Clone, Copy)]
 enum TraversalOwner {
     Initializer(InitializerId),
     Instance(FunctionInstanceId),
+    Artifact(LoweredArtifactRequestId),
 }
 
 impl TraversalOwner {
@@ -221,6 +286,33 @@ impl TraversalOwner {
                 LoweredHelperRequester::Initializer(initializer)
             }
             TraversalOwner::Instance(instance) => LoweredHelperRequester::Instance(instance),
+            TraversalOwner::Artifact(_) => {
+                unreachable!("generated artifact plans never request compiler helpers")
+            }
+        }
+    }
+
+    fn instance_request(
+        self,
+        kind: LoweredInstanceDependencyKind,
+        origin: &Origin,
+    ) -> LoweredInstanceRequest {
+        match self {
+            TraversalOwner::Initializer(initializer) => LoweredInstanceRequest::Initializer {
+                initializer,
+                kind,
+                origin: origin.clone(),
+            },
+            TraversalOwner::Instance(instance) => LoweredInstanceRequest::Dependency {
+                owner: instance,
+                kind,
+                origin: origin.clone(),
+            },
+            TraversalOwner::Artifact(artifact) => LoweredInstanceRequest::Artifact {
+                artifact,
+                kind,
+                origin: origin.clone(),
+            },
         }
     }
 }
@@ -401,7 +493,8 @@ impl<'a> WorklistBuilder<'a> {
             .clone();
         let origin = match &record.request {
             LoweredInstanceRequest::Initializer { origin, .. }
-            | LoweredInstanceRequest::Dependency { origin, .. } => origin.clone(),
+            | LoweredInstanceRequest::Dependency { origin, .. }
+            | LoweredInstanceRequest::Artifact { origin, .. } => origin.clone(),
             LoweredInstanceRequest::EagerTemplate => record.origin.clone(),
         };
         ResolvedInstanceRequest {
@@ -469,14 +562,23 @@ impl<'a> WorklistBuilder<'a> {
         origin: &Origin,
         kind: LoweredInstanceDependencyKind,
     ) {
-        if let TraversalOwner::Instance(owner) = owner
-            && let Some(record) = self.instances.get_mut(owner)
-        {
-            record.dependencies.push(LoweredInstanceDependency {
-                instance,
-                origin: origin.clone(),
-                kind,
-            });
+        let edge = LoweredInstanceDependency {
+            instance,
+            origin: origin.clone(),
+            kind,
+        };
+        match owner {
+            TraversalOwner::Instance(owner) => {
+                if let Some(record) = self.instances.get_mut(owner) {
+                    record.dependencies.push(edge);
+                }
+            }
+            TraversalOwner::Artifact(owner) => {
+                if let Some(record) = self.artifacts.get_mut(owner) {
+                    record.instances.push(edge);
+                }
+            }
+            TraversalOwner::Initializer(_) => {}
         }
     }
 
@@ -516,20 +618,7 @@ impl<'a> WorklistBuilder<'a> {
         };
         match self.program.resolve_instance_request(&request) {
             Ok(resolved) => {
-                let request_root = match owner {
-                    TraversalOwner::Initializer(initializer) => {
-                        LoweredInstanceRequest::Initializer {
-                            initializer,
-                            kind,
-                            origin: origin.clone(),
-                        }
-                    }
-                    TraversalOwner::Instance(instance) => LoweredInstanceRequest::Dependency {
-                        owner: instance,
-                        kind,
-                        origin: origin.clone(),
-                    },
-                };
+                let request_root = owner.instance_request(kind, origin);
                 let id = self.intern_resolved(resolved, request_root);
                 self.record_instance_edge(owner, id, origin, kind);
                 Some(id)
@@ -544,6 +633,7 @@ impl<'a> WorklistBuilder<'a> {
     fn request_artifact(
         &mut self,
         key: ArtifactRequestKey,
+        plan: Option<LoweredArtifactPlan>,
         origin: &Origin,
         owner: TraversalOwner,
         kind: LoweredArtifactDependencyKind,
@@ -562,22 +652,39 @@ impl<'a> WorklistBuilder<'a> {
                     kind,
                     origin: origin.clone(),
                 },
+                TraversalOwner::Artifact(artifact) => LoweredArtifactRequestRoot::Artifact {
+                    artifact,
+                    kind,
+                    origin: origin.clone(),
+                },
             };
             self.artifacts.push(LoweredArtifactRequest {
                 ordinal,
                 name: String::new(),
                 origin: origin.clone(),
                 request,
+                plan,
+                artifacts: Vec::new(),
+                instances: Vec::new(),
             });
         }
-        if let TraversalOwner::Instance(instance) = owner
-            && let Some(record) = self.instances.get_mut(instance)
-        {
-            record.artifacts.push(LoweredArtifactDependency {
-                artifact: ordinal,
-                origin: origin.clone(),
-                kind,
-            });
+        let edge = LoweredArtifactDependency {
+            artifact: ordinal,
+            origin: origin.clone(),
+            kind,
+        };
+        match owner {
+            TraversalOwner::Instance(instance) => {
+                if let Some(record) = self.instances.get_mut(instance) {
+                    record.artifacts.push(edge);
+                }
+            }
+            TraversalOwner::Artifact(artifact) => {
+                if let Some(record) = self.artifacts.get_mut(artifact) {
+                    record.artifacts.push(edge);
+                }
+            }
+            TraversalOwner::Initializer(_) => {}
         }
     }
 
@@ -805,6 +912,21 @@ impl<'a> WorklistBuilder<'a> {
                     enclosing,
                     LoweredInstanceDependencyKind::FormattingConstructor,
                 );
+                // Literal parts are written through `Formatter.write`; a
+                // template with no literal part never calls it.
+                if template
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, LoweredStringTemplatePart::Literal(_)))
+                {
+                    self.request_formatting_helper(
+                        program.string_formatting.write,
+                        &expression.origin,
+                        owner,
+                        enclosing,
+                        LoweredInstanceDependencyKind::FormattingWrite,
+                    );
+                }
                 for part in &template.parts {
                     let LoweredStringTemplatePart::Interpolation(interpolation) = part else {
                         continue;
@@ -1260,12 +1382,18 @@ impl<'a> WorklistBuilder<'a> {
             }
         };
         match ConstructorAdapterKey::new(symbol, type_id, adapter, &concrete, origin) {
-            Ok(key) => self.request_artifact(
-                ArtifactRequestKey::ConstructorAdapter(key),
-                origin,
-                owner,
-                LoweredArtifactDependencyKind::ConstructorAdapter,
-            ),
+            Ok(key) => {
+                let plan = LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
+                    callable_type: concrete,
+                });
+                self.request_artifact(
+                    ArtifactRequestKey::ConstructorAdapter(key),
+                    Some(plan),
+                    origin,
+                    owner,
+                    LoweredArtifactDependencyKind::ConstructorAdapter,
+                );
+            }
             Err(diagnostic) => self.diagnostics.push(diagnostic),
         }
     }
@@ -1385,12 +1513,18 @@ impl<'a> WorklistBuilder<'a> {
                     &callable_type,
                     origin,
                 ) {
-                    Ok(key) => self.request_artifact(
-                        ArtifactRequestKey::StructuralMethod(key),
-                        origin,
-                        owner,
-                        LoweredArtifactDependencyKind::StructuralMethod,
-                    ),
+                    Ok(key) => {
+                        let plan = LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
+                            structural: *structural,
+                        });
+                        self.request_artifact(
+                            ArtifactRequestKey::StructuralMethod(key),
+                            Some(plan),
+                            origin,
+                            owner,
+                            LoweredArtifactDependencyKind::StructuralMethod,
+                        );
+                    }
                     Err(diagnostic) => self.diagnostics.push(diagnostic),
                 }
             }
@@ -1707,6 +1841,18 @@ impl LoweredProgram {
                     ));
                 }
             }
+            if let LoweredInstanceRequest::Artifact { artifact, .. } = &instance.request
+                && !self.artifacts.contains(*artifact)
+            {
+                diagnostics.push(Diagnostic::new(
+                    instance.origin.span.clone(),
+                    format!(
+                        "function instance {} was requested by missing artifact {}",
+                        id.index(),
+                        artifact.index()
+                    ),
+                ));
+            }
         }
         for (id, artifact) in self.artifacts.iter() {
             if artifact.ordinal.index() != id.index() {
@@ -1719,18 +1865,73 @@ impl LoweredProgram {
                     ),
                 ));
             }
-            if !matches!(
-                self.specializations.artifact(artifact.ordinal),
-                Some(ArtifactRequestKey::ConstructorAdapter(_))
-                    | Some(ArtifactRequestKey::StructuralMethod(_))
-            ) {
-                diagnostics.push(Diagnostic::new(
+            match self.specializations.artifact(artifact.ordinal) {
+                Some(key) => {
+                    if let Some(plan) = &artifact.plan {
+                        if !plan.matches_key(key) {
+                            diagnostics.push(Diagnostic::new(
+                                artifact.origin.span.clone(),
+                                format!(
+                                    "artifact {} plan family `{}` does not match its key family `{}`",
+                                    id.index(),
+                                    plan.family_name(),
+                                    key.family_name()
+                                ),
+                            ));
+                        }
+                    } else {
+                        diagnostics.push(Diagnostic::new(
+                            artifact.origin.span.clone(),
+                            format!("artifact {} has no owned plan", id.index()),
+                        ));
+                    }
+                }
+                None => diagnostics.push(Diagnostic::new(
                     artifact.origin.span.clone(),
                     format!(
                         "artifact {} does not agree with its specialization key",
                         id.index()
                     ),
+                )),
+            }
+            if let LoweredArtifactRequestRoot::Artifact {
+                artifact: requester,
+                ..
+            } = &artifact.request
+                && !self.artifacts.contains(*requester)
+            {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    format!(
+                        "artifact {} was requested by missing artifact {}",
+                        id.index(),
+                        requester.index()
+                    ),
                 ));
+            }
+            for dependency in &artifact.artifacts {
+                if dependency.artifact.index() >= self.artifacts.len() {
+                    diagnostics.push(Diagnostic::new(
+                        dependency.origin.span.clone(),
+                        format!(
+                            "artifact {} references missing artifact {}",
+                            id.index(),
+                            dependency.artifact.index()
+                        ),
+                    ));
+                }
+            }
+            for dependency in &artifact.instances {
+                if !self.instances.contains(dependency.instance) {
+                    diagnostics.push(Diagnostic::new(
+                        dependency.origin.span.clone(),
+                        format!(
+                            "artifact {} references missing instance {}",
+                            id.index(),
+                            dependency.instance.index()
+                        ),
+                    ));
+                }
             }
             let name_index = self.instances.len() + id.index();
             if names.get(name_index) != Some(&artifact.name) {
@@ -1866,7 +2067,16 @@ mod tests {
             }
         }
         for (id, artifact) in program.artifacts.iter() {
-            out.push_str(&format!("artifact {} {}\n", id.index(), artifact.name));
+            out.push_str(&format!(
+                "artifact {} {} plan={}\n",
+                id.index(),
+                artifact.name,
+                artifact
+                    .plan
+                    .as_ref()
+                    .map(LoweredArtifactPlan::family_name)
+                    .unwrap_or("<none>")
+            ));
         }
         out
     }
@@ -2060,6 +2270,10 @@ mod tests {
             (
                 program.string_formatting.constructor.unwrap(),
                 LoweredInstanceDependencyKind::FormattingConstructor,
+            ),
+            (
+                program.string_formatting.write.unwrap(),
+                LoweredInstanceDependencyKind::FormattingWrite,
             ),
             (
                 program.string_formatting.finish.unwrap(),
@@ -2311,6 +2525,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn artifact_requests_carry_family_matching_plans() {
+        let (_, program) = lower(concat!(
+            "type Point = ctor (I32, I32)\n",
+            "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+            "let p = (1, 2)\n",
+            "let text = \"${p:?}\"\n",
+        ));
+        let mut families = HashSet::new();
+        for (id, artifact) in program.artifacts.iter() {
+            let key = program
+                .specializations
+                .artifact(artifact.ordinal)
+                .expect("artifact has a catalog key");
+            let plan = artifact
+                .plan
+                .as_ref()
+                .unwrap_or_else(|| panic!("artifact {id:?} has no owned plan"));
+            assert!(
+                plan.matches_key(key),
+                "plan `{}` does not match key `{}`",
+                plan.family_name(),
+                key.family_name()
+            );
+            assert!(
+                artifact.artifacts.is_empty() && artifact.instances.is_empty(),
+                "Stage 4.1 artifacts carry no outgoing edges yet"
+            );
+            families.insert(key.family_name());
+        }
+        assert!(
+            families.contains("constructor-adapter"),
+            "the constructor adapter is requested with its plan"
+        );
+        assert!(
+            families.contains("structural-method"),
+            "the structural debug method is requested with its plan"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** Not started. Stage 3 is complete at `1b347a8`: `LoweredProgram` owns the reachable `LoweredFunctionInstance` graph with materialized concrete bodies, typed constructor-adapter and structural-method artifact *requests* (keys only, no bodies), and a list of unresolved `LoweredCompilerHelperRequest`s. The legacy backend still emits every generated function itself, discovering most of them deep inside LLVM emission through `TypedModule` queries, name lookups, `Debug`-string cache keys, and syntax-ID-keyed names.
+**Status:** Stage 4.1 is complete (inventory, artifact key families, dependency schema, and placeholder plans). Stage 3 completed at `1b347a8`: `LoweredProgram` owns the reachable `LoweredFunctionInstance` graph with materialized concrete bodies, typed constructor-adapter and structural-method artifact *requests* (keys only, no bodies), and a list of unresolved `LoweredCompilerHelperRequest`s. The legacy backend still emits every generated function itself, discovering most of them deep inside LLVM emission through `TypedModule` queries, name lookups, `Debug`-string cache keys, and syntax-ID-keyed names. Stage 4.2 (fixed-point closure) is next.
 
 Stage 4 makes the lowered catalog **closed**: before LLVM runs, every function the backend will emit exists as a lowered source-function instance or as a typed, keyed, deduplicated generated artifact with an owned lowered plan, and every reference from a body or from another artifact resolves to one catalog entry. Stage 4 does not switch the backend to the catalog (that is Stage 5), it does not change the emitted ABI, and it adds no new source syntax or runtime polymorphism. The legacy backend and the `LoweredModule::typed` bridge stay operational; the transition comparison in Stage 4.7 proves the new catalog covers everything legacy emission generates.
 
@@ -19,7 +19,7 @@ Line references below are against `1b347a8` and will drift; re-locate them by fu
 
 ## Hidden Discovery Paths to Relocate
 
-This is the starting inventory; Stage 4.1 must verify and complete it (every `add_function` and every function-valued cache in `codegen.rs`).
+This is the starting inventory. Stage 4.1 verified and completed it (every `add_function` and every function-valued cache in `codegen.rs`); the frozen, enumerated matrix is in the Stage 4.1 notes below, including the negative matrix and the recorded schema decisions. The table above is kept as the discovery summary.
 
 | Backend path | Current key / name | Hidden dependencies discovered during emission | Target family |
 | --- | --- | --- | --- |
@@ -41,7 +41,7 @@ This is the starting inventory; Stage 4.1 must verify and complete it (every `ad
 
 Known latent defects this inventory exposes (fix only as far as Stage 4 needs; do not change legacy emission): per-syntax-ID runner and coroutine names alias across generic instances, and `compile_drop_value` silently depends on the `Drop` method already being an eager root.
 
-## Stage 4.1 - Inventory, Schema, and Key Families
+## Stage 4.1 - Inventory, Schema, and Key Families (Complete)
 
 - Freeze the route matrix above in a Stage 4.1 notes section: read every `add_function`, every `get_function(..).unwrap_or_else(add_function)`, every function-valued `HashMap` on `ModuleEmitter`, and every `trait_method_code`/`ensure_function_specialization` call reached from inside a generated body. For each, record trigger, current key, hidden dependencies, the owned lowered record that supplies its inputs, and the target artifact family. Add a negative matrix for what stays backend-local (pure LLVM intrinsics and target layout computations).
 - Extend `ArtifactRequestKey` with the new families (`DropGlue`, `GcFinalizer { Payload | Cell | ClosureEnvironment | Buffer }`, `CoroutineResume`/`CoroutineCleanup` (or one `CoroutineCodes` pair key), `ReactionRunner`, `UntilRunner`, `DerivedRunner`, `ExternAdapter`) and decide whether `RuntimeHelper` is an artifact family or a separate requirement set (recommendation: a separate ordered `LoweredRuntimeRequirements` set, since those symbols have fixed names and no bodies Stage 4 plans). Extend the canonical encoding, family tags, `planned_names` (stable, family-prefixed, ordinal-based), and name-collision checks. Bump the encoding version.
@@ -50,6 +50,63 @@ Known latent defects this inventory exposes (fix only as far as Stage 4 needs; d
 - Add the `LoweredArtifactPlan` enum with one placeholder variant per family and exhaustive matches in validation/snapshot code, so every later substage fills a variant rather than adding an untyped fallback.
 
 **Gate:** Every backend-generated function and name-based selection is in the matrix with a target family or an explicit negative reason; key tests prove namespace separation among all families, per-instance separation of per-site artifacts (same syntax, two instances → two keys), dedup of structurally equal type-keyed artifacts, and encoding stability.
+
+### Stage 4.1 Notes: Frozen Backend Route Matrix
+
+Read from `codegen.rs` at `df249ce`; line numbers drift, function names are authoritative. "Owned inputs" is the lowered record the Stage 4 plan consumes and "family" is the target `ArtifactRequestKey` variant or the source-function instance namespace. Every function-valued `ModuleEmitter` map and every `add_function`/`get_function(..).unwrap_or_else(add_function)` site was walked.
+
+#### Positive matrix
+
+| # | Backend path | Trigger | Current key / name | Hidden dependencies during emission | Owned lowered inputs | Target family |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `declare_functions` (841) | every declared function and compiler helper, plus every concrete non-thunk template the backend emits eagerly | `FunctionId` in `functions` | none | `LoweredFunction` template | source-function instance (Stage 3) |
+| 1a | `declare_initializers` (828) | every loaded module | `__staple_init_m{prefix}` in `initializers` | none | `LoweredInitializer` body | lowered module initializer (Stage 3 root) |
+| 2 | `ensure_function_specialization` (920) | generic direct call, function value, or selected method | `(FunctionId, Debug fn type)` + `DefaultHasher` name in `specialized_functions` | `infer_type_parameters` over the callable type, merged with `active_type_substitutions` | site `CallSubstitutions` + `TraitEvidence` | `InstanceKey` (Stage 3.1-3.3) |
+| 3 | `ensure_constructor_adapter` (982) | constructor used as a value / adapter | `(SymbolId, Debug fn type)` in `constructor_codes` | recursive `Ref` construction classification | `LoweredCallableValue` constructor target | `ConstructorAdapter` |
+| 4 | `trait_method_code` (3710) | any trait-dispatched site, including inside generated bodies | none: `trait_impl_method` / `structural_trait_method` / `instantiated_trait_method_type` lookups | explicit implementation selection, structural fallback | `TraitEvidence` + completed site arguments | instance `TraitMethod` or `StructuralMethod` |
+| 5 | `structural_trait_method_code` (3739) + `compile_structural_debug_body` (3839, 3908) | structural Debug (product/sum) | `(StructuralTraitMethod, Debug arguments)` in `structural_trait_codes` | per-field/alternative `standard_trait("Debug")` via `trait_method_code`; `Formatter.write` by name; label/punctuation literals; sum alternative order | `StructuralMethodKey` + owned type metadata | `StructuralMethod` plan + nested instance/artifact + `FormattingWrite` edges |
+| 6 | `compile_structural_index_body` (4193), `compile_structural_mutate_body` (4299) | structural `Index` / `MutateIndex` | same `structural_trait_codes` | product element order, nested `Index`/`MutateIndex` selections, top-level product flattening | `StructuralMethodKey` + method type | `StructuralMethod` |
+| 7 | `compile_structural_deref_index_body` (4343), `compile_structural_deref_mutate_body` (4399) | structural `DerefIndex` / `DerefMutateIndex` | same `structural_trait_codes` | `standard_trait_id("Index"/"MutateIndex")` + `trait_method_id` + delegated `build_trait_method_call` | `StructuralMethodKey` + `Ref` payload type | `StructuralMethod` |
+| 8 | `compile_structural_into_iterator_body` (4537), `compile_structural_next_body` (4561) | structural `IntoIterator` / `Iterator.next` | same `structural_trait_codes` | iterator product shape, cursor type, `IterStep` `Done`/`Yield` alternative matching | `StructuralMethodKey` + owned sum metadata | `StructuralMethod` |
+| 9 | `compile_string_template` (4037), `compile_formatter_write_literal` (3984), `standard_function_named` lookups | string template | name lookups `formatter_new`/`formatter_write`/`formatter_finish` | `Formatter.write` for literal parts (not in the worklist before 4.1) | `LoweredStringFormatting` + `LoweredStringTemplate` | instance edges `FormattingConstructor`/`FormattingWrite`/`FormattingFinish` |
+| 10 | `compile_drop_value` (1525), `compile_conditional_drop` (1710), `compile_conditional_cell_drop` (6091), `drop_all_owned` (1503) | any ownership cleanup: discarded/replaced values, loop-body results, scope exits, `drops_after_call`, captures, cells, coroutine cleanup | none: inline recursion over the concrete type | `TypedModule::drop_method_for` exact-argument user `Drop` selection (only if already in `functions` - latent defect), `is_coroutine_type` frame cleanup, scheduler/wait/resolver/completion-token runtime release, CString `free`, product/sum/`Distinct` recursion via `type_needs_drop` | concrete `CheckedType` + `concrete_needs_drop` | `DropGlue` |
+| 11 | `ensure_gc_finalizer` (6017) via `build_ref_value` (6000) | managed `Ref` allocation with droppable payload | `Debug(payload)` + `DefaultHasher` in `gc_finalizers` | payload drop glue | concrete allocation value type | `GcFinalizer::Payload` |
+| 12 | `ensure_cell_finalizer` (6057) | captured binding cell allocation | `"cell:" + Debug` + hash in `gc_finalizers` | cell value drop glue | capture/cell concrete type | `GcFinalizer::Cell` |
+| 13 | `ensure_closure_finalizer` (11174), including coroutine thunk environments (9756, 9912) | managed closure environment allocation | `closure:{FunctionId}:{Debug capture types}` + hash, computed under `active_type_substitutions` | ordered capture drops, skipping initialization-state/mutable/derived/borrowed captures | closure instance capture layout | `GcFinalizer::ClosureEnvironment` |
+| 14 | `ensure_buffer_finalizer` (13444) | buffer creation with droppable element | `"buffer:" + Debug(element)` + hash in `gc_finalizers` | element drop glue | buffer intrinsic concrete element type | `GcFinalizer::Buffer` |
+| 15 | `compile_buffer_clone` (13136) | `BufferClone` intrinsic | none | `standard_trait("Clone")` by name (now `semantic_ids.clone_trait`), `trait_method_code` for the element, destination buffer finalizer | intrinsic call record + element type | element `Clone` instance/structural edge + `GcFinalizer::Buffer` |
+| 16 | `ensure_coroutine_codes` (9414) | `coro` creation and frame cleanup | `body SyntaxId` in `coroutine_codes` | `typed_module.coroutine_plan`, `implicit_thunk_for`, `coroutine_frame_layout` (9352), closure finalizer for thunk environments, `llvm.trap` | `LoweredCoroutinePlan` + body-thunk instance | `CoroutineCodes` pair |
+| 17 | reaction runner (7763) from `compile_reaction` (7639) | `reaction {}` | `__staple_reaction_runner_{call SyntaxId}` | callback call shape, ordered resource loads, `__staple_reaction_create` | `LoweredReactiveOperationKind::Reaction` + callback | `ReactionRunner` |
+| 18 | `emit_until_runner` (8085) | `until` predicate subscription | `__staple_until_runner_{call SyntaxId}` (reuses by name) | predicate closure type, completion record state | `LoweredReactiveOperationKind::Until` + await site | `UntilRunner` |
+| 19 | derived runner (8266) from `compile_derived_create` (8204) | derived binding creation | `__staple_derived_runner_{evaluator SymbolId}` | evaluator call shape, payload callback/output slots | `LoweredReactiveOperationKind::DerivedCreate` + binding site | `DerivedRunner` |
+| 20 | `declare_external_functions` (577) | every non-variadic extern binding, eagerly | `__staple_extern_{external_name}` in `closure_codes` | extern callable type | extern symbol + canonical callable type | `ExternAdapter` |
+| 21 | runtime module installs (477-548), `build_utf8_validator` (8765), lazy libc/LLVM (`free`, `memcmp`, `snprintf`, `strlen`, `memchr`, `llvm.trap`, `__staple_gc_*`), `coroutine_runtime_fn` (10588), `build_reactive_runtime_call` | operations that need a runtime surface | fixed symbol names | none: fixed runtime surface | lowered operations that use the surface | `LoweredRuntimeRequirements` (separate ordered set, not an artifact family) |
+
+#### Negative matrix: backend-local, no lowered artifact
+
+- Pure IR mechanics and intrinsics with no lowered body: GEP/load/store/switch/phi construction, `llvm.trap` sentinels in unreachable paths, `memcmp` for literal-set comparison, `snprintf`/`strlen`/`memchr`/`free` calls whose only Stage 4 record is a runtime requirement.
+- Executable harness and data storage: `compile_main_function` (1744) emits the fixed-name `main` that installs GC stack state, registers global roots, and runs the lowered module initializers; `declare_top_level_storage`/`declare_initialization_state`/signal and derived metadata globals are data layout, not callables. Stage 5 regenerates the harness from entry/initializer metadata, not from a catalog key.
+- Target layout computations that stay in LLVM: `target_data.get_store_size`, `compile_type`, `compile_native_function_type`, `compile_closure_function_type`, `coroutine_frame_layout`/`coroutine_header_type`, `buffer_header_type`, sum storage layout, alignment, closure/buffer/coroutine representations, indirect parameter masks, `size_type` constants.
+- Transitional backend state Stage 5 removes: `active_type_substitutions`, `expression_type_overrides`, `specialization_queue`, the `functions`/`initializers`/`gc_finalizers`/`coroutine_codes` caches, and every `Debug`-string or `DefaultHasher` key.
+
+#### Decisions recorded here
+
+- `RuntimeHelper` is **not** an artifact family: fixed-named runtime symbols have no lowered bodies to plan, so Stage 4.6 records an ordered, deduplicated `LoweredRuntimeRequirements` set per program from the lowered operations that need each surface.
+- Coroutine resume/cleanup is one `CoroutineCodes` pair key (the backend always creates both together), keyed by the body thunk's instance ordinal.
+- `GcFinalizer` has four subkinds (`Payload`, `Cell`, `ClosureEnvironment`, `Buffer`); `ClosureEnvironment` is keyed by the closure instance ordinal plus ordered concrete capture types, never by `active_type_substitutions`.
+- Per-site artifacts (`ReactionRunner`, `UntilRunner`, `DerivedRunner`) are keyed by `ArtifactSiteOwner` (`Initializer` | `Instance` ordinal | `Artifact` ordinal) plus a lowered `ArtifactSite` (reactive callback position, reactive-operation position, or a plan-local ordinal). No key contains a `SyntaxId`, `Debug` string, or hash value; the owner disambiguates which body's arena a position indexes, so the same template site in two instances produces two keys.
+- `ArtifactRequestKey::DropGlue` is keyed by the canonical concrete type, so structurally equal drop glue deduplicates across owners; `ExternAdapter` is keyed by extern `SymbolId` plus canonical callable type.
+- `SPECIALIZATION_KEY_ENCODING_VERSION` is bumped 1 → 2 for the added families, tags, and site-owner encodings.
+- Artifact requests carry an `Option<LoweredArtifactPlan>`: 4.1 requests already carry the matching placeholder plan, and every later substage fills the variant for its family instead of adding an untyped fallback; `validate_specializations` rejects an artifact whose plan family disagrees with its key family or that has no plan.
+- `LoweredArtifactDependencyKind` covers every artifact family so artifact-owned edges are self-describing; artifacts own ordered `artifacts` and `instances` edge lists and an `Artifact` request root, and instances first requested by a plan record `LoweredInstanceRequest::Artifact`.
+- `LoweredSemanticIds::clone_trait` records the checker-selected `Clone` trait; every runtime type `compile_drop_value` special-cases (`Coroutine`, `Scheduler`, `Wait`, `Resolver`, `CompletionToken`) was already present, so no further IDs were added.
+- `Formatter.write` is an instance dependency (`FormattingWrite`) recorded for templates with at least one literal part, and instance bodies bind the matching `FormattingWrite` site.
+
+#### Stage 4.1 verification
+
+`lower/artifact_plan.rs` defines the placeholder `LoweredArtifactPlan` with one variant per family and exhaustive family/`matches_key` matches; `lower.rs` re-exports it and the normalized snapshot renders each artifact's key and plan family. `specialization.rs` tests prove namespace separation across all twelve key variants, per-instance and per-site separation, structural dedup of type-keyed artifacts, and versioned encoding injectivity. `worklist.rs` tests prove requested artifacts carry matching plans, artifact edges and roots stay validated, and string templates record the `Formatter.write` instance while `instance_body.rs` binds it. `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (1184 tests: 242 compiler unit, 487 compiler integration, 224 CLI, 108 module, plus the smaller suites), `git diff --check`, and the CLI `--emit llvm`, `--emit object`, and `run` paths with the worktree standard library pass.
+
+**Gate:** Met. Every backend-generated function and name-based selection is in the matrix with a target family or an explicit negative reason; namespace, per-instance separation, type-keyed dedup, and encoding-stability tests pass.
 
 ## Stage 4.2 - Fixed-Point Artifact Closure Engine
 
@@ -126,7 +183,7 @@ Known latent defects this inventory exposes (fix only as far as Stage 4 needs; d
 
 ## Ordering and Parallelism
 
-- 4.1 first, then 4.2 (everything else plugs into its API).
+- 4.1 is complete; 4.2 is next (everything else plugs into its API).
 - 4.3, 4.4, and 4.5 are independent after 4.2 and may proceed in parallel, with one caveat: 4.5's coroutine cleanup and closure finalizers reference 4.4's `DropGlue`/`GcFinalizer` keys, so land 4.4's key and plan types before 4.5 binds cleanup.
 - 4.6 is independent after 4.1 and small.
 - 4.7 last; its legacy-recording hook may be added early (during 4.3) and extended per substage.

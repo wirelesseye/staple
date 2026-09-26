@@ -450,6 +450,7 @@ fn body_evidence_origin(
         LoweredBindingSite::Index(id)
         | LoweredBindingSite::FormattingConstructor(id)
         | LoweredBindingSite::FormattingFinish(id)
+        | LoweredBindingSite::FormattingWrite(id)
         | LoweredBindingSite::Interpolation { template: id, .. } => body
             .expressions
             .get(id)
@@ -1149,6 +1150,7 @@ mod tests {
                         "structural artifact arguments are concrete"
                     );
                 }
+                Some(other) => panic!("unexpected artifact family `{}`", other.family_name()),
                 None => panic!("artifact without a catalog key"),
             }
         }
