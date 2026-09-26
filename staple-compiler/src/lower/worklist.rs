@@ -99,6 +99,34 @@ pub(crate) enum LoweredInstanceRequest {
         kind: LoweredInstanceDependencyKind,
         origin: Origin,
     },
+    /// First requested by a closure-phase scanner reading an owner body
+    /// (Stage 4.2). The owner is the materialized instance or module
+    /// initializer whose scan requested the instance.
+    Scan {
+        owner: LoweredScanOwner,
+        kind: LoweredInstanceDependencyKind,
+        origin: Origin,
+    },
+}
+
+/// The closure-phase owner whose scan first requested an instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LoweredScanOwner {
+    Initializer(InitializerId),
+    Instance(FunctionInstanceId),
+}
+
+impl LoweredInstanceRequest {
+    /// The request origin, whichever root shape first discovered the instance.
+    pub(super) fn origin(&self, fallback: &Origin) -> Origin {
+        match self {
+            LoweredInstanceRequest::Initializer { origin, .. }
+            | LoweredInstanceRequest::Dependency { origin, .. }
+            | LoweredInstanceRequest::Artifact { origin, .. }
+            | LoweredInstanceRequest::Scan { origin, .. } => origin.clone(),
+            LoweredInstanceRequest::EagerTemplate => fallback.clone(),
+        }
+    }
 }
 
 /// The lowered-record route that requested a function instance.
@@ -312,14 +340,14 @@ pub(super) struct SpecializationParts {
 /// creates instance/artifact records, and writes edges.
 pub(super) struct GraphRecorder {
     /// Instances in first-discovery order; the arena index is the ordinal.
-    instances: Arena<LoweredFunctionInstance, FunctionInstanceId>,
+    pub(super) instances: Arena<LoweredFunctionInstance, FunctionInstanceId>,
     /// Artifacts in first-discovery order; the arena index is the ordinal.
-    artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
+    pub(super) artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
     /// Compiler-helper requests the graph carries unresolved. Stage 4.2
     /// removes this representation once helper targets are diagnosed.
-    helper_requests: Vec<LoweredCompilerHelperRequest>,
+    pub(super) helper_requests: Vec<LoweredCompilerHelperRequest>,
     /// The append-only instance/artifact key catalog.
-    catalog: SpecializationCatalog,
+    pub(super) catalog: SpecializationCatalog,
     /// Instances awaiting traversal, in discovery order.
     queue: Vec<FunctionInstanceId>,
     /// Traversal watermark into `queue`. The queue is append-only within a
@@ -339,7 +367,7 @@ impl GraphRecorder {
         }
     }
 
-    fn from_parts(parts: SpecializationParts) -> Self {
+    pub(super) fn from_parts(parts: SpecializationParts) -> Self {
         GraphRecorder {
             instances: parts.instances,
             artifacts: parts.artifacts,
@@ -350,7 +378,7 @@ impl GraphRecorder {
         }
     }
 
-    fn into_parts(self) -> SpecializationParts {
+    pub(super) fn into_parts(self) -> SpecializationParts {
         SpecializationParts {
             instances: self.instances,
             artifacts: self.artifacts,
@@ -373,7 +401,7 @@ impl GraphRecorder {
     /// Interns one resolved source-function request and queues a newly created
     /// instance for traversal. The returned flag reports whether the key was
     /// new, so callers can tell a first discovery from a deduplicated reuse.
-    fn intern_resolved(
+    pub(super) fn intern_resolved(
         &mut self,
         program: &LoweredProgram,
         resolved: ResolvedInstanceRequest,
@@ -410,7 +438,7 @@ impl GraphRecorder {
         (id, false)
     }
 
-    fn record_instance_edge(
+    pub(super) fn record_instance_edge(
         &mut self,
         owner: TraversalOwner,
         instance: FunctionInstanceId,
@@ -442,7 +470,7 @@ impl GraphRecorder {
     /// key records the additional edge on the owner. The returned flag reports
     /// whether the artifact was newly created, so the closure loop knows which
     /// artifacts still need expansion.
-    fn request_artifact(
+    pub(super) fn request_artifact(
         &mut self,
         key: ArtifactRequestKey,
         plan: Option<LoweredArtifactPlan>,
@@ -503,7 +531,7 @@ impl GraphRecorder {
         (ordinal, created)
     }
 
-    fn assign_names(&mut self) -> Result<(), Vec<Diagnostic>> {
+    pub(super) fn assign_names(&mut self) -> Result<(), Vec<Diagnostic>> {
         let names = match self.catalog.planned_names() {
             Ok(names) => names,
             Err(SpecializationNameCollision { name }) => {
@@ -550,7 +578,7 @@ pub(super) fn build(program: &LoweredProgram) -> Result<SpecializationParts, Vec
 /// The record that requested an instance or artifact. Artifacts own requests
 /// once the Stage 4.2 closure loop expands their plans.
 #[derive(Debug, Clone, Copy)]
-enum TraversalOwner {
+pub(super) enum TraversalOwner {
     Initializer(InitializerId),
     Instance(FunctionInstanceId),
     Artifact(LoweredArtifactRequestId),
@@ -620,7 +648,7 @@ impl TraversalVisited {
     }
 }
 
-struct WorklistBuilder<'a> {
+pub(super) struct WorklistBuilder<'a> {
     program: &'a LoweredProgram,
     recorder: GraphRecorder,
     diagnostics: Vec<Diagnostic>,
@@ -798,12 +826,7 @@ impl<'a> WorklistBuilder<'a> {
             .instance(record.ordinal)
             .expect("interned instance has a catalog key")
             .clone();
-        let origin = match &record.request {
-            LoweredInstanceRequest::Initializer { origin, .. }
-            | LoweredInstanceRequest::Dependency { origin, .. }
-            | LoweredInstanceRequest::Artifact { origin, .. } => origin.clone(),
-            LoweredInstanceRequest::EagerTemplate => record.origin.clone(),
-        };
+        let origin = record.request.origin(&record.origin);
         ResolvedInstanceRequest {
             key,
             environment: record.environment.clone(),

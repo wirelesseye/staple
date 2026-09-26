@@ -35,17 +35,16 @@ use super::worklist::{
 };
 use super::{
     Arena, ArenaId, BlockId, CallSubstitutions, ExpressionId, FunctionInstanceId, ItemId,
-    LoweredAwait, LoweredAwaitId, LoweredAwaitKind, LoweredBlock, LoweredCall,
+    LoweredArtifactUse, LoweredAwait, LoweredAwaitId, LoweredAwaitKind, LoweredBlock, LoweredCall,
     LoweredCallEnvironment, LoweredCallId, LoweredCallStep, LoweredCallableCategory,
     LoweredCallableTarget, LoweredCallableValue, LoweredCallableValueId, LoweredCapture,
     LoweredClosureCapture, LoweredClosureConstruction, LoweredClosureEnvironment, LoweredCoro,
     LoweredCoroId, LoweredCoroutinePlan, LoweredCoroutinePlanId, LoweredExpression,
-    LoweredExpressionKind, LoweredInstanceRequest, LoweredItem, LoweredItemKind, LoweredName,
-    LoweredPattern, LoweredPatternKind, LoweredPlace, LoweredPlaceKind, LoweredProgram,
-    LoweredReactiveCallbackId, LoweredReactiveOperationId, LoweredReactiveOperationKind,
-    LoweredResourceProvider, LoweredResourceProviderId, LoweredResourceUse, LoweredResourceUseId,
-    LoweredStringTemplatePart, LoweredWith, LoweredWithId, Origin, PatternId, PlaceId,
-    TraitEvidence,
+    LoweredExpressionKind, LoweredItem, LoweredItemKind, LoweredName, LoweredPattern,
+    LoweredPatternKind, LoweredPlace, LoweredPlaceKind, LoweredProgram, LoweredReactiveCallbackId,
+    LoweredReactiveOperationId, LoweredReactiveOperationKind, LoweredResourceProvider,
+    LoweredResourceProviderId, LoweredResourceUse, LoweredResourceUseId, LoweredStringTemplatePart,
+    LoweredWith, LoweredWithId, Origin, PatternId, PlaceId, TraitEvidence,
 };
 
 /// One parameter of an instance body: the template symbol plus its concrete
@@ -164,6 +163,10 @@ pub(crate) struct LoweredInstanceBody {
     pub bindings: BTreeMap<LoweredBindingSite, LoweredBoundTarget>,
     /// Resolved evidence for every trait-dependent site.
     pub evidence: BTreeMap<LoweredBindingSite, TraitEvidence>,
+    /// Generated-artifact uses recorded by Stage 4.2 scanners, in scan order.
+    /// The validator proves these agree one-to-one with the instance's
+    /// closure-phase artifact edges.
+    pub artifact_uses: Vec<LoweredArtifactUse>,
     // Instance-local arenas. IDs are meaningful only inside this body.
     pub(super) blocks: Arena<LoweredBlock, BlockId>,
     pub(super) items: Arena<LoweredItem, ItemId>,
@@ -213,6 +216,7 @@ impl LoweredInstanceBody {
             function_providers: Vec::new(),
             bindings: BTreeMap::new(),
             evidence: BTreeMap::new(),
+            artifact_uses: Vec::new(),
             blocks: Arena::default(),
             items: Arena::default(),
             expressions: Arena::default(),
@@ -1670,12 +1674,7 @@ fn enclosing_request(
         .instance(record.ordinal)
         .expect("interned instance has a catalog key")
         .clone();
-    let origin = match &record.request {
-        LoweredInstanceRequest::Initializer { origin, .. }
-        | LoweredInstanceRequest::Dependency { origin, .. }
-        | LoweredInstanceRequest::Artifact { origin, .. } => origin.clone(),
-        LoweredInstanceRequest::EagerTemplate => record.origin.clone(),
-    };
+    let origin = record.request.origin(&record.origin);
     ResolvedInstanceRequest {
         key,
         environment: record.environment.clone(),

@@ -24,6 +24,7 @@ use crate::{
     TypeParameterId, TypedModule, contains_type_parameter, infer_type_parameters,
 };
 
+mod artifact_closure;
 mod artifact_plan;
 mod graph_validation;
 mod instance_body;
@@ -57,6 +58,13 @@ pub(crate) use instance_body::{
     LoweredBindingSite, LoweredBoundTarget, LoweredInstanceBody, LoweredInstanceCapture,
     LoweredInstanceParameter,
 };
+
+// Stage 4.2 closure API. The engine scans owners and expands artifacts through
+// the hook surface; Stage 4.3-4.6 register their family hooks.
+#[allow(unused_imports)] // Stage 4.3-4.6 flesh out the hook surface.
+use artifact_closure::{ArtifactFamilyHooks, ClosureRequest, ProductionHooks};
+#[allow(unused_imports)] // Stage 4.4-4.6 and tests name use sites.
+pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse};
 
 // Stage 4.1 artifact-plan API. Plans are attached to artifact requests and
 // filled by the substage that owns each artifact family.
@@ -2010,6 +2018,14 @@ pub(crate) struct LoweredProgram {
     /// Compiler-helper requests the Stage 3 graph carries unresolved; Stage 4
     /// closes their generated bodies and dependencies.
     helper_requests: Vec<LoweredCompilerHelperRequest>,
+    /// Stage 4.2 closure artifact uses recorded on module initializers, indexed
+    /// by `InitializerId` in scan order. Stage 3 initializer requests stay
+    /// request-root-only, so this starts empty and only closure-phase scanners
+    /// add entries.
+    initializer_artifact_uses: Vec<Vec<LoweredArtifactUse>>,
+    /// Stage 4.2 closure artifact edges owned by module initializers, indexed
+    /// by `InitializerId` in request order.
+    initializer_artifacts: Vec<Vec<LoweredArtifactDependency>>,
     /// Append-only instance/artifact key catalog. Stage 3.3 alone reserves
     /// ordinals, before visiting a body, so recursion converges.
     specializations: SpecializationCatalog,
@@ -12699,6 +12715,9 @@ impl Lowerer {
             diagnostics.extend(program.materialize_instance_bodies());
         }
         if diagnostics.is_empty() {
+            diagnostics.extend(program.close_artifact_catalog(&ProductionHooks));
+        }
+        if diagnostics.is_empty() {
             diagnostics.extend(program.validate_instance_bodies());
         }
         if diagnostics.is_empty() {
@@ -14312,6 +14331,60 @@ mod tests {
         let first_snapshot = normalized_program_snapshot(&first);
         assert!(!first_snapshot.is_empty());
         assert_eq!(first_snapshot, normalized_program_snapshot(&second));
+    }
+
+    #[test]
+    fn closure_with_production_hooks_preserves_stage_3_snapshots() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def forward: <T where Copy T> T -> T = value => identity value\n",
+            "let first: I32 = forward 1\n",
+            "type Point = ctor (I32, I32)\n",
+            "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+            "let p = (1, 2)\n",
+            "let text = \"${p:?}\"\n",
+            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "let created = task ()\n",
+        );
+        let module = checked_program(source);
+
+        // The pre-closure Stage 3 program: graph plus materialized bodies.
+        let mut baseline = LoweredProgram::default();
+        assert!(baseline.snapshot(&module).is_empty());
+        assert!(baseline.validate().is_empty());
+        assert!(baseline.build_specialization_worklist().is_empty());
+        assert!(baseline.materialize_instance_bodies().is_empty());
+        assert!(baseline.validate_instance_bodies().is_empty());
+
+        let lowered = Lowerer::new().lower(&module).expect("lowering succeeds");
+        assert_eq!(
+            normalized_program_snapshot(&baseline),
+            normalized_program_snapshot(&lowered.program),
+            "ProductionHooks keep the Stage 3 catalog byte-identical"
+        );
+        assert_eq!(baseline.instances.len(), lowered.program.instances.len());
+        assert_eq!(baseline.artifacts.len(), lowered.program.artifacts.len());
+        assert!(
+            lowered
+                .program
+                .initializer_artifacts
+                .iter()
+                .all(Vec::is_empty),
+            "placeholder hooks request no initializer artifacts"
+        );
+        assert!(
+            lowered
+                .program
+                .initializer_artifact_uses
+                .iter()
+                .all(Vec::is_empty)
+        );
+        for (_, instance) in lowered.program.instances.iter() {
+            if let Some(body) = &instance.body {
+                assert!(body.artifact_uses.is_empty());
+            }
+        }
     }
 
     #[test]
