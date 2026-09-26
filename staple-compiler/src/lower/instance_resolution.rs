@@ -1188,8 +1188,27 @@ impl<'a> TraitSelectionContext<'a> {
         let mut candidates = self
             .bounds
             .iter()
-            .filter(|bound| bound.trait_id == trait_id)
-            .map(|bound| bound.arguments.clone())
+            .filter(|bound| bound.trait_id == trait_id && bound.arguments.len() == arguments.len())
+            .filter_map(|bound| {
+                let mut substitutions = HashMap::new();
+                let matches_known =
+                    bound
+                        .arguments
+                        .iter()
+                        .zip(arguments)
+                        .all(|(template, actual)| {
+                            contains_inferred_type(actual)
+                                || infer_type_parameters(template, actual, &mut substitutions)
+                        });
+                matches_known.then(|| {
+                    bound
+                        .arguments
+                        .iter()
+                        .cloned()
+                        .map(|argument| substitute_type(argument, &substitutions))
+                        .collect()
+                })
+            })
             .collect::<Vec<_>>();
         for implementation in &self.implementations {
             if implementation.trait_id != trait_id
@@ -2245,7 +2264,7 @@ impl<'a> ParameterCollector<'a> {
             LoweredExpressionKind::Coro(coro) => {
                 self.family("expression.coro");
                 if let Some(coro) = self.program.coros.get(*coro) {
-                    self.collect_coroutine_plan(coro.plan);
+                    self.collect_coroutine_creation(coro.plan);
                 }
             }
             LoweredExpressionKind::Await(await_) => {
@@ -2504,6 +2523,19 @@ impl<'a> ParameterCollector<'a> {
         }
         if let Some(callable) = callback.callable {
             self.collect_expression(callable);
+        }
+    }
+
+    /// A creation site uses the child's result, deferred effects, and capture
+    /// layout, but its frame locals and awaits belong to the body thunk.
+    fn collect_coroutine_creation(&mut self, plan: LoweredCoroutinePlanId) {
+        let Some(plan) = self.program.coroutine_plans.get(plan) else {
+            return;
+        };
+        self.collect_type(&plan.result_type);
+        self.collect_effect_set(&plan.deferred_effects);
+        for capture in &plan.captures {
+            self.collect_symbol_type(capture.symbol);
         }
     }
 
@@ -3784,6 +3816,35 @@ mod tests {
     }
 
     #[test]
+    fn completion_ignores_bounds_with_different_known_arguments() {
+        let (_, program) = lower(concat!(
+            "trait TestConvert Target Output where Target ~> Output {\n",
+            "  test_convert: Target -> Output\n",
+            "}\n",
+        ));
+        let convert = trait_id_named(&program, "TestConvert");
+        let context = TraitSelectionContext::new(
+            &program,
+            vec![
+                CheckedTraitBound {
+                    trait_id: convert,
+                    arguments: vec![CheckedType::I64, CheckedType::U64],
+                },
+                CheckedTraitBound {
+                    trait_id: convert,
+                    arguments: vec![CheckedType::I32, CheckedType::U32],
+                },
+            ],
+        );
+        assert_eq!(
+            context
+                .complete_obligation_arguments(convert, &[CheckedType::I32, CheckedType::Inferred]),
+            Some(vec![CheckedType::I32, CheckedType::U32]),
+            "an unrelated declared bound must not conflict with the matching bound"
+        );
+    }
+
+    #[test]
     fn structural_selections_and_obligation_only_bounds_resolve() {
         let (_, program) = lower("let pair = (1, 2)\n");
         let index = program
@@ -4465,6 +4526,35 @@ mod tests {
             })
             .expect("the coroutine thunk instance resolves");
         assert!(!resolved.key.substitutions().is_empty());
+    }
+
+    #[test]
+    fn coroutine_creation_does_not_collect_child_body_only_parameters() {
+        let (_, mut program) = lower(concat!(
+            "use std.coroutine.*\n",
+            "def make_task: <T where Copy T> T -> Coroutine{} T = value => coro { value }\n",
+            "let task = make_task 1\n",
+        ));
+        let (plan_id, thunk) = program
+            .coroutine_plans
+            .iter()
+            .map(|(id, plan)| (id, plan.thunk))
+            .next()
+            .expect("a coroutine plan");
+        let child_only = TypeParameterId(9999);
+        program
+            .coroutine_plans
+            .get_mut(plan_id)
+            .expect("coroutine plan")
+            .await_result_types
+            .push(CheckedType::Parameter {
+                id: child_only,
+                name: "ChildOnly".to_owned(),
+                sized: true,
+            });
+        let outer = relevance(&program, "make_task");
+        assert!(!outer.contains_type(child_only));
+        assert!(program.relevant_parameters(thunk).contains_type(child_only));
     }
 
     #[test]
