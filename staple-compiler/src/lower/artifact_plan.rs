@@ -14,8 +14,12 @@
 
 #![allow(dead_code)] // Stage 4.3-4.6 fill the placeholder fields.
 
-use crate::specialization::{ArtifactRequestKey, ArtifactSite};
-use crate::{CheckedFunctionType, CheckedType, FunctionId, StructuralTraitMethod, SymbolId};
+use super::{ArenaId, FunctionInstanceId};
+use crate::specialization::{
+    ArtifactRequestKey, ArtifactSite, ArtifactSiteOwner, CanonicalFunctionType, CanonicalType,
+    GcFinalizerKey,
+};
+use crate::{CheckedFunctionType, CheckedType, Origin, StructuralTraitMethod, SymbolId};
 
 /// The owned plan of one generated artifact, one variant per artifact family.
 #[derive(Debug, Clone)]
@@ -72,9 +76,83 @@ impl LoweredArtifactPlan {
         }
     }
 
-    /// Whether this plan belongs to the same artifact family as `key`.
-    pub(crate) fn matches_key(&self, key: &ArtifactRequestKey) -> bool {
-        self.family_name() == key.family_name()
+    /// Whether this plan belongs to the same artifact family as `key` and its
+    /// identity inputs rebuild exactly that key: instance and owner positions
+    /// must agree, and checked types must canonicalize to the key's values.
+    /// A plan whose types cannot canonicalize concretely never agrees.
+    pub(crate) fn matches_key(&self, key: &ArtifactRequestKey, origin: &Origin) -> bool {
+        let same_type =
+            |value: &CheckedType, expected: &CanonicalType| match CanonicalType::concrete(
+                value, origin,
+            ) {
+                Ok(canonical) => &canonical == expected,
+                Err(_) => false,
+            };
+        let same_function = |value: &CheckedFunctionType, expected: &CanonicalFunctionType| {
+            match CanonicalFunctionType::concrete(value, origin) {
+                Ok(canonical) => &canonical == expected,
+                Err(_) => false,
+            }
+        };
+        match (self, key) {
+            (
+                LoweredArtifactPlan::ConstructorAdapter(plan),
+                ArtifactRequestKey::ConstructorAdapter(key),
+            ) => same_function(&plan.callable_type, &key.callable_type),
+            (
+                LoweredArtifactPlan::StructuralMethod(plan),
+                ArtifactRequestKey::StructuralMethod(key),
+            ) => plan.structural == key.structural,
+            (LoweredArtifactPlan::DropGlue(plan), ArtifactRequestKey::DropGlue(key)) => {
+                same_type(&plan.value_type, key)
+            }
+            (LoweredArtifactPlan::GcFinalizer(plan), ArtifactRequestKey::GcFinalizer(key)) => {
+                match (plan, key) {
+                    (
+                        GcFinalizerPlan::Payload { value_type },
+                        GcFinalizerKey::Payload(expected),
+                    )
+                    | (GcFinalizerPlan::Cell { value_type }, GcFinalizerKey::Cell(expected))
+                    | (
+                        GcFinalizerPlan::Buffer {
+                            element: value_type,
+                        },
+                        GcFinalizerKey::Buffer(expected),
+                    ) => same_type(value_type, expected),
+                    (
+                        GcFinalizerPlan::ClosureEnvironment { closure, captures },
+                        GcFinalizerKey::ClosureEnvironment {
+                            closure: expected_closure,
+                            captures: expected_captures,
+                        },
+                    ) => {
+                        closure.index() == expected_closure.index()
+                            && captures.len() == expected_captures.len()
+                            && captures
+                                .iter()
+                                .zip(expected_captures)
+                                .all(|(capture, expected)| same_type(capture, expected))
+                    }
+                    _ => false,
+                }
+            }
+            (
+                LoweredArtifactPlan::CoroutineCodes(plan),
+                ArtifactRequestKey::CoroutineCodes(key),
+            ) => plan.body.index() == key.body.index(),
+            (
+                LoweredArtifactPlan::ReactionRunner(plan),
+                ArtifactRequestKey::ReactionRunner(key),
+            )
+            | (LoweredArtifactPlan::UntilRunner(plan), ArtifactRequestKey::UntilRunner(key))
+            | (LoweredArtifactPlan::DerivedRunner(plan), ArtifactRequestKey::DerivedRunner(key)) => {
+                plan.owner == key.owner && plan.site == key.site
+            }
+            (LoweredArtifactPlan::ExternAdapter(plan), ArtifactRequestKey::ExternAdapter(key)) => {
+                plan.symbol == key.symbol && same_function(&plan.callable_type, &key.callable_type)
+            }
+            _ => false,
+        }
     }
 }
 
@@ -107,7 +185,9 @@ pub(crate) enum GcFinalizerPlan {
         value_type: CheckedType,
     },
     ClosureEnvironment {
-        closure: FunctionId,
+        /// The closure's own function instance; its position is the key's
+        /// instance ordinal.
+        closure: FunctionInstanceId,
         captures: Vec<CheckedType>,
     },
     Buffer {
@@ -118,13 +198,16 @@ pub(crate) enum GcFinalizerPlan {
 /// The plan shape of one coroutine body's resume/cleanup pair.
 #[derive(Debug, Clone)]
 pub(crate) struct CoroutineCodesPlan {
-    /// The coroutine body thunk template this pair belongs to.
-    pub body: FunctionId,
+    /// The coroutine body thunk instance this pair belongs to; its position
+    /// is the key's instance ordinal.
+    pub body: FunctionInstanceId,
 }
 
 /// The plan shape of one reactive runner.
 #[derive(Debug, Clone)]
 pub(crate) struct ReactiveRunnerPlan {
+    /// The record whose body arena `site` indexes.
+    pub owner: ArtifactSiteOwner,
     /// The lowered reactive-operation or binding site the runner serves.
     pub site: ArtifactSite,
 }

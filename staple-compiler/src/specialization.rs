@@ -3168,6 +3168,12 @@ mod tests {
             GcFinalizerPlan, LoweredArtifactPlan, ReactiveRunnerPlan, StructuralMethodPlan,
         };
         let keys = stage_4_artifact_families();
+        let node = nominal(7, "Node");
+        let instance = crate::FunctionInstanceId::for_test(0);
+        let runner = ReactiveRunnerPlan {
+            owner: instance_owner(0),
+            site: callback_site(0),
+        };
         let plans = vec![
             LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
                 callable_type: simple_callable(),
@@ -3176,33 +3182,25 @@ mod tests {
                 structural: StructuralTraitMethod::Index,
             }),
             LoweredArtifactPlan::DropGlue(DropGluePlan {
-                value_type: CheckedType::I32,
+                value_type: node.clone(),
             }),
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload {
-                value_type: CheckedType::I32,
+                value_type: node.clone(),
             }),
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Cell {
-                value_type: CheckedType::I32,
+                value_type: node.clone(),
             }),
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::ClosureEnvironment {
-                closure: FunctionId(1),
+                closure: instance,
                 captures: vec![CheckedType::I32],
             }),
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Buffer {
-                element: CheckedType::I32,
+                element: node.clone(),
             }),
-            LoweredArtifactPlan::CoroutineCodes(CoroutineCodesPlan {
-                body: FunctionId(1),
-            }),
-            LoweredArtifactPlan::ReactionRunner(ReactiveRunnerPlan {
-                site: callback_site(0),
-            }),
-            LoweredArtifactPlan::UntilRunner(ReactiveRunnerPlan {
-                site: callback_site(0),
-            }),
-            LoweredArtifactPlan::DerivedRunner(ReactiveRunnerPlan {
-                site: callback_site(0),
-            }),
+            LoweredArtifactPlan::CoroutineCodes(CoroutineCodesPlan { body: instance }),
+            LoweredArtifactPlan::ReactionRunner(runner.clone()),
+            LoweredArtifactPlan::UntilRunner(runner.clone()),
+            LoweredArtifactPlan::DerivedRunner(runner),
             LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
                 symbol: SymbolId(1),
                 callable_type: simple_callable(),
@@ -3225,10 +3223,83 @@ mod tests {
             plan_names, key_names,
             "the placeholder plan families mirror the key families exactly"
         );
-        for (key, plan) in keys.iter().zip(&plans) {
+        let origin = requesting_origin();
+        for (index, (key, plan)) in keys.iter().zip(&plans).enumerate() {
             assert!(
-                plan.matches_key(key),
-                "plan family `{}` matches key family `{}`",
+                plan.matches_key(key, &origin),
+                "plan `{}` rebuilds key `{}`",
+                plan.family_name(),
+                key.family_name()
+            );
+            for (other_index, other) in keys.iter().enumerate() {
+                if other_index != index {
+                    assert!(
+                        !plan.matches_key(other, &origin),
+                        "plan `{}` never matches key `{}`",
+                        plan.family_name(),
+                        other.family_name()
+                    );
+                }
+            }
+        }
+
+        // Same family, different identity inputs: the plan must not agree.
+        let mismatches = [
+            (
+                LoweredArtifactPlan::DropGlue(DropGluePlan {
+                    value_type: CheckedType::I64,
+                }),
+                ArtifactRequestKey::DropGlue(concrete(&node)),
+            ),
+            (
+                LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
+                    structural: StructuralTraitMethod::Debug,
+                }),
+                structural_artifact_key(),
+            ),
+            (
+                LoweredArtifactPlan::CoroutineCodes(CoroutineCodesPlan {
+                    body: crate::FunctionInstanceId::for_test(1),
+                }),
+                ArtifactRequestKey::CoroutineCodes(CoroutineCodesKey {
+                    body: InstanceOrdinal(0),
+                }),
+            ),
+            (
+                LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::ClosureEnvironment {
+                    closure: crate::FunctionInstanceId::for_test(1),
+                    captures: vec![CheckedType::I32],
+                }),
+                ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment {
+                    closure: InstanceOrdinal(0),
+                    captures: vec![concrete(&CheckedType::I32)],
+                }),
+            ),
+            (
+                LoweredArtifactPlan::ReactionRunner(ReactiveRunnerPlan {
+                    owner: instance_owner(1),
+                    site: callback_site(0),
+                }),
+                ArtifactRequestKey::ReactionRunner(ReactiveRunnerKey {
+                    owner: instance_owner(0),
+                    site: callback_site(0),
+                }),
+            ),
+            (
+                LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
+                    symbol: SymbolId(2),
+                    callable_type: simple_callable(),
+                }),
+                ArtifactRequestKey::ExternAdapter(ExternAdapterKey {
+                    symbol: SymbolId(1),
+                    callable_type: canonical_function(&simple_callable()),
+                }),
+            ),
+        ];
+        for (plan, key) in &mismatches {
+            assert!(
+                !plan.matches_key(key, &origin),
+                "plan `{}` with different identity inputs must not rebuild key `{}`",
                 plan.family_name(),
                 key.family_name()
             );

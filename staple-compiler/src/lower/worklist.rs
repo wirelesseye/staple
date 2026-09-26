@@ -227,9 +227,41 @@ impl LoweredArtifactDependencyKind {
         }
     }
 
-    /// The matching artifact key family name.
-    pub(crate) fn family_name(self) -> &'static str {
-        self.description()
+    /// Whether an edge of this kind may target `key`. A `GcFinalizer` edge
+    /// accepts every finalizer subkind, so kinds are compared by key variant
+    /// rather than by the per-subkind family name.
+    pub(crate) fn matches_key(self, key: &ArtifactRequestKey) -> bool {
+        matches!(
+            (self, key),
+            (
+                LoweredArtifactDependencyKind::ConstructorAdapter,
+                ArtifactRequestKey::ConstructorAdapter(_)
+            ) | (
+                LoweredArtifactDependencyKind::StructuralMethod,
+                ArtifactRequestKey::StructuralMethod(_)
+            ) | (
+                LoweredArtifactDependencyKind::DropGlue,
+                ArtifactRequestKey::DropGlue(_)
+            ) | (
+                LoweredArtifactDependencyKind::GcFinalizer,
+                ArtifactRequestKey::GcFinalizer(_)
+            ) | (
+                LoweredArtifactDependencyKind::CoroutineCodes,
+                ArtifactRequestKey::CoroutineCodes(_)
+            ) | (
+                LoweredArtifactDependencyKind::ReactionRunner,
+                ArtifactRequestKey::ReactionRunner(_)
+            ) | (
+                LoweredArtifactDependencyKind::UntilRunner,
+                ArtifactRequestKey::UntilRunner(_)
+            ) | (
+                LoweredArtifactDependencyKind::DerivedRunner,
+                ArtifactRequestKey::DerivedRunner(_)
+            ) | (
+                LoweredArtifactDependencyKind::ExternAdapter,
+                ArtifactRequestKey::ExternAdapter(_)
+            )
+        )
     }
 }
 
@@ -280,18 +312,6 @@ enum TraversalOwner {
 }
 
 impl TraversalOwner {
-    fn helper_requester(self) -> LoweredHelperRequester {
-        match self {
-            TraversalOwner::Initializer(initializer) => {
-                LoweredHelperRequester::Initializer(initializer)
-            }
-            TraversalOwner::Instance(instance) => LoweredHelperRequester::Instance(instance),
-            TraversalOwner::Artifact(_) => {
-                unreachable!("generated artifact plans never request compiler helpers")
-            }
-        }
-    }
-
     fn instance_request(
         self,
         kind: LoweredInstanceDependencyKind,
@@ -689,10 +709,30 @@ impl<'a> WorklistBuilder<'a> {
     }
 
     fn request_helper(&mut self, function: FunctionId, origin: &Origin, owner: TraversalOwner) {
+        // Generated artifact plans must name their callees explicitly, so an
+        // artifact owner reports a diagnostic instead of recording an
+        // unresolved helper.
+        let requested_by = match owner {
+            TraversalOwner::Initializer(initializer) => {
+                LoweredHelperRequester::Initializer(initializer)
+            }
+            TraversalOwner::Instance(instance) => LoweredHelperRequester::Instance(instance),
+            TraversalOwner::Artifact(artifact) => {
+                self.diagnostics.push(Diagnostic::new(
+                    origin.span.clone(),
+                    format!(
+                        "generated artifact {} requested unresolved compiler helper function {}",
+                        artifact.index(),
+                        function.0
+                    ),
+                ));
+                return;
+            }
+        };
         self.helper_requests.push(LoweredCompilerHelperRequest {
             function,
             origin: origin.clone(),
-            requested_by: owner.helper_requester(),
+            requested_by,
         });
     }
 
@@ -1758,6 +1798,29 @@ impl LoweredProgram {
 
     /// Validates the installed worklist against its own catalog: dense
     /// ordinals, catalog agreement, planned names, and in-range edges.
+    /// Reports an artifact edge whose kind disagrees with the key family of
+    /// the artifact it targets. A missing target is reported separately.
+    fn validate_artifact_edge_kind(
+        &self,
+        owner: &str,
+        dependency: &LoweredArtifactDependency,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if let Some(key) = self.specializations.artifact(dependency.artifact)
+            && !dependency.kind.matches_key(key)
+        {
+            diagnostics.push(Diagnostic::new(
+                dependency.origin.span.clone(),
+                format!(
+                    "{owner} has a `{}` edge to `{}` artifact {}",
+                    dependency.kind.description(),
+                    key.family_name(),
+                    dependency.artifact.index()
+                ),
+            ));
+        }
+    }
+
     pub(super) fn validate_specializations(&self) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         let catalog_instances = self.specializations.instances().count();
@@ -1841,6 +1904,13 @@ impl LoweredProgram {
                     ));
                 }
             }
+            for dependency in &instance.artifacts {
+                self.validate_artifact_edge_kind(
+                    &format!("function instance {}", id.index()),
+                    dependency,
+                    &mut diagnostics,
+                );
+            }
             if let LoweredInstanceRequest::Artifact { artifact, .. } = &instance.request
                 && !self.artifacts.contains(*artifact)
             {
@@ -1868,11 +1938,11 @@ impl LoweredProgram {
             match self.specializations.artifact(artifact.ordinal) {
                 Some(key) => {
                     if let Some(plan) = &artifact.plan {
-                        if !plan.matches_key(key) {
+                        if !plan.matches_key(key, &artifact.origin) {
                             diagnostics.push(Diagnostic::new(
                                 artifact.origin.span.clone(),
                                 format!(
-                                    "artifact {} plan family `{}` does not match its key family `{}`",
+                                    "artifact {} plan `{}` does not rebuild its key `{}`",
                                     id.index(),
                                     plan.family_name(),
                                     key.family_name()
@@ -1910,6 +1980,11 @@ impl LoweredProgram {
                 ));
             }
             for dependency in &artifact.artifacts {
+                self.validate_artifact_edge_kind(
+                    &format!("artifact {}", id.index()),
+                    dependency,
+                    &mut diagnostics,
+                );
                 if dependency.artifact.index() >= self.artifacts.len() {
                     diagnostics.push(Diagnostic::new(
                         dependency.origin.span.clone(),
@@ -2546,7 +2621,7 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("artifact {id:?} has no owned plan"));
             assert!(
-                plan.matches_key(key),
+                plan.matches_key(key, &artifact.origin),
                 "plan `{}` does not match key `{}`",
                 plan.family_name(),
                 key.family_name()
@@ -2564,6 +2639,108 @@ mod tests {
         assert!(
             families.contains("structural-method"),
             "the structural debug method is requested with its plan"
+        );
+    }
+
+    #[test]
+    fn plan_identity_and_edge_kind_corruption_is_diagnosed() {
+        let (_, mut program) = lower(concat!(
+            "type Point = ctor (I32, I32)\n",
+            "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+            "let p = (1, 2)\n",
+            "let text = \"${p:?}\"\n",
+        ));
+        let (structural, constructor) = {
+            let find = |family: &str| {
+                program
+                    .artifacts
+                    .iter()
+                    .find(|(_, artifact)| {
+                        program
+                            .specializations
+                            .artifact(artifact.ordinal)
+                            .map(ArtifactRequestKey::family_name)
+                            == Some(family)
+                    })
+                    .map(|(id, _)| id)
+                    .unwrap_or_else(|| panic!("no `{family}` artifact"))
+            };
+            (find("structural-method"), find("constructor-adapter"))
+        };
+
+        // A same-family plan whose identity inputs disagree with the key.
+        let record = program.artifacts.get_mut(structural).expect("artifact");
+        let Some(LoweredArtifactPlan::StructuralMethod(plan)) = record.plan.as_mut() else {
+            panic!("structural artifact carries a structural plan");
+        };
+        plan.structural = match plan.structural {
+            crate::StructuralTraitMethod::Index => crate::StructuralTraitMethod::Debug,
+            _ => crate::StructuralTraitMethod::Index,
+        };
+        // An edge whose kind disagrees with its target's key family.
+        let ordinal = program.artifacts.get(structural).expect("artifact").ordinal;
+        let origin = record_origin(&program, constructor);
+        program
+            .artifacts
+            .get_mut(constructor)
+            .expect("artifact")
+            .artifacts
+            .push(LoweredArtifactDependency {
+                artifact: ordinal,
+                origin,
+                kind: LoweredArtifactDependencyKind::DropGlue,
+            });
+
+        let messages = program
+            .validate_specializations()
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("does not rebuild its key")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("has a `drop-glue` edge to `structural-method`")),
+            "{messages:?}"
+        );
+    }
+
+    fn record_origin(program: &LoweredProgram, artifact: LoweredArtifactRequestId) -> Origin {
+        program
+            .artifacts
+            .get(artifact)
+            .expect("artifact")
+            .origin
+            .clone()
+    }
+
+    #[test]
+    fn artifact_owned_helper_requests_are_diagnosed_not_panics() {
+        let (_, program) = lower("let x = 1\n");
+        let origin = program
+            .initializers
+            .iter()
+            .next()
+            .map(|(_, initializer)| initializer.origin.clone())
+            .expect("an initializer");
+        let mut builder = WorklistBuilder::new(&program);
+        builder.request_helper(
+            FunctionId(0),
+            &origin,
+            TraversalOwner::Artifact(LoweredArtifactRequestId::for_test(0)),
+        );
+        assert!(builder.helper_requests.is_empty());
+        assert!(
+            builder.diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("requested unresolved compiler helper")),
+            "{:?}",
+            builder.diagnostics
         );
     }
 
