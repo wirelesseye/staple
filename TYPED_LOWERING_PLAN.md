@@ -126,6 +126,7 @@ Progress:
   - layout-specific helpers required by lowered operations.
 - Deduplicate artifacts using structural keys.
 - Validate that every lowered callable or helper reference resolves to a catalog entry.
+- Follow the detailed sequence and gates in [STAGE_4_GENERATED_ARTIFACTS_BREAKDOWN.md](STAGE_4_GENERATED_ARTIFACTS_BREAKDOWN.md).
 
 > **Complex stage:** Some dependencies are currently discovered deep inside LLVM emission, especially formatting, structural traits, cleanup, and coroutines. This stage may need subsystem-specific breakdown plans to identify and relocate every hidden discovery path.
 
