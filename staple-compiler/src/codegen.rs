@@ -50,16 +50,17 @@ struct ModuleEmitter<'module, 'context> {
         CheckedFunctionType,
         HashMap<TypeParameterId, CheckedType>,
     )>,
-    /// Test-only: typed constructor-adapter discoveries in creation order.
+    /// Test-only: typed constructor-adapter records in creation order.
     #[cfg(test)]
-    legacy_constructor_adapters: Vec<(SymbolId, CheckedFunctionType)>,
-    /// Test-only: typed structural-method discoveries in creation order.
+    legacy_constructor_adapters: Vec<LegacyConstructorAdapter>,
+    /// Test-only: finished structural-method records in creation order.
     #[cfg(test)]
-    legacy_structural_methods: Vec<(
-        crate::StructuralTraitMethod,
-        Vec<CheckedType>,
-        CheckedFunctionType,
-    )>,
+    legacy_structural_methods: Vec<LegacyStructuralMethod>,
+    /// Test-only: the structural bodies currently being emitted, innermost
+    /// last. Events record onto the innermost entry so nested structural
+    /// bodies attribute their own literals and delegates.
+    #[cfg(test)]
+    legacy_structural_stack: Vec<LegacyStructuralMethod>,
     active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
     expression_type_overrides: HashMap<staple_syntax::SyntaxId, CheckedType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
@@ -313,6 +314,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             legacy_constructor_adapters: Vec::new(),
             #[cfg(test)]
             legacy_structural_methods: Vec::new(),
+            #[cfg(test)]
+            legacy_structural_stack: Vec::new(),
             active_type_substitutions: HashMap::new(),
             expression_type_overrides: HashMap::new(),
             function_symbols: HashMap::new(),
@@ -389,6 +392,47 @@ impl<'context> CodeGenerator<'context> {
 /// source-function specialization queue (function, concrete type, recorded
 /// substitutions), constructor adapters, and structural methods. Production
 /// emission never reads this record.
+/// Test-only: one emitted constructor adapter and the decisions its body
+/// makes.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyConstructorAdapter {
+    pub(crate) symbol: SymbolId,
+    pub(crate) callable_type: CheckedFunctionType,
+    /// The concrete result is a managed reference.
+    pub(crate) managed_ref: bool,
+    /// `build_ref_value` set a payload finalizer.
+    pub(crate) finalizer_set: bool,
+}
+
+/// Test-only: one nested `trait_method_code` selection inside a structural
+/// body: the selected instance template with its concrete method type, or the
+/// nested structural kind with its completed arguments.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LegacyStructuralCallee {
+    Instance(FunctionId, CheckedFunctionType),
+    Structural(crate::StructuralTraitMethod, Vec<CheckedType>),
+}
+
+/// Test-only: one emitted structural-method body and the decisions it makes.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyStructuralMethod {
+    pub(crate) structural: crate::StructuralTraitMethod,
+    pub(crate) arguments: Vec<CheckedType>,
+    pub(crate) function_type: CheckedFunctionType,
+    /// `compile_formatter_write_literal` strings in emission order.
+    pub(crate) debug_literals: Vec<String>,
+    /// Nested trait-method selections in emission order.
+    pub(crate) delegates: Vec<LegacyStructuralCallee>,
+    /// `DerefIndex`: `Some(true)` took the direct-load fast path; `Some(false)`
+    /// delegated; `None` for other kinds.
+    pub(crate) deref_index_fast_path: Option<bool>,
+    /// `Iterator.next`: the `Done` and `Yield` alternative indices.
+    pub(crate) next_alternatives: Option<(usize, usize)>,
+}
+
 #[cfg(test)]
 pub(crate) struct LegacyEmissions {
     pub(crate) specializations: Vec<(
@@ -396,12 +440,8 @@ pub(crate) struct LegacyEmissions {
         CheckedFunctionType,
         HashMap<TypeParameterId, CheckedType>,
     )>,
-    pub(crate) constructor_adapters: Vec<(SymbolId, CheckedFunctionType)>,
-    pub(crate) structural_methods: Vec<(
-        crate::StructuralTraitMethod,
-        Vec<CheckedType>,
-        CheckedFunctionType,
-    )>,
+    pub(crate) constructor_adapters: Vec<LegacyConstructorAdapter>,
+    pub(crate) structural_methods: Vec<LegacyStructuralMethod>,
 }
 
 /// Compiles one lowered module with the legacy backend and returns its typed
@@ -1005,8 +1045,20 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         );
         self.constructor_codes.insert((symbol, key), function);
         #[cfg(test)]
-        self.legacy_constructor_adapters
-            .push((symbol, function_type.clone()));
+        {
+            let managed_ref = matches!(function_type.result.as_ref(), CheckedType::Ref(_));
+            let finalizer_set = matches!(
+                function_type.result.as_ref(),
+                CheckedType::Ref(payload) if self.typed_module.type_needs_drop(payload)
+            );
+            self.legacy_constructor_adapters
+                .push(LegacyConstructorAdapter {
+                    symbol,
+                    callable_type: function_type.clone(),
+                    managed_ref,
+                    finalizer_set,
+                });
+        }
 
         let previous_block = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
@@ -3724,6 +3776,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .typed_module
             .trait_impl_method(trait_id, arguments, method)
         {
+            #[cfg(test)]
+            if let Some(record) = self.legacy_structural_stack.last_mut() {
+                record.delegates.push(LegacyStructuralCallee::Instance(
+                    function_id,
+                    function_type.clone(),
+                ));
+            }
             if let Some(function) = self.functions.get(&function_id).copied() {
                 return Ok(function);
             }
@@ -3733,6 +3792,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .typed_module
             .structural_trait_method(trait_id, arguments)
             .ok_or_else(|| Diagnostic::new(span.clone(), "no trait implementation is available"))?;
+        #[cfg(test)]
+        if let Some(record) = self.legacy_structural_stack.last_mut() {
+            record.delegates.push(LegacyStructuralCallee::Structural(
+                structural,
+                arguments.to_vec(),
+            ));
+        }
         self.structural_trait_method_code(structural, arguments, &function_type, span)
     }
 
@@ -3756,11 +3822,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let function = self.llvm_module.add_function(&name, llvm_type, None);
         self.structural_trait_codes.insert(key, function);
         #[cfg(test)]
-        self.legacy_structural_methods.push((
+        self.legacy_structural_stack.push(LegacyStructuralMethod {
             structural,
-            arguments.to_vec(),
-            function_type.clone(),
-        ));
+            arguments: arguments.to_vec(),
+            function_type: function_type.clone(),
+            debug_literals: Vec::new(),
+            delegates: Vec::new(),
+            deref_index_fast_path: None,
+            next_alternatives: None,
+        });
         let previous = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
@@ -3833,6 +3903,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if let Some(block) = previous {
             self.builder.position_at_end(block);
         }
+        #[cfg(test)]
+        self.legacy_structural_methods.push(
+            self.legacy_structural_stack
+                .pop()
+                .expect("every emitted structural body has a record"),
+        );
         Ok(function)
     }
 
@@ -3987,6 +4063,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         literal: &str,
         span: Span,
     ) -> CodeGenerationResult<()> {
+        #[cfg(test)]
+        if let Some(record) = self.legacy_structural_stack.last_mut() {
+            record.debug_literals.push(literal.to_string());
+        }
         let function_id = self
             .typed_module
             .resolved()
@@ -4369,6 +4449,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             && let Some(element) = product.homogeneous_element()
             && self.typed_module.is_copy_in_function(element, None)
         {
+            #[cfg(test)]
+            if let Some(record) = self.legacy_structural_stack.last_mut() {
+                record.deref_index_fast_path = Some(true);
+            }
             let BasicValueEnum::IntValue(position) = position_value else {
                 return Err(Diagnostic::new(span, "invalid structural Index position"));
             };
@@ -4376,6 +4460,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .size_type
                 .const_int(product.elements.len() as u64, false);
             return self.compile_index_load(*pointer, *position, length, output.clone(), span);
+        }
+        #[cfg(test)]
+        if let Some(record) = self.legacy_structural_stack.last_mut() {
+            record.deref_index_fast_path = Some(false);
         }
         let payload_value = self
             .builder
@@ -4600,22 +4688,26 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             variadic: false,
         });
-        let done_alternative = result_sum
+        let done_index = result_sum
             .alternatives
             .iter()
-            .find(|alternative| {
+            .position(|alternative| {
                 matches!(alternative, CheckedType::Distinct { representation, .. } if representation.as_ref() == iter)
             })
-            .cloned()
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing `IterStep.Done` alternative"))?;
-        let yield_alternative = result_sum
+        let yield_index = result_sum
             .alternatives
             .iter()
-            .find(|alternative| {
+            .position(|alternative| {
                 matches!(alternative, CheckedType::Distinct { representation, .. } if representation.as_ref() == &yield_representation)
             })
-            .cloned()
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing `IterStep.Yield` alternative"))?;
+        let done_alternative = result_sum.alternatives[done_index].clone();
+        let yield_alternative = result_sum.alternatives[yield_index].clone();
+        #[cfg(test)]
+        if let Some(record) = self.legacy_structural_stack.last_mut() {
+            record.next_alternatives = Some((done_index, yield_index));
+        }
 
         let product_value = *product_value;
         let cursor = *cursor;

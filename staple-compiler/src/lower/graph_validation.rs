@@ -524,17 +524,19 @@ mod tests {
 
     use inkwell::context::Context;
 
-    use crate::specialization::{ArtifactRequestKey, CanonicalFunctionType};
+    use crate::specialization::{ArtifactRequestKey, CanonicalFunctionType, CanonicalType};
     use crate::{
-        CallTypeSubstitution, LoweredModule, Lowerer, NameResolver, ProgramLoader,
-        SubstitutionEnvironment, TypeChecker, TypeParameterId, TypedModule,
+        CallTypeSubstitution, CheckedFunctionType, ConstructorConstruction, DebugStep,
+        LoweredArtifactPlan, LoweredModule, Lowerer, NameResolver, PlannedCallee, ProgramLoader,
+        StructuralBody, StructuralTraitMethod, SubstitutionEnvironment, TypeChecker,
+        TypeParameterId, TypedModule,
     };
 
     use super::super::{
-        LoweredArtifactRequestRoot, LoweredBindingSite, LoweredBoundTarget, LoweredCallStep,
-        LoweredCallableCategory, LoweredCallableTarget, LoweredExpressionKind,
-        LoweredInstanceDependency, LoweredInstanceDependencyKind, LoweredInstanceRequest,
-        LoweredRepeatCount, TraitEvidence,
+        LoweredArtifactRequestId, LoweredArtifactRequestRoot, LoweredBindingSite,
+        LoweredBoundTarget, LoweredCallStep, LoweredCallableCategory, LoweredCallableTarget,
+        LoweredExpressionKind, LoweredInstanceDependency, LoweredInstanceDependencyKind,
+        LoweredInstanceRequest, LoweredRepeatCount, LoweredStringTemplatePart, TraitEvidence,
     };
     use super::*;
 
@@ -1538,24 +1540,25 @@ mod tests {
             );
         }
         let origin = Origin::compiler();
-        for (symbol, function_type) in &legacy.constructor_adapters {
-            let callable_type = CanonicalFunctionType::concrete(function_type, &origin)
+        for adapter in &legacy.constructor_adapters {
+            let callable_type = CanonicalFunctionType::concrete(&adapter.callable_type, &origin)
                 .expect("a legacy adapter type is concrete");
             let found = program.artifacts.iter().any(|(_, artifact)| {
                 matches!(
                     program.specializations.artifact(artifact.ordinal),
                     Some(ArtifactRequestKey::ConstructorAdapter(key))
-                        if key.symbol == *symbol && key.callable_type == callable_type
+                        if key.symbol == adapter.symbol && key.callable_type == callable_type
                 )
             });
             assert!(
                 found,
                 "legacy constructor adapter for symbol {} has no artifact request",
-                symbol.0
+                adapter.symbol.0
             );
         }
-        for (structural, arguments, _function_type) in &legacy.structural_methods {
-            let arguments = arguments
+        for method in &legacy.structural_methods {
+            let arguments = method
+                .arguments
                 .iter()
                 .map(|argument| {
                     CanonicalType::concrete(argument, &origin)
@@ -1566,12 +1569,13 @@ mod tests {
                 matches!(
                     program.specializations.artifact(artifact.ordinal),
                     Some(ArtifactRequestKey::StructuralMethod(key))
-                        if key.structural == *structural && key.arguments == arguments
+                        if key.structural == method.structural && key.arguments == arguments
                 )
             });
             assert!(
                 found,
-                "legacy structural method {structural:?} has no artifact request"
+                "legacy structural method {:?} has no artifact request",
+                method.structural
             );
         }
         (
@@ -1639,6 +1643,521 @@ mod tests {
         assert!(
             structural_methods > 0,
             "the comparison must see at least one structural method"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Stage 4.3 formatting closure and legacy transition comparison.
+    // ------------------------------------------------------------------
+
+    /// Every string template in a materialized body binds its formatting
+    /// helpers, every interpolation binds its selected callee, and every
+    /// product-`Debug` plan binds `Formatter.write`.
+    #[test]
+    fn formatting_sites_bind_their_helpers_and_callees() {
+        let lowered = lower(concat!(
+            "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
+            "def label: () -> String = () => \"plain\"\n",
+            "def show_number: (I32) -> String = value => \"value=${value}\"\n",
+            "let a = show_pair (1, 2)\n",
+            "let b = label ()\n",
+            "let c = show_number 1\n",
+        ));
+        let program = &lowered.program;
+        let mut templates = 0;
+        let mut interpolations = 0;
+        for (_, instance) in program.instances.iter() {
+            let Some(body) = &instance.body else {
+                continue;
+            };
+            for (id, expression) in body.expressions.iter() {
+                let LoweredExpressionKind::StringTemplate(template) = &expression.kind else {
+                    continue;
+                };
+                templates += 1;
+                assert!(
+                    matches!(
+                        body.binding(LoweredBindingSite::FormattingConstructor(id)),
+                        Some(LoweredBoundTarget::Instance(_))
+                    ),
+                    "every template binds its constructor instance"
+                );
+                assert!(
+                    matches!(
+                        body.binding(LoweredBindingSite::FormattingFinish(id)),
+                        Some(LoweredBoundTarget::Instance(_))
+                    ),
+                    "every template binds its finish instance"
+                );
+                let has_literal = template
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, LoweredStringTemplatePart::Literal(_)));
+                match body.binding(LoweredBindingSite::FormattingWrite(id)) {
+                    Some(LoweredBoundTarget::Instance(_)) => {
+                        assert!(
+                            has_literal,
+                            "write is bound only when a literal part exists"
+                        );
+                    }
+                    None => {
+                        assert!(
+                            !has_literal,
+                            "a template with a literal part binds the write instance"
+                        );
+                    }
+                    other => panic!("unexpected formatting-write binding {other:?}"),
+                }
+                for (index, part) in template.parts.iter().enumerate() {
+                    let LoweredStringTemplatePart::Interpolation(interpolation) = part else {
+                        continue;
+                    };
+                    interpolations += 1;
+                    let site = LoweredBindingSite::Interpolation {
+                        template: id,
+                        part: index,
+                    };
+                    match (&interpolation.evidence, body.binding(site)) {
+                        (
+                            TraitEvidence::ExplicitImplementation { .. },
+                            Some(LoweredBoundTarget::Instance(_)),
+                        ) => {}
+                        (
+                            TraitEvidence::Structural { .. },
+                            Some(LoweredBoundTarget::Artifact(ordinal)),
+                        ) => {
+                            // A structural Debug reached through an
+                            // interpolation must be reachable in the catalog.
+                            let artifact = program
+                                .artifacts
+                                .get(LoweredArtifactRequestId::from_index(ordinal.index()))
+                                .expect("the interpolation artifact is interned");
+                            match &artifact.plan {
+                                Some(LoweredArtifactPlan::StructuralMethod(plan)) => {
+                                    if interpolation.format
+                                        == staple_syntax::StringInterpolationFormat::Debug
+                                    {
+                                        assert!(
+                                            matches!(
+                                                plan.body,
+                                                StructuralBody::ProductDebug { .. }
+                                                    | StructuralBody::SumDebug { .. }
+                                            ),
+                                            "a Debug interpolation resolves a Debug body: {:?}",
+                                            plan.body
+                                        );
+                                    }
+                                }
+                                other => panic!(
+                                    "interpolation artifact has no structural plan: {other:?}"
+                                ),
+                            }
+                        }
+                        (evidence, target) => {
+                            panic!("interpolation binding mismatch: {evidence:?} -> {target:?}")
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            templates >= 2,
+            "the fixture covers a template with and without literals"
+        );
+        assert!(interpolations >= 2);
+
+        let mut product_debug_plans = 0;
+        for (_, artifact) in program.artifacts.iter() {
+            if let Some(LoweredArtifactPlan::StructuralMethod(plan)) = &artifact.plan
+                && let StructuralBody::ProductDebug { write, .. } = &plan.body
+            {
+                assert!(
+                    write.instance.is_some(),
+                    "every product-Debug plan binds the write instance"
+                );
+                product_debug_plans += 1;
+            }
+        }
+        assert!(product_debug_plans > 0);
+    }
+
+    /// The completed arguments of a legacy structural body's key.
+    fn canonical_arguments(arguments: &[crate::CheckedType]) -> Vec<CanonicalType> {
+        let origin = Origin::compiler();
+        arguments
+            .iter()
+            .map(|argument| {
+                CanonicalType::concrete(argument, &origin).expect("concrete legacy argument")
+            })
+            .collect()
+    }
+
+    /// Requires every planned delegate to match the legacy delegate at the
+    /// same position: the same instance template with the same concrete
+    /// method type, or the same nested structural key.
+    fn assert_delegates_match(
+        program: &LoweredProgram,
+        plan_delegates: &[(&PlannedCallee, &CheckedFunctionType)],
+        legacy_delegates: &[crate::codegen::LegacyStructuralCallee],
+    ) {
+        use crate::codegen::LegacyStructuralCallee;
+        let origin = Origin::compiler();
+        assert_eq!(
+            plan_delegates.len(),
+            legacy_delegates.len(),
+            "delegate count agrees"
+        );
+        for (entry, legacy) in plan_delegates.iter().zip(legacy_delegates) {
+            let (callee, callee_type): (&PlannedCallee, &CheckedFunctionType) = *entry;
+            let planned_type = CanonicalFunctionType::concrete(callee_type, &origin)
+                .expect("concrete callee type");
+            match (callee, legacy) {
+                (
+                    PlannedCallee::Instance(planned),
+                    LegacyStructuralCallee::Instance(function, function_type),
+                ) => {
+                    let bound = planned.instance.expect("bound after closure");
+                    let record = program.instances.get(bound).expect("bound instance");
+                    assert_eq!(
+                        record.template, *function,
+                        "the delegated instance uses the legacy function template"
+                    );
+                    assert_eq!(
+                        CanonicalFunctionType::concrete(function_type, &origin)
+                            .expect("concrete legacy type"),
+                        planned_type,
+                        "the delegated method type agrees"
+                    );
+                    if let Some(body) = &record.body {
+                        let signature = CanonicalFunctionType::concrete(&body.signature, &origin)
+                            .expect("concrete body signature");
+                        assert_eq!(signature, planned_type, "instance body signature agrees");
+                    }
+                }
+                (
+                    PlannedCallee::Artifact(planned),
+                    LegacyStructuralCallee::Structural(structural, arguments),
+                ) => {
+                    let ordinal = planned.artifact.expect("bound after closure");
+                    let key = program
+                        .specializations
+                        .artifact(ordinal)
+                        .expect("bound artifact key");
+                    match key {
+                        ArtifactRequestKey::StructuralMethod(key) => {
+                            assert_eq!(key.structural, *structural);
+                            assert_eq!(key.arguments, canonical_arguments(arguments));
+                        }
+                        other => {
+                            panic!("expected a structural key, got `{}`", other.family_name())
+                        }
+                    }
+                }
+                (planned, legacy) => {
+                    panic!("delegate shape mismatch: planned {planned:?} vs legacy {legacy:?}")
+                }
+            }
+        }
+    }
+
+    /// Stage 4.3's transition comparison: every legacy-generated constructor
+    /// adapter and structural body matches exactly one artifact plan with the
+    /// same decisions, and every such plan matches a legacy body.
+    fn assert_legacy_artifacts_match_plans(source: &str) -> (usize, usize) {
+        let module = checked_program(source);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .expect("source should lower before the legacy comparison");
+        let context = Context::create();
+        let legacy = crate::codegen::legacy_emissions(&context, &lowered)
+            .expect("the legacy backend should compile the module");
+        let program = &lowered.program;
+        let origin = Origin::compiler();
+
+        for adapter in &legacy.constructor_adapters {
+            let callable_type =
+                CanonicalFunctionType::concrete(&adapter.callable_type, &origin).expect("concrete");
+            let plan = program
+                .artifacts
+                .iter()
+                .find_map(|(_, artifact)| {
+                    match (
+                        program.specializations.artifact(artifact.ordinal),
+                        artifact.plan.as_ref(),
+                    ) {
+                        (
+                            Some(ArtifactRequestKey::ConstructorAdapter(key)),
+                            Some(LoweredArtifactPlan::ConstructorAdapter(plan)),
+                        ) if key.symbol == adapter.symbol && key.callable_type == callable_type => {
+                            Some(plan)
+                        }
+                        _ => None,
+                    }
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "legacy constructor adapter for symbol {} has no matching plan",
+                        adapter.symbol.0
+                    )
+                });
+            match &plan.construction {
+                ConstructorConstruction::ManagedRef { finalizer, .. } => {
+                    assert!(
+                        adapter.managed_ref,
+                        "legacy adapter for symbol {} returned a value but the plan allocates",
+                        adapter.symbol.0
+                    );
+                    assert_eq!(
+                        finalizer.is_some(),
+                        adapter.finalizer_set,
+                        "finalizer presence for symbol {}",
+                        adapter.symbol.0
+                    );
+                }
+                ConstructorConstruction::Value { .. } => {
+                    assert!(
+                        !adapter.managed_ref,
+                        "legacy adapter for symbol {} allocates but the plan wraps a value",
+                        adapter.symbol.0
+                    );
+                    assert!(!adapter.finalizer_set);
+                }
+                ConstructorConstruction::Unexpanded => {
+                    panic!("constructor plan was never expanded")
+                }
+            }
+        }
+
+        for method in &legacy.structural_methods {
+            let arguments = canonical_arguments(&method.arguments);
+            let function_type = CanonicalFunctionType::concrete(&method.function_type, &origin)
+                .expect("concrete legacy method type");
+            let plan = program
+                .artifacts
+                .iter()
+                .find_map(|(_, artifact)| {
+                    match (
+                        program.specializations.artifact(artifact.ordinal),
+                        artifact.plan.as_ref(),
+                    ) {
+                        (
+                            Some(ArtifactRequestKey::StructuralMethod(key)),
+                            Some(LoweredArtifactPlan::StructuralMethod(plan)),
+                        ) if key.structural == method.structural
+                            && key.arguments == arguments
+                            && key.callable_type == function_type =>
+                        {
+                            Some(plan)
+                        }
+                        _ => None,
+                    }
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "legacy {:?} body for {:?} has no matching plan",
+                        method.structural, method.arguments
+                    )
+                });
+            match &plan.body {
+                StructuralBody::ProductDebug { steps, write } => {
+                    assert_eq!(method.structural, StructuralTraitMethod::Debug);
+                    let literals = steps
+                        .iter()
+                        .filter_map(|step| match step {
+                            DebugStep::Write(literal) => Some(literal.as_str()),
+                            DebugStep::Element { .. } => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        literals,
+                        method
+                            .debug_literals
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                        "Debug literal sequence agrees"
+                    );
+                    let delegates = steps
+                        .iter()
+                        .filter_map(|step| match step {
+                            DebugStep::Element { delegate, .. } => {
+                                Some((&delegate.callee, &delegate.callee_type))
+                            }
+                            DebugStep::Write(_) => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_delegates_match(program, &delegates, &method.delegates);
+                    assert!(write.instance.is_some(), "the write instance is bound");
+                }
+                StructuralBody::SumDebug { alternatives } => {
+                    assert_eq!(method.structural, StructuralTraitMethod::Debug);
+                    assert!(method.debug_literals.is_empty());
+                    let delegates = alternatives
+                        .iter()
+                        .map(|delegate| (&delegate.callee, &delegate.callee_type))
+                        .collect::<Vec<_>>();
+                    assert_delegates_match(program, &delegates, &method.delegates);
+                }
+                StructuralBody::DerefIndexLoad { .. } => {
+                    assert_eq!(method.structural, StructuralTraitMethod::DerefIndex);
+                    assert_eq!(method.deref_index_fast_path, Some(true));
+                    assert!(method.delegates.is_empty());
+                }
+                StructuralBody::DerefDelegate { delegate, .. } => {
+                    match method.structural {
+                        StructuralTraitMethod::DerefIndex => {
+                            assert_eq!(method.deref_index_fast_path, Some(false));
+                        }
+                        StructuralTraitMethod::DerefMutateIndex => {
+                            assert_eq!(method.deref_index_fast_path, None);
+                        }
+                        other => panic!("unexpected DerefDelegate for {other:?}"),
+                    }
+                    let delegates = vec![(&delegate.callee, &delegate.callee_type)];
+                    assert_delegates_match(program, &delegates, &method.delegates);
+                }
+                StructuralBody::Next { done, yield_, .. } => {
+                    assert_eq!(method.structural, StructuralTraitMethod::Iterator);
+                    assert_eq!(method.next_alternatives, Some((done.index, yield_.index)));
+                    assert!(method.delegates.is_empty());
+                }
+                StructuralBody::IndexSwitch { .. }
+                | StructuralBody::IndexLoad { .. }
+                | StructuralBody::MutateReplace { .. }
+                | StructuralBody::IntoIterator { .. } => {
+                    assert!(method.delegates.is_empty(), "no delegated callees");
+                    assert_eq!(method.deref_index_fast_path, None);
+                    assert_eq!(method.next_alternatives, None);
+                    assert!(method.debug_literals.is_empty());
+                }
+                StructuralBody::Unexpanded => panic!("structural plan was never expanded"),
+            }
+        }
+
+        // Vice versa: no catalog constructor or structural plan may exist
+        // without an emitted legacy body.
+        for (_, artifact) in program.artifacts.iter() {
+            match program.specializations.artifact(artifact.ordinal) {
+                Some(ArtifactRequestKey::ConstructorAdapter(key)) => {
+                    assert!(
+                        legacy.constructor_adapters.iter().any(|adapter| {
+                            adapter.symbol == key.symbol
+                                && CanonicalFunctionType::concrete(&adapter.callable_type, &origin)
+                                    .expect("concrete")
+                                    == key.callable_type
+                        }),
+                        "constructor plan for symbol {} has no legacy emission",
+                        key.symbol.0
+                    );
+                }
+                Some(ArtifactRequestKey::StructuralMethod(key)) => {
+                    assert!(
+                        legacy.structural_methods.iter().any(|method| {
+                            method.structural == key.structural
+                                && canonical_arguments(&method.arguments) == key.arguments
+                        }),
+                        "structural plan for {:?} has no legacy emission",
+                        key.structural
+                    );
+                }
+                _ => {}
+            }
+        }
+        (
+            legacy.constructor_adapters.len(),
+            legacy.structural_methods.len(),
+        )
+    }
+
+    #[test]
+    fn legacy_constructor_and_structural_bodies_match_artifact_plans() {
+        let mut total_adapters = 0;
+        let mut total_methods = 0;
+        for source in [
+            concat!(
+                "type Point = ctor (I32, I32)\n",
+                "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+                "type Named = ctor (left: I32, right: I32)\n",
+                "let make_named: () -> ((I32, I32) -> Named) = () => Named\n",
+                "type Resource = ctor I32\n",
+                "impl Drop Resource { def drop = Resource value => () }\n",
+                "let make_resource: () -> (Resource -> Ref Resource) = () => Ref\n",
+                "let make_ref: () -> (I32 -> Ref I32) = () => Ref\n",
+                "def ref_maker: <T where Copy T> () -> (T -> Ref T) = () => Ref\n",
+                "let maker_i32: I32 -> Ref I32 = ref_maker ()\n",
+                "let maker_u8: U8 -> Ref U8 = ref_maker ()\n",
+            ),
+            concat!(
+                "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
+                "def show_named: (left: I32, right: I32) -> String = pair => \"${pair:?}\"\n",
+                "def show_nested: ((I32, I32), (I32, I32)) -> String = nested => \"${nested:?}\"\n",
+                "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (1 satisfies U8) }\n",
+                "def show_sum: (I32 | U8) -> String = value => \"${value:?}\"\n",
+                "let a = show_pair (1, 2)\n",
+                "let b = show_named (1, 2)\n",
+                "let c = show_nested ((1, 2), (3, 4))\n",
+                "let d = show_sum (pick True)\n",
+            ),
+            concat!(
+                "type Resource = ctor I32\n",
+                "impl Drop Resource { def drop = Resource value => () }\n",
+                "def index_mixed: (U8, I32) -> (I32 | U8) = pair => pair[0]\n",
+                "def index_uniform: (I32, I32) -> I32 = pair => pair[0]\n",
+                "def mutate_copy: (I32, I32) -> (I32, I32) = pair => { let mut copy = pair; copy[0] = 3; copy }\n",
+                "def mutate_resource: move (Resource, Resource) -> (Resource, Resource) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = Resource 3\n",
+                "  copy\n",
+                "}\n",
+                "def count_pair: (U8, I32) -> I32 = pair => {\n",
+                "  let mut count = 0\n",
+                "  for item in pair { count = count + 1 }\n",
+                "  count\n",
+                "}\n",
+                "def deref_uniform: (Ref (I32, I32)) -> I32 = reference => reference[0]\n",
+                "def deref_mixed: (Ref (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
+                "def deref_replace: move (Ref (I32, I32)) -> Ref (I32, I32) = move reference => {\n",
+                "  let mut own = reference\n",
+                "  own[0] = 3\n",
+                "  own\n",
+                "}\n",
+                "type Row = ctor (I32, I32)\n",
+                "impl Index Row USize I32 { def index = (row, position) => 7 }\n",
+                "def deref_row: (Ref Row, USize) -> I32 = (reference, position) => reference[position]\n",
+                "def use_pair: <T where Copy T> (T, T) -> T = pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = pair[1]\n",
+                "  let mut last = copy[0]\n",
+                "  for item in copy { last = item }\n",
+                "  last\n",
+                "}\n",
+                "let used_i32: I32 = use_pair (1, 2)\n",
+                "let used_u8: U8 = use_pair ((1 satisfies U8), (2 satisfies U8))\n",
+                "let mixed = index_mixed ((1 satisfies U8), 2)\n",
+                "let uniform = index_uniform (1, 2)\n",
+                "let copied = mutate_copy (1, 2)\n",
+                "let replaced = mutate_resource (Resource 1, Resource 2)\n",
+                "let counted = count_pair ((1 satisfies U8), 2)\n",
+                "let derefed = deref_uniform (Ref (1, 2))\n",
+                "let derefed_mixed = deref_mixed (Ref ((1 satisfies U8), 2))\n",
+                "let derefed_replaced = deref_replace (Ref (1, 2))\n",
+                "let derefed_row = deref_row (Ref (Row (1, 2)), 0)\n",
+            ),
+            concat!(
+                "type Held T = ctor (T)\n",
+                "impl<T where Debug T> Debug (Held T) { def fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
+                "def show_mixed: (Held I32, I32) -> String = pair => \"${pair:?}\"\n",
+                "let text = show_mixed (Held 1, 2)\n",
+            ),
+        ] {
+            let (adapters, methods) = assert_legacy_artifacts_match_plans(source);
+            total_adapters += adapters;
+            total_methods += methods;
+        }
+        assert!(total_adapters >= 5, "the fixtures cover constructor shapes");
+        assert!(
+            total_methods >= 7,
+            "the fixtures cover every structural kind: {total_methods}"
         );
     }
 
