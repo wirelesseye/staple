@@ -1,6 +1,6 @@
 # Stage 4.2 Plan: Fixed-Point Artifact Closure Engine
 
-**Status:** In progress. Stage 4.1 is complete through `9601bfb` (artifact key families, `LoweredArtifactPlan` placeholders, artifact-owned edge lists, `LoweredInstanceRequest::Artifact`, `LoweredArtifactRequestRoot::Artifact`, `FormattingWrite`). Stage 4.2 Step 1 (extract `GraphRecorder`, install/take helpers, `WorklistBuilder::resume`) is complete; Steps 2–6 are next; Stages 4.3–4.6 plug their families into the API defined here.
+**Status:** In progress. Stage 4.1 is complete through `9601bfb` (artifact key families, `LoweredArtifactPlan` placeholders, artifact-owned edge lists, `LoweredInstanceRequest::Artifact`, `LoweredArtifactRequestRoot::Artifact`, `FormattingWrite`). Stage 4.2 Steps 1–2 (shared `GraphRecorder` with install/take and resumable traversal; incremental pending-instance materialization) are complete; Steps 3–6 are next; Stages 4.3–4.6 plug their families into the API defined here.
 
 ## Goal and boundary
 
@@ -172,6 +172,8 @@ Validation runs after the closure loop in `Lowerer::lower`, next to the existing
 
 - Add `materialize_pending_instance_bodies` and route the existing entry point through it.
 - **Gate:** existing Stage 3.4 tests and snapshots are unchanged. A test materializes, appends a new concrete instance through `GraphRecorder` plus `resume`, materializes again, and shows that the old bodies are untouched (pointer-equal or snapshot-equal) while the new body passes `validate_instance_bodies`.
+
+**Step 2 notes (complete).** `LoweredProgram::materialize_instance_bodies` now delegates to `materialize_pending_instance_bodies`, and `BodyMaterializer::build_pending` clones only instances whose `body` is `None`. Behavior on the first call is unchanged, including the Stage 3.4 rule that a template with no runtime body still receives its empty body record (`bodyless_templates_materialize_empty_bodies`), so the plan's "whose template has a body" filter was deliberately not applied. Installation remains all-or-nothing per call. New test `resumed_instances_materialize_without_touching_installed_bodies` materializes a program, snapshots every installed body, appends a second concrete `identity` instance through `GraphRecorder` and `resume`, materializes again, and requires the old body snapshots to be byte-identical while the new instance's concrete body passes `validate_instance_bodies`. Full workspace suite (1188 tests) passes.
 
 ### Step 3 — Engine, requests, hooks, and use storage
 

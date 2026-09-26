@@ -3052,6 +3052,120 @@ mod tests {
     }
 
     #[test]
+    fn resumed_instances_materialize_without_touching_installed_bodies() {
+        use crate::CallTypeSubstitution;
+
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+        );
+        let module = checked_program(source);
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        assert!(program.build_specialization_worklist().is_empty());
+        assert!(program.materialize_instance_bodies().is_empty());
+        assert!(program.validate_instance_bodies().is_empty());
+
+        let before = program
+            .instances
+            .iter()
+            .map(|(id, instance)| {
+                (
+                    id.index(),
+                    format!("{:?}", instance.body.as_ref().expect("body")),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let existing = program.instances.len();
+
+        // Append a second concrete instance of the same template through the
+        // recorder and traverse it with `resume`, exactly as the Stage 4.2
+        // closure loop will after an artifact requests a new instance.
+        let function = function_id(&program, "identity");
+        let template = program.functions.get(function).expect("identity").clone();
+        let parameter = match template.signature.parameter.as_ref() {
+            CheckedType::Parameter { id, .. } => *id,
+            other => panic!("identity takes a type parameter, got {other:?}"),
+        };
+        let call = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| match &call.target {
+                LoweredCallableTarget::DirectFunction {
+                    function: target, ..
+                } if *target == function => Some(call),
+                _ => None,
+            })
+            .expect("the call site to identity");
+        let mut substitutions = call.substitutions.clone();
+        let mut replaced = false;
+        for entry in &mut substitutions.types {
+            if entry.parameter == parameter {
+                entry.value_type = CheckedType::U8;
+                replaced = true;
+            }
+        }
+        if !replaced {
+            substitutions.types.push(CallTypeSubstitution {
+                parameter,
+                value_type: CheckedType::U8,
+            });
+        }
+        let map = HashMap::from([(parameter, CheckedType::U8)]);
+        let function_type =
+            match substitute_type(CheckedType::Function(template.signature.clone()), &map) {
+                CheckedType::Function(function_type) => function_type,
+                other => panic!("expected a function signature, got {other:?}"),
+            };
+        let resolved = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function,
+                origin: call.origin.clone(),
+                function_type,
+                substitutions,
+                evidence: call.evidence.clone(),
+                target: InstanceResolutionTarget::Root,
+            })
+            .expect("the second instantiation resolves");
+
+        let mut recorder = GraphRecorder::from_parts(program.take_graph());
+        let (new_instance, created) =
+            recorder.intern_resolved(&program, resolved, LoweredInstanceRequest::EagerTemplate);
+        assert!(created, "the second instantiation is a new instance");
+        let parts = recorder.into_parts();
+        let parts = WorklistBuilder::resume(&program, parts, vec![new_instance]).expect("resume");
+        program.install_graph(parts);
+        assert_eq!(program.instances.len(), existing + 1);
+
+        assert!(program.materialize_pending_instance_bodies().is_empty());
+        assert!(program.validate_instance_bodies().is_empty());
+
+        let after = program
+            .instances
+            .iter()
+            .map(|(id, instance)| {
+                (
+                    id.index(),
+                    format!("{:?}", instance.body.as_ref().expect("body")),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for (id, snapshot) in before {
+            assert_eq!(after.get(&id), Some(&snapshot), "body {id} is untouched");
+        }
+        let new_body = program
+            .instances
+            .get(new_instance)
+            .and_then(|instance| instance.body.as_ref())
+            .expect("the resumed instance has a body");
+        assert!(
+            new_body.root.is_some(),
+            "the resumed instance has a concrete body"
+        );
+    }
+
+    #[test]
     fn repeated_lowering_yields_the_same_instance_graph() {
         let source = concat!(
             "def identity: <T where Copy T> T -> T = value => value\n",

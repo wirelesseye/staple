@@ -288,9 +288,19 @@ impl LoweredProgram {
     /// site bound to the existing graph; otherwise the diagnostics are
     /// returned and the caller discards lowering.
     pub(super) fn materialize_instance_bodies(&mut self) -> Vec<Diagnostic> {
+        self.materialize_pending_instance_bodies()
+    }
+
+    /// Materializes one concrete body per instance that has none yet, in
+    /// ordinal order. The Stage 3 entry point calls this once; the Stage 4.2
+    /// closure loop calls it after each resumed worklist pass, so an instance
+    /// requested by a generated artifact gets a body without re-cloning the
+    /// bodies already installed. Installation is all-or-nothing per call:
+    /// when any body fails, the caller discards lowering and nothing changes.
+    pub(super) fn materialize_pending_instance_bodies(&mut self) -> Vec<Diagnostic> {
         let (bodies, diagnostics) = {
             let materializer = BodyMaterializer::new(self);
-            materializer.build()
+            materializer.build_pending()
         };
         if !diagnostics.is_empty() {
             return diagnostics;
@@ -364,7 +374,13 @@ impl<'a> BodyMaterializer<'a> {
         }
     }
 
-    fn build(
+    /// Clones a body for every instance that does not have one yet. Correctness
+    /// requires that a pending instance's nested requests are all interned
+    /// before this call; the resumed worklist guarantees it, and the existing
+    /// "missing function instance" diagnostic reports a traversal bug
+    /// otherwise. A template with no body still yields its empty body record,
+    /// exactly as the one-shot Stage 3.4 entry point always did.
+    fn build_pending(
         &self,
     ) -> (
         Vec<(FunctionInstanceId, LoweredInstanceBody)>,
@@ -374,6 +390,7 @@ impl<'a> BodyMaterializer<'a> {
             .program
             .instances
             .iter()
+            .filter(|(_, instance)| instance.body.is_none())
             .map(|(id, _)| id)
             .collect::<Vec<_>>();
         let mut bodies = Vec::with_capacity(ids.len());
