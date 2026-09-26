@@ -1,6 +1,6 @@
 # Stage 4.2 Plan: Fixed-Point Artifact Closure Engine
 
-**Status:** In progress. Stage 4.1 is complete through `9601bfb` (artifact key families, `LoweredArtifactPlan` placeholders, artifact-owned edge lists, `LoweredInstanceRequest::Artifact`, `LoweredArtifactRequestRoot::Artifact`, `FormattingWrite`). Stage 4.2 Steps 1–5 (shared `GraphRecorder` with install/take and resumable traversal; incremental pending-instance materialization; the closure engine with placeholder hooks, use/edge storage, and the `Scan` instance root; compiler-helper removal; closure validation with the synthetic-hook test family) are complete; Step 6 (handoff) is next; Stages 4.3–4.6 plug their families into the API defined here.
+**Status:** Complete. Stage 4.1 is complete through `9601bfb` (artifact key families, `LoweredArtifactPlan` placeholders, artifact-owned edge lists, `LoweredInstanceRequest::Artifact`, `LoweredArtifactRequestRoot::Artifact`, `FormattingWrite`). Stage 4.2 Steps 1–6 are complete: shared `GraphRecorder` with install/take and resumable traversal; incremental pending-instance materialization; the closure engine with placeholder hooks, use/edge storage, and the `Scan` instance root; compiler-helper removal; closure validation with the synthetic-hook test family; and the Stages 4.3–4.6 hook-contract handoff below. Stages 4.3–4.6 plug their families into the API defined here.
 
 ## Goal and boundary
 
@@ -216,6 +216,72 @@ Validation runs after the closure loop in `Lowerer::lower`, next to the existing
 
 - Record the hook contract for Stages 4.3–4.6 in this file. It must cover: what a scanner may read, the required site order, how to add an `ArtifactUseSite` variant and its validator arm, how an expander builds a `Root` instance request, which kinds to use, and where to register in `ProductionHooks`. Record the observed round and growth maxima for the standard library.
 - Update [STAGE_4_GENERATED_ARTIFACTS_BREAKDOWN.md](STAGE_4_GENERATED_ARTIFACTS_BREAKDOWN.md) and [TYPED_LOWERING_PLAN.md](TYPED_LOWERING_PLAN.md) with what passed and what remains, including the Stage 5 note that initializer dispatch sites have no binding table.
+
+**Step 6 notes (complete).** The "Handoff contract for Stages 4.3–4.6" section below records what a scanner may read (installed graph, concrete bodies, owned catalogs; never templates or `TypedModule`), the required within-owner/family/site order and its ordinal consequences, the four-step recipe for adding an `ArtifactUseSite` variant and its `check_use_site` validator arm, the exact `Root` instance-request recipe for expanders (plus the plan-ordinal caveat), which artifact/instance dependency kinds to use and where each family registers in `ProductionHooks`, the stateless/deterministic hook rules, the 64-round and `max(templates * 64, 1024)` growth bounds with the observed Stage 4.2 maxima (one round, zero growth for the standard library and every fixture), and the Stage 5 note that initializer dispatch sites have no binding table. [STAGE_4_GENERATED_ARTIFACTS_BREAKDOWN.md](STAGE_4_GENERATED_ARTIFACTS_BREAKDOWN.md) and [TYPED_LOWERING_PLAN.md](TYPED_LOWERING_PLAN.md) are updated to mark Stage 4.2 complete with Stage 4.3 next. No code changes are part of this step; the full workspace suite (1201 tests) remains green.
+
+## Handoff contract for Stages 4.3–4.6 (Step 6)
+
+### What a scanner may read
+
+Scanners run inside `close_artifact_catalog` with the graph installed, so they read `&LoweredProgram` and nothing else:
+
+- Concrete facts come from materialized instance bodies (`LoweredFunctionInstance::body`, `LoweredInstanceBody`) and concrete initializer bodies. Never read a template to decide a concrete fact: Stage 3.4 already recomputed copy/drop/pass-mode facts on the body, and Stage 4.4 depends on those facts.
+- Semantic catalogs (`functions`, `types`, `traits`, `trait_methods`, `trait_implementations`, `string_formatting`, `semantic_ids`) and the current catalog (`specializations`, `artifacts`, `instances`) are readable. `TypedModule` is never consulted.
+- A scanner must not mutate anything and must not intern keys itself. It returns requests; the engine detaches the graph and applies them through `GraphRecorder`.
+
+### Required order
+
+- Within one owner, report sites in lowered evaluation order (the same order the Stage 3.3 traversal uses). Within one site, use the family's documented order.
+- Across families, `ProductionHooks::scan_initializer`/`scan_instance` concatenate scanner results in the fixed order 4.3 → 4.4 → 4.5 → 4.6. That order, the site order, and apply-immediately-after-each-owner determine ordinals; any change is snapshot-visible and needs a plan update.
+- Request order inside one expansion is likewise ordinal-determining.
+
+### Adding an `ArtifactUseSite` variant
+
+1. Add the variant to `ArtifactUseSite` in `lower/artifact_closure.rs`; the exhaustive `matches` in the validators force every site to be handled.
+2. Scanner requests keep recording it automatically: `ClosureRequest::Artifact { use_site: Some(...), .. }` already writes a `LoweredArtifactUse` on the owner and an owner edge, and the engine records `initializer_artifacts` for initializer owners.
+3. Replace the `#[cfg(test)]`/`#[cfg(not(test))]` split in `LoweredProgram::check_use_site` with an exhaustive match that proves the site's body arena ID exists in the owner's body (the test arm stays for the scripted test site). Later variants must keep one-to-one agreement with closure edges; the validator enforces it.
+4. Do not put a site into an `ArtifactRequestKey`: sites are owner-local positions. Per-site artifacts are keyed by `ArtifactSiteOwner` plus a lowered `ArtifactSite`, never by a use site.
+
+### Building a `Root` instance request from an expander
+
+Expanders build `ClosureRequest::Instance` themselves; the engine never guesses substitutions:
+
+```rust
+let resolved = program.resolve_instance_request(&InstanceResolutionRequest {
+    function,
+    origin: origin.clone(),
+    function_type,            // fully concrete after substitution
+    substitutions: CallSubstitutions { types, effects }, // explicit and concrete
+    evidence,                 // Selected/Declared recipe from the owned catalogs
+    target: InstanceResolutionTarget::Root,
+})?;
+ClosureRequest::Instance { resolved, kind, origin }
+```
+
+Use only `Root`: expander owners are artifacts, not enclosing instances, so `Nested`/`Current` are not available. Resolution failure is a diagnostic at the request origin. If a plan must name the ordinal of an instance it also requests, request that instance from a phase where the id is already known (the Stage 3.3 worklist) or read it back after the round; the engine interns it during apply, so a plan built during expansion cannot see the fresh id.
+
+### Which kinds to use
+
+- Every scanner/expander artifact request uses the `LoweredArtifactDependencyKind` variant of its family; edge-kind/family agreement is validated (`matches_key`).
+- Stage 4.2 adds no `LoweredInstanceDependencyKind`. A scanner that requests an instance (for example buffer clone's element `Clone` in 4.4) must add a concrete kind to that enum, its `description`, and any order-sensitive snapshot expectations. Scanner instance edges are closure-phase, so the Stage 3.4 binding validator ignores them; the closure validator checks their owner edge and requester integrity.
+- Record everything the legacy backend would otherwise discover through `TypedModule::{trait_impl_method, structural_trait_method, instantiated_trait_method_type, drop_method_for, coroutine_plan, implicit_thunk_for, type_needs_drop, is_copy_type}`, `resolved().standard_trait(..)`, `standard_function_named`, or `standard_function_name_matches` in the plan, not in the scanner.
+
+### Where to register in `ProductionHooks`
+
+- `lower/artifact_closure.rs` keeps only the dispatch and the placeholder test surface. Family code lives in the family's own module (for example `lower/artifact_plan.rs`) and is called from `ProductionHooks`:
+  - `scan_initializer`/`scan_instance` call each family scanner in the fixed family order and concatenate;
+  - `expand` matches `ArtifactRequestKey` by family and calls that family's expander, replacing its placeholder arm (the match stays exhaustive).
+- Hooks must stay stateless and deterministic so the fixed-point re-check is meaningful: no `HashMap` iteration order in output, no ambient counters, same plan and requests for the same artifact/owner state.
+- Family scanners must also keep `validate_instance_bodies` passing: they may only produce closure-phase edges, and every scanner artifact request needs a use site.
+
+### Observed maxima and bounds
+
+- Bound constants: 64 rounds; total growth budget `max(function templates * 64, 1024)`. Violations diagnose at the last request origin with a depth-bounded requester chain.
+- With the Stage 4.2 `ProductionHooks`, the standard library and every fixture close in exactly one round with zero growth. Stages 4.3–4.6 must record the real maxima here as each family lands (the growth budget is chosen to stay far above them).
+
+### Stage 5 handoff note
+
+Initializer dispatch sites still have no binding table: an initializer body's calls/artifacts are recorded as request roots and closure edges, but there is no `LoweredBoundTarget` table for initializer sites, and initializer-owned instance requests are request-root-only. Stage 5 must either add an initializer binding table or consume the request roots and `initializer_artifacts`/`initializer_artifact_uses` directly. Also note that `LoweredInstanceBody::artifact_uses` and the initializer use vectors are the only records of closure site-to-artifact references for Stage 5 emission.
 
 ## Risks and decisions to watch
 
