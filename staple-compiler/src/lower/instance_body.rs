@@ -491,6 +491,17 @@ impl<'a> BodyCloner<'a> {
             .bounds
             .iter()
             .filter_map(|bound| {
+                // A bound whose parameter is absent from the resolved
+                // environment is irrelevant to this instance. Stage 3.2
+                // deliberately excludes such parameters from its key, so
+                // there is no concrete bound to store in the body.
+                if bound
+                    .arguments
+                    .iter()
+                    .any(|argument| contains_type_parameter(&self.ty(argument)))
+                {
+                    return None;
+                }
                 match self.program.complete_declared_bound(
                     &function.origin,
                     bound,
@@ -1340,8 +1351,20 @@ impl<'a> BodyCloner<'a> {
                 | LoweredCallableCategory::Intrinsic
                 | LoweredCallableCategory::Constructor
         );
-        if !passes_hidden
-            || call.resource_bindings.len() == call.function_type.effects.resources.len()
+        if !passes_hidden {
+            return;
+        }
+        if call.resource_bindings.len() == call.function_type.effects.resources.len()
+            && call
+                .resource_bindings
+                .iter()
+                .zip(&call.function_type.effects.resources)
+                .all(|(id, resource)| {
+                    self.body
+                        .resource_uses
+                        .get(*id)
+                        .is_some_and(|use_| use_.resource == *resource)
+                })
         {
             return;
         }
@@ -1354,7 +1377,7 @@ impl<'a> BodyCloner<'a> {
                     self.body
                         .resource_uses
                         .get(*use_)
-                        .map(|use_| use_.resource.value_type.clone()),
+                        .map(|use_| use_.resource.clone()),
                 )
             })
             .collect::<Vec<_>>();
@@ -1364,8 +1387,8 @@ impl<'a> BodyCloner<'a> {
             let reused = existing
                 .iter()
                 .enumerate()
-                .find(|(index, (_, value_type))| {
-                    !consumed[*index] && value_type.as_ref() == Some(&resource.value_type)
+                .find(|(index, (_, existing_resource))| {
+                    !consumed[*index] && existing_resource.as_ref() == Some(resource)
                 })
                 .map(|(index, (use_, _))| {
                     consumed[index] = true;
@@ -1788,10 +1811,11 @@ impl<'a> BodyCloner<'a> {
                         }
                         LoweredClosureCapture {
                             capture: capture.capture.clone(),
+                            drops_value: capture.owns_value
+                                && self.program.concrete_needs_drop(&value_type),
                             value_type,
                             access: capture.access,
                             owns_value: capture.owns_value,
-                            drops_value: capture.drops_value,
                         }
                     })
                     .collect(),
@@ -1823,6 +1847,27 @@ impl<'a> BodyCloner<'a> {
         use_.provider = use_
             .provider
             .map(|provider| self.clone_resource_provider(provider));
+        if let Some(provider) = use_
+            .provider
+            .and_then(|provider| self.body.resource_providers.get(provider))
+        {
+            use_.indirect = provider.indirect;
+        }
+        use_.pass_mode = match use_.kind {
+            super::LoweredResourceUseKind::Read => super::LoweredArgumentPassMode::Value,
+            super::LoweredResourceUseKind::MutablePlace => {
+                super::LoweredArgumentPassMode::MutablePlace
+            }
+            super::LoweredResourceUseKind::HiddenArgument => {
+                if use_.resource.mutable
+                    || !self.program.concrete_is_copy(&use_.resource.value_type)
+                {
+                    super::LoweredArgumentPassMode::BorrowedPointer
+                } else {
+                    super::LoweredArgumentPassMode::Value
+                }
+            }
+        };
         let new = self.body.resource_uses.push(use_);
         self.resource_uses.insert(id, new);
         new
@@ -3346,6 +3391,23 @@ impl<'a> BodyValidator<'a> {
                 ),
             );
         }
+        for (id, required) in call
+            .resource_bindings
+            .iter()
+            .zip(&call.function_type.effects.resources)
+        {
+            if self
+                .body
+                .resource_uses
+                .get(*id)
+                .is_some_and(|use_| use_.resource != *required)
+            {
+                self.report(
+                    origin.span.clone(),
+                    "call hidden-resource binding order disagrees with the concrete effect row",
+                );
+            }
+        }
         if let Some(operation) = call.reactive {
             self.visit_operation(operation);
         }
@@ -3377,11 +3439,40 @@ impl<'a> BodyValidator<'a> {
         if !self.uses.insert(id) {
             return;
         }
-        let Some(use_) = self.body.resource_uses.get(id) else {
+        let Some(use_) = self.body.resource_uses.get(id).cloned() else {
             return;
         };
         self.check_concrete_type(&use_.origin, &use_.resource.value_type, "resource type");
+        let expected = match use_.kind {
+            super::LoweredResourceUseKind::Read => super::LoweredArgumentPassMode::Value,
+            super::LoweredResourceUseKind::MutablePlace => {
+                super::LoweredArgumentPassMode::MutablePlace
+            }
+            super::LoweredResourceUseKind::HiddenArgument => {
+                if use_.resource.mutable
+                    || !self.program.concrete_is_copy(&use_.resource.value_type)
+                {
+                    super::LoweredArgumentPassMode::BorrowedPointer
+                } else {
+                    super::LoweredArgumentPassMode::Value
+                }
+            }
+        };
+        if use_.pass_mode != expected {
+            self.report(
+                use_.origin.span.clone(),
+                "resource use pass mode disagrees with its concrete type",
+            );
+        }
         if let Some(provider) = use_.provider {
+            if let Some(provider_record) = self.body.resource_providers.get(provider) {
+                if use_.indirect != provider_record.indirect {
+                    self.report(
+                        use_.origin.span.clone(),
+                        "resource use indirectness disagrees with its concrete provider",
+                    );
+                }
+            }
             self.visit_provider(provider);
         }
     }
@@ -4166,6 +4257,125 @@ mod tests {
             ),
             "the source template remains unchanged"
         );
+    }
+
+    #[test]
+    fn unused_generic_bounds_do_not_require_an_instance_substitution() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "def irrelevant: <T where Copy T> I32 -> I32 = value => value\n",
+            "let result = irrelevant 1\n",
+        ));
+        materialize(&mut program);
+        let (_, instance) = instance_of(&program, function_id(&program, "irrelevant"));
+        assert!(instance.environment.is_empty());
+        assert!(instance.body.as_ref().unwrap().bounds.is_empty());
+    }
+
+    #[test]
+    fn owned_capture_drop_is_derived_from_its_concrete_type() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "use std.cinterop.*\n",
+            "extern \"c\" { inspect: CString -> I32 }\n",
+            "def make = (move value: CString) => { let callback = () => inspect value; callback }\n",
+            "let callback = make (c_string \"owned\")\n",
+        ));
+        for value in &mut program.callable_values.values {
+            if let Some(closure) = &mut value.closure {
+                for capture in &mut closure.captures {
+                    if capture.value_type == CheckedType::CString {
+                        capture.drops_value = false;
+                    }
+                }
+            }
+        }
+        materialize(&mut program);
+        let (_, instance) = instance_of(&program, function_id(&program, "make"));
+        let body = instance.body.as_ref().unwrap();
+        let capture = body
+            .callable_values
+            .iter()
+            .filter_map(|(_, value)| value.closure.as_ref())
+            .flat_map(|closure| &closure.captures)
+            .find(|capture| capture.value_type == CheckedType::CString)
+            .expect("closure captures the concrete CString");
+        assert!(capture.owns_value);
+        assert!(capture.drops_value);
+    }
+
+    #[test]
+    fn resource_uses_recompute_pass_mode_and_provider_indirectness() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "type A = ctor (value: I32)\n",
+            "def read_a: () ->{A} I32 = () => (resource A).value\n",
+            "def forward: () ->{A} I32 = () => read_a ()\n",
+            "let result = with A = A (value: 1) { forward () }\n",
+        ));
+        let mut changed = 0;
+        for use_ in &mut program.resource_uses.values {
+            if matches!(
+                use_.kind,
+                super::super::LoweredResourceUseKind::Read
+                    | super::super::LoweredResourceUseKind::HiddenArgument
+            ) {
+                use_.pass_mode = super::super::LoweredArgumentPassMode::BorrowedPointer;
+                use_.indirect = true;
+                changed += 1;
+            }
+        }
+        assert!(changed > 0);
+        materialize(&mut program);
+        let (_, instance) = instance_of(&program, function_id(&program, "forward"));
+        let body = instance.body.as_ref().unwrap();
+        let mut saw_hidden = false;
+        for (_, use_) in body.resource_uses.iter() {
+            if use_.kind != super::super::LoweredResourceUseKind::HiddenArgument {
+                continue;
+            }
+            let provider = body.resource_providers.get(use_.provider.unwrap()).unwrap();
+            assert!(!provider.indirect, "the concrete A provider is Copy");
+            assert!(!use_.indirect);
+            assert_eq!(use_.pass_mode, super::super::LoweredArgumentPassMode::Value);
+            saw_hidden = true;
+        }
+        assert!(saw_hidden);
+    }
+
+    #[test]
+    fn hidden_resource_bindings_recover_order_without_a_count_change() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "type A = ctor (value: I32)\n",
+            "type B = ctor (value: I32)\n",
+            "def sum: () ->{A, B} I32 = () => (resource A).value + (resource B).value\n",
+            "def forward: () ->{A, B} I32 = () => sum ()\n",
+            "let result = with A = A (value: 1) { with B = B (value: 2) { forward () } }\n",
+        ));
+        let call = program
+            .calls
+            .values
+            .iter_mut()
+            .find(|call| {
+                matches!(&call.origin.span, Span::User { location: Some(location), .. } if location.line == 4)
+                    && call.resource_bindings.len() == 2
+            })
+            .expect("forward calls sum");
+        assert_eq!(call.resource_bindings.len(), 2);
+        call.resource_bindings.reverse();
+        materialize(&mut program);
+        let (_, instance) = instance_of(&program, function_id(&program, "forward"));
+        let body = instance.body.as_ref().unwrap();
+        let call = body
+            .calls
+            .iter()
+            .map(|(_, call)| call)
+            .find(|call| call.resource_bindings.len() == 2)
+            .expect("concrete forward calls sum");
+        for (id, required) in call
+            .resource_bindings
+            .iter()
+            .zip(&call.function_type.effects.resources)
+        {
+            assert_eq!(&body.resource_uses.get(*id).unwrap().resource, required);
+        }
     }
 
     #[test]
