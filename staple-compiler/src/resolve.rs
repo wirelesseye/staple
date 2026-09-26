@@ -22,7 +22,7 @@ pub struct TraitId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TraitMethodId(pub usize);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeParameterId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

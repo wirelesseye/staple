@@ -23,6 +23,8 @@ use crate::{
     TypeParameterId, TypedModule, contains_type_parameter, infer_type_parameters,
 };
 
+mod instance_resolution;
+
 macro_rules! arena_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

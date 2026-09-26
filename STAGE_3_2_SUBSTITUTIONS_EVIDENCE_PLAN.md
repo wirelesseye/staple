@@ -1,6 +1,6 @@
 # Stage 3.2 Plan: Resolve Substitutions and Relevant Parameters
 
-**Status:** Not started. Stage 3.1 is complete.
+**Status:** Step 1 complete. Steps 2–5 in progress. Stage 3.1 is complete.
 
 ## Goal and starting point
 
@@ -73,3 +73,17 @@ Gate: every request presented to the resolver produces one concrete, validated k
 - Decide whether relevant-parameter collection is a cached per-template analysis or computed during a deterministic first scan. Its output must be stable and shared by calls, callable values, and implicit thunk requests.
 - Decide whether the resolver returns a dedicated selected-evidence record and resolved environment or extends `InstanceRequest`. Preserve `InstanceRequest::resolve` as a final concrete conversion step, not a shortcut around missing-value checks.
 - Confirm the exact checker rules for structural derivation, negative implementations, conditional bounds, and functional-dependency completion before duplicating selection logic over owned catalogs. If the owned snapshot lacks a checked decision needed for equivalence, add that owned metadata in Stage 3.2 with a transition test.
+
+## Implementation Notes
+
+### Step 1 — Inventory parameter-bearing owned records (complete)
+
+- Added the private lowering child module `staple-compiler/src/lower/instance_resolution.rs`. The parameter scan lives next to the owned arenas so the resolver reads the private `LoweredProgram` fields directly and no accessor surface or `TypedModule` fallback is introduced.
+- `RelevantParameters` keeps type and effect parameter IDs in two ordered sets (ascending `TypeParameterId`), so programmatically built keys are deterministic. `TypeParameterId` gained `PartialOrd`/`Ord` for that ordered storage; no other ID families changed.
+- `LoweredProgram::relevant_parameters(function)` scans, in deterministic arena/insertion order: `LoweredFunction.signature`, parameter pattern, parameter symbols and capture symbols from the symbol catalog, the function's coroutine plan (result/deferred effects/captures/frame bindings/awaited types/awaits), and the owned body through every record family below.
+- Body traversal is exhaustive over `LoweredExpressionKind` (headers, coercions, effects, blocks, names, access dereference paths, products and default slots, repeated-product symbolic counts, satisfies, logicals, loops, matches, index dispatches, string templates and interpolations, calls and their argument/default/resource/substitution/evidence plans, callable values and closure captures, resource uses, `with` providers and bodies, `coro` plans, and `await` kinds), `LoweredItemKind` (bindings, pattern bindings with propagation, assignments with `MutateIndex` dispatch and evidence, returns, breaks, continues, expression statements), `LoweredPlaceKind`, `LoweredPatternKind`, resource providers/uses, reactive operations (including the call-attached operation), reactive callbacks, coroutine plans, and all four `TraitEvidence` shapes. A new variant forces an explicit collector decision at compile time.
+- Nested functions, implicit thunks, derived evaluators, and coroutine body thunks are scanned under their own `FunctionId`: the enclosing body follows the construction/call site and its ordered capture/callback/substitution metadata, never the nested body block. A closure whose signature is concrete but whose captures mention an outer parameter is therefore relevant through its own capture symbols.
+- Declared `LoweredFunction.bounds` are deliberately *not* relevance on their own: an unused bound cannot change the emitted instance, and bounds participate through the `DeclaredBound` evidence recipes (`arguments` and `prerequisites`) that reference them. This keeps an unused outer parameter out of the key (proved by fixture) while still collecting every bound that reaches code or evidence.
+- Coverage contract: `PARAMETER_RECORD_FAMILIES` is the declared collector decision table, and the coverage test lowers one fixture spanning initializers, generic signature/body/capture/evidence/effect uses, aggregates, control flow, calls, formatting, resources, reactive operations, and coroutines, then asserts every declared family was visited under some function or initializer. Deferred/`Stage26Deferred` heads are an explicit no-family decision because no accepted lowered program retains them.
+- Focused tests prove: collection is deterministic; a signature-only parameter is found; a body-only parameter (a `Phantom T` binding under a concrete signature) is found; a capture-only parameter is found under the nested function whose signature is concrete; declared-bound evidence and effect-row parameters are found with the right kinds; and an unused outer parameter is excluded.
+- Gate: `cargo fmt --all`, `cargo check --workspace`, `cargo test --workspace` (1084 tests, including the eight new resolver tests), and `git diff --check` pass. Step 2 (build and normalize the substitution environment) is next.
