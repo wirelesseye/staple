@@ -5749,14 +5749,16 @@ impl LoweredProgram {
                 metadata.trait_id == trait_id
                     && !metadata.negative
                     && metadata.arguments.len() == arguments.len()
-                    && metadata
-                        .arguments
-                        .iter()
-                        .zip(arguments)
-                        .all(|(template, argument)| {
-                            let mut substitutions = HashMap::new();
-                            infer_type_parameters(template, argument, &mut substitutions)
-                        })
+                    && {
+                        let mut substitutions = HashMap::new();
+                        metadata
+                            .arguments
+                            .iter()
+                            .zip(arguments)
+                            .all(|(template, argument)| {
+                                infer_type_parameters(template, argument, &mut substitutions)
+                            })
+                    }
                     && metadata
                         .methods
                         .iter()

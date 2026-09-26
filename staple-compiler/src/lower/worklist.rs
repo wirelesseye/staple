@@ -88,6 +88,10 @@ pub(crate) enum LoweredInstanceRequest {
 pub(crate) enum LoweredInstanceDependencyKind {
     /// A direct call target.
     DirectCall,
+    /// The formatter constructor selected for a string template.
+    FormattingConstructor,
+    /// The formatter finish function selected for a string template.
+    FormattingFinish,
     /// A function-valued name, selector, or closure construction.
     CallableValue,
     /// An implicit thunk adapted into a call argument.
@@ -107,6 +111,8 @@ impl LoweredInstanceDependencyKind {
     pub(crate) fn description(self) -> &'static str {
         match self {
             LoweredInstanceDependencyKind::DirectCall => "direct-call",
+            LoweredInstanceDependencyKind::FormattingConstructor => "formatting-constructor",
+            LoweredInstanceDependencyKind::FormattingFinish => "formatting-finish",
             LoweredInstanceDependencyKind::CallableValue => "callable-value",
             LoweredInstanceDependencyKind::ImplicitThunkArgument => "implicit-thunk-argument",
             LoweredInstanceDependencyKind::TraitMethod => "trait-method",
@@ -781,6 +787,13 @@ impl<'a> WorklistBuilder<'a> {
                 );
             }
             LoweredExpressionKind::StringTemplate(template) => {
+                self.request_formatting_helper(
+                    program.string_formatting.constructor,
+                    &expression.origin,
+                    owner,
+                    enclosing,
+                    LoweredInstanceDependencyKind::FormattingConstructor,
+                );
                 for part in &template.parts {
                     let LoweredStringTemplatePart::Interpolation(interpolation) = part else {
                         continue;
@@ -802,6 +815,13 @@ impl<'a> WorklistBuilder<'a> {
                         owner,
                     );
                 }
+                self.request_formatting_helper(
+                    program.string_formatting.finish,
+                    &expression.origin,
+                    owner,
+                    enclosing,
+                    LoweredInstanceDependencyKind::FormattingFinish,
+                );
             }
             LoweredExpressionKind::Call(call) => {
                 self.traverse_call(*call, owner, enclosing);
@@ -977,7 +997,6 @@ impl<'a> WorklistBuilder<'a> {
         let Some(call) = program.calls.get(call_id) else {
             return;
         };
-        self.traverse_call_target(call, owner, enclosing);
         for step in &call.steps {
             match step {
                 LoweredCallStep::Callee { expression } => {
@@ -992,7 +1011,8 @@ impl<'a> WorklistBuilder<'a> {
                 | LoweredCallStep::Default { expression, .. } => {
                     self.traverse_expression(*expression, owner, enclosing);
                 }
-                LoweredCallStep::Resource { .. } | LoweredCallStep::Invoke => {}
+                LoweredCallStep::Resource { .. } => {}
+                LoweredCallStep::Invoke => self.traverse_call_target(call, owner, enclosing),
             }
         }
         for index in 0..call.arguments.len() {
@@ -1001,6 +1021,32 @@ impl<'a> WorklistBuilder<'a> {
         if let Some(operation) = call.reactive {
             self.traverse_reactive_operation(operation, owner, enclosing);
         }
+    }
+
+    fn request_formatting_helper(
+        &mut self,
+        function: Option<FunctionId>,
+        origin: &Origin,
+        owner: TraversalOwner,
+        enclosing: Option<&ResolvedInstanceRequest>,
+        kind: LoweredInstanceDependencyKind,
+    ) {
+        let Some(function) = function else {
+            return;
+        };
+        let Some(function_type) = self.function_signature(function) else {
+            return;
+        };
+        self.request_function(
+            function,
+            origin,
+            function_type,
+            CallSubstitutions::default(),
+            None,
+            nested_target(enclosing),
+            owner,
+            kind,
+        );
     }
 
     fn traverse_call_argument(
@@ -1698,8 +1744,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::{
-        ExpressionOwner, NameResolver, ProgramLoader, SubstitutionValue, TypeChecker,
-        TypeParameterId, TypedModule,
+        NameResolver, ProgramLoader, SubstitutionValue, TypeChecker, TypeParameterId, TypedModule,
     };
 
     use super::*;
@@ -1890,6 +1935,91 @@ mod tests {
             )),
             "initializer-discovered instances record the requesting initializer"
         );
+    }
+
+    #[test]
+    fn call_arguments_discover_instances_before_the_invoked_target() {
+        let (_, program) = lower(concat!(
+            "def outer: <T where Copy T> T -> T = value => value\n",
+            "def inner: <T where Copy T> T -> T = value => value\n",
+            "let result: I32 = outer (inner 1)\n",
+        ));
+        let outer = instances_of(&program, function_id(&program, "outer"))[0];
+        let inner = instances_of(&program, function_id(&program, "inner"))[0];
+        assert!(inner.ordinal.index() < outer.ordinal.index());
+    }
+
+    #[test]
+    fn shared_default_lookup_unifies_all_header_arguments_together() {
+        let mut program = LoweredProgram::default();
+        let trait_id = TraitId(0);
+        let method = TraitMethodId(0);
+        let function = FunctionId(0);
+        let parameter_id = TypeParameterId(0);
+        let parameter = CheckedType::Parameter {
+            id: parameter_id,
+            name: "T".to_owned(),
+            sized: true,
+        };
+        program
+            .trait_implementations
+            .push(super::super::LoweredTraitImplementationMetadata {
+                origin: Origin::compiler(),
+                trait_id,
+                parameters: vec![parameter_id],
+                arguments: vec![parameter.clone(), parameter],
+                bounds: Vec::new(),
+                negative: false,
+                methods: vec![(method, function)],
+            });
+        let concrete =
+            program
+                .trait_implementations
+                .push(super::super::LoweredTraitImplementationMetadata {
+                    origin: Origin::compiler(),
+                    trait_id,
+                    parameters: Vec::new(),
+                    arguments: vec![CheckedType::I32, CheckedType::U8],
+                    bounds: Vec::new(),
+                    negative: false,
+                    methods: vec![(method, function)],
+                });
+        assert_eq!(
+            program.trait_implementation_id(
+                trait_id,
+                method,
+                function,
+                &[CheckedType::I32, CheckedType::U8],
+            ),
+            Some(concrete)
+        );
+    }
+
+    #[test]
+    fn string_templates_record_formatter_calls() {
+        let (_, program) = lower(concat!(
+            "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
+            "let result: String = render 1\n",
+        ));
+        let render = instances_of(&program, function_id(&program, "render"))[0];
+        for (function, kind) in [
+            (
+                program.string_formatting.constructor.unwrap(),
+                LoweredInstanceDependencyKind::FormattingConstructor,
+            ),
+            (
+                program.string_formatting.finish.unwrap(),
+                LoweredInstanceDependencyKind::FormattingFinish,
+            ),
+        ] {
+            assert!(render.dependencies.iter().any(|dependency| {
+                dependency.kind == kind
+                    && program
+                        .instances
+                        .get(dependency.instance)
+                        .is_some_and(|instance| instance.template == function)
+            }));
+        }
     }
 
     #[test]
