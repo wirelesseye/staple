@@ -263,7 +263,7 @@ Use only `Root`: expander owners are artifacts, not enclosing instances, so `Nes
 ### Which kinds to use
 
 - Every scanner/expander artifact request uses the `LoweredArtifactDependencyKind` variant of its family; edge-kind/family agreement is validated (`matches_key`).
-- Stage 4.2 adds no `LoweredInstanceDependencyKind`. A scanner that requests an instance (for example buffer clone's element `Clone` in 4.4) must add a concrete kind to that enum, its `description`, and any order-sensitive snapshot expectations. Scanner instance edges are closure-phase, so the Stage 3.4 binding validator ignores them; the closure validator checks their owner edge and requester integrity.
+- Stage 4.2 adds no `LoweredInstanceDependencyKind`. A scanner that requests an instance (for example buffer clone's element `Clone` in 4.4) must add a concrete kind to that enum, its `description`, and any order-sensitive snapshot expectations. Scanner instance requests carry a `use_site` exactly like scanner artifact requests: the engine records a `LoweredInstanceUse` on the owner (`LoweredInstanceBody::instance_uses`, or `initializer_instance_uses` plus explicit `initializer_instances` edges for initializers), and the closure validator requires instance uses to agree one-to-one with the owner's closure-phase instance edges. The Stage 3.4 binding validator ignores these edges. Expander instance requests must not carry a use site.
 - Record everything the legacy backend would otherwise discover through `TypedModule::{trait_impl_method, structural_trait_method, instantiated_trait_method_type, drop_method_for, coroutine_plan, implicit_thunk_for, type_needs_drop, is_copy_type}`, `resolved().standard_trait(..)`, `standard_function_named`, or `standard_function_name_matches` in the plan, not in the scanner.
 
 ### Where to register in `ProductionHooks`
@@ -272,11 +272,11 @@ Use only `Root`: expander owners are artifacts, not enclosing instances, so `Nes
   - `scan_initializer`/`scan_instance` call each family scanner in the fixed family order and concatenate;
   - `expand` matches `ArtifactRequestKey` by family and calls that family's expander, replacing its placeholder arm (the match stays exhaustive).
 - Hooks must stay stateless and deterministic so the fixed-point re-check is meaningful: no `HashMap` iteration order in output, no ambient counters, same plan and requests for the same artifact/owner state.
-- Family scanners must also keep `validate_instance_bodies` passing: they may only produce closure-phase edges, and every scanner artifact request needs a use site.
+- Family scanners must also keep `validate_instance_bodies` passing: they may only produce closure-phase edges, and every scanner artifact or instance request needs a use site.
 
 ### Observed maxima and bounds
 
-- Bound constants: 64 rounds; total growth budget `max(function templates * 64, 1024)`. Violations diagnose at the last request origin with a depth-bounded requester chain.
+- Bound constants: 64 rounds; total growth budget `max(function templates * 64, 1024)`. The growth budget is checked after every applied scan and expansion, not only at round boundaries, so an expansion chain that appends only artifacts cannot run unbounded. Violations diagnose at the last request origin with a depth-bounded requester chain.
 - With the Stage 4.2 `ProductionHooks`, the standard library and every fixture close in exactly one round with zero growth. Stages 4.3–4.6 must record the real maxima here as each family lands (the growth budget is chosen to stay far above them).
 
 ### Stage 5 handoff note
@@ -295,3 +295,11 @@ Initializer dispatch sites still have no binding table: an initializer body's ca
 
 - Stage 4.2 delivers the closure engine, request/use recording, and validators, with placeholder family hooks. The catalog is closed only relative to the registered hooks. Stages 4.3–4.6 make it closed relative to the legacy backend, and Stage 4.7 proves it against legacy emission.
 - No artifact plan gains real content in Stage 4.2. No legacy backend or ABI change. `TypedModule` is not consulted by the engine.
+
+## Review fixes
+
+A review of the Stage 4.2 implementation found and fixed three issues:
+
+- **Artifact-only growth could hang.** The growth budget was checked only at round boundaries and only when a round reserved new instances, so an expansion chain that kept appending fresh artifacts never terminated. `GrowthBudget::check` now runs after every applied initializer scan, instance scan, and expansion (`closure_artifact_only_growth_hits_the_budget_instead_of_hanging`).
+- **Scanner instance edges were unattributed.** `ClosureRequest::Instance` now carries `use_site`. Scanner requests record a `LoweredInstanceUse` on instance bodies (`instance_uses`) or initializers (`initializer_instance_uses`, with closure-phase initializer instance edges now explicit in `initializer_instances`), and use/edge agreement covers instance edges as well as artifact edges. Expander requests with a use site are rejected, and requester integrity checks initializer `Scan` roots against `initializer_instances` (`closure_scanner_instance_requests_record_their_use_sites`, `closure_scanner_instance_edges_without_a_use_site_are_diagnosed`, `closure_expander_instance_requests_reject_use_sites`).
+- **The initializer fixed-point check ignored edge kinds.** Initializer artifact and instance edges are now compared by target, kind, and origin, like the other owners (`closure_initializer_fixed_point_compares_edge_kinds`).

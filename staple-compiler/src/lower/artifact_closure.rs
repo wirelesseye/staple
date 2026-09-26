@@ -30,8 +30,8 @@ use super::worklist::{GraphRecorder, LoweredScanOwner, TraversalOwner, WorklistB
 use super::{
     ArenaId, FunctionInstanceId, InitializerId, LoweredArtifactDependency,
     LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
-    LoweredArtifactRequestRoot, LoweredInstanceDependencyKind, LoweredInstanceRequest,
-    LoweredProgram, Origin, ResolvedInstanceRequest,
+    LoweredArtifactRequestRoot, LoweredInstanceDependency, LoweredInstanceDependencyKind,
+    LoweredInstanceRequest, LoweredProgram, Origin, ResolvedInstanceRequest,
 };
 use crate::specialization::{ArtifactOrdinal, ArtifactRequestKey};
 
@@ -63,6 +63,9 @@ pub(super) enum ClosureRequest {
         resolved: ResolvedInstanceRequest,
         kind: LoweredInstanceDependencyKind,
         origin: Origin,
+        /// The owner-local site that calls or references the instance.
+        /// Scanner requests carry one; expander requests do not.
+        use_site: Option<ArtifactUseSite>,
     },
     /// A generated artifact with the plan it is created with.
     Artifact {
@@ -94,6 +97,18 @@ pub(crate) struct LoweredArtifactUse {
     pub site: ArtifactUseSite,
     pub artifact: ArtifactOrdinal,
     pub kind: LoweredArtifactDependencyKind,
+    pub origin: Origin,
+}
+
+/// One scanner-requested source-function instance use recorded on its owner
+/// in scan order. The validator proves the owner's instance uses agree
+/// one-to-one with its closure-phase instance edges, so every such edge is
+/// tied to the exact site Stage 5 emits the reference from.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredInstanceUse {
+    pub site: ArtifactUseSite,
+    pub instance: FunctionInstanceId,
+    pub kind: LoweredInstanceDependencyKind,
     pub origin: Origin,
 }
 
@@ -224,6 +239,43 @@ impl AppliedOwner {
     }
 }
 
+/// The total-growth allowance of one closure run, measured against the Stage 3
+/// catalog it started from.
+struct GrowthBudget {
+    baseline_instances: usize,
+    baseline_artifacts: usize,
+    limit: usize,
+}
+
+impl GrowthBudget {
+    /// Reports non-convergence once the closure has appended more instances and
+    /// artifacts than the budget allows. Checked after every apply, so neither
+    /// an instance-growing nor an artifact-only chain can run unbounded.
+    fn check(
+        &self,
+        program: &LoweredProgram,
+        last_request: &Option<LastRequest>,
+    ) -> Option<Diagnostic> {
+        let growth = program
+            .instances
+            .len()
+            .saturating_sub(self.baseline_instances)
+            + program
+                .artifacts
+                .len()
+                .saturating_sub(self.baseline_artifacts);
+        (growth > self.limit).then(|| {
+            program.non_convergence(
+                last_request,
+                format!(
+                    "artifact closure grew by {growth} entries (budget {})",
+                    self.limit
+                ),
+            )
+        })
+    }
+}
+
 /// The last request the engine applied, used to diagnose bound violations at
 /// the requesting site.
 struct LastRequest {
@@ -246,15 +298,19 @@ impl LoweredProgram {
         // their uses and edges explicit.
         self.initializer_artifact_uses = vec![Vec::new(); self.initializers.len()];
         self.initializer_artifacts = vec![Vec::new(); self.initializers.len()];
+        self.initializer_instance_uses = vec![Vec::new(); self.initializers.len()];
+        self.initializer_instances = vec![Vec::new(); self.initializers.len()];
 
-        let baseline_instances = self.instances.len();
-        let baseline_artifacts = self.artifacts.len();
-        let growth_budget = self
-            .functions
-            .iter()
-            .count()
-            .saturating_mul(GROWTH_PER_TEMPLATE)
-            .max(MIN_GROWTH_BUDGET);
+        let budget = GrowthBudget {
+            baseline_instances: self.instances.len(),
+            baseline_artifacts: self.artifacts.len(),
+            limit: self
+                .functions
+                .iter()
+                .count()
+                .saturating_mul(GROWTH_PER_TEMPLATE)
+                .max(MIN_GROWTH_BUDGET),
+        };
 
         let mut scanned_initializers = 0usize;
         let mut scanned_instances = 0usize;
@@ -273,15 +329,17 @@ impl LoweredProgram {
                     Ok(requests) => requests,
                     Err(diagnostics) => return diagnostics,
                 };
-                let mut diagnostics = self.apply_closure_requests(
+                let diagnostics = self.apply_closure_requests(
                     AppliedOwner::Initializer(initializer),
                     requests,
                     &mut new_instances,
                     &mut last_request,
                 );
                 if !diagnostics.is_empty() {
-                    diagnostics.shrink_to_fit();
                     return diagnostics;
+                }
+                if let Some(diagnostic) = budget.check(self, &last_request) {
+                    return vec![diagnostic];
                 }
             }
 
@@ -302,11 +360,17 @@ impl LoweredProgram {
                 if !diagnostics.is_empty() {
                     return diagnostics;
                 }
+                if let Some(diagnostic) = budget.check(self, &last_request) {
+                    return vec![diagnostic];
+                }
             }
 
             // Expand artifacts to the current end. Expanding one artifact may
             // append more, and the cursor keeps going until it reaches the
             // end, so every artifact is expanded exactly once per closure.
+            // An expansion chain that only ever appends artifacts never ends
+            // a round, so the growth budget is checked after every expansion
+            // rather than only at the round boundary.
             while expanded_artifacts < self.artifacts.len() {
                 let artifact = LoweredArtifactRequestId::from_index(expanded_artifacts);
                 expanded_artifacts += 1;
@@ -327,19 +391,13 @@ impl LoweredProgram {
                     record.plan = Some(plan);
                     record.expanded = true;
                 }
+                if let Some(diagnostic) = budget.check(self, &last_request) {
+                    return vec![diagnostic];
+                }
             }
 
             if new_instances.is_empty() {
                 return self.finish_closure();
-            }
-
-            let growth = (self.instances.len() - baseline_instances)
-                + (self.artifacts.len() - baseline_artifacts);
-            if growth > growth_budget {
-                return vec![self.non_convergence(
-                    &last_request,
-                    format!("artifact closure grew by {growth} entries (budget {growth_budget})"),
-                )];
             }
 
             // The next round needs bodies: resume the Stage 3.3 traversal over
@@ -394,7 +452,15 @@ impl LoweredProgram {
                     resolved,
                     kind,
                     origin,
+                    use_site,
                 } => {
+                    if matches!(owner, AppliedOwner::Artifact(_)) && use_site.is_some() {
+                        diagnostics.push(Diagnostic::new(
+                            origin.span.clone(),
+                            "expander-produced instance requests carry no use site".to_string(),
+                        ));
+                        continue;
+                    }
                     let request_root = match owner {
                         AppliedOwner::Initializer(initializer) => LoweredInstanceRequest::Scan {
                             owner: LoweredScanOwner::Initializer(initializer),
@@ -418,16 +484,48 @@ impl LoweredProgram {
                     if created {
                         new_instances.push(instance);
                     }
-                    if matches!(owner, AppliedOwner::Initializer(_)) {
-                        // Stage 3 initializer instance requests keep their
-                        // existing request-root-only representation.
-                    } else {
-                        recorder.record_closure_instance_edge(
-                            owner.traversal_owner(),
+                    let edge = LoweredInstanceDependency {
+                        instance,
+                        origin: origin.clone(),
+                        kind,
+                        closure_phase: true,
+                    };
+                    match owner {
+                        AppliedOwner::Initializer(initializer) => {
+                            // Closure-phase initializer instance edges become
+                            // explicit; Stage 3 initializer instance requests
+                            // keep their request-root-only representation.
+                            self.initializer_instances[initializer.index()].push(edge);
+                        }
+                        AppliedOwner::Instance(_) | AppliedOwner::Artifact(_) => {
+                            recorder.record_closure_instance_edge(
+                                owner.traversal_owner(),
+                                instance,
+                                &origin,
+                                kind,
+                            );
+                        }
+                    }
+                    if let Some(site) = use_site {
+                        let use_ = LoweredInstanceUse {
+                            site,
                             instance,
-                            &origin,
                             kind,
-                        );
+                            origin: origin.clone(),
+                        };
+                        match owner {
+                            AppliedOwner::Initializer(initializer) => {
+                                self.initializer_instance_uses[initializer.index()].push(use_);
+                            }
+                            AppliedOwner::Instance(owner) => {
+                                if let Some(record) = recorder.instances.get_mut(owner)
+                                    && let Some(body) = record.body.as_mut()
+                                {
+                                    body.instance_uses.push(use_);
+                                }
+                            }
+                            AppliedOwner::Artifact(_) => {}
+                        }
                     }
                     *last_request = Some(LastRequest {
                         origin,
@@ -677,6 +775,50 @@ impl FixedPointOwner {
     }
 }
 
+/// The comparable identity of one closure use or edge: target, kind, and
+/// origin. Artifact and instance records are compared only within their own
+/// family, so the kind description is unambiguous.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct UseEdge<'a> {
+    target: usize,
+    kind: &'static str,
+    origin: &'a Origin,
+}
+
+impl<'a> UseEdge<'a> {
+    fn artifact_edge(edge: &'a LoweredArtifactDependency) -> Self {
+        UseEdge {
+            target: edge.artifact.index(),
+            kind: edge.kind.description(),
+            origin: &edge.origin,
+        }
+    }
+
+    fn artifact_use(use_: &'a LoweredArtifactUse) -> Self {
+        UseEdge {
+            target: use_.artifact.index(),
+            kind: use_.kind.description(),
+            origin: &use_.origin,
+        }
+    }
+
+    fn instance_edge(edge: &'a LoweredInstanceDependency) -> Self {
+        UseEdge {
+            target: edge.instance.index(),
+            kind: edge.kind.description(),
+            origin: &edge.origin,
+        }
+    }
+
+    fn instance_use(use_: &'a LoweredInstanceUse) -> Self {
+        UseEdge {
+            target: use_.instance.index(),
+            kind: use_.kind.description(),
+            origin: &use_.origin,
+        }
+    }
+}
+
 /// The request-root walk node used by the acyclicity check.
 #[derive(Debug, Clone, Copy)]
 enum RequestRoot {
@@ -770,6 +912,26 @@ impl LoweredProgram {
                                     initializer.index()
                                 ),
                             ));
+                            continue;
+                        }
+                        let recorded = self
+                            .initializer_instances
+                            .get(initializer.index())
+                            .is_some_and(|edges| {
+                                edges.iter().any(|edge| {
+                                    edge.instance == id
+                                        && edge.kind == *kind
+                                        && edge.origin == *origin
+                                })
+                            });
+                        if !recorded {
+                            diagnostics.push(Diagnostic::new(
+                                origin.span.clone(),
+                                format!(
+                                    "function instance {} is not recorded on the initializer scan that requested it",
+                                    id.index()
+                                ),
+                            ));
                         }
                     }
                     LoweredScanOwner::Instance(owner) => {
@@ -860,70 +1022,65 @@ impl LoweredProgram {
     }
 
     /// For every instance body and module initializer, the multiset of closure
-    /// artifact uses must equal the owner's closure-phase artifact edges by
-    /// artifact, kind, and origin.
+    /// artifact uses must equal the owner's closure-phase artifact edges, and
+    /// the multiset of closure instance uses must equal its closure-phase
+    /// instance edges, each by target, kind, and origin. This ties every
+    /// scanner-recorded edge to the exact owner site that references it.
     fn check_use_edge_agreement(&self, diagnostics: &mut Vec<Diagnostic>) {
         for (id, instance) in self.instances.iter() {
-            let closure_edges = instance
+            let owner = format!("function instance {}", id.index());
+            let artifact_edges = instance
                 .artifacts
                 .iter()
                 .filter(|edge| edge.closure_phase)
+                .map(|edge| UseEdge::artifact_edge(edge))
                 .collect::<Vec<_>>();
-            let uses = instance
-                .body
-                .as_ref()
-                .map(|body| body.artifact_uses.as_slice())
-                .unwrap_or(&[]);
-            if closure_edges.is_empty() && uses.is_empty() {
-                continue;
-            }
-            if instance.body.is_none() {
-                diagnostics.push(Diagnostic::new(
-                    instance.origin.span.clone(),
-                    format!(
-                        "function instance {} has closure artifact records but no materialized body",
-                        id.index()
-                    ),
-                ));
-                continue;
-            }
-            let mut remaining = closure_edges;
-            for use_ in uses {
-                self.check_use_site(
-                    &format!("function instance {}", id.index()),
-                    use_.site,
-                    diagnostics,
-                );
-                match remaining.iter().position(|edge| {
-                    edge.artifact == use_.artifact
-                        && edge.kind == use_.kind
-                        && edge.origin == use_.origin
-                }) {
-                    Some(index) => {
-                        remaining.remove(index);
-                    }
-                    None => diagnostics.push(Diagnostic::new(
-                        use_.origin.span.clone(),
-                        format!(
-                            "function instance {} has an artifact use with no matching closure edge",
-                            id.index()
-                        ),
-                    )),
+            let instance_edges = instance
+                .dependencies
+                .iter()
+                .filter(|edge| edge.closure_phase)
+                .map(|edge| UseEdge::instance_edge(edge))
+                .collect::<Vec<_>>();
+            let Some(body) = &instance.body else {
+                if !artifact_edges.is_empty() || !instance_edges.is_empty() {
+                    diagnostics.push(Diagnostic::new(
+                        instance.origin.span.clone(),
+                        format!("{owner} has closure use records but no materialized body"),
+                    ));
                 }
-            }
-            for edge in remaining {
-                diagnostics.push(Diagnostic::new(
-                    edge.origin.span.clone(),
-                    format!(
-                        "function instance {} has a closure artifact edge with no use",
-                        id.index()
-                    ),
-                ));
-            }
+                continue;
+            };
+            let artifact_uses = body
+                .artifact_uses
+                .iter()
+                .map(|use_| (use_.site, UseEdge::artifact_use(use_)))
+                .collect::<Vec<_>>();
+            let instance_uses = body
+                .instance_uses
+                .iter()
+                .map(|use_| (use_.site, UseEdge::instance_use(use_)))
+                .collect::<Vec<_>>();
+            self.agree_uses_with_edges(
+                &owner,
+                "artifact",
+                artifact_uses,
+                artifact_edges,
+                diagnostics,
+            );
+            self.agree_uses_with_edges(
+                &owner,
+                "instance",
+                instance_uses,
+                instance_edges,
+                diagnostics,
+            );
         }
 
-        if self.initializer_artifacts.len() != self.initializers.len()
-            || self.initializer_artifact_uses.len() != self.initializers.len()
+        let initializers = self.initializers.len();
+        if self.initializer_artifacts.len() != initializers
+            || self.initializer_artifact_uses.len() != initializers
+            || self.initializer_instances.len() != initializers
+            || self.initializer_instance_uses.len() != initializers
         {
             diagnostics.push(Diagnostic::new(
                 Span::Compiler,
@@ -932,41 +1089,67 @@ impl LoweredProgram {
             return;
         }
         for (id, _) in self.initializers.iter() {
-            let mut remaining = self.initializer_artifacts[id.index()]
+            let owner = format!("initializer {}", id.index());
+            let artifact_uses = self.initializer_artifact_uses[id.index()]
                 .iter()
+                .map(|use_| (use_.site, UseEdge::artifact_use(use_)))
                 .collect::<Vec<_>>();
-            for use_ in &self.initializer_artifact_uses[id.index()] {
-                self.check_use_site(
-                    &format!("initializer {}", id.index()),
-                    use_.site,
-                    diagnostics,
-                );
-                match remaining.iter().position(|edge| {
-                    edge.artifact == use_.artifact
-                        && edge.kind == use_.kind
-                        && edge.origin == use_.origin
-                }) {
-                    Some(index) => {
-                        remaining.remove(index);
-                    }
-                    None => diagnostics.push(Diagnostic::new(
-                        use_.origin.span.clone(),
-                        format!(
-                            "initializer {} has an artifact use with no matching closure edge",
-                            id.index()
-                        ),
-                    )),
+            let artifact_edges = self.initializer_artifacts[id.index()]
+                .iter()
+                .map(UseEdge::artifact_edge)
+                .collect::<Vec<_>>();
+            let instance_uses = self.initializer_instance_uses[id.index()]
+                .iter()
+                .map(|use_| (use_.site, UseEdge::instance_use(use_)))
+                .collect::<Vec<_>>();
+            let instance_edges = self.initializer_instances[id.index()]
+                .iter()
+                .map(UseEdge::instance_edge)
+                .collect::<Vec<_>>();
+            self.agree_uses_with_edges(
+                &owner,
+                "artifact",
+                artifact_uses,
+                artifact_edges,
+                diagnostics,
+            );
+            self.agree_uses_with_edges(
+                &owner,
+                "instance",
+                instance_uses,
+                instance_edges,
+                diagnostics,
+            );
+        }
+    }
+
+    /// Matches each use to one remaining edge with the same target, kind, and
+    /// origin, reporting unmatched uses and edges.
+    fn agree_uses_with_edges(
+        &self,
+        owner: &str,
+        family: &str,
+        uses: Vec<(ArtifactUseSite, UseEdge<'_>)>,
+        mut edges: Vec<UseEdge<'_>>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        for (site, use_) in uses {
+            self.check_use_site(owner, site, diagnostics);
+            match edges.iter().position(|edge| *edge == use_) {
+                Some(index) => {
+                    edges.remove(index);
                 }
+                None => diagnostics.push(Diagnostic::new(
+                    use_.origin.span.clone(),
+                    format!("{owner} has an {family} use with no matching closure edge"),
+                )),
             }
-            for edge in remaining {
-                diagnostics.push(Diagnostic::new(
-                    edge.origin.span.clone(),
-                    format!(
-                        "initializer {} has a closure artifact edge with no use",
-                        id.index()
-                    ),
-                ));
-            }
+        }
+        for edge in edges {
+            diagnostics.push(Diagnostic::new(
+                edge.origin.span.clone(),
+                format!("{owner} has a closure {family} edge with no use"),
+            ));
         }
     }
 
@@ -1119,6 +1302,7 @@ impl LoweredProgram {
                     resolved,
                     kind,
                     origin,
+                    ..
                 } => {
                     let Some(ordinal) = self.specializations.instance_ordinal(&resolved.key) else {
                         diagnostics.push(Diagnostic::new(
@@ -1178,7 +1362,14 @@ impl LoweredProgram {
         origin: &Origin,
     ) -> bool {
         match owner {
-            FixedPointOwner::Initializer(_) => true,
+            FixedPointOwner::Initializer(initializer) => self
+                .initializer_instances
+                .get(initializer.index())
+                .is_some_and(|edges| {
+                    edges.iter().any(|edge| {
+                        edge.instance == instance && edge.kind == kind && edge.origin == *origin
+                    })
+                }),
             FixedPointOwner::Instance(owner) => self.instances.get(owner).is_some_and(|record| {
                 record.dependencies.iter().any(|edge| {
                     edge.instance == instance && edge.kind == kind && edge.origin == *origin
@@ -1204,9 +1395,9 @@ impl LoweredProgram {
                 .initializer_artifacts
                 .get(initializer.index())
                 .is_some_and(|edges| {
-                    edges
-                        .iter()
-                        .any(|edge| edge.artifact == artifact && edge.origin == *origin)
+                    edges.iter().any(|edge| {
+                        edge.artifact == artifact && edge.kind == kind && edge.origin == *origin
+                    })
                 }),
             FixedPointOwner::Instance(owner) => self.instances.get(owner).is_some_and(|record| {
                 record.artifacts.iter().any(|edge| {
@@ -1606,6 +1797,7 @@ mod tests {
                 resolved,
                 kind: LoweredInstanceDependencyKind::DirectCall,
                 origin: origin.clone(),
+                use_site: None,
             }]],
         );
         hooks.instance_requests.insert(
@@ -1678,6 +1870,7 @@ mod tests {
                 resolved,
                 kind: LoweredInstanceDependencyKind::DirectCall,
                 origin: origin.clone(),
+                use_site: None,
             }]],
         );
         // The instance the artifact requested re-requests the same artifact:
@@ -2143,6 +2336,7 @@ mod tests {
                     resolved,
                     kind: LoweredInstanceDependencyKind::DirectCall,
                     origin: self.origin.clone(),
+                    use_site: None,
                 }],
             ))
         }
@@ -2405,6 +2599,277 @@ mod tests {
         assert_eq!(
             program.initializer_artifact_uses[0][0].site,
             ArtifactUseSite::Test(4)
+        );
+    }
+
+    /// Hooks whose expansions only ever append fresh artifacts, never an
+    /// instance, so the round boundary is never reached.
+    struct ArtifactOnlyGrowHooks {
+        seed: FunctionInstanceId,
+        origin: Origin,
+        baseline_artifacts: usize,
+    }
+
+    impl ArtifactFamilyHooks for ArtifactOnlyGrowHooks {
+        fn scan_initializer(
+            &self,
+            _program: &LoweredProgram,
+            _initializer: InitializerId,
+        ) -> ScanResult {
+            Ok(Vec::new())
+        }
+
+        fn scan_instance(
+            &self,
+            _program: &LoweredProgram,
+            instance: FunctionInstanceId,
+        ) -> ScanResult {
+            if instance == self.seed {
+                return Ok(vec![drop_glue_request(
+                    grow_type(0),
+                    &self.origin,
+                    Some(ArtifactUseSite::Test(0)),
+                )]);
+            }
+            Ok(Vec::new())
+        }
+
+        fn expand(
+            &self,
+            program: &LoweredProgram,
+            artifact: LoweredArtifactRequestId,
+        ) -> ExpansionResult {
+            let plan = program
+                .artifacts
+                .get(artifact)
+                .expect("artifact")
+                .plan
+                .clone()
+                .expect("plan");
+            if artifact.index() < self.baseline_artifacts {
+                return Ok((plan, Vec::new()));
+            }
+            let depth = (artifact.index() - self.baseline_artifacts + 1) as u64;
+            Ok((
+                plan,
+                vec![drop_glue_request(grow_type(depth), &self.origin, None)],
+            ))
+        }
+    }
+
+    #[test]
+    fn closure_artifact_only_growth_hits_the_budget_instead_of_hanging() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let baseline_instances = program.instances.len();
+        let hooks = ArtifactOnlyGrowHooks {
+            seed,
+            origin: instance_origin(&program, seed),
+            baseline_artifacts: program.artifacts.len(),
+        };
+        let diagnostics = program.close_artifact_catalog(&hooks);
+        let messages = messages(&diagnostics);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("grew by") && message.contains("request chain")),
+            "{messages:?}"
+        );
+        assert_eq!(
+            program.instances.len(),
+            baseline_instances,
+            "the chain never requested an instance"
+        );
+    }
+
+    #[test]
+    fn closure_scanner_instance_requests_record_their_use_sites() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let initializer_origin = program
+            .initializers
+            .get(InitializerId::from_index(0))
+            .expect("initializer")
+            .origin
+            .clone();
+        let base_instances = program.instances.len();
+        let from_instance = resolve_root_instance(
+            &program,
+            "identity",
+            CheckedType::Ref(Box::new(CheckedType::U8)),
+            &origin,
+        );
+        let from_initializer = resolve_root_instance(
+            &program,
+            "identity",
+            CheckedType::Ref(Box::new(CheckedType::U16)),
+            &initializer_origin,
+        );
+
+        let mut hooks = TestHooks::default();
+        let instance_request = ClosureRequest::Instance {
+            resolved: from_instance,
+            kind: LoweredInstanceDependencyKind::DirectCall,
+            origin: origin.clone(),
+            use_site: Some(ArtifactUseSite::Test(2)),
+        };
+        let initializer_request = ClosureRequest::Instance {
+            resolved: from_initializer,
+            kind: LoweredInstanceDependencyKind::DirectCall,
+            origin: initializer_origin.clone(),
+            use_site: Some(ArtifactUseSite::Test(3)),
+        };
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![instance_request.clone()], vec![instance_request]],
+        );
+        hooks.initializer_requests.insert(
+            0,
+            vec![vec![initializer_request.clone()], vec![initializer_request]],
+        );
+        close(&mut program, &hooks);
+
+        assert_eq!(program.instances.len(), base_instances + 2);
+        let from_initializer = FunctionInstanceId::from_index(base_instances);
+        let from_instance = FunctionInstanceId::from_index(base_instances + 1);
+
+        let seed_record = program.instances.get(seed).expect("seed");
+        let uses = &seed_record.body.as_ref().expect("seed body").instance_uses;
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].site, ArtifactUseSite::Test(2));
+        assert_eq!(uses[0].instance, from_instance);
+        assert!(
+            seed_record
+                .dependencies
+                .iter()
+                .any(|edge| { edge.instance == from_instance && edge.closure_phase })
+        );
+
+        assert_eq!(program.initializer_instances[0].len(), 1);
+        assert_eq!(
+            program.initializer_instances[0][0].instance,
+            from_initializer
+        );
+        assert!(program.initializer_instances[0][0].closure_phase);
+        assert_eq!(program.initializer_instance_uses[0].len(), 1);
+        assert_eq!(
+            program.initializer_instance_uses[0][0].site,
+            ArtifactUseSite::Test(3)
+        );
+    }
+
+    #[test]
+    fn closure_scanner_instance_edges_without_a_use_site_are_diagnosed() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let resolved = resolve_root_instance(
+            &program,
+            "identity",
+            CheckedType::Ref(Box::new(CheckedType::U8)),
+            &origin,
+        );
+        let request = ClosureRequest::Instance {
+            resolved,
+            kind: LoweredInstanceDependencyKind::DirectCall,
+            origin: origin.clone(),
+            use_site: None,
+        };
+        let mut hooks = TestHooks::default();
+        hooks
+            .instance_requests
+            .insert(seed.index(), vec![vec![request.clone()], vec![request]]);
+        assert!(program.close_artifact_catalog(&hooks).is_empty());
+        let diagnostics = program.validate_artifact_closure(&hooks);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("has a closure instance edge with no use")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn closure_expander_instance_requests_reject_use_sites() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base = program.artifacts.len();
+        let resolved = resolve_root_instance(
+            &program,
+            "identity",
+            CheckedType::Ref(Box::new(CheckedType::U8)),
+            &origin,
+        );
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![drop_glue_request(
+                CheckedType::Ref(Box::new(CheckedType::I32)),
+                &origin,
+                Some(ArtifactUseSite::Test(0)),
+            )]],
+        );
+        hooks.artifact_requests.insert(
+            base,
+            vec![vec![ClosureRequest::Instance {
+                resolved,
+                kind: LoweredInstanceDependencyKind::DirectCall,
+                origin: origin.clone(),
+                use_site: Some(ArtifactUseSite::Test(1)),
+            }]],
+        );
+        let diagnostics = program.close_artifact_catalog(&hooks);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message
+                    .contains("expander-produced instance requests carry no use site")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn closure_initializer_fixed_point_compares_edge_kinds() {
+        let mut program = stage_three("let value = 1\n");
+        let origin = program
+            .initializers
+            .get(InitializerId::from_index(0))
+            .expect("initializer")
+            .origin
+            .clone();
+        let value_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let recorded =
+            drop_glue_request(value_type.clone(), &origin, Some(ArtifactUseSite::Test(5)));
+        // Same key and origin on the re-check, but a different edge kind.
+        let ClosureRequest::Artifact {
+            key,
+            plan,
+            origin: request_origin,
+            use_site,
+            ..
+        } = recorded.clone()
+        else {
+            unreachable!("drop_glue_request builds an artifact request");
+        };
+        let changed_kind = ClosureRequest::Artifact {
+            key,
+            plan,
+            kind: LoweredArtifactDependencyKind::GcFinalizer,
+            origin: request_origin,
+            use_site,
+        };
+        let mut hooks = TestHooks::default();
+        hooks
+            .initializer_requests
+            .insert(0, vec![vec![recorded], vec![changed_kind]]);
+        assert!(program.close_artifact_catalog(&hooks).is_empty());
+        let diagnostics = program.validate_artifact_closure(&hooks);
+        assert!(
+            messages(&diagnostics).iter().any(|message| message
+                .contains("closure did not reach a fixed point: initializer 0 has no edge")),
+            "{diagnostics:?}"
         );
     }
 }

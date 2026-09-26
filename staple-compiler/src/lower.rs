@@ -63,7 +63,7 @@ pub(crate) use instance_body::{
 #[allow(unused_imports)] // Stage 4.3-4.6 flesh out the hook surface.
 use artifact_closure::{ArtifactFamilyHooks, ClosureRequest, ProductionHooks};
 #[allow(unused_imports)] // Stage 4.4-4.6 and tests name use sites.
-pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse};
+pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredInstanceUse};
 
 // Stage 4.1 artifact-plan API. Plans are attached to artifact requests and
 // filled by the substage that owns each artifact family.
@@ -2027,6 +2027,13 @@ pub(crate) struct LoweredProgram {
     /// Stage 4.2 closure artifact edges owned by module initializers, indexed
     /// by `InitializerId` in request order.
     initializer_artifacts: Vec<Vec<LoweredArtifactDependency>>,
+    /// Stage 4.2 closure instance uses recorded on module initializers by
+    /// scanners, indexed by `InitializerId` in scan order.
+    initializer_instance_uses: Vec<Vec<LoweredInstanceUse>>,
+    /// Stage 4.2 closure instance edges owned by module initializers, indexed
+    /// by `InitializerId` in request order. Stage 3 initializer instance
+    /// requests stay request-root-only; only closure-phase scans add entries.
+    initializer_instances: Vec<Vec<LoweredInstanceDependency>>,
     /// Append-only instance/artifact key catalog. Stage 3.3 alone reserves
     /// ordinals, before visiting a body, so recursion converges.
     specializations: SpecializationCatalog,
@@ -14317,6 +14324,20 @@ mod tests {
                 ));
             }
         }
+        for (id, instance) in program.instances.iter() {
+            let Some(body) = &instance.body else {
+                continue;
+            };
+            for use_ in &body.instance_uses {
+                lines.push(format!(
+                    "  instance {} use instance {} {} {:?}",
+                    id.index(),
+                    use_.instance.index(),
+                    use_.kind.description(),
+                    use_.site
+                ));
+            }
+        }
         for (id, uses) in program.initializer_artifact_uses.iter().enumerate() {
             for use_ in uses {
                 lines.push(format!(
@@ -14332,6 +14353,25 @@ mod tests {
                 lines.push(format!(
                     "  initializer {id} artifact edge {} {}",
                     edge.artifact.index(),
+                    edge.kind.description()
+                ));
+            }
+        }
+        for (id, uses) in program.initializer_instance_uses.iter().enumerate() {
+            for use_ in uses {
+                lines.push(format!(
+                    "  initializer {id} use instance {} {} {:?}",
+                    use_.instance.index(),
+                    use_.kind.description(),
+                    use_.site
+                ));
+            }
+        }
+        for (id, edges) in program.initializer_instances.iter().enumerate() {
+            for edge in edges {
+                lines.push(format!(
+                    "  initializer {id} instance edge {} {}",
+                    edge.instance.index(),
                     edge.kind.description()
                 ));
             }
@@ -14417,9 +14457,24 @@ mod tests {
                 .iter()
                 .all(Vec::is_empty)
         );
+        assert!(
+            lowered
+                .program
+                .initializer_instances
+                .iter()
+                .all(Vec::is_empty)
+        );
+        assert!(
+            lowered
+                .program
+                .initializer_instance_uses
+                .iter()
+                .all(Vec::is_empty)
+        );
         for (_, instance) in lowered.program.instances.iter() {
             if let Some(body) = &instance.body {
                 assert!(body.artifact_uses.is_empty());
+                assert!(body.instance_uses.is_empty());
             }
         }
     }

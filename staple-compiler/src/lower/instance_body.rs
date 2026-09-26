@@ -40,11 +40,12 @@ use super::{
     LoweredCallableTarget, LoweredCallableValue, LoweredCallableValueId, LoweredCapture,
     LoweredClosureCapture, LoweredClosureConstruction, LoweredClosureEnvironment, LoweredCoro,
     LoweredCoroId, LoweredCoroutinePlan, LoweredCoroutinePlanId, LoweredExpression,
-    LoweredExpressionKind, LoweredItem, LoweredItemKind, LoweredName, LoweredPattern,
-    LoweredPatternKind, LoweredPlace, LoweredPlaceKind, LoweredProgram, LoweredReactiveCallbackId,
-    LoweredReactiveOperationId, LoweredReactiveOperationKind, LoweredResourceProvider,
-    LoweredResourceProviderId, LoweredResourceUse, LoweredResourceUseId, LoweredStringTemplatePart,
-    LoweredWith, LoweredWithId, Origin, PatternId, PlaceId, TraitEvidence,
+    LoweredExpressionKind, LoweredInstanceUse, LoweredItem, LoweredItemKind, LoweredName,
+    LoweredPattern, LoweredPatternKind, LoweredPlace, LoweredPlaceKind, LoweredProgram,
+    LoweredReactiveCallbackId, LoweredReactiveOperationId, LoweredReactiveOperationKind,
+    LoweredResourceProvider, LoweredResourceProviderId, LoweredResourceUse, LoweredResourceUseId,
+    LoweredStringTemplatePart, LoweredWith, LoweredWithId, Origin, PatternId, PlaceId,
+    TraitEvidence,
 };
 
 /// One parameter of an instance body: the template symbol plus its concrete
@@ -166,6 +167,10 @@ pub(crate) struct LoweredInstanceBody {
     /// The validator proves these agree one-to-one with the instance's
     /// closure-phase artifact edges.
     pub artifact_uses: Vec<LoweredArtifactUse>,
+    /// Source-function instance uses recorded by Stage 4.2 scanners, in scan
+    /// order. The validator proves these agree one-to-one with the instance's
+    /// closure-phase instance edges.
+    pub instance_uses: Vec<LoweredInstanceUse>,
     // Instance-local arenas. IDs are meaningful only inside this body.
     pub(super) blocks: Arena<LoweredBlock, BlockId>,
     pub(super) items: Arena<LoweredItem, ItemId>,
@@ -216,6 +221,7 @@ impl LoweredInstanceBody {
             bindings: BTreeMap::new(),
             evidence: BTreeMap::new(),
             artifact_uses: Vec::new(),
+            instance_uses: Vec::new(),
             blocks: Arena::default(),
             items: Arena::default(),
             expressions: Arena::default(),
