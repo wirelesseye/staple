@@ -13127,7 +13127,7 @@ fn contains_type_parameter_id(value_type: &CheckedType, expected: TypeParameterI
     type_parameter_ids(value_type).contains(&expected)
 }
 
-fn contains_inferred_type(value_type: &CheckedType) -> bool {
+pub(crate) fn contains_inferred_type(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Inferred | CheckedType::TypeConstructor { .. } => true,
         CheckedType::CPointer { pointee } => contains_inferred_type(pointee),
@@ -14737,7 +14737,7 @@ fn product_item(product: &CheckedProductType) -> CheckedType {
     )
 }
 
-fn structural_trait_arguments(
+pub(crate) fn structural_trait_arguments(
     trait_id: TraitId,
     arguments: &[CheckedType],
     index_trait: Option<TraitId>,
@@ -15168,7 +15168,7 @@ fn ambiguous_trait_implementation_failure(arguments: &[CheckedType]) -> String {
     }
 }
 
-fn is_copy_type(
+pub(crate) fn is_copy_type(
     value_type: &CheckedType,
     copy_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
@@ -15271,7 +15271,7 @@ fn type_needs_drop(
     }
 }
 
-fn is_default_type(
+pub(crate) fn is_default_type(
     value_type: &CheckedType,
     default_trait: TraitId,
     implementations: &[CheckedTraitImplementation],

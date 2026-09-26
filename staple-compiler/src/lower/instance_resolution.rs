@@ -6,14 +6,17 @@
 //! is scanned under its own `FunctionId`, so a nested body contributes through
 //! the record that constructs or invokes it, not as ordinary children.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use staple_syntax::Diagnostic;
 
 use crate::{
-    CallSubstitutions, CheckedEffectSet, CheckedFunctionType, CheckedTraitBound, CheckedType,
-    FunctionId, TraitEvidence, TypeParameterId, contains_type_parameter, effect_substitution_type,
-    effect_substitution_value, infer_type_parameters, merge_types, substitute_effect_set,
+    CallSubstitutions, CheckedEffectSet, CheckedFunctionType, CheckedTraitBound,
+    CheckedTraitImplementation, CheckedType, FunctionId, StructuralTraitMethod, TraitEvidence,
+    TraitId, TraitMethodId, TypeParameterId, contains_inferred_type, contains_type_parameter,
+    effect_substitution_type, effect_substitution_value, infer_type_parameters, is_copy_type,
+    is_default_type, merge_types, structural_trait_arguments, substitute_effect_set,
     substitute_type,
 };
 
@@ -834,6 +837,781 @@ fn contains_placeholder(value_type: &CheckedType) -> bool {
         } => arguments.iter().any(contains_placeholder) || contains_placeholder(representation),
         _ => false,
     }
+}
+
+/// Owned-metadata view of one trait selector. It mirrors the checker's
+/// `resolve_trait_obligation`/`dispatch_matching_implementations` rules over
+/// the lowered trait and implementation catalogs, so evidence selection never
+/// consults `TypedModule`, LLVM state, or a runtime implementation search.
+struct TraitSelectionContext<'a> {
+    program: &'a LoweredProgram,
+    implementations: Vec<CheckedTraitImplementation>,
+    implementation_ids: Vec<LoweredTraitImplementationId>,
+    /// Substituted declared prerequisites in scope for this request.
+    bounds: Vec<CheckedTraitBound>,
+    visited: RefCell<Vec<(TraitId, Vec<CheckedType>)>>,
+    cycle_hit: Cell<bool>,
+    /// A matching implementation header failed its conditional bounds.
+    prerequisite_failed: Cell<bool>,
+}
+
+impl<'a> TraitSelectionContext<'a> {
+    fn new(program: &'a LoweredProgram, bounds: Vec<CheckedTraitBound>) -> Self {
+        let mut implementations = Vec::new();
+        let mut implementation_ids = Vec::new();
+        for (id, metadata) in program.trait_implementations.iter() {
+            implementations.push(CheckedTraitImplementation {
+                span: metadata.origin.span.clone(),
+                trait_id: metadata.trait_id,
+                parameters: metadata.parameters.iter().copied().collect(),
+                arguments: metadata.arguments.clone(),
+                bounds: metadata.bounds.clone(),
+                negative: metadata.negative,
+                methods: metadata.methods.iter().copied().collect(),
+            });
+            implementation_ids.push(id);
+        }
+        TraitSelectionContext {
+            program,
+            implementations,
+            implementation_ids,
+            bounds,
+            visited: RefCell::new(Vec::new()),
+            cycle_hit: Cell::new(false),
+            prerequisite_failed: Cell::new(false),
+        }
+    }
+
+    /// Expands declared bounds through the owned trait prerequisite catalog,
+    /// mirroring the checker's `expand_trait_bounds`, so a transitive
+    /// prerequisite such as `TestDerived T` implying `TestBase T` is visible
+    /// to selection.
+    fn expand_bounds(&self, bounds: Vec<CheckedTraitBound>) -> Vec<CheckedTraitBound> {
+        let mut expanded = Vec::new();
+        for bound in bounds {
+            self.expand_bound(bound, &mut expanded);
+        }
+        expanded
+    }
+
+    fn expand_bound(&self, bound: CheckedTraitBound, expanded: &mut Vec<CheckedTraitBound>) {
+        if expanded.len() > 64 || expanded.contains(&bound) {
+            return;
+        }
+        expanded.push(bound.clone());
+        let Some(metadata) = self.program.traits.get(bound.trait_id) else {
+            return;
+        };
+        if metadata.parameters.len() != bound.arguments.len() {
+            return;
+        }
+        let mut substitutions = HashMap::new();
+        for (parameter, argument) in metadata.parameters.iter().zip(&bound.arguments) {
+            let _ = infer_type_parameters(parameter, argument, &mut substitutions);
+        }
+        for prerequisite in &metadata.prerequisites {
+            let prerequisite = CheckedTraitBound {
+                trait_id: prerequisite.trait_id,
+                arguments: prerequisite
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| substitute_type(argument, &substitutions))
+                    .collect(),
+            };
+            self.expand_bound(prerequisite, expanded);
+        }
+    }
+
+    fn trait_name(&self, trait_id: TraitId) -> String {
+        self.program
+            .traits
+            .get(trait_id)
+            .map(|trait_| trait_.name.clone())
+            .unwrap_or_else(|| format!("trait {}", trait_id.0))
+    }
+
+    fn is_copy(&self, value_type: &CheckedType) -> bool {
+        is_copy_type(
+            value_type,
+            self.program.semantic_ids.copy_trait,
+            self.program.semantic_ids.drop_trait,
+            self.program.semantic_ids.io_type,
+            &self.implementations,
+            &self.bounds,
+        )
+    }
+
+    fn structural(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Option<(Vec<CheckedType>, StructuralTraitMethod)> {
+        structural_trait_arguments(
+            trait_id,
+            arguments,
+            self.program.semantic_ids.index_trait,
+            self.program.semantic_ids.mutate_index_trait,
+            self.program.semantic_ids.into_iterator_trait,
+            self.program.semantic_ids.iterator_trait,
+            self.program.semantic_ids.debug_trait,
+            |value_type| self.is_copy(value_type),
+            |value_type| {
+                self.program.semantic_ids.debug_trait.is_some_and(|debug| {
+                    self.obligation_available(debug, std::slice::from_ref(value_type))
+                })
+            },
+            |trait_id, arguments| self.resolve_obligation(trait_id, arguments),
+        )
+    }
+
+    fn obligation_available(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
+        self.resolve_obligation(trait_id, arguments).is_some()
+    }
+
+    fn resolve_obligation(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Option<Vec<CheckedType>> {
+        let key = (trait_id, arguments.to_vec());
+        {
+            let mut visited = self.visited.borrow_mut();
+            if visited.len() > 64 || visited.contains(&key) {
+                self.cycle_hit.set(true);
+                return None;
+            }
+            visited.push(key);
+        }
+        let result = self.resolve_obligation_inner(trait_id, arguments);
+        self.visited.borrow_mut().pop();
+        result
+    }
+
+    fn resolve_obligation_inner(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Option<Vec<CheckedType>> {
+        if let Some((completed, _)) = self.structural(trait_id, arguments) {
+            return Some(completed);
+        }
+        if arguments.iter().any(contains_inferred_type) {
+            return self.complete_obligation_arguments(trait_id, arguments);
+        }
+        self.obligation_available_exact(trait_id, arguments)
+            .then(|| arguments.to_vec())
+    }
+
+    fn obligation_available_exact(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
+        if let Some((_, _)) = self.structural(trait_id, arguments) {
+            return true;
+        }
+        if self
+            .bounds
+            .iter()
+            .any(|bound| bound.trait_id == trait_id && bound.arguments == arguments)
+        {
+            return true;
+        }
+        let [target] = arguments else {
+            return !self
+                .matching_implementations(trait_id, arguments)
+                .is_empty();
+        };
+        if Some(trait_id) == self.program.semantic_ids.natural_trait {
+            return matches!(target, CheckedType::NumberLiteral(_));
+        }
+        if Some(trait_id) == self.program.semantic_ids.sized_trait {
+            return target.is_sized();
+        }
+        if Some(trait_id) == self.program.semantic_ids.copy_trait {
+            return self.is_copy(target);
+        }
+        if Some(trait_id) == self.program.semantic_ids.default_trait {
+            if let Some(default_trait) = self.program.semantic_ids.default_trait
+                && is_default_type(target, default_trait, &self.implementations, &self.bounds)
+            {
+                return true;
+            }
+            return !self
+                .matching_implementations(trait_id, arguments)
+                .is_empty();
+        }
+        !self
+            .matching_implementations(trait_id, arguments)
+            .is_empty()
+    }
+
+    /// Implementation indices whose header unifies with `arguments` and whose
+    /// conditional bounds hold. Negative implementations never prove an
+    /// obligation and never provide a method.
+    fn matching_implementations(&self, trait_id: TraitId, arguments: &[CheckedType]) -> Vec<usize> {
+        let mut matches = Vec::new();
+        for (index, implementation) in self.implementations.iter().enumerate() {
+            if implementation.trait_id != trait_id
+                || implementation.negative
+                || implementation.arguments.len() != arguments.len()
+            {
+                continue;
+            }
+            let mut substitutions = HashMap::new();
+            let unifies =
+                implementation
+                    .arguments
+                    .iter()
+                    .zip(arguments)
+                    .all(|(template, actual)| {
+                        infer_type_parameters(template, actual, &mut substitutions)
+                    });
+            if !unifies {
+                continue;
+            }
+            if self.implementation_bounds_hold(implementation, &substitutions) {
+                matches.push(index);
+            }
+        }
+        matches
+    }
+
+    fn implementation_bounds_hold(
+        &self,
+        implementation: &CheckedTraitImplementation,
+        substitutions: &HashMap<TypeParameterId, CheckedType>,
+    ) -> bool {
+        implementation.bounds.iter().all(|bound| {
+            let bound_arguments = bound
+                .arguments
+                .iter()
+                .cloned()
+                .map(|argument| substitute_type(argument, substitutions))
+                .collect::<Vec<_>>();
+            if bound_arguments
+                .iter()
+                .any(|argument| contains_type_parameter(argument))
+            {
+                self.prerequisite_failed.set(true);
+                return false;
+            }
+            if Some(bound.trait_id) == self.program.semantic_ids.copy_trait {
+                let holds = bound_arguments
+                    .first()
+                    .is_some_and(|value| self.is_copy(value));
+                if !holds {
+                    self.prerequisite_failed.set(true);
+                }
+                return holds;
+            }
+            let holds = self.obligation_available(bound.trait_id, &bound_arguments);
+            if !holds {
+                self.prerequisite_failed.set(true);
+            }
+            holds
+        })
+    }
+
+    fn negative_match(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
+        self.implementations.iter().any(|implementation| {
+            implementation.trait_id == trait_id
+                && implementation.negative
+                && implementation.arguments.len() == arguments.len()
+                && implementation
+                    .arguments
+                    .iter()
+                    .zip(arguments)
+                    .all(|(template, actual)| {
+                        let mut substitutions = HashMap::new();
+                        infer_type_parameters(template, actual, &mut substitutions)
+                    })
+        })
+    }
+
+    /// Completes functional-dependency or inferred positions from declared
+    /// bounds and implementation headers, exactly like the checker's inferred
+    /// branch: unify the known positions, substitute into each candidate
+    /// header, and require every candidate to agree.
+    fn complete_obligation_arguments(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Option<Vec<CheckedType>> {
+        let mut candidates = self.all_completion_candidates(trait_id, arguments);
+        let mut completed = candidates.drain(..).next()?;
+        for candidate in candidates {
+            completed = merge_trait_arguments(&completed, &candidate)?;
+        }
+        Some(completed)
+    }
+
+    fn all_completion_candidates(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Vec<Vec<CheckedType>> {
+        let mut candidates = self
+            .bounds
+            .iter()
+            .filter(|bound| bound.trait_id == trait_id)
+            .map(|bound| bound.arguments.clone())
+            .collect::<Vec<_>>();
+        for implementation in &self.implementations {
+            if implementation.trait_id != trait_id
+                || implementation.arguments.len() != arguments.len()
+            {
+                continue;
+            }
+            let mut substitutions = HashMap::new();
+            let unifies =
+                implementation
+                    .arguments
+                    .iter()
+                    .zip(arguments)
+                    .all(|(template, actual)| {
+                        contains_inferred_type(actual)
+                            || infer_type_parameters(template, actual, &mut substitutions)
+                    });
+            if !unifies || !self.implementation_bounds_hold(implementation, &substitutions) {
+                continue;
+            }
+            candidates.push(
+                implementation
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| substitute_type(argument, &substitutions))
+                    .collect(),
+            );
+        }
+        candidates
+    }
+
+    /// The completed header arguments for one matched implementation.
+    fn completed_arguments(
+        &self,
+        index: usize,
+        arguments: &[CheckedType],
+    ) -> Option<Vec<CheckedType>> {
+        let implementation = self.implementations.get(index)?;
+        let mut substitutions = HashMap::new();
+        let unifies = implementation
+            .arguments
+            .iter()
+            .zip(arguments)
+            .all(|(template, actual)| infer_type_parameters(template, actual, &mut substitutions));
+        unifies.then(|| {
+            implementation
+                .arguments
+                .iter()
+                .cloned()
+                .map(|argument| substitute_type(argument, &substitutions))
+                .collect()
+        })
+    }
+
+    fn select_method(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+        method: TraitMethodId,
+        origin: &Origin,
+    ) -> Result<TraitEvidence, Diagnostic> {
+        let matches = self.matching_implementations(trait_id, arguments);
+        if let Some(index) = matches.first().copied() {
+            let completed = self
+                .completed_arguments(index, arguments)
+                .ok_or_else(|| no_match_diagnostic(self, origin, trait_id, arguments, false))?;
+            for other in matches.iter().skip(1) {
+                let Some(other_completed) = self.completed_arguments(*other, arguments) else {
+                    continue;
+                };
+                let Some(merged) = merge_trait_arguments(&completed, &other_completed) else {
+                    return Err(ambiguous_diagnostic(self, origin, trait_id, arguments));
+                };
+                if merged != completed {
+                    return Err(ambiguous_diagnostic(self, origin, trait_id, arguments));
+                }
+            }
+            let metadata = self
+                .program
+                .trait_implementations
+                .get(self.implementation_ids[index])
+                .expect("matched implementation is in the catalog");
+            let function = metadata
+                .methods
+                .iter()
+                .find(|(candidate, _)| *candidate == method)
+                .map(|(_, function)| *function)
+                .or_else(|| self.default_method(trait_id, method));
+            let Some(function) = function else {
+                return Err(no_match_diagnostic(
+                    self, origin, trait_id, arguments, false,
+                ));
+            };
+            return Ok(TraitEvidence::ExplicitImplementation {
+                trait_id,
+                implementation: self.implementation_ids[index],
+                method,
+                function,
+                arguments: completed,
+            });
+        }
+        if let Some((completed, structural)) = self.structural(trait_id, arguments) {
+            return Ok(TraitEvidence::Structural {
+                trait_id,
+                method,
+                structural,
+                arguments: completed,
+            });
+        }
+        let negative = self.negative_match(trait_id, arguments);
+        Err(no_match_diagnostic(
+            self, origin, trait_id, arguments, negative,
+        ))
+    }
+
+    fn default_method(&self, trait_id: TraitId, method: TraitMethodId) -> Option<FunctionId> {
+        self.program
+            .traits
+            .get(trait_id)?
+            .default_methods
+            .iter()
+            .find(|(candidate, _)| *candidate == method)
+            .map(|(_, function)| *function)
+    }
+
+    /// Proves an obligation without selecting a method target.
+    fn prove_obligation(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+        origin: &Origin,
+    ) -> Result<(), Diagnostic> {
+        if self.obligation_available(trait_id, arguments) {
+            Ok(())
+        } else {
+            Err(no_match_diagnostic(
+                self,
+                origin,
+                trait_id,
+                arguments,
+                self.negative_match(trait_id, arguments),
+            ))
+        }
+    }
+}
+
+fn merge_trait_arguments(left: &[CheckedType], right: &[CheckedType]) -> Option<Vec<CheckedType>> {
+    if left.len() != right.len() {
+        return None;
+    }
+    left.iter()
+        .cloned()
+        .zip(right.iter().cloned())
+        .map(|(left, right)| merge_types(left, right))
+        .collect()
+}
+
+fn describe_arguments(arguments: &[CheckedType]) -> String {
+    arguments
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn no_match_diagnostic(
+    context: &TraitSelectionContext<'_>,
+    origin: &Origin,
+    trait_id: TraitId,
+    arguments: &[CheckedType],
+    negative: bool,
+) -> Diagnostic {
+    let message = if negative {
+        format!(
+            "trait `{}` is rejected for `{}` by a negative implementation",
+            context.trait_name(trait_id),
+            describe_arguments(arguments)
+        )
+    } else if context.cycle_hit.get() {
+        format!(
+            "trait `{}` for `{}` has an unresolved cyclic obligation",
+            context.trait_name(trait_id),
+            describe_arguments(arguments)
+        )
+    } else if context.prerequisite_failed.get() {
+        format!(
+            "trait `{}` for `{}` has an unsatisfied conditional prerequisite",
+            context.trait_name(trait_id),
+            describe_arguments(arguments)
+        )
+    } else {
+        format!(
+            "no implementation of trait `{}` is available for `{}`",
+            context.trait_name(trait_id),
+            describe_arguments(arguments)
+        )
+    };
+    Diagnostic::new(origin.span.clone(), message)
+}
+
+fn ambiguous_diagnostic(
+    context: &TraitSelectionContext<'_>,
+    origin: &Origin,
+    trait_id: TraitId,
+    arguments: &[CheckedType],
+) -> Diagnostic {
+    Diagnostic::new(
+        origin.span.clone(),
+        format!(
+            "ambiguous implementation of trait `{}` for `{}`",
+            context.trait_name(trait_id),
+            describe_arguments(arguments)
+        ),
+    )
+}
+
+impl LoweredProgram {
+    /// Resolves one evidence recipe against the concrete environment.
+    ///
+    /// Explicit and structural selections already recorded by Stage 2 are
+    /// preserved and validated; a declared bound is matched against the owned
+    /// implementation catalog in declaration order using the checker's
+    /// unification, conditional-bound, negative-implementation, functional
+    /// dependency, and structural-derivation rules. A `method: None` recipe
+    /// proves an obligation but returns no target evidence.
+    pub(crate) fn resolve_trait_evidence(
+        &self,
+        origin: &Origin,
+        evidence: Option<&TraitEvidence>,
+        environment: &SubstitutionEnvironment,
+    ) -> Result<Option<TraitEvidence>, Diagnostic> {
+        let Some(evidence) = evidence else {
+            return Ok(None);
+        };
+        let map = environment.substitution_map();
+        match evidence {
+            TraitEvidence::ExplicitImplementation {
+                trait_id,
+                implementation,
+                method,
+                function,
+                arguments,
+            } => {
+                let arguments = substitute_concrete_arguments(arguments, &map, origin)?;
+                let context = TraitSelectionContext::new(self, Vec::new());
+                let metadata = self
+                    .trait_implementations
+                    .get(*implementation)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "recorded trait implementation {} is missing from the lowered catalog",
+                                implementation.index()
+                            ),
+                        )
+                    })?;
+                if metadata.trait_id != *trait_id {
+                    return Err(Diagnostic::new(
+                        origin.span.clone(),
+                        "recorded explicit evidence names the wrong trait implementation",
+                    ));
+                }
+                let selected = metadata
+                    .methods
+                    .iter()
+                    .find(|(candidate, _)| candidate == method)
+                    .map(|(_, function)| *function)
+                    .or_else(|| context.default_method(*trait_id, *method));
+                if selected != Some(*function) {
+                    return Err(Diagnostic::new(
+                        origin.span.clone(),
+                        format!(
+                            "recorded explicit selection for trait `{}` no longer provides method {}",
+                            context.trait_name(*trait_id),
+                            method.0
+                        ),
+                    ));
+                }
+                let Some(index) = context
+                    .implementation_ids
+                    .iter()
+                    .position(|id| id == implementation)
+                else {
+                    return Err(Diagnostic::new(
+                        origin.span.clone(),
+                        format!(
+                            "recorded trait implementation {} is missing from the lowered catalog",
+                            implementation.index()
+                        ),
+                    ));
+                };
+                if !context
+                    .matching_implementations(*trait_id, &arguments)
+                    .contains(&index)
+                {
+                    return Err(Diagnostic::new(
+                        origin.span.clone(),
+                        format!(
+                            "recorded explicit selection for trait `{}` no longer matches `{}`",
+                            context.trait_name(*trait_id),
+                            describe_arguments(&arguments)
+                        ),
+                    ));
+                }
+                Ok(Some(TraitEvidence::ExplicitImplementation {
+                    trait_id: *trait_id,
+                    implementation: *implementation,
+                    method: *method,
+                    function: *function,
+                    arguments,
+                }))
+            }
+            TraitEvidence::Structural {
+                trait_id,
+                method,
+                structural,
+                arguments,
+            } => {
+                let substituted = arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument.clone(), &map))
+                    .collect::<Vec<_>>();
+                let context = TraitSelectionContext::new(self, Vec::new());
+                let Some((completed, derived)) = context.structural(*trait_id, &substituted) else {
+                    return Err(Diagnostic::new(
+                        origin.span.clone(),
+                        format!(
+                            "recorded structural selection for trait `{}` no longer applies to `{}`",
+                            context.trait_name(*trait_id),
+                            describe_arguments(&substituted)
+                        ),
+                    ));
+                };
+                if derived != *structural {
+                    return Err(Diagnostic::new(
+                        origin.span.clone(),
+                        format!(
+                            "recorded structural selection for trait `{}` disagrees with the derived method",
+                            context.trait_name(*trait_id)
+                        ),
+                    ));
+                }
+                for argument in &completed {
+                    if let Some(problem) = unresolved_type_problem(argument) {
+                        return Err(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "structural selection for trait `{}` is not concrete: {problem}",
+                                context.trait_name(*trait_id)
+                            ),
+                        ));
+                    }
+                }
+                Ok(Some(TraitEvidence::Structural {
+                    trait_id: *trait_id,
+                    method: *method,
+                    structural: *structural,
+                    arguments: completed,
+                }))
+            }
+            TraitEvidence::DeclaredBound {
+                trait_id,
+                method,
+                arguments,
+                prerequisites,
+            } => {
+                let mut substituted = arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument.clone(), &map))
+                    .collect::<Vec<_>>();
+                let bounds = TraitSelectionContext::new(self, Vec::new())
+                    .expand_bounds(substitute_bounds(prerequisites, &map));
+                let context = TraitSelectionContext::new(self, bounds);
+                if substituted.iter().any(contains_inferred_type) {
+                    substituted = context
+                        .complete_obligation_arguments(*trait_id, &substituted)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                origin.span.clone(),
+                                format!(
+                                    "cannot complete the arguments of trait `{}` for `{}` from the owned catalogs",
+                                    context.trait_name(*trait_id),
+                                    describe_arguments(&substituted)
+                                ),
+                            )
+                        })?;
+                }
+                for argument in &substituted {
+                    if let Some(problem) = unresolved_type_problem(argument) {
+                        return Err(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "trait `{}` evidence is not concrete: {problem}",
+                                context.trait_name(*trait_id)
+                            ),
+                        ));
+                    }
+                }
+                match method {
+                    Some(method) => context
+                        .select_method(*trait_id, &substituted, *method, origin)
+                        .map(Some),
+                    None => {
+                        context.prove_obligation(*trait_id, &substituted, origin)?;
+                        Ok(None)
+                    }
+                }
+            }
+            TraitEvidence::RejectedImplementation { trait_id, .. } => Err(Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "trait `{}` evidence is a negative implementation and never forms an instance",
+                    self.traits
+                        .get(*trait_id)
+                        .map(|trait_| trait_.name.clone())
+                        .unwrap_or_else(|| format!("trait {}", trait_id.0))
+                ),
+            )),
+        }
+    }
+}
+
+fn substitute_bounds(
+    bounds: &[CheckedTraitBound],
+    map: &HashMap<TypeParameterId, CheckedType>,
+) -> Vec<CheckedTraitBound> {
+    bounds
+        .iter()
+        .map(|bound| CheckedTraitBound {
+            trait_id: bound.trait_id,
+            arguments: bound
+                .arguments
+                .iter()
+                .cloned()
+                .map(|argument| substitute_type(argument, map))
+                .collect(),
+        })
+        .collect()
+}
+
+fn substitute_concrete_arguments(
+    arguments: &[CheckedType],
+    map: &HashMap<TypeParameterId, CheckedType>,
+    origin: &Origin,
+) -> Result<Vec<CheckedType>, Diagnostic> {
+    let mut substituted = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let value = substitute_type(argument.clone(), map);
+        if let Some(problem) = unresolved_type_problem(&value) {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                format!("trait evidence argument `{value}` is not concrete: {problem}"),
+            ));
+        }
+        substituted.push(value);
+    }
+    Ok(substituted)
 }
 
 struct ParameterCollector<'a> {
@@ -1674,7 +2452,10 @@ impl LoweredProgram {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use crate::{NameResolver, ProgramLoader, TypeChecker, TypedModule, contains_type_parameter};
+    use crate::{
+        CheckedTypeElement, NameResolver, ProgramLoader, TypeChecker, TypedModule,
+        contains_type_parameter,
+    };
 
     use super::*;
 
@@ -2439,6 +3220,591 @@ mod tests {
             moves: Vec::new(),
             effects: CheckedEffectSet::default(),
             result: Box::new(result),
+        }
+    }
+
+    fn trait_id_named(program: &LoweredProgram, name: &str) -> TraitId {
+        program
+            .traits
+            .iter()
+            .find(|(_, _, trait_)| {
+                trait_.name == name || trait_.name.ends_with(&format!(".{name}"))
+            })
+            .map(|(_, id, _)| id)
+            .unwrap_or_else(|| panic!("no lowered trait named {name}"))
+    }
+
+    fn direct_calls<'a>(
+        program: &'a LoweredProgram,
+        name: &str,
+    ) -> Vec<(FunctionId, &'a LoweredCall)> {
+        let target = function_id(program, name);
+        program
+            .calls
+            .iter()
+            .filter_map(|(_, call)| match &call.target {
+                LoweredCallableTarget::DirectFunction { function, .. } if *function == target => {
+                    Some((target, call))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn enclosing_environment(program: &LoweredProgram, name: &str) -> SubstitutionEnvironment {
+        let (function, call) = direct_call(program, name);
+        let (environment, _) = program
+            .resolve_substitutions(
+                function,
+                &call.origin,
+                &call.function_type,
+                &call.substitutions,
+                None,
+            )
+            .unwrap_or_else(|diagnostic| panic!("{name} should resolve: {diagnostic:?}"));
+        environment
+    }
+
+    fn declared_bound_evidence(program: &LoweredProgram, trait_name: &str) -> TraitEvidence {
+        let trait_id = trait_id_named(program, trait_name);
+        program
+            .calls
+            .iter()
+            .filter_map(|(_, call)| call.evidence.as_ref())
+            .chain(
+                program
+                    .callable_values
+                    .iter()
+                    .filter_map(|(_, value)| value.evidence.as_ref()),
+            )
+            .find(|evidence| {
+                matches!(
+                    evidence,
+                    TraitEvidence::DeclaredBound { trait_id: candidate, .. } if *candidate == trait_id
+                )
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("no declared-bound evidence for trait {trait_name}"))
+    }
+
+    /// The declared-bound evidence recorded inside one function template's own
+    /// body, excluding nested closure bodies and other functions.
+    fn declared_bound_evidence_in(
+        program: &LoweredProgram,
+        trait_name: &str,
+        owner: FunctionId,
+    ) -> TraitEvidence {
+        let trait_id = trait_id_named(program, trait_name);
+        for (_, expression) in program.expressions.iter() {
+            if expression.key.owner != ExpressionOwner::Function(owner) {
+                continue;
+            }
+            let evidence = match &expression.kind {
+                LoweredExpressionKind::Call(call) => program
+                    .calls
+                    .get(*call)
+                    .and_then(|call| call.evidence.as_ref()),
+                LoweredExpressionKind::CallableValue(value) => program
+                    .callable_values
+                    .get(*value)
+                    .and_then(|value| value.evidence.as_ref()),
+                _ => None,
+            };
+            if let Some(evidence) = evidence
+                && matches!(
+                    evidence,
+                    TraitEvidence::DeclaredBound { trait_id: candidate, .. } if *candidate == trait_id
+                )
+            {
+                return evidence.clone();
+            }
+        }
+        panic!("no declared-bound evidence for trait {trait_name} in the template body")
+    }
+
+    fn resolve_evidence(
+        program: &LoweredProgram,
+        evidence: &TraitEvidence,
+        environment: &SubstitutionEnvironment,
+    ) -> TraitEvidence {
+        program
+            .resolve_trait_evidence(&test_origin(), Some(evidence), environment)
+            .unwrap_or_else(|diagnostic| panic!("evidence should resolve: {diagnostic:?}"))
+            .expect("a method target")
+    }
+
+    fn explicit_function(evidence: &TraitEvidence) -> FunctionId {
+        match evidence {
+            TraitEvidence::ExplicitImplementation { function, .. } => *function,
+            other => panic!("expected an explicit implementation, got {other:?}"),
+        }
+    }
+
+    fn implementation_arguments(evidence: &TraitEvidence) -> Vec<CheckedType> {
+        match evidence {
+            TraitEvidence::ExplicitImplementation { arguments, .. }
+            | TraitEvidence::Structural { arguments, .. } => arguments.clone(),
+            other => panic!("expected resolved evidence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolves_direct_explicit_methods_and_defaults() {
+        let (module, program) = lower(concat!(
+            "trait TestShow T { test_show: T -> Bool }\n",
+            "impl TestShow I32 { def test_show = _ => True }\n",
+            "trait TestDefaulted T {\n",
+            "  test_primary: T -> Bool\n",
+            "  test_fallback: T -> Bool = value => test_primary value\n",
+            "}\n",
+            "impl TestDefaulted I32 { def test_primary = _ => True }\n",
+            "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
+            "def fallback_bound: <T where TestDefaulted T> T -> Bool = value => test_fallback value\n",
+            "let shown: Bool = show_bound 1\n",
+            "let fell: Bool = fallback_bound 1\n",
+        ));
+        let show_bound = function_id(&program, "show_bound");
+        let environment = enclosing_environment(&program, "show_bound");
+        let evidence = declared_bound_evidence_in(&program, "TestShow", show_bound);
+        let evidence = resolve_evidence(&program, &evidence, &environment);
+        assert_eq!(implementation_arguments(&evidence), vec![CheckedType::I32]);
+        let show_trait = trait_id_named(&program, "TestShow");
+        let show_method = program.traits.get(show_trait).expect("show trait").methods[0];
+        let expected = module
+            .trait_impl_method(show_trait, &[CheckedType::I32], show_method)
+            .expect("the checker selects the same method");
+        assert_eq!(explicit_function(&evidence), expected);
+
+        let fallback_bound = function_id(&program, "fallback_bound");
+        let environment = enclosing_environment(&program, "fallback_bound");
+        let evidence = declared_bound_evidence_in(&program, "TestDefaulted", fallback_bound);
+        let evidence = resolve_evidence(&program, &evidence, &environment);
+        let defaulted = program
+            .traits
+            .get(trait_id_named(&program, "TestDefaulted"))
+            .expect("defaulted trait");
+        let fallback_method = defaulted
+            .methods
+            .iter()
+            .copied()
+            .find(|method| {
+                program
+                    .trait_methods
+                    .get(*method)
+                    .is_some_and(|method| method.name == "test_fallback")
+            })
+            .expect("fallback method");
+        let default_function = defaulted
+            .default_methods
+            .iter()
+            .find(|(method, _)| *method == fallback_method)
+            .map(|(_, function)| *function)
+            .expect("a default implementation");
+        assert_eq!(explicit_function(&evidence), default_function);
+    }
+
+    #[test]
+    fn signature_identical_implementations_stay_distinct() {
+        let (_, program) = lower(concat!(
+            "type Alpha = ctor ()\n",
+            "type Beta = ctor ()\n",
+            "trait TestTag T { test_tag: T -> I32 }\n",
+            "impl TestTag Alpha { def test_tag = _ => 1 }\n",
+            "impl TestTag Beta { def test_tag = _ => 2 }\n",
+            "def use_tag: <T where TestTag T> T -> I32 = value => test_tag value\n",
+            "let one: I32 = use_tag (Alpha ())\n",
+            "let two: I32 = use_tag (Beta ())\n",
+        ));
+        let calls = direct_calls(&program, "use_tag");
+        assert_eq!(calls.len(), 2);
+        let mut functions = Vec::new();
+        for (function, call) in calls {
+            let (environment, _) = program
+                .resolve_substitutions(
+                    function,
+                    &call.origin,
+                    &call.function_type,
+                    &call.substitutions,
+                    None,
+                )
+                .expect("the outer instance resolves");
+            let evidence = declared_bound_evidence_in(&program, "TestTag", function);
+            let evidence = resolve_evidence(&program, &evidence, &environment);
+            functions.push(explicit_function(&evidence));
+        }
+        assert_ne!(
+            functions[0], functions[1],
+            "two implementations with the same callable signature stay distinct"
+        );
+    }
+
+    #[test]
+    fn conditional_implementations_discharge_their_bounds() {
+        let (module, program) = lower(concat!(
+            "trait TestShow T { test_show: T -> Bool }\n",
+            "impl TestShow I32 { def test_show = _ => True }\n",
+            "trait TestGuarded T { guarded: T -> Bool }\n",
+            "impl<T where TestShow T> TestGuarded T { def guarded = value => test_show value }\n",
+            "type Plain = ctor ()\n",
+            "def use_guarded: <T where TestGuarded T> T -> Bool = value => guarded value\n",
+            "let ok: Bool = use_guarded 1\n",
+        ));
+        let use_guarded = function_id(&program, "use_guarded");
+        let environment = enclosing_environment(&program, "use_guarded");
+        let evidence = declared_bound_evidence_in(&program, "TestGuarded", use_guarded);
+        let evidence = resolve_evidence(&program, &evidence, &environment);
+        assert_eq!(implementation_arguments(&evidence), vec![CheckedType::I32]);
+        let guarded = trait_id_named(&program, "TestGuarded");
+        let guarded_method = program.traits.get(guarded).expect("guarded trait").methods[0];
+        let expected = module
+            .trait_impl_method(guarded, &[CheckedType::I32], guarded_method)
+            .expect("the checker selects the conditional implementation");
+        assert_eq!(explicit_function(&evidence), expected);
+
+        let plain = program
+            .types
+            .iter()
+            .find(|(_, _, metadata)| metadata.name == "Plain")
+            .expect("Plain type")
+            .2;
+        let plain_type = CheckedType::Distinct {
+            id: plain.semantic_id,
+            name: plain.name.clone(),
+            arguments: Vec::new(),
+            representation: Box::new(CheckedType::empty_product()),
+        };
+        let evidence = TraitEvidence::DeclaredBound {
+            trait_id: trait_id_named(&program, "TestGuarded"),
+            method: Some(guarded_method),
+            arguments: vec![plain_type],
+            prerequisites: Vec::new(),
+        };
+        let error = program
+            .resolve_trait_evidence(
+                &test_origin(),
+                Some(&evidence),
+                &SubstitutionEnvironment::default(),
+            )
+            .expect_err("an unsatisfied conditional bound diagnoses");
+        assert!(
+            error
+                .message
+                .contains("unsatisfied conditional prerequisite"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn transitive_prerequisites_are_discharged_recursively() {
+        let (_, program) = lower(concat!(
+            "trait TestBase T { base_test: T -> Bool }\n",
+            "trait TestDerived T where TestBase T { derived_test: T -> Bool }\n",
+            "impl TestBase I32 { def base_test = _ => True }\n",
+            "impl TestDerived I32 { def derived_test = value => base_test value }\n",
+            "def use_derived: <T where TestDerived T> T -> Bool = value => base_test value\n",
+            "let result: Bool = use_derived 1\n",
+        ));
+        let use_derived = function_id(&program, "use_derived");
+        let environment = enclosing_environment(&program, "use_derived");
+        let evidence = declared_bound_evidence_in(&program, "TestBase", use_derived);
+        let evidence = resolve_evidence(&program, &evidence, &environment);
+        assert_eq!(implementation_arguments(&evidence), vec![CheckedType::I32]);
+
+        // A conditional implementation discharges its own bound through
+        // another implementation, not through a declared precondition.
+        let (_, program) = lower(concat!(
+            "trait TestInner T { inner_test: T -> I32 }\n",
+            "trait TestOuter T { outer_test: T -> I32 }\n",
+            "impl TestInner I32 { def inner_test = _ => 1 }\n",
+            "impl<T where TestInner T> TestOuter T { def outer_test = value => inner_test value }\n",
+            "def use_outer: <T where TestOuter T> T -> I32 = value => outer_test value\n",
+            "let result: I32 = use_outer 1\n",
+        ));
+        let use_outer = function_id(&program, "use_outer");
+        let environment = enclosing_environment(&program, "use_outer");
+        let evidence = declared_bound_evidence_in(&program, "TestOuter", use_outer);
+        let evidence = resolve_evidence(&program, &evidence, &environment);
+        assert_eq!(implementation_arguments(&evidence), vec![CheckedType::I32]);
+    }
+
+    #[test]
+    fn functional_dependencies_complete_inferred_arguments() {
+        let (_, program) = lower(concat!(
+            "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
+            "  test_convert: (Target, Position) -> Output\n",
+            "}\n",
+            "impl TestConvert I32 I32 I32 { def test_convert = pair => pair.0 }\n",
+        ));
+        let convert = trait_id_named(&program, "TestConvert");
+        let method = program.traits.get(convert).expect("convert trait").methods[0];
+        let evidence = TraitEvidence::DeclaredBound {
+            trait_id: convert,
+            method: Some(method),
+            arguments: vec![CheckedType::I32, CheckedType::I32, CheckedType::Inferred],
+            prerequisites: Vec::new(),
+        };
+        let resolved = program
+            .resolve_trait_evidence(
+                &test_origin(),
+                Some(&evidence),
+                &SubstitutionEnvironment::default(),
+            )
+            .expect("the dependent argument completes")
+            .expect("a method target");
+        assert_eq!(
+            implementation_arguments(&resolved),
+            vec![CheckedType::I32, CheckedType::I32, CheckedType::I32]
+        );
+    }
+
+    #[test]
+    fn structural_selections_and_obligation_only_bounds_resolve() {
+        let (_, program) = lower("let pair = (1, 2)\n");
+        let index = program
+            .semantic_ids
+            .index_trait
+            .expect("Index in the prelude");
+        let method = program.traits.get(index).expect("Index trait").methods[0];
+        let product = CheckedType::Product(CheckedProductType {
+            elements: vec![
+                CheckedTypeElement {
+                    name: None,
+                    value_type: CheckedType::I32,
+                    default: None,
+                },
+                CheckedTypeElement {
+                    name: None,
+                    value_type: CheckedType::I32,
+                    default: None,
+                },
+            ],
+            variadic: false,
+        });
+        let evidence = TraitEvidence::DeclaredBound {
+            trait_id: index,
+            method: Some(method),
+            arguments: vec![product, CheckedType::USize, CheckedType::I32],
+            prerequisites: Vec::new(),
+        };
+        let resolved = program
+            .resolve_trait_evidence(
+                &test_origin(),
+                Some(&evidence),
+                &SubstitutionEnvironment::default(),
+            )
+            .expect("the structural derivation resolves")
+            .expect("a structural target");
+        match resolved {
+            TraitEvidence::Structural {
+                structural: StructuralTraitMethod::Index,
+                arguments,
+                ..
+            } => assert_eq!(arguments.len(), 3),
+            other => panic!("expected a structural Index selection, got {other:?}"),
+        }
+
+        let copy = program
+            .semantic_ids
+            .copy_trait
+            .expect("Copy in the prelude");
+        let evidence = TraitEvidence::DeclaredBound {
+            trait_id: copy,
+            method: None,
+            arguments: vec![CheckedType::I32],
+            prerequisites: Vec::new(),
+        };
+        let resolved = program
+            .resolve_trait_evidence(
+                &test_origin(),
+                Some(&evidence),
+                &SubstitutionEnvironment::default(),
+            )
+            .expect("a method-less bound proves its obligation");
+        assert!(resolved.is_none(), "no method target is invented");
+    }
+
+    #[test]
+    fn negative_implementations_are_rejected() {
+        let (_, program) = lower(concat!(
+            "type MyString = ctor String\n",
+            "impl !Copy MyString {}\n",
+        ));
+        let negative = program
+            .trait_implementations
+            .iter()
+            .find(|(_, metadata)| metadata.negative)
+            .expect("a negative implementation");
+        let argument = negative.1.arguments[0].clone();
+        let evidence = TraitEvidence::DeclaredBound {
+            trait_id: negative.1.trait_id,
+            method: None,
+            arguments: vec![argument],
+            prerequisites: Vec::new(),
+        };
+        let error = program
+            .resolve_trait_evidence(
+                &test_origin(),
+                Some(&evidence),
+                &SubstitutionEnvironment::default(),
+            )
+            .expect_err("a negative implementation rejects the obligation");
+        assert!(
+            error.message.contains("negative implementation"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn ambiguous_and_cyclic_obligations_are_rejected() {
+        let (_, program) = lower(concat!(
+            "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
+            "  test_convert: (Target, Position) -> Output\n",
+            "}\n",
+            "impl TestConvert I32 I32 I32 { def test_convert = pair => pair.0 }\n",
+        ));
+        let convert = trait_id_named(&program, "TestConvert");
+        let method = program.traits.get(convert).expect("convert trait").methods[0];
+        let mut context = TraitSelectionContext::new(&program, Vec::new());
+        let mut conflicting = context.implementations[0].clone();
+        // Two headers can both unify an inferred position but disagree on the
+        // completion; the checker's coherence rules prevent this in a real
+        // program, so the defensive ambiguity path is exercised directly.
+        conflicting.arguments = vec![CheckedType::I32, CheckedType::I32, nominal(5, "Other")];
+        context.implementations.push(conflicting);
+        context
+            .implementation_ids
+            .push(LoweredTraitImplementationId::for_test(0));
+        let error = context
+            .select_method(
+                convert,
+                &[CheckedType::I32, CheckedType::I32, CheckedType::Inferred],
+                method,
+                &test_origin(),
+            )
+            .expect_err("two disagreeing completions diagnose");
+        assert!(error.message.contains("ambiguous"), "{error:?}");
+
+        let (_, program) = lower(concat!(
+            "trait TestCycle T { cycle_test: T -> Bool }\n",
+            "impl<T where TestCycle T> TestCycle T { def cycle_test = _ => True }\n",
+        ));
+        let cycle = trait_id_named(&program, "TestCycle");
+        let method = program.traits.get(cycle).expect("cycle trait").methods[0];
+        let context = TraitSelectionContext::new(&program, Vec::new());
+        let error = context
+            .select_method(cycle, &[CheckedType::I32], method, &test_origin())
+            .expect_err("a cyclic obligation diagnoses");
+        assert!(error.message.contains("cyclic obligation"), "{error:?}");
+    }
+
+    #[test]
+    fn bounds_with_outer_parameters_resolve_after_substitution() {
+        let (_, program) = lower(concat!(
+            "trait TestShow T { test_show: T -> Bool }\n",
+            "impl TestShow I32 { def test_show = _ => True }\n",
+            "def outer_bound: <T where TestShow T> T -> () -> Bool = value => () => test_show value\n",
+            "let applied = (outer_bound 1) ()\n",
+        ));
+        let evidence = declared_bound_evidence(&program, "TestShow");
+        let TraitEvidence::DeclaredBound { arguments, .. } = &evidence else {
+            unreachable!()
+        };
+        assert!(
+            arguments.iter().any(contains_type_parameter),
+            "the template recipe keeps the declared parameter: {arguments:?}"
+        );
+        let environment = enclosing_environment(&program, "outer_bound");
+        let resolved = program
+            .resolve_trait_evidence(&test_origin(), Some(&evidence), &environment)
+            .expect("the bound resolves once the outer parameter is concrete")
+            .expect("a method target");
+        assert_eq!(implementation_arguments(&resolved), vec![CheckedType::I32]);
+    }
+
+    #[test]
+    fn recorded_explicit_and_structural_evidence_is_preserved() {
+        let (_, program) = lower(concat!(
+            "use std.fmt.Formatter\n",
+            "trait TestShow T { test_show: T -> Bool }\n",
+            "impl TestShow I32 { def test_show = _ => True }\n",
+            "let direct: Bool = test_show 1\n",
+            "let pair = (1, 2)\n",
+            "let first = pair[0]\n",
+            "let debugged = \"${pair:?}\"\n",
+        ));
+        let explicit = program
+            .calls
+            .iter()
+            .filter_map(|(_, call)| call.evidence.as_ref())
+            .find(|evidence| matches!(evidence, TraitEvidence::ExplicitImplementation { .. }))
+            .cloned()
+            .expect("an explicit implementation recipe");
+        let resolved = program
+            .resolve_trait_evidence(
+                &test_origin(),
+                Some(&explicit),
+                &SubstitutionEnvironment::default(),
+            )
+            .expect("the recorded explicit selection validates")
+            .expect("a method target");
+        match (&explicit, &resolved) {
+            (
+                TraitEvidence::ExplicitImplementation {
+                    function: before, ..
+                },
+                TraitEvidence::ExplicitImplementation {
+                    function: after, ..
+                },
+            ) => assert_eq!(before, after),
+            _ => panic!("expected the explicit selection to be preserved"),
+        }
+
+        let structural = program
+            .expressions
+            .iter()
+            .find_map(|(_, expression)| match &expression.kind {
+                LoweredExpressionKind::Index(index) => match &index.evidence {
+                    evidence @ TraitEvidence::Structural { .. } => Some(evidence.clone()),
+                    _ => None,
+                },
+                LoweredExpressionKind::StringTemplate(template) => {
+                    template.parts.iter().find_map(|part| match part {
+                        LoweredStringTemplatePart::Interpolation(interpolation) => {
+                            match &interpolation.evidence {
+                                evidence @ TraitEvidence::Structural { .. } => {
+                                    Some(evidence.clone())
+                                }
+                                _ => None,
+                            }
+                        }
+                        LoweredStringTemplatePart::Literal(_) => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("a structural recipe");
+        assert!(
+            matches!(structural, TraitEvidence::Structural { .. }),
+            "fixture should carry structural evidence: {structural:?}"
+        );
+        let resolved = program
+            .resolve_trait_evidence(
+                &test_origin(),
+                Some(&structural),
+                &SubstitutionEnvironment::default(),
+            )
+            .expect("the recorded structural selection validates")
+            .expect("a structural target");
+        match (&structural, &resolved) {
+            (
+                TraitEvidence::Structural {
+                    structural: before, ..
+                },
+                TraitEvidence::Structural {
+                    structural: after, ..
+                },
+            ) => assert_eq!(before, after),
+            _ => panic!("expected the structural selection to be preserved"),
         }
     }
 
