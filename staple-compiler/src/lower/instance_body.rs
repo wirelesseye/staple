@@ -3878,7 +3878,9 @@ impl<'a> BodyValidator<'a> {
             }
         }
         for (index, dependency) in self.instance.dependencies.iter().enumerate() {
-            if !matched_dependencies.contains(&index) {
+            // Closure-phase edges are scanner discoveries; the closure
+            // validator checks them against use records instead.
+            if !dependency.closure_phase && !matched_dependencies.contains(&index) {
                 self.report(
                     dependency.origin.span.clone(),
                     format!(
@@ -3889,7 +3891,7 @@ impl<'a> BodyValidator<'a> {
             }
         }
         for (index, artifact) in self.instance.artifacts.iter().enumerate() {
-            if !matched_artifacts.contains(&index) {
+            if !artifact.closure_phase && !matched_artifacts.contains(&index) {
                 self.report(
                     artifact.origin.span.clone(),
                     "Stage 3.3 artifact request has no instance-body binding",
@@ -3912,6 +3914,7 @@ impl<'a> BodyValidator<'a> {
             .enumerate()
             .find(|(index, dependency)| {
                 !matched.contains(index)
+                    && !dependency.closure_phase
                     && dependency.instance == instance
                     && kinds.contains(&dependency.kind)
                     && dependency.origin.syntax == origin.syntax
@@ -3940,6 +3943,7 @@ impl<'a> BodyValidator<'a> {
             .enumerate()
             .find(|(index, artifact)| {
                 !matched.contains(index)
+                    && !artifact.closure_phase
                     && artifact.artifact == ordinal
                     && artifact.kind == kind
                     && artifact.origin.syntax == origin.syntax

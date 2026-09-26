@@ -12728,6 +12728,9 @@ impl Lowerer {
             diagnostics.extend(program.validate_specialization_graph());
         }
         if diagnostics.is_empty() {
+            diagnostics.extend(program.validate_artifact_closure(&ProductionHooks));
+        }
+        if diagnostics.is_empty() {
             diagnostics.extend(program.validate_source_coverage(module));
         }
         if diagnostics.is_empty() {
@@ -14297,6 +14300,39 @@ mod tests {
                     "  instance edge {} {}",
                     dependency.instance.index(),
                     dependency.kind.description()
+                ));
+            }
+        }
+        for (id, instance) in program.instances.iter() {
+            let Some(body) = &instance.body else {
+                continue;
+            };
+            for use_ in &body.artifact_uses {
+                lines.push(format!(
+                    "  instance {} use artifact {} {} {:?}",
+                    id.index(),
+                    use_.artifact.index(),
+                    use_.kind.description(),
+                    use_.site
+                ));
+            }
+        }
+        for (id, uses) in program.initializer_artifact_uses.iter().enumerate() {
+            for use_ in uses {
+                lines.push(format!(
+                    "  initializer {id} use artifact {} {} {:?}",
+                    use_.artifact.index(),
+                    use_.kind.description(),
+                    use_.site
+                ));
+            }
+        }
+        for (id, edges) in program.initializer_artifacts.iter().enumerate() {
+            for edge in edges {
+                lines.push(format!(
+                    "  initializer {id} artifact edge {} {}",
+                    edge.artifact.index(),
+                    edge.kind.description()
                 ));
             }
         }

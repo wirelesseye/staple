@@ -178,6 +178,10 @@ pub(crate) struct LoweredInstanceDependency {
     pub instance: FunctionInstanceId,
     pub origin: Origin,
     pub kind: LoweredInstanceDependencyKind,
+    /// Whether the Stage 4.2 closure phase recorded this edge. Closure edges
+    /// have no instance-body binding; they are checked against scanner use
+    /// records instead of the Stage 3.4 binding table.
+    pub closure_phase: bool,
 }
 
 /// One generated-artifact request with its owned plan and its own outgoing
@@ -199,6 +203,9 @@ pub(crate) struct LoweredArtifactRequest {
     pub artifacts: Vec<LoweredArtifactDependency>,
     /// Artifact-to-instance edges in the order the plan requested them.
     pub instances: Vec<LoweredInstanceDependency>,
+    /// Whether the Stage 4.2 closure engine expanded this artifact. Transient
+    /// closure state like `LoweredFunctionInstance::traversed`.
+    pub expanded: bool,
 }
 
 /// Who first requested a generated artifact.
@@ -305,6 +312,8 @@ pub(crate) struct LoweredArtifactDependency {
     pub artifact: ArtifactOrdinal,
     pub origin: Origin,
     pub kind: LoweredArtifactDependencyKind,
+    /// See `LoweredInstanceDependency::closure_phase`.
+    pub closure_phase: bool,
 }
 
 /// The built worklist before it is installed on the lowered program. This is
@@ -422,10 +431,34 @@ impl GraphRecorder {
         origin: &Origin,
         kind: LoweredInstanceDependencyKind,
     ) {
+        self.record_instance_edge_with_phase(owner, instance, origin, kind, false);
+    }
+
+    /// Records a closure-phase instance edge, which the Stage 3.4 validator
+    /// must not expect in an instance body's binding table.
+    pub(super) fn record_closure_instance_edge(
+        &mut self,
+        owner: TraversalOwner,
+        instance: FunctionInstanceId,
+        origin: &Origin,
+        kind: LoweredInstanceDependencyKind,
+    ) {
+        self.record_instance_edge_with_phase(owner, instance, origin, kind, true);
+    }
+
+    fn record_instance_edge_with_phase(
+        &mut self,
+        owner: TraversalOwner,
+        instance: FunctionInstanceId,
+        origin: &Origin,
+        kind: LoweredInstanceDependencyKind,
+        closure_phase: bool,
+    ) {
         let edge = LoweredInstanceDependency {
             instance,
             origin: origin.clone(),
             kind,
+            closure_phase,
         };
         match owner {
             TraversalOwner::Instance(owner) => {
@@ -454,6 +487,31 @@ impl GraphRecorder {
         origin: &Origin,
         owner: TraversalOwner,
         kind: LoweredArtifactDependencyKind,
+    ) -> (ArtifactOrdinal, bool) {
+        self.request_artifact_with_phase(key, plan, origin, owner, kind, false)
+    }
+
+    /// Reserves one closure-phase artifact request. Closure edges are checked
+    /// against scanner use records instead of the Stage 3.4 binding table.
+    pub(super) fn request_closure_artifact(
+        &mut self,
+        key: ArtifactRequestKey,
+        plan: Option<LoweredArtifactPlan>,
+        origin: &Origin,
+        owner: TraversalOwner,
+        kind: LoweredArtifactDependencyKind,
+    ) -> (ArtifactOrdinal, bool) {
+        self.request_artifact_with_phase(key, plan, origin, owner, kind, true)
+    }
+
+    fn request_artifact_with_phase(
+        &mut self,
+        key: ArtifactRequestKey,
+        plan: Option<LoweredArtifactPlan>,
+        origin: &Origin,
+        owner: TraversalOwner,
+        kind: LoweredArtifactDependencyKind,
+        closure_phase: bool,
     ) -> (ArtifactOrdinal, bool) {
         let ordinal = self.catalog.reserve_artifact(key);
         let mut created = false;
@@ -484,6 +542,7 @@ impl GraphRecorder {
                 plan,
                 artifacts: Vec::new(),
                 instances: Vec::new(),
+                expanded: false,
             });
             created = true;
         }
@@ -491,6 +550,7 @@ impl GraphRecorder {
             artifact: ordinal,
             origin: origin.clone(),
             kind,
+            closure_phase,
         };
         match owner {
             TraversalOwner::Instance(instance) => {
@@ -2832,6 +2892,7 @@ mod tests {
                 artifact: ordinal,
                 origin,
                 kind: LoweredArtifactDependencyKind::DropGlue,
+                closure_phase: false,
             });
 
         let messages = program

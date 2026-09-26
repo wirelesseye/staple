@@ -741,6 +741,7 @@ mod tests {
                 instance: FunctionInstanceId::for_test(999),
                 origin,
                 kind: LoweredInstanceDependencyKind::DirectCall,
+                closure_phase: false,
             });
         let diagnostics = program.validate_specialization_graph();
         assert!(

@@ -54,6 +54,7 @@ const MAX_REQUESTER_CHAIN: usize = 32;
 
 /// One scanner- or expander-produced request, applied by the engine after the
 /// hook returned and the graph was detached.
+#[derive(Debug, Clone)]
 pub(super) enum ClosureRequest {
     /// A source-function instance, already resolved through
     /// `LoweredProgram::resolve_instance_request` by the requester with a
@@ -324,6 +325,7 @@ impl LoweredProgram {
                 }
                 if let Some(record) = self.artifacts.get_mut(artifact) {
                     record.plan = Some(plan);
+                    record.expanded = true;
                 }
             }
 
@@ -420,7 +422,7 @@ impl LoweredProgram {
                         // Stage 3 initializer instance requests keep their
                         // existing request-root-only representation.
                     } else {
-                        recorder.record_instance_edge(
+                        recorder.record_closure_instance_edge(
                             owner.traversal_owner(),
                             instance,
                             &origin,
@@ -451,7 +453,7 @@ impl LoweredProgram {
                         continue;
                     }
                     let owner_label = owner.describe();
-                    let (ordinal, _) = recorder.request_artifact(
+                    let (ordinal, _) = recorder.request_closure_artifact(
                         key,
                         Some(plan),
                         &origin,
@@ -488,6 +490,7 @@ impl LoweredProgram {
                                 artifact: ordinal,
                                 origin: origin.clone(),
                                 kind,
+                                closure_phase: true,
                             },
                         );
                     }
@@ -651,5 +654,1757 @@ impl LoweredProgram {
             }
         }
         chain.push("...".to_string());
+    }
+}
+
+/// Where a fixed-point re-check request came from.
+#[derive(Debug, Clone, Copy)]
+enum FixedPointOwner {
+    Initializer(InitializerId),
+    Instance(FunctionInstanceId),
+    Artifact(LoweredArtifactRequestId),
+}
+
+impl FixedPointOwner {
+    fn describe(self) -> String {
+        match self {
+            FixedPointOwner::Initializer(initializer) => {
+                format!("initializer {}", initializer.index())
+            }
+            FixedPointOwner::Instance(instance) => format!("instance {}", instance.index()),
+            FixedPointOwner::Artifact(artifact) => format!("artifact {}", artifact.index()),
+        }
+    }
+}
+
+/// The request-root walk node used by the acyclicity check.
+#[derive(Debug, Clone, Copy)]
+enum RequestRoot {
+    Instance(FunctionInstanceId),
+    Artifact(LoweredArtifactRequestId),
+}
+
+impl LoweredProgram {
+    /// Validates the closed artifact catalog: expansion completeness, requester
+    /// integrity, scanner use/edge agreement, acyclic request roots, and the
+    /// fixed point itself. Runs after `close_artifact_catalog` and after the
+    /// Stage 3 validators.
+    pub(super) fn validate_artifact_closure(
+        &self,
+        hooks: &dyn ArtifactFamilyHooks,
+    ) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        self.check_artifact_expansion(&mut diagnostics);
+        self.check_requester_integrity(&mut diagnostics);
+        self.check_use_edge_agreement(&mut diagnostics);
+        self.check_request_root_acyclicity(&mut diagnostics);
+        self.check_closure_fixed_point(hooks, &mut diagnostics);
+        diagnostics
+    }
+
+    /// Every artifact must have been expanded exactly once by the closure loop.
+    /// Plan presence and key agreement are already checked by
+    /// `validate_specializations`; this check only proves expansion ran.
+    fn check_artifact_expansion(&self, diagnostics: &mut Vec<Diagnostic>) {
+        for (id, artifact) in self.artifacts.iter() {
+            if !artifact.expanded {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    format!("generated artifact {} was never expanded", id.index()),
+                ));
+            }
+        }
+    }
+
+    /// Every request root must name an existing owner, and that owner must
+    /// record the matching edge with the same kind and origin. Initializer
+    /// artifact edges are checked by use/edge agreement instead, because Stage
+    /// 3 initializer requests keep their request-root-only representation.
+    fn check_requester_integrity(&self, diagnostics: &mut Vec<Diagnostic>) {
+        for (id, instance) in self.instances.iter() {
+            match &instance.request {
+                LoweredInstanceRequest::Initializer { initializer, .. } => {
+                    if !self.initializers.contains(*initializer) {
+                        diagnostics.push(Diagnostic::new(
+                            instance.origin.span.clone(),
+                            format!(
+                                "function instance {} was requested by missing initializer {}",
+                                id.index(),
+                                initializer.index()
+                            ),
+                        ));
+                    }
+                }
+                LoweredInstanceRequest::Artifact {
+                    artifact,
+                    kind,
+                    origin,
+                } => {
+                    let recorded = self.artifacts.get(*artifact).is_some_and(|owner| {
+                        owner.instances.iter().any(|edge| {
+                            edge.instance == id && edge.kind == *kind && edge.origin == *origin
+                        })
+                    });
+                    if !recorded {
+                        diagnostics.push(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "function instance {} is not recorded on the artifact that requested it",
+                                id.index()
+                            ),
+                        ));
+                    }
+                }
+                LoweredInstanceRequest::Scan {
+                    owner,
+                    kind,
+                    origin,
+                } => match owner {
+                    LoweredScanOwner::Initializer(initializer) => {
+                        if !self.initializers.contains(*initializer) {
+                            diagnostics.push(Diagnostic::new(
+                                origin.span.clone(),
+                                format!(
+                                    "function instance {} was requested by missing initializer {}",
+                                    id.index(),
+                                    initializer.index()
+                                ),
+                            ));
+                        }
+                    }
+                    LoweredScanOwner::Instance(owner) => {
+                        let recorded = self.instances.get(*owner).is_some_and(|record| {
+                            record.dependencies.iter().any(|edge| {
+                                edge.instance == id
+                                    && edge.kind == *kind
+                                    && edge.origin == *origin
+                                    && edge.closure_phase
+                            })
+                        });
+                        if !recorded {
+                            diagnostics.push(Diagnostic::new(
+                                origin.span.clone(),
+                                format!(
+                                    "function instance {} is not recorded on the instance scan that requested it",
+                                    id.index()
+                                ),
+                            ));
+                        }
+                    }
+                },
+                LoweredInstanceRequest::Dependency { .. }
+                | LoweredInstanceRequest::EagerTemplate => {}
+            }
+        }
+
+        for (id, artifact) in self.artifacts.iter() {
+            match &artifact.request {
+                LoweredArtifactRequestRoot::Initializer { initializer, .. } => {
+                    if !self.initializers.contains(*initializer) {
+                        diagnostics.push(Diagnostic::new(
+                            artifact.origin.span.clone(),
+                            format!(
+                                "generated artifact {} was requested by missing initializer {}",
+                                id.index(),
+                                initializer.index()
+                            ),
+                        ));
+                    }
+                }
+                LoweredArtifactRequestRoot::Instance {
+                    instance,
+                    kind,
+                    origin,
+                } => {
+                    let recorded = self.instances.get(*instance).is_some_and(|record| {
+                        record.artifacts.iter().any(|edge| {
+                            edge.artifact == artifact.ordinal
+                                && edge.kind == *kind
+                                && edge.origin == *origin
+                        })
+                    });
+                    if !recorded {
+                        diagnostics.push(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "generated artifact {} has no recorded edge on the instance that requested it",
+                                id.index()
+                            ),
+                        ));
+                    }
+                }
+                LoweredArtifactRequestRoot::Artifact {
+                    artifact: owner,
+                    kind,
+                    origin,
+                } => {
+                    let recorded = self.artifacts.get(*owner).is_some_and(|record| {
+                        record.artifacts.iter().any(|edge| {
+                            edge.artifact == artifact.ordinal
+                                && edge.kind == *kind
+                                && edge.origin == *origin
+                        })
+                    });
+                    if !recorded {
+                        diagnostics.push(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "generated artifact {} has no recorded edge on the artifact that requested it",
+                                id.index()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    /// For every instance body and module initializer, the multiset of closure
+    /// artifact uses must equal the owner's closure-phase artifact edges by
+    /// artifact, kind, and origin.
+    fn check_use_edge_agreement(&self, diagnostics: &mut Vec<Diagnostic>) {
+        for (id, instance) in self.instances.iter() {
+            let closure_edges = instance
+                .artifacts
+                .iter()
+                .filter(|edge| edge.closure_phase)
+                .collect::<Vec<_>>();
+            let uses = instance
+                .body
+                .as_ref()
+                .map(|body| body.artifact_uses.as_slice())
+                .unwrap_or(&[]);
+            if closure_edges.is_empty() && uses.is_empty() {
+                continue;
+            }
+            if instance.body.is_none() {
+                diagnostics.push(Diagnostic::new(
+                    instance.origin.span.clone(),
+                    format!(
+                        "function instance {} has closure artifact records but no materialized body",
+                        id.index()
+                    ),
+                ));
+                continue;
+            }
+            let mut remaining = closure_edges;
+            for use_ in uses {
+                self.check_use_site(
+                    &format!("function instance {}", id.index()),
+                    use_.site,
+                    diagnostics,
+                );
+                match remaining.iter().position(|edge| {
+                    edge.artifact == use_.artifact
+                        && edge.kind == use_.kind
+                        && edge.origin == use_.origin
+                }) {
+                    Some(index) => {
+                        remaining.remove(index);
+                    }
+                    None => diagnostics.push(Diagnostic::new(
+                        use_.origin.span.clone(),
+                        format!(
+                            "function instance {} has an artifact use with no matching closure edge",
+                            id.index()
+                        ),
+                    )),
+                }
+            }
+            for edge in remaining {
+                diagnostics.push(Diagnostic::new(
+                    edge.origin.span.clone(),
+                    format!(
+                        "function instance {} has a closure artifact edge with no use",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+
+        if self.initializer_artifacts.len() != self.initializers.len()
+            || self.initializer_artifact_uses.len() != self.initializers.len()
+        {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                "initializer artifact closure storage is not sized for the initializer catalog",
+            ));
+            return;
+        }
+        for (id, _) in self.initializers.iter() {
+            let mut remaining = self.initializer_artifacts[id.index()]
+                .iter()
+                .collect::<Vec<_>>();
+            for use_ in &self.initializer_artifact_uses[id.index()] {
+                self.check_use_site(
+                    &format!("initializer {}", id.index()),
+                    use_.site,
+                    diagnostics,
+                );
+                match remaining.iter().position(|edge| {
+                    edge.artifact == use_.artifact
+                        && edge.kind == use_.kind
+                        && edge.origin == use_.origin
+                }) {
+                    Some(index) => {
+                        remaining.remove(index);
+                    }
+                    None => diagnostics.push(Diagnostic::new(
+                        use_.origin.span.clone(),
+                        format!(
+                            "initializer {} has an artifact use with no matching closure edge",
+                            id.index()
+                        ),
+                    )),
+                }
+            }
+            for edge in remaining {
+                diagnostics.push(Diagnostic::new(
+                    edge.origin.span.clone(),
+                    format!(
+                        "initializer {} has a closure artifact edge with no use",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// Stage 4.2 can only validate the scripted test site. Later families
+    /// replace this arm with body-arena checks for their site variants.
+    #[cfg(test)]
+    fn check_use_site(
+        &self,
+        _owner: &str,
+        _site: ArtifactUseSite,
+        _diagnostics: &mut Vec<Diagnostic>,
+    ) {
+    }
+
+    #[cfg(not(test))]
+    fn check_use_site(
+        &self,
+        _owner: &str,
+        site: ArtifactUseSite,
+        _diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        // No family variants exist yet, so no use site can be constructed.
+        match site {}
+    }
+
+    /// Following `request` roots from any instance or artifact must terminate
+    /// at an initializer, an eager template, or a Stage 3 instance root.
+    /// Recursion is fine in edges but not in roots.
+    fn check_request_root_acyclicity(&self, diagnostics: &mut Vec<Diagnostic>) {
+        let limit = self.instances.len() + self.artifacts.len() + 1;
+        for (id, instance) in self.instances.iter() {
+            if self.request_root_cycles(RequestRoot::Instance(id), limit) {
+                diagnostics.push(Diagnostic::new(
+                    instance.origin.span.clone(),
+                    format!("function instance {} has a cyclic request root", id.index()),
+                ));
+            }
+        }
+        for (id, artifact) in self.artifacts.iter() {
+            if self.request_root_cycles(RequestRoot::Artifact(id), limit) {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    format!(
+                        "generated artifact {} has a cyclic request root",
+                        id.index()
+                    ),
+                ));
+            }
+        }
+    }
+
+    fn request_root_cycles(&self, start: RequestRoot, limit: usize) -> bool {
+        let mut node = start;
+        for _ in 0..=limit {
+            match node {
+                RequestRoot::Instance(id) => {
+                    let Some(record) = self.instances.get(id) else {
+                        return false;
+                    };
+                    match &record.request {
+                        LoweredInstanceRequest::Initializer { .. }
+                        | LoweredInstanceRequest::EagerTemplate => return false,
+                        LoweredInstanceRequest::Dependency { owner, .. } => {
+                            node = RequestRoot::Instance(*owner);
+                        }
+                        LoweredInstanceRequest::Artifact { artifact, .. } => {
+                            node = RequestRoot::Artifact(*artifact);
+                        }
+                        LoweredInstanceRequest::Scan { owner, .. } => match owner {
+                            LoweredScanOwner::Initializer(_) => return false,
+                            LoweredScanOwner::Instance(owner) => {
+                                node = RequestRoot::Instance(*owner);
+                            }
+                        },
+                    }
+                }
+                RequestRoot::Artifact(id) => {
+                    let Some(record) = self.artifacts.get(id) else {
+                        return false;
+                    };
+                    match &record.request {
+                        LoweredArtifactRequestRoot::Initializer { .. } => return false,
+                        LoweredArtifactRequestRoot::Instance { instance, .. } => {
+                            node = RequestRoot::Instance(*instance);
+                        }
+                        LoweredArtifactRequestRoot::Artifact { artifact, .. } => {
+                            node = RequestRoot::Artifact(*artifact);
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Re-runs every scanner and expander read-only against the final program
+    /// and requires each returned request to name an already-interned key with
+    /// an already-recorded owner edge. This proves the catalog is a fixed
+    /// point and catches nondeterministic or order-sensitive hooks.
+    fn check_closure_fixed_point(
+        &self,
+        hooks: &dyn ArtifactFamilyHooks,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        for (id, _) in self.initializers.iter() {
+            match hooks.scan_initializer(self, id) {
+                Ok(requests) => self.check_fixed_point_requests(
+                    FixedPointOwner::Initializer(id),
+                    &requests,
+                    diagnostics,
+                ),
+                Err(mut problems) => diagnostics.append(&mut problems),
+            }
+        }
+        for (id, instance) in self.instances.iter() {
+            // Scanners read materialized bodies only.
+            if instance.body.is_none() {
+                continue;
+            }
+            match hooks.scan_instance(self, id) {
+                Ok(requests) => self.check_fixed_point_requests(
+                    FixedPointOwner::Instance(id),
+                    &requests,
+                    diagnostics,
+                ),
+                Err(mut problems) => diagnostics.append(&mut problems),
+            }
+        }
+        for (id, _) in self.artifacts.iter() {
+            match hooks.expand(self, id) {
+                Ok((_plan, requests)) => self.check_fixed_point_requests(
+                    FixedPointOwner::Artifact(id),
+                    &requests,
+                    diagnostics,
+                ),
+                Err(mut problems) => diagnostics.append(&mut problems),
+            }
+        }
+    }
+
+    fn check_fixed_point_requests(
+        &self,
+        owner: FixedPointOwner,
+        requests: &[ClosureRequest],
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        for request in requests {
+            match request {
+                ClosureRequest::Instance {
+                    resolved,
+                    kind,
+                    origin,
+                } => {
+                    let Some(ordinal) = self.specializations.instance_ordinal(&resolved.key) else {
+                        diagnostics.push(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "closure did not reach a fixed point: {} requested an uninterned function instance",
+                                owner.describe()
+                            ),
+                        ));
+                        continue;
+                    };
+                    let instance = FunctionInstanceId::from_index(ordinal.index());
+                    if !self.owner_records_instance(owner, instance, *kind, origin) {
+                        diagnostics.push(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "closure did not reach a fixed point: {} has no edge to requested instance {}",
+                                owner.describe(),
+                                instance.index()
+                            ),
+                        ));
+                    }
+                }
+                ClosureRequest::Artifact {
+                    key, kind, origin, ..
+                } => {
+                    let Some(ordinal) = self.specializations.artifact_ordinal(key) else {
+                        diagnostics.push(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "closure did not reach a fixed point: {} requested an uninterned generated artifact",
+                                owner.describe()
+                            ),
+                        ));
+                        continue;
+                    };
+                    if !self.owner_records_artifact(owner, ordinal, *kind, origin) {
+                        diagnostics.push(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "closure did not reach a fixed point: {} has no edge to requested artifact {}",
+                                owner.describe(),
+                                ordinal.index()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn owner_records_instance(
+        &self,
+        owner: FixedPointOwner,
+        instance: FunctionInstanceId,
+        kind: LoweredInstanceDependencyKind,
+        origin: &Origin,
+    ) -> bool {
+        match owner {
+            FixedPointOwner::Initializer(_) => true,
+            FixedPointOwner::Instance(owner) => self.instances.get(owner).is_some_and(|record| {
+                record.dependencies.iter().any(|edge| {
+                    edge.instance == instance && edge.kind == kind && edge.origin == *origin
+                })
+            }),
+            FixedPointOwner::Artifact(owner) => self.artifacts.get(owner).is_some_and(|record| {
+                record.instances.iter().any(|edge| {
+                    edge.instance == instance && edge.kind == kind && edge.origin == *origin
+                })
+            }),
+        }
+    }
+
+    fn owner_records_artifact(
+        &self,
+        owner: FixedPointOwner,
+        artifact: ArtifactOrdinal,
+        kind: LoweredArtifactDependencyKind,
+        origin: &Origin,
+    ) -> bool {
+        match owner {
+            FixedPointOwner::Initializer(initializer) => self
+                .initializer_artifacts
+                .get(initializer.index())
+                .is_some_and(|edges| {
+                    edges
+                        .iter()
+                        .any(|edge| edge.artifact == artifact && edge.origin == *origin)
+                }),
+            FixedPointOwner::Instance(owner) => self.instances.get(owner).is_some_and(|record| {
+                record.artifacts.iter().any(|edge| {
+                    edge.artifact == artifact && edge.kind == kind && edge.origin == *origin
+                })
+            }),
+            FixedPointOwner::Artifact(owner) => self.artifacts.get(owner).is_some_and(|record| {
+                record.artifacts.iter().any(|edge| {
+                    edge.artifact == artifact && edge.kind == kind && edge.origin == *origin
+                })
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    use crate::specialization::{
+        ArtifactSite, ArtifactSiteOwner, CanonicalType, GcFinalizerKey, ReactiveRunnerKey,
+    };
+    use crate::{
+        CallSubstitutions, CallTypeSubstitution, CheckedType, DropGluePlan, FunctionId,
+        GcFinalizerPlan, InstanceResolutionRequest, InstanceResolutionTarget, NameResolver,
+        ProgramLoader, ReactiveRunnerPlan, TypeChecker, TypedModule, substitute_type,
+    };
+
+    use super::*;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum HookOwner {
+        Initializer,
+        Instance,
+        Artifact,
+    }
+
+    /// A scripted hook set. Each owner's nth call returns the nth script, so a
+    /// two-entry script can prove a fixed point on the first call and inject a
+    /// fresh key on the re-check.
+    #[derive(Default)]
+    struct TestHooks {
+        initializer_requests: HashMap<usize, Vec<Vec<ClosureRequest>>>,
+        instance_requests: HashMap<usize, Vec<Vec<ClosureRequest>>>,
+        artifact_requests: HashMap<usize, Vec<Vec<ClosureRequest>>>,
+        calls: RefCell<HashMap<(HookOwner, usize), usize>>,
+    }
+
+    impl TestHooks {
+        fn script(
+            &self,
+            owner: HookOwner,
+            ordinal: usize,
+            table: &HashMap<usize, Vec<Vec<ClosureRequest>>>,
+        ) -> Vec<ClosureRequest> {
+            let call = {
+                let mut calls = self.calls.borrow_mut();
+                let entry = calls.entry((owner, ordinal)).or_insert(0);
+                let current = *entry;
+                *entry += 1;
+                current
+            };
+            table
+                .get(&ordinal)
+                .and_then(|scripts| scripts.get(call))
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    impl ArtifactFamilyHooks for TestHooks {
+        fn scan_initializer(
+            &self,
+            _program: &LoweredProgram,
+            initializer: InitializerId,
+        ) -> ScanResult {
+            Ok(self.script(
+                HookOwner::Initializer,
+                initializer.index(),
+                &self.initializer_requests,
+            ))
+        }
+
+        fn scan_instance(
+            &self,
+            _program: &LoweredProgram,
+            instance: FunctionInstanceId,
+        ) -> ScanResult {
+            Ok(self.script(
+                HookOwner::Instance,
+                instance.index(),
+                &self.instance_requests,
+            ))
+        }
+
+        fn expand(
+            &self,
+            program: &LoweredProgram,
+            artifact: LoweredArtifactRequestId,
+        ) -> ExpansionResult {
+            let record = program
+                .artifacts
+                .get(artifact)
+                .expect("the engine expands existing artifacts");
+            let plan = record.plan.clone().expect("every artifact carries a plan");
+            Ok((
+                plan,
+                self.script(
+                    HookOwner::Artifact,
+                    artifact.index(),
+                    &self.artifact_requests,
+                ),
+            ))
+        }
+    }
+
+    fn standard_library_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler crate should have a workspace parent")
+            .join("stdlib")
+    }
+
+    fn checked_program(source: &str) -> TypedModule {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler crate should have a workspace parent");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(standard_library_root())
+            .load_source(source, root)
+            .expect("test source should load");
+        let resolved = NameResolver::new()
+            .resolve_program(program)
+            .expect("test source should resolve");
+        TypeChecker::new()
+            .check(resolved)
+            .expect("test source should type check")
+    }
+
+    /// The Stage 3 program: graph built and materialized, closure not run.
+    fn stage_three(source: &str) -> LoweredProgram {
+        let module = checked_program(source);
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        assert!(program.build_specialization_worklist().is_empty());
+        assert!(program.materialize_instance_bodies().is_empty());
+        program
+    }
+
+    fn function_id(program: &LoweredProgram, name: &str) -> FunctionId {
+        program
+            .functions
+            .iter()
+            .find(|(_, _, function)| {
+                function.name == name || function.name.ends_with(&format!(".{name}"))
+            })
+            .map(|(_, id, _)| id)
+            .unwrap_or_else(|| panic!("no lowered function named {name}"))
+    }
+
+    fn identity_instance(program: &LoweredProgram, index: usize) -> FunctionInstanceId {
+        let identity = function_id(program, "identity");
+        program
+            .instances
+            .iter()
+            .filter(|(_, instance)| instance.template == identity)
+            .map(|(id, _)| id)
+            .nth(index)
+            .expect("the fixture instantiates identity")
+    }
+
+    fn instance_origin(program: &LoweredProgram, instance: FunctionInstanceId) -> Origin {
+        program
+            .instances
+            .get(instance)
+            .expect("instance")
+            .origin
+            .clone()
+    }
+
+    fn drop_glue_request(
+        value_type: CheckedType,
+        origin: &Origin,
+        site: Option<ArtifactUseSite>,
+    ) -> ClosureRequest {
+        let canonical =
+            CanonicalType::concrete(&value_type, origin).expect("a concrete drop-glue type");
+        ClosureRequest::Artifact {
+            key: ArtifactRequestKey::DropGlue(canonical),
+            plan: LoweredArtifactPlan::DropGlue(DropGluePlan { value_type }),
+            kind: LoweredArtifactDependencyKind::DropGlue,
+            origin: origin.clone(),
+            use_site: site,
+        }
+    }
+
+    fn finalizer_request(
+        value_type: CheckedType,
+        origin: &Origin,
+        site: Option<ArtifactUseSite>,
+    ) -> ClosureRequest {
+        let canonical =
+            CanonicalType::concrete(&value_type, origin).expect("a concrete payload type");
+        ClosureRequest::Artifact {
+            key: ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(canonical)),
+            plan: LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload { value_type }),
+            kind: LoweredArtifactDependencyKind::GcFinalizer,
+            origin: origin.clone(),
+            use_site: site,
+        }
+    }
+
+    fn runner_request(
+        owner: ArtifactSiteOwner,
+        site: ArtifactSite,
+        origin: &Origin,
+        use_site: Option<ArtifactUseSite>,
+    ) -> ClosureRequest {
+        ClosureRequest::Artifact {
+            key: ArtifactRequestKey::ReactionRunner(ReactiveRunnerKey { owner, site }),
+            plan: LoweredArtifactPlan::ReactionRunner(ReactiveRunnerPlan { owner, site }),
+            kind: LoweredArtifactDependencyKind::ReactionRunner,
+            origin: origin.clone(),
+            use_site,
+        }
+    }
+
+    fn resolve_root_instance(
+        program: &LoweredProgram,
+        function_name: &str,
+        value_type: CheckedType,
+        origin: &Origin,
+    ) -> ResolvedInstanceRequest {
+        let function = function_id(program, function_name);
+        let template = program.functions.get(function).expect("template").clone();
+        let parameter = match template.signature.parameter.as_ref() {
+            CheckedType::Parameter { id, .. } => *id,
+            other => panic!("{function_name} should take a type parameter, got {other:?}"),
+        };
+        let map = HashMap::from([(parameter, value_type.clone())]);
+        let function_type =
+            match substitute_type(CheckedType::Function(template.signature.clone()), &map) {
+                CheckedType::Function(function_type) => function_type,
+                other => panic!("expected a function signature, got {other:?}"),
+            };
+        program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function,
+                origin: origin.clone(),
+                function_type,
+                substitutions: CallSubstitutions {
+                    types: vec![CallTypeSubstitution {
+                        parameter,
+                        value_type,
+                    }],
+                    effects: Vec::new(),
+                },
+                evidence: None,
+                target: InstanceResolutionTarget::Root,
+            })
+            .expect("the synthetic instance request resolves")
+    }
+
+    fn close(program: &mut LoweredProgram, hooks: &TestHooks) {
+        let diagnostics = program.close_artifact_catalog(hooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.validate_artifact_closure(hooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate_specializations().is_empty());
+        assert!(program.validate_instance_bodies().is_empty());
+        assert!(program.validate_specialization_graph().is_empty());
+    }
+
+    fn messages(diagnostics: &[Diagnostic]) -> Vec<&str> {
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect()
+    }
+
+    const IDENTITY_FIXTURE: &str = concat!(
+        "def identity: <T where Copy T> T -> T = value => value\n",
+        "let first: I32 = identity 1\n",
+    );
+
+    #[test]
+    fn closure_chain_records_ordered_edges_roots_and_ordinals() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base = program.artifacts.len();
+        let a_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let b_type = CheckedType::Ref(Box::new(a_type.clone()));
+        let finalizer_type = CheckedType::Ref(Box::new(b_type.clone()));
+
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![drop_glue_request(
+                a_type,
+                &origin,
+                Some(ArtifactUseSite::Test(0)),
+            )]],
+        );
+        hooks
+            .artifact_requests
+            .insert(base, vec![vec![drop_glue_request(b_type, &origin, None)]]);
+        hooks.artifact_requests.insert(
+            base + 1,
+            vec![vec![finalizer_request(finalizer_type, &origin, None)]],
+        );
+        close(&mut program, &hooks);
+
+        assert_eq!(program.artifacts.len(), base + 3);
+        let a = LoweredArtifactRequestId::from_index(base);
+        let b = LoweredArtifactRequestId::from_index(base + 1);
+        let f = LoweredArtifactRequestId::from_index(base + 2);
+        let record = |id| program.artifacts.get(id).expect("artifact");
+        assert!(record(a).name.starts_with("__staple_drop_glue"));
+        assert!(record(b).name.starts_with("__staple_drop_glue"));
+        assert!(record(f).name.starts_with("__staple_gc_finalizer_payload"));
+        assert!(matches!(
+            &record(a).request,
+            LoweredArtifactRequestRoot::Instance {
+                instance,
+                kind: LoweredArtifactDependencyKind::DropGlue,
+                ..
+            } if *instance == seed
+        ));
+        assert!(matches!(
+            &record(b).request,
+            LoweredArtifactRequestRoot::Artifact { artifact, .. } if *artifact == a
+        ));
+        assert!(matches!(
+            &record(f).request,
+            LoweredArtifactRequestRoot::Artifact { artifact, .. } if *artifact == b
+        ));
+        assert!(record(a).artifacts.iter().any(|edge| {
+            edge.artifact == record(b).ordinal
+                && edge.closure_phase
+                && edge.kind == LoweredArtifactDependencyKind::DropGlue
+        }));
+        assert!(record(b).artifacts.iter().any(|edge| {
+            edge.artifact == record(f).ordinal
+                && edge.closure_phase
+                && edge.kind == LoweredArtifactDependencyKind::GcFinalizer
+        }));
+
+        let body = program
+            .instances
+            .get(seed)
+            .and_then(|instance| instance.body.as_ref())
+            .expect("the scanned instance has a body");
+        assert_eq!(body.artifact_uses.len(), 1);
+        assert_eq!(body.artifact_uses[0].artifact, record(a).ordinal);
+        assert_eq!(
+            body.artifact_uses[0].kind,
+            LoweredArtifactDependencyKind::DropGlue
+        );
+        assert_eq!(body.artifact_uses[0].site, ArtifactUseSite::Test(0));
+        assert!(
+            program
+                .instances
+                .get(seed)
+                .expect("instance")
+                .artifacts
+                .iter()
+                .any(|edge| { edge.artifact == record(a).ordinal && edge.closure_phase })
+        );
+    }
+
+    #[test]
+    fn closure_expansion_requests_an_instance_and_scans_it_next_round() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base_instances = program.instances.len();
+        let base_artifacts = program.artifacts.len();
+        let new_type = CheckedType::Ref(Box::new(CheckedType::U8));
+        let resolved = resolve_root_instance(&program, "identity", new_type.clone(), &origin);
+
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![drop_glue_request(
+                new_type.clone(),
+                &origin,
+                Some(ArtifactUseSite::Test(0)),
+            )]],
+        );
+        hooks.artifact_requests.insert(
+            base_artifacts,
+            vec![vec![ClosureRequest::Instance {
+                resolved,
+                kind: LoweredInstanceDependencyKind::DirectCall,
+                origin: origin.clone(),
+            }]],
+        );
+        hooks.instance_requests.insert(
+            base_instances,
+            vec![vec![finalizer_request(
+                new_type.clone(),
+                &origin,
+                Some(ArtifactUseSite::Test(1)),
+            )]],
+        );
+        close(&mut program, &hooks);
+
+        assert_eq!(program.instances.len(), base_instances + 1);
+        assert_eq!(program.artifacts.len(), base_artifacts + 2);
+        let new_instance = FunctionInstanceId::from_index(base_instances);
+        assert!(
+            program
+                .instances
+                .get(new_instance)
+                .expect("resumed instance")
+                .body
+                .is_some()
+        );
+        assert!(matches!(
+            &program.instances.get(new_instance).expect("instance").request,
+            LoweredInstanceRequest::Artifact { artifact, .. }
+                if artifact.index() == base_artifacts
+        ));
+        let first_artifact = LoweredArtifactRequestId::from_index(base_artifacts);
+        assert!(
+            program
+                .artifacts
+                .get(first_artifact)
+                .expect("artifact")
+                .instances
+                .iter()
+                .any(|edge| edge.instance == new_instance)
+        );
+        let body = program
+            .instances
+            .get(new_instance)
+            .and_then(|instance| instance.body.as_ref())
+            .expect("body");
+        assert_eq!(body.artifact_uses.len(), 1);
+        assert_eq!(body.artifact_uses[0].site, ArtifactUseSite::Test(1));
+    }
+
+    #[test]
+    fn closure_instance_rescans_dedup_against_the_requesting_artifact() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base_instances = program.instances.len();
+        let base_artifacts = program.artifacts.len();
+        let value_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let resolved = resolve_root_instance(&program, "identity", value_type.clone(), &origin);
+
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![drop_glue_request(
+                value_type.clone(),
+                &origin,
+                Some(ArtifactUseSite::Test(0)),
+            )]],
+        );
+        hooks.artifact_requests.insert(
+            base_artifacts,
+            vec![vec![ClosureRequest::Instance {
+                resolved,
+                kind: LoweredInstanceDependencyKind::DirectCall,
+                origin: origin.clone(),
+            }]],
+        );
+        // The instance the artifact requested re-requests the same artifact:
+        // it dedups to one ordinal with an edge on the new owner.
+        hooks.instance_requests.insert(
+            base_instances,
+            vec![vec![drop_glue_request(
+                value_type,
+                &origin,
+                Some(ArtifactUseSite::Test(1)),
+            )]],
+        );
+        close(&mut program, &hooks);
+
+        assert_eq!(program.artifacts.len(), base_artifacts + 1);
+        assert_eq!(program.instances.len(), base_instances + 1);
+        let new_instance = FunctionInstanceId::from_index(base_instances);
+        let ordinal = program
+            .artifacts
+            .get(LoweredArtifactRequestId::from_index(base_artifacts))
+            .expect("artifact")
+            .ordinal;
+        let body = program
+            .instances
+            .get(new_instance)
+            .and_then(|instance| instance.body.as_ref())
+            .expect("the rescanned instance has a body");
+        assert_eq!(body.artifact_uses.len(), 1);
+        assert_eq!(body.artifact_uses[0].artifact, ordinal);
+        assert!(
+            program
+                .instances
+                .get(new_instance)
+                .expect("instance")
+                .artifacts
+                .iter()
+                .any(|edge| edge.artifact == ordinal && edge.closure_phase)
+        );
+    }
+
+    #[test]
+    fn closure_recursion_through_artifacts_dedups_and_records_back_edges() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base = program.artifacts.len();
+        let a_type = CheckedType::Ref(Box::new(CheckedType::I32));
+        let b_type = CheckedType::Ref(Box::new(a_type.clone()));
+
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![drop_glue_request(
+                a_type.clone(),
+                &origin,
+                Some(ArtifactUseSite::Test(0)),
+            )]],
+        );
+        // A requests itself and B; B requests A again.
+        hooks.artifact_requests.insert(
+            base,
+            vec![vec![
+                drop_glue_request(a_type.clone(), &origin, None),
+                drop_glue_request(b_type, &origin, None),
+            ]],
+        );
+        hooks.artifact_requests.insert(
+            base + 1,
+            vec![vec![drop_glue_request(a_type, &origin, None)]],
+        );
+        close(&mut program, &hooks);
+
+        assert_eq!(program.artifacts.len(), base + 2, "recursion dedups");
+        let a = LoweredArtifactRequestId::from_index(base);
+        let b = LoweredArtifactRequestId::from_index(base + 1);
+        let ordinal_a = program.artifacts.get(a).expect("artifact").ordinal;
+        assert!(
+            program
+                .artifacts
+                .get(a)
+                .expect("artifact")
+                .artifacts
+                .iter()
+                .any(|edge| edge.artifact == ordinal_a),
+            "A records a self back-edge"
+        );
+        assert!(
+            program
+                .artifacts
+                .get(b)
+                .expect("artifact")
+                .artifacts
+                .iter()
+                .any(|edge| edge.artifact == ordinal_a)
+        );
+    }
+
+    #[test]
+    fn closure_dedups_type_keyed_artifacts_across_owners() {
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+            "let second: U8 = identity (1 satisfies U8)\n",
+        );
+        let mut program = stage_three(source);
+        let first = identity_instance(&program, 0);
+        let second = identity_instance(&program, 1);
+        let origin = instance_origin(&program, first);
+        let base = program.artifacts.len();
+
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            first.index(),
+            vec![vec![drop_glue_request(
+                CheckedType::I32,
+                &origin,
+                Some(ArtifactUseSite::Test(0)),
+            )]],
+        );
+        hooks.instance_requests.insert(
+            second.index(),
+            vec![vec![drop_glue_request(
+                CheckedType::I32,
+                &origin,
+                Some(ArtifactUseSite::Test(1)),
+            )]],
+        );
+        close(&mut program, &hooks);
+
+        assert_eq!(program.artifacts.len(), base + 1, "one shared ordinal");
+        let shared = LoweredArtifactRequestId::from_index(base);
+        let ordinal = program.artifacts.get(shared).expect("artifact").ordinal;
+        let first_body = program
+            .instances
+            .get(first)
+            .and_then(|instance| instance.body.as_ref())
+            .expect("body");
+        let second_body = program
+            .instances
+            .get(second)
+            .and_then(|instance| instance.body.as_ref())
+            .expect("body");
+        assert_eq!(first_body.artifact_uses.len(), 1);
+        assert_eq!(second_body.artifact_uses.len(), 1);
+        assert_eq!(first_body.artifact_uses[0].artifact, ordinal);
+        assert_eq!(second_body.artifact_uses[0].artifact, ordinal);
+        for (instance, site) in [(first, 0), (second, 1)] {
+            let edges = program
+                .instances
+                .get(instance)
+                .expect("instance")
+                .artifacts
+                .iter()
+                .filter(|edge| edge.artifact == ordinal)
+                .count();
+            assert_eq!(edges, 1, "instance {instance:?} records one edge");
+            let use_site = if site == 0 {
+                first_body.artifact_uses[0].site
+            } else {
+                second_body.artifact_uses[0].site
+            };
+            assert_eq!(use_site, ArtifactUseSite::Test(site as u32));
+        }
+    }
+
+    #[test]
+    fn closure_per_owner_sites_produce_distinct_keys() {
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+            "let second: U8 = identity (1 satisfies U8)\n",
+        );
+        let mut program = stage_three(source);
+        let first = identity_instance(&program, 0);
+        let second = identity_instance(&program, 1);
+        let origin = instance_origin(&program, first);
+        let base = program.artifacts.len();
+
+        let first_owner = program.instances.get(first).expect("instance").ordinal;
+        let second_owner = program.instances.get(second).expect("instance").ordinal;
+        let site = ArtifactSite::PlanLocal(7);
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            first.index(),
+            vec![vec![runner_request(
+                ArtifactSiteOwner::Instance(first_owner),
+                site,
+                &origin,
+                Some(ArtifactUseSite::Test(0)),
+            )]],
+        );
+        hooks.instance_requests.insert(
+            second.index(),
+            vec![vec![runner_request(
+                ArtifactSiteOwner::Instance(second_owner),
+                site,
+                &origin,
+                Some(ArtifactUseSite::Test(0)),
+            )]],
+        );
+        close(&mut program, &hooks);
+
+        assert_eq!(
+            program.artifacts.len(),
+            base + 2,
+            "the same site in two owners yields two keys"
+        );
+        let first_key = program
+            .specializations
+            .artifact(
+                program
+                    .artifacts
+                    .get(LoweredArtifactRequestId::from_index(base))
+                    .expect("artifact")
+                    .ordinal,
+            )
+            .expect("key");
+        let second_key = program
+            .specializations
+            .artifact(
+                program
+                    .artifacts
+                    .get(LoweredArtifactRequestId::from_index(base + 1))
+                    .expect("artifact")
+                    .ordinal,
+            )
+            .expect("key");
+        assert_ne!(first_key, second_key);
+    }
+
+    #[test]
+    fn closure_never_renumbers_or_renames_stage_three_entries() {
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+            "type Point = ctor (I32, I32)\n",
+            "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+            "let p = (1, 2)\n",
+            "let text = \"${p:?}\"\n",
+        );
+        let baseline = stage_three(source);
+        let baseline_instances = baseline
+            .instances
+            .iter()
+            .map(|(id, instance)| (id.index(), instance.name.clone()))
+            .collect::<Vec<_>>();
+        let baseline_artifacts = baseline
+            .artifacts
+            .iter()
+            .map(|(id, artifact)| (id.index(), artifact.name.clone()))
+            .collect::<Vec<_>>();
+        assert!(!baseline_instances.is_empty());
+        assert!(!baseline_artifacts.is_empty());
+
+        let mut program = stage_three(source);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base = program.artifacts.len();
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![
+                drop_glue_request(
+                    CheckedType::Ref(Box::new(CheckedType::I32)),
+                    &origin,
+                    Some(ArtifactUseSite::Test(0)),
+                ),
+                runner_request(
+                    ArtifactSiteOwner::Initializer(InitializerId::from_index(0)),
+                    ArtifactSite::PlanLocal(0),
+                    &origin,
+                    Some(ArtifactUseSite::Test(1)),
+                ),
+            ]],
+        );
+        close(&mut program, &hooks);
+
+        let closed_instances = program
+            .instances
+            .iter()
+            .take(baseline_instances.len())
+            .map(|(id, instance)| (id.index(), instance.name.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(baseline_instances, closed_instances);
+        let closed_artifacts = program
+            .artifacts
+            .iter()
+            .take(baseline_artifacts.len())
+            .map(|(id, artifact)| (id.index(), artifact.name.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(baseline_artifacts, closed_artifacts);
+        assert_eq!(program.artifacts.len(), base + 2);
+    }
+
+    fn closure_snapshot(program: &LoweredProgram) -> String {
+        let mut out = String::new();
+        for (id, instance) in program.instances.iter() {
+            out.push_str(&format!(
+                "instance {} name={} request={:?} deps={:?} artifacts={:?}\n",
+                id.index(),
+                instance.name,
+                instance.request,
+                instance
+                    .dependencies
+                    .iter()
+                    .map(|edge| (
+                        edge.instance.index(),
+                        edge.kind.description(),
+                        edge.closure_phase
+                    ))
+                    .collect::<Vec<_>>(),
+                instance
+                    .artifacts
+                    .iter()
+                    .map(|edge| (
+                        edge.artifact.index(),
+                        edge.kind.description(),
+                        edge.closure_phase
+                    ))
+                    .collect::<Vec<_>>(),
+            ));
+            if let Some(body) = &instance.body {
+                out.push_str(&format!(
+                    "  uses={:?}\n",
+                    body.artifact_uses
+                        .iter()
+                        .map(|use_| (use_.artifact.index(), use_.kind.description(), use_.site))
+                        .collect::<Vec<_>>()
+                ));
+            }
+        }
+        for (id, artifact) in program.artifacts.iter() {
+            let family = program
+                .specializations
+                .artifact(artifact.ordinal)
+                .map(|key| key.family_name())
+                .unwrap_or("<missing>");
+            out.push_str(&format!(
+                "artifact {} name={} family={family} root={:?} edges={:?} instances={:?} expanded={}\n",
+                id.index(),
+                artifact.name,
+                artifact.request,
+                artifact
+                    .artifacts
+                    .iter()
+                    .map(|edge| (edge.artifact.index(), edge.kind.description(), edge.closure_phase))
+                    .collect::<Vec<_>>(),
+                artifact
+                    .instances
+                    .iter()
+                    .map(|edge| (edge.instance.index(), edge.kind.description(), edge.closure_phase))
+                    .collect::<Vec<_>>(),
+                artifact.expanded,
+            ));
+        }
+        out
+    }
+
+    #[test]
+    fn closure_is_deterministic_across_repeated_runs() {
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+            "let second: U8 = identity (1 satisfies U8)\n",
+        );
+        let run = || {
+            let mut program = stage_three(source);
+            let first = identity_instance(&program, 0);
+            let second = identity_instance(&program, 1);
+            let origin = instance_origin(&program, first);
+            let mut by_type = HashMap::new();
+            by_type.insert(0usize, first);
+            by_type.insert(1usize, second);
+            let mut instance_requests = HashMap::new();
+            for (index, instance) in by_type {
+                instance_requests.insert(
+                    instance.index(),
+                    vec![vec![drop_glue_request(
+                        if index == 0 {
+                            CheckedType::I32
+                        } else {
+                            CheckedType::U8
+                        },
+                        &origin,
+                        Some(ArtifactUseSite::Test(index as u32)),
+                    )]],
+                );
+            }
+            let hooks = TestHooks {
+                instance_requests,
+                ..TestHooks::default()
+            };
+            close(&mut program, &hooks);
+            closure_snapshot(&program)
+        };
+        assert_eq!(run(), run());
+    }
+
+    /// A hook set that reserves one fresh instance and artifact per round so
+    /// the round bound is reached without unbounded per-round work.
+    struct GrowHooks {
+        seed: FunctionInstanceId,
+        origin: Origin,
+        baseline_instances: usize,
+        baseline_artifacts: usize,
+        depth: Cell<u64>,
+    }
+
+    impl ArtifactFamilyHooks for GrowHooks {
+        fn scan_initializer(
+            &self,
+            _program: &LoweredProgram,
+            _initializer: InitializerId,
+        ) -> ScanResult {
+            Ok(Vec::new())
+        }
+
+        fn scan_instance(
+            &self,
+            _program: &LoweredProgram,
+            instance: FunctionInstanceId,
+        ) -> ScanResult {
+            if instance == self.seed {
+                return Ok(vec![drop_glue_request(
+                    grow_type(0),
+                    &self.origin,
+                    Some(ArtifactUseSite::Test(0)),
+                )]);
+            }
+            if instance.index() >= self.baseline_instances {
+                let depth = self.depth.get();
+                return Ok(vec![drop_glue_request(
+                    grow_type(depth),
+                    &self.origin,
+                    Some(ArtifactUseSite::Test(depth as u32)),
+                )]);
+            }
+            Ok(Vec::new())
+        }
+
+        fn expand(
+            &self,
+            program: &LoweredProgram,
+            artifact: LoweredArtifactRequestId,
+        ) -> ExpansionResult {
+            let plan = program
+                .artifacts
+                .get(artifact)
+                .expect("artifact")
+                .plan
+                .clone()
+                .expect("plan");
+            if artifact.index() < self.baseline_artifacts {
+                return Ok((plan, Vec::new()));
+            }
+            let depth = self.depth.get() + 1;
+            self.depth.set(depth);
+            let resolved =
+                resolve_root_instance(program, "identity", grow_type(depth), &self.origin);
+            Ok((
+                plan,
+                vec![ClosureRequest::Instance {
+                    resolved,
+                    kind: LoweredInstanceDependencyKind::DirectCall,
+                    origin: self.origin.clone(),
+                }],
+            ))
+        }
+    }
+
+    /// A distinct concrete type per growth step: an array whose count is the
+    /// step number keeps every key small but fresh.
+    fn grow_type(depth: u64) -> CheckedType {
+        CheckedType::Array {
+            element: Box::new(CheckedType::I32),
+            count: Box::new(CheckedType::NumberLiteral(depth + 1)),
+        }
+    }
+
+    #[test]
+    fn closure_non_convergence_hits_the_bound_with_a_requester_chain() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let baseline_instances = program.instances.len();
+        let baseline_artifacts = program.artifacts.len();
+        let hooks = GrowHooks {
+            seed,
+            origin: instance_origin(&program, seed),
+            baseline_instances,
+            baseline_artifacts,
+            depth: Cell::new(0),
+        };
+        let diagnostics = program.close_artifact_catalog(&hooks);
+        let messages = messages(&diagnostics);
+        assert!(
+            messages.iter().any(
+                |message| message.contains("did not converge after 64 rounds")
+                    || message.contains("grew by")
+            ),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("request chain")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn closure_corruption_is_diagnosed() {
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+        );
+        let mut program = stage_three(source);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base = program.artifacts.len();
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![drop_glue_request(
+                CheckedType::Ref(Box::new(CheckedType::I32)),
+                &origin,
+                Some(ArtifactUseSite::Test(0)),
+            )]],
+        );
+        close(&mut program, &hooks);
+        assert_eq!(program.artifacts.len(), base + 1);
+        let artifact = LoweredArtifactRequestId::from_index(base);
+
+        // A closure edge whose use was removed.
+        let mut broken = program.clone();
+        broken
+            .instances
+            .get_mut(seed)
+            .and_then(|instance| instance.body.as_mut())
+            .expect("body")
+            .artifact_uses
+            .clear();
+        assert!(
+            messages(&broken.validate_artifact_closure(&TestHooks::default()))
+                .iter()
+                .any(|message| message.contains("closure artifact edge with no use"))
+        );
+
+        // An extra use with no edge.
+        let mut broken = program.clone();
+        let duplicate = broken
+            .instances
+            .get(seed)
+            .and_then(|instance| instance.body.as_ref())
+            .expect("body")
+            .artifact_uses[0]
+            .clone();
+        broken
+            .instances
+            .get_mut(seed)
+            .and_then(|instance| instance.body.as_mut())
+            .expect("body")
+            .artifact_uses
+            .push(duplicate);
+        assert!(
+            messages(&broken.validate_artifact_closure(&TestHooks::default()))
+                .iter()
+                .any(|message| message.contains("use with no matching closure edge"))
+        );
+
+        // A requester whose recorded edge kind disagrees with the root kind.
+        let mut broken = program.clone();
+        let kind = match &broken.artifacts.get(artifact).expect("artifact").request {
+            LoweredArtifactRequestRoot::Instance { kind, .. } => *kind,
+            other => panic!("expected an instance root, got {other:?}"),
+        };
+        assert_eq!(kind, LoweredArtifactDependencyKind::DropGlue);
+        if let LoweredArtifactRequestRoot::Instance { kind, .. } = &mut broken
+            .artifacts
+            .get_mut(artifact)
+            .expect("artifact")
+            .request
+        {
+            *kind = LoweredArtifactDependencyKind::GcFinalizer;
+        }
+        assert!(
+            messages(&broken.validate_artifact_closure(&TestHooks::default()))
+                .iter()
+                .any(|message| message
+                    .contains("no recorded edge on the instance that requested it"))
+        );
+
+        // An artifact the closure never expanded.
+        let mut broken = program.clone();
+        broken
+            .artifacts
+            .get_mut(artifact)
+            .expect("artifact")
+            .expanded = false;
+        assert!(
+            messages(&broken.validate_artifact_closure(&TestHooks::default()))
+                .iter()
+                .any(|message| message.contains("was never expanded"))
+        );
+
+        // A plan that no longer rebuilds its key.
+        let mut broken = program.clone();
+        broken.artifacts.get_mut(artifact).expect("artifact").plan =
+            Some(LoweredArtifactPlan::DropGlue(DropGluePlan {
+                value_type: CheckedType::U8,
+            }));
+        assert!(
+            messages(&broken.validate_specializations())
+                .iter()
+                .any(|message| message.contains("does not rebuild its key"))
+        );
+
+        // An instance whose template has a body but no materialized body.
+        let mut broken = program.clone();
+        broken.instances.get_mut(seed).expect("instance").body = None;
+        assert!(
+            messages(&broken.validate_instance_bodies())
+                .iter()
+                .any(|message| message.contains("has no concrete body"))
+        );
+
+        // A cyclic request root.
+        let mut broken = program.clone();
+        let other = broken
+            .instances
+            .iter()
+            .find(|(id, _)| *id != seed)
+            .map(|(id, _)| id)
+            .expect("a second instance");
+        let seed_origin = instance_origin(&broken, seed);
+        let other_origin = instance_origin(&broken, other);
+        broken.instances.get_mut(seed).expect("instance").request =
+            LoweredInstanceRequest::Dependency {
+                owner: other,
+                kind: LoweredInstanceDependencyKind::DirectCall,
+                origin: seed_origin,
+            };
+        broken.instances.get_mut(other).expect("instance").request =
+            LoweredInstanceRequest::Dependency {
+                owner: seed,
+                kind: LoweredInstanceDependencyKind::DirectCall,
+                origin: other_origin,
+            };
+        assert!(
+            messages(&broken.validate_artifact_closure(&TestHooks::default()))
+                .iter()
+                .any(|message| message.contains("cyclic request root"))
+        );
+    }
+
+    #[test]
+    fn closure_fixed_point_violation_is_diagnosed() {
+        let mut program = stage_three(IDENTITY_FIXTURE);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let base = program.artifacts.len();
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![drop_glue_request(
+                CheckedType::Ref(Box::new(CheckedType::I32)),
+                &origin,
+                Some(ArtifactUseSite::Test(0)),
+            )]],
+        );
+        // The first expansion reserves nothing; the re-check invents a key.
+        hooks.artifact_requests.insert(
+            base,
+            vec![
+                Vec::new(),
+                vec![drop_glue_request(
+                    CheckedType::Ref(Box::new(CheckedType::U8)),
+                    &origin,
+                    None,
+                )],
+            ],
+        );
+        let diagnostics = program.close_artifact_catalog(&hooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.validate_artifact_closure(&hooks);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("did not reach a fixed point")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn closure_scan_and_expansion_requests_from_initializers_are_recorded() {
+        let mut program = stage_three("let value = 1\n");
+        let initializer = InitializerId::from_index(0);
+        let origin = program
+            .initializers
+            .get(initializer)
+            .expect("initializer")
+            .origin
+            .clone();
+        let base = program.artifacts.len();
+        let mut hooks = TestHooks::default();
+        hooks.initializer_requests.insert(
+            0,
+            vec![vec![drop_glue_request(
+                CheckedType::Ref(Box::new(CheckedType::I32)),
+                &origin,
+                Some(ArtifactUseSite::Test(4)),
+            )]],
+        );
+        close(&mut program, &hooks);
+
+        assert_eq!(program.artifacts.len(), base + 1);
+        let artifact = LoweredArtifactRequestId::from_index(base);
+        assert!(matches!(
+            &program.artifacts.get(artifact).expect("artifact").request,
+            LoweredArtifactRequestRoot::Initializer { initializer: owner, .. } if *owner == initializer
+        ));
+        assert_eq!(program.initializer_artifacts[0].len(), 1);
+        assert_eq!(program.initializer_artifacts[0][0].artifact.index(), base);
+        assert!(program.initializer_artifacts[0][0].closure_phase);
+        assert_eq!(program.initializer_artifact_uses[0].len(), 1);
+        assert_eq!(
+            program.initializer_artifact_uses[0][0].site,
+            ArtifactUseSite::Test(4)
+        );
     }
 }
