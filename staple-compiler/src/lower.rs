@@ -46,9 +46,8 @@ pub(crate) use instance_resolution::{
 #[allow(unused_imports)] // Stage 3.4 consumes these worklist types.
 pub(crate) use worklist::{
     LoweredArtifactDependency, LoweredArtifactDependencyKind, LoweredArtifactRequest,
-    LoweredArtifactRequestRoot, LoweredCompilerHelperRequest, LoweredFunctionInstance,
-    LoweredHelperRequester, LoweredInstanceDependency, LoweredInstanceDependencyKind,
-    LoweredInstanceRequest,
+    LoweredArtifactRequestRoot, LoweredFunctionInstance, LoweredInstanceDependency,
+    LoweredInstanceDependencyKind, LoweredInstanceRequest, LoweredScanOwner,
 };
 
 // Stage 3.4 instance-body API. Bodies are instance-owned and instance-local;
@@ -599,6 +598,8 @@ pub(crate) struct LoweredStringFormatting {
 /// The eight explicit callable categories. Every call and callable value has
 /// exactly one category; there is no unknown/fallback variant. Variants carry
 /// semantic IDs only, never backend symbol strings or debug-formatted keys.
+/// The instance graph rejects `CompilerHelper`: a body or generated plan that
+/// reaches the category is a lowering diagnostic, not a deferred request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LoweredCallableCategory {
     DirectKnownFunction,
@@ -668,8 +669,11 @@ pub(crate) enum LoweredCallableTarget {
         method: TraitMethodId,
         structural: StructuralTraitMethod,
     },
-    /// A compiler helper function selected by checked operations. Complete
-    /// helper discovery and deduplication remain Stage 4 work.
+    /// A compiler helper function selected by checked operations. Kept in the
+    /// Stage 2 schema so the eight-category decision table stays complete, but
+    /// the lowered graph rejects it: an instance or artifact that reaches this
+    /// target is a lowering diagnostic because every generated helper must be
+    /// a source-function instance or a typed artifact.
     CompilerHelper { function: FunctionId },
 }
 
@@ -2015,9 +2019,6 @@ pub(crate) struct LoweredProgram {
     /// Constructor-adapter and structural-method requests in first-discovery
     /// order; the matching key is interned in `specializations`.
     artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
-    /// Compiler-helper requests the Stage 3 graph carries unresolved; Stage 4
-    /// closes their generated bodies and dependencies.
-    helper_requests: Vec<LoweredCompilerHelperRequest>,
     /// Stage 4.2 closure artifact uses recorded on module initializers, indexed
     /// by `InitializerId` in scan order. Stage 3 initializer requests stay
     /// request-root-only, so this starts empty and only closure-phase scanners

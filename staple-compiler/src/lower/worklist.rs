@@ -307,29 +307,12 @@ pub(crate) struct LoweredArtifactDependency {
     pub kind: LoweredArtifactDependencyKind,
 }
 
-/// A compiler-helper request the Stage 3 graph carries unresolved. Stage 4
-/// generates the helper body and discovers its dependencies before LLVM
-/// migration.
-#[derive(Debug, Clone)]
-pub(crate) struct LoweredCompilerHelperRequest {
-    pub function: FunctionId,
-    pub origin: Origin,
-    pub requested_by: LoweredHelperRequester,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum LoweredHelperRequester {
-    Initializer(InitializerId),
-    Instance(FunctionInstanceId),
-}
-
 /// The built worklist before it is installed on the lowered program. This is
 /// the recorder's persisted state: installing it hands the graph to the
 /// program, taking it back detaches the graph for the next recording phase.
 pub(super) struct SpecializationParts {
     pub instances: Arena<LoweredFunctionInstance, FunctionInstanceId>,
     pub artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
-    pub helper_requests: Vec<LoweredCompilerHelperRequest>,
     pub catalog: SpecializationCatalog,
 }
 
@@ -343,9 +326,6 @@ pub(super) struct GraphRecorder {
     pub(super) instances: Arena<LoweredFunctionInstance, FunctionInstanceId>,
     /// Artifacts in first-discovery order; the arena index is the ordinal.
     pub(super) artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
-    /// Compiler-helper requests the graph carries unresolved. Stage 4.2
-    /// removes this representation once helper targets are diagnosed.
-    pub(super) helper_requests: Vec<LoweredCompilerHelperRequest>,
     /// The append-only instance/artifact key catalog.
     pub(super) catalog: SpecializationCatalog,
     /// Instances awaiting traversal, in discovery order.
@@ -360,7 +340,6 @@ impl GraphRecorder {
         GraphRecorder {
             instances: Arena::default(),
             artifacts: Arena::default(),
-            helper_requests: Vec::new(),
             catalog: SpecializationCatalog::default(),
             queue: Vec::new(),
             cursor: 0,
@@ -371,7 +350,6 @@ impl GraphRecorder {
         GraphRecorder {
             instances: parts.instances,
             artifacts: parts.artifacts,
-            helper_requests: parts.helper_requests,
             catalog: parts.catalog,
             queue: Vec::new(),
             cursor: 0,
@@ -382,7 +360,6 @@ impl GraphRecorder {
         SpecializationParts {
             instances: self.instances,
             artifacts: self.artifacts,
-            helper_requests: self.helper_requests,
             catalog: self.catalog,
         }
     }
@@ -905,34 +882,27 @@ impl<'a> WorklistBuilder<'a> {
             .request_artifact(key, plan, origin, owner, kind);
     }
 
+    /// A compiler-helper target has no generated artifact: every owner reports
+    /// it as a diagnostic. Generated artifact plans must name their callees
+    /// explicitly, and an instance or initializer body that reaches the
+    /// category is a lowering gap, never something the graph defers.
     fn request_helper(&mut self, function: FunctionId, origin: &Origin, owner: TraversalOwner) {
-        // Generated artifact plans must name their callees explicitly, so an
-        // artifact owner reports a diagnostic instead of recording an
-        // unresolved helper.
-        let requested_by = match owner {
+        let owner_label = match owner {
             TraversalOwner::Initializer(initializer) => {
-                LoweredHelperRequester::Initializer(initializer)
+                format!("initializer {}", initializer.index())
             }
-            TraversalOwner::Instance(instance) => LoweredHelperRequester::Instance(instance),
+            TraversalOwner::Instance(instance) => format!("function instance {}", instance.index()),
             TraversalOwner::Artifact(artifact) => {
-                self.diagnostics.push(Diagnostic::new(
-                    origin.span.clone(),
-                    format!(
-                        "generated artifact {} requested unresolved compiler helper function {}",
-                        artifact.index(),
-                        function.0
-                    ),
-                ));
-                return;
+                format!("generated artifact {}", artifact.index())
             }
         };
-        self.recorder
-            .helper_requests
-            .push(LoweredCompilerHelperRequest {
-                function,
-                origin: origin.clone(),
-                requested_by,
-            });
+        self.diagnostics.push(Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "{owner_label} has a compiler-helper target function {} with no generated artifact",
+                function.0
+            ),
+        ));
     }
 
     // ------------------------------------------------------------------
@@ -1953,7 +1923,6 @@ impl LoweredProgram {
     pub(super) fn install_graph(&mut self, parts: SpecializationParts) {
         self.instances = parts.instances;
         self.artifacts = parts.artifacts;
-        self.helper_requests = parts.helper_requests;
         self.specializations = parts.catalog;
     }
 
@@ -1964,7 +1933,6 @@ impl LoweredProgram {
         SpecializationParts {
             instances: std::mem::take(&mut self.instances),
             artifacts: std::mem::take(&mut self.artifacts),
-            helper_requests: std::mem::take(&mut self.helper_requests),
             catalog: std::mem::take(&mut self.specializations),
         }
     }
@@ -2199,17 +2167,6 @@ impl LoweredProgram {
                 diagnostics.push(Diagnostic::new(
                     artifact.origin.span.clone(),
                     format!("artifact {} has an unstable name", id.index()),
-                ));
-            }
-        }
-        for request in &self.helper_requests {
-            if self.functions.get(request.function).is_none() {
-                diagnostics.push(Diagnostic::new(
-                    request.origin.span.clone(),
-                    format!(
-                        "compiler-helper request names missing function {}",
-                        request.function.0
-                    ),
                 ));
             }
         }
@@ -2906,7 +2863,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_owned_helper_requests_are_diagnosed_not_panics() {
+    fn compiler_helper_targets_are_diagnosed_for_every_owner() {
         let (_, program) = lower("let x = 1\n");
         let origin = program
             .initializers
@@ -2914,20 +2871,23 @@ mod tests {
             .next()
             .map(|(_, initializer)| initializer.origin.clone())
             .expect("an initializer");
-        let mut builder = WorklistBuilder::new(&program);
-        builder.request_helper(
-            FunctionId(0),
-            &origin,
+        let owners = [
+            TraversalOwner::Initializer(InitializerId::from_index(0)),
+            TraversalOwner::Instance(FunctionInstanceId::from_index(0)),
             TraversalOwner::Artifact(LoweredArtifactRequestId::for_test(0)),
-        );
-        assert!(builder.recorder.helper_requests.is_empty());
-        assert!(
-            builder.diagnostics.iter().any(|diagnostic| diagnostic
-                .message
-                .contains("requested unresolved compiler helper")),
-            "{:?}",
-            builder.diagnostics
-        );
+        ];
+        for (index, owner) in owners.into_iter().enumerate() {
+            let mut builder = WorklistBuilder::new(&program);
+            builder.request_helper(FunctionId(0), &origin, owner);
+            assert!(
+                builder.diagnostics.iter().any(|diagnostic| diagnostic
+                    .message
+                    .contains("compiler-helper target function 0")
+                    && diagnostic.message.contains("no generated artifact")),
+                "owner {index} should report a diagnostic: {:?}",
+                builder.diagnostics
+            );
+        }
     }
 
     #[test]

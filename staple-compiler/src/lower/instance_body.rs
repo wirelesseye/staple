@@ -100,16 +100,15 @@ pub(crate) enum LoweredBindingSite {
 }
 
 /// The concrete target bound at one site. Variants distinguish source-function
-/// instances from generated artifacts, unresolved Stage 4 helpers, and the
-/// non-instance routes that intentionally stay indirect/external/intrinsic.
+/// instances from generated artifacts and the non-instance routes that
+/// intentionally stay indirect/external/intrinsic. A `CompilerHelper` site has
+/// no binding: the graph rejects the category with a diagnostic.
 #[derive(Debug, Clone)]
 pub(crate) enum LoweredBoundTarget {
     /// A known source function interned as a concrete instance.
     Instance(FunctionInstanceId),
     /// A generated constructor-adapter or structural-method artifact.
     Artifact(ArtifactOrdinal),
-    /// A compiler-helper request Stage 4 must close.
-    Helper(FunctionId),
     /// The site keeps its non-source route (indirect closure, external,
     /// intrinsic, or ordinary constructor call).
     Route(LoweredCallableCategory),
@@ -2453,9 +2452,13 @@ impl<'a> BodyCloner<'a> {
                 );
             }
             LoweredCallableTarget::CompilerHelper { function } => {
-                self.body
-                    .bindings
-                    .insert(site, LoweredBoundTarget::Helper(*function));
+                self.diagnostics.push(Diagnostic::new(
+                    original.origin.span.clone(),
+                    format!(
+                        "compiler-helper target function {} has no generated artifact",
+                        function.0
+                    ),
+                ));
             }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
@@ -2532,9 +2535,13 @@ impl<'a> BodyCloner<'a> {
                 );
             }
             LoweredCallableTarget::CompilerHelper { function } => {
-                self.body
-                    .bindings
-                    .insert(site, LoweredBoundTarget::Helper(*function));
+                self.diagnostics.push(Diagnostic::new(
+                    original.origin.span.clone(),
+                    format!(
+                        "compiler-helper target function {} has no generated artifact",
+                        function.0
+                    ),
+                ));
             }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
@@ -3852,24 +3859,6 @@ impl<'a> BodyValidator<'a> {
                                 .map(|origin| origin.span.clone())
                                 .unwrap_or(Span::Compiler),
                             "instance body artifact binding does not match a Stage 3.3 artifact request",
-                        );
-                    }
-                }
-                LoweredBoundTarget::Helper(function) => {
-                    let requested = self.program.helper_requests.iter().any(|request| {
-                        request.function == *function
-                            && matches!(
-                                request.requested_by,
-                                super::LoweredHelperRequester::Instance(owner) if owner == self.owner
-                            )
-                    });
-                    if !requested {
-                        self.report(
-                            origin
-                                .as_ref()
-                                .map(|origin| origin.span.clone())
-                                .unwrap_or(Span::Compiler),
-                            "instance body helper binding has no Stage 3.3 request",
                         );
                     }
                 }

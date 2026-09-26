@@ -1,6 +1,6 @@
 # Stage 4.2 Plan: Fixed-Point Artifact Closure Engine
 
-**Status:** In progress. Stage 4.1 is complete through `9601bfb` (artifact key families, `LoweredArtifactPlan` placeholders, artifact-owned edge lists, `LoweredInstanceRequest::Artifact`, `LoweredArtifactRequestRoot::Artifact`, `FormattingWrite`). Stage 4.2 Steps 1–3 (shared `GraphRecorder` with install/take and resumable traversal; incremental pending-instance materialization; the closure engine with placeholder hooks, use/edge storage, and the `Scan` instance root) are complete; Steps 4–6 are next; Stages 4.3–4.6 plug their families into the API defined here.
+**Status:** In progress. Stage 4.1 is complete through `9601bfb` (artifact key families, `LoweredArtifactPlan` placeholders, artifact-owned edge lists, `LoweredInstanceRequest::Artifact`, `LoweredArtifactRequestRoot::Artifact`, `FormattingWrite`). Stage 4.2 Steps 1–4 (shared `GraphRecorder` with install/take and resumable traversal; incremental pending-instance materialization; the closure engine with placeholder hooks, use/edge storage, and the `Scan` instance root; compiler-helper removal) are complete; Steps 5–6 are next; Stages 4.3–4.6 plug their families into the API defined here.
 
 ## Goal and boundary
 
@@ -189,6 +189,10 @@ Validation runs after the closure loop in `Lowerer::lower`, next to the existing
 
 - Apply the compiler-helper removal above.
 - **Gate:** the helper tests are rewritten, and no `Helper` binding or `helper_requests` symbol remains (`grep` clean). Workspace tests pass.
+
+### Step 4 — Remove compiler-helper requests
+
+**Step 4 notes (complete).** `LoweredCompilerHelperRequest`, `LoweredHelperRequester`, `LoweredProgram::helper_requests`, `SpecializationParts::helper_requests`, the recorder's helper list, `LoweredBoundTarget::Helper`, and the body-validator helper arm are gone. `WorklistBuilder::request_helper` and both `BodyCloner` `CompilerHelper` arms now report a source diagnostic for every owner ("{owner} has a compiler-helper target function {n} with no generated artifact" / "compiler-helper target function {n} has no generated artifact"), so a body that reaches the category never binds. `LoweredCallableTarget::CompilerHelper` and `LoweredCallableCategory::CompilerHelper` stay in the Stage 2 schema; their doc comments now state that the graph rejects the category while the eight-category decision table stays complete. `compiler_helper_targets_are_diagnosed_for_every_owner` covers initializer, instance, and artifact owners. `rg` finds no `helper_requests`, `CompilerHelperRequest`, `HelperRequester`, `BoundTarget::Helper`, or `LoweredHelper` symbol, and the full workspace suite (1189 tests) passes.
 
 ### Step 5 — Closure validation and synthetic-hook tests
 
