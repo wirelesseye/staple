@@ -24,7 +24,7 @@ use crate::{
 };
 
 use super::instance_body::LoweredInstanceBody;
-use super::{ArenaId, LoweredFunctionInstance, LoweredProgram};
+use super::{ArenaId, LoweredFunctionInstance, LoweredItemKind, LoweredProgram};
 
 impl LoweredProgram {
     /// The Stage 3.5 graph audit: catalog/name agreement, complete concrete
@@ -364,6 +364,13 @@ impl<'a> GraphValidator<'a> {
                 }
             }
         }
+        for (_, item) in body.items.iter() {
+            if let LoweredItemKind::Assignment(assignment) = &item.kind
+                && let Some(evidence) = &assignment.evidence
+            {
+                self.check_evidence(&item.origin, evidence);
+            }
+        }
         for (site, evidence) in &body.evidence {
             let origin = body_evidence_origin(body, *site).unwrap_or_else(Origin::compiler);
             self.check_evidence(&origin, evidence);
@@ -401,14 +408,26 @@ impl<'a> GraphValidator<'a> {
     }
 
     fn check_evidence(&mut self, origin: &Origin, evidence: &TraitEvidence) {
-        if matches!(
-            evidence,
-            TraitEvidence::DeclaredBound { .. } | TraitEvidence::RejectedImplementation { .. }
-        ) {
-            self.report(
-                origin,
-                "emitted instance retains an unresolved trait evidence recipe",
-            );
+        match evidence {
+            TraitEvidence::ExplicitImplementation { arguments, .. }
+            | TraitEvidence::Structural { arguments, .. } => {
+                for argument in arguments {
+                    if contains_type_parameter(argument)
+                        || CanonicalType::concrete(argument, origin).is_err()
+                    {
+                        self.report(
+                            origin,
+                            format!("emitted evidence keeps a template-only argument: {argument}"),
+                        );
+                    }
+                }
+            }
+            TraitEvidence::DeclaredBound { .. } | TraitEvidence::RejectedImplementation { .. } => {
+                self.report(
+                    origin,
+                    "emitted instance retains an unresolved trait evidence recipe",
+                )
+            }
         }
     }
 }
@@ -455,17 +474,22 @@ fn body_evidence_origin(
 
 #[cfg(test)]
 impl LoweredProgram {
-    /// Test-only: the interned instance whose template and concrete
-    /// substitutions reproduce one legacy specialization. The legacy queue
-    /// records only the concrete callable type, so evidence is excluded from
-    /// the comparison.
+    /// Test-only: the interned instance whose template, concrete callable
+    /// type, and substitutions reproduce one legacy specialization. The
+    /// legacy queue does not record evidence, so it is excluded here.
     pub(crate) fn instance_for_legacy_specialization(
         &self,
         function: crate::FunctionId,
+        function_type: &crate::CheckedFunctionType,
         substitutions: &std::collections::HashMap<crate::TypeParameterId, crate::CheckedType>,
     ) -> Option<FunctionInstanceId> {
         self.instances.iter().find_map(|(id, instance)| {
-            if instance.template != function {
+            if instance.template != function
+                || !instance
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| &body.signature == function_type)
+            {
                 return None;
             }
             let types_match = instance.relevant.type_parameters().all(|parameter| {
@@ -770,6 +794,113 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("template type substitution")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn graph_validator_reports_template_only_evidence_arguments() {
+        let mut program = lower(concat!(
+            "trait TestShow T { test_show: T -> Bool }\n",
+            "impl TestShow I32 { def test_show = _ => True }\n",
+            "def show: <T where TestShow T> T -> Bool = value => test_show value\n",
+            "let shown: Bool = show 1\n",
+        ))
+        .program;
+        let id = program
+            .instances
+            .iter()
+            .find(|(_, instance)| {
+                instance
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| !body.evidence.is_empty())
+            })
+            .map(|(id, _)| id)
+            .expect("a concrete trait selection in an instance body");
+        let body = program
+            .instances
+            .get_mut(id)
+            .and_then(|instance| instance.body.as_mut())
+            .expect("instance body");
+        let evidence = body.evidence.values_mut().next().expect("evidence entry");
+        let TraitEvidence::ExplicitImplementation { arguments, .. } = evidence else {
+            panic!("expected explicit implementation evidence");
+        };
+        arguments.push(crate::CheckedType::Parameter {
+            id: TypeParameterId(999),
+            name: "Unresolved".to_owned(),
+            sized: true,
+        });
+        let diagnostics = program.validate_specialization_graph();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("template-only argument")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn graph_validator_checks_indexed_assignment_evidence() {
+        let mut program = lower(concat!(
+            "def update: () -> () = () => { let mut values: (I32; 2) = (1, 2); values[0] = 3; () }\n",
+            "let updated = update ()\n",
+        ))
+        .program;
+        let id = program
+            .instances
+            .iter()
+            .find(|(_, instance)| {
+                instance.body.as_ref().is_some_and(|body| {
+                    body.items.iter().any(|(_, item)| {
+                        matches!(
+                            &item.kind,
+                            LoweredItemKind::Assignment(assignment)
+                                if assignment.evidence.is_some()
+                        )
+                    })
+                })
+            })
+            .map(|(id, _)| id)
+            .expect("indexed assignment instance");
+        let body = program
+            .instances
+            .get_mut(id)
+            .and_then(|instance| instance.body.as_mut())
+            .expect("instance body");
+        let item_id = body
+            .items
+            .iter()
+            .find(|(_, item)| {
+                matches!(
+                    &item.kind,
+                    LoweredItemKind::Assignment(assignment) if assignment.evidence.is_some()
+                )
+            })
+            .map(|(id, _)| id)
+            .expect("indexed assignment item");
+        let item = body
+            .items
+            .get_mut(item_id)
+            .expect("indexed assignment item");
+        let LoweredItemKind::Assignment(assignment) = &mut item.kind else {
+            unreachable!();
+        };
+        let evidence = assignment.evidence.as_mut().expect("assignment evidence");
+        let TraitEvidence::Structural { arguments, .. } = evidence else {
+            panic!("expected structural assignment evidence");
+        };
+        arguments.push(crate::CheckedType::Parameter {
+            id: TypeParameterId(999),
+            name: "Unresolved".to_owned(),
+            sized: true,
+        });
+        let diagnostics = program.validate_specialization_graph();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("template-only argument")),
             "{diagnostics:?}"
         );
     }
@@ -1295,7 +1426,7 @@ mod tests {
         let legacy = crate::codegen::legacy_emissions(&context, &lowered)
             .expect("the legacy backend should compile the module");
         let program = &lowered.program;
-        for (function, _function_type, substitutions) in &legacy.specializations {
+        for (function, function_type, substitutions) in &legacy.specializations {
             let name = program
                 .functions
                 .get(*function)
@@ -1303,7 +1434,7 @@ mod tests {
                 .unwrap_or("<missing>");
             assert!(
                 program
-                    .instance_for_legacy_specialization(*function, substitutions)
+                    .instance_for_legacy_specialization(*function, function_type, substitutions)
                     .is_some(),
                 "legacy specialization for `{name}` has no matching instance"
             );
@@ -1431,11 +1562,45 @@ mod tests {
             .expect("T");
         let mut substitutions = std::collections::HashMap::new();
         substitutions.insert(parameter, crate::CheckedType::U64);
+        let signature = instances_of(program, template)[0]
+            .1
+            .body
+            .as_ref()
+            .expect("instance body")
+            .signature
+            .clone();
         assert!(
             program
-                .instance_for_legacy_specialization(template, &substitutions)
+                .instance_for_legacy_specialization(template, &signature, &substitutions)
                 .is_none(),
             "a substitution with no instance must not match"
+        );
+    }
+
+    #[test]
+    fn legacy_specialization_requires_the_concrete_callable_type() {
+        let lowered = lower(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let applied: I32 = identity 1\n",
+        ));
+        let program = &lowered.program;
+        let template = function_id(program, "identity");
+        let (_, instance) = single_instance(program, "identity");
+        let parameter = instance.relevant.type_parameters().next().expect("T");
+        let mut substitutions = std::collections::HashMap::new();
+        substitutions.insert(parameter, crate::CheckedType::I32);
+        let signature = &instance.body.as_ref().expect("instance body").signature;
+        assert!(
+            program
+                .instance_for_legacy_specialization(template, signature, &substitutions)
+                .is_some()
+        );
+        let mut wrong_signature = signature.clone();
+        wrong_signature.result = Box::new(crate::CheckedType::U8);
+        assert!(
+            program
+                .instance_for_legacy_specialization(template, &wrong_signature, &substitutions)
+                .is_none()
         );
     }
 }
