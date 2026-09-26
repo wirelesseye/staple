@@ -198,6 +198,21 @@ impl SubstitutionValue {
         }
     }
 
+    /// A checker placeholder or a bare effect wildcard: never authoritative
+    /// over a concrete value from another source.
+    fn is_placeholder(&self) -> bool {
+        match self {
+            SubstitutionValue::Type(value_type) => {
+                matches!(value_type, CheckedType::Inferred | CheckedType::Error)
+            }
+            SubstitutionValue::Effects(effects) => {
+                effects.variable.is_some()
+                    && effects.resources.is_empty()
+                    && effects.state.is_none()
+            }
+        }
+    }
+
     fn is_self_placeholder(&self, parameter: TypeParameterId) -> bool {
         match self {
             SubstitutionValue::Type(CheckedType::Parameter { id, .. }) => *id == parameter,
@@ -676,6 +691,35 @@ fn merge_substitution_values(
             ),
         )
     };
+    // The complete checked callable type is authoritative for the target
+    // template's own parameters. A nested trait request that re-instantiates
+    // a declaration the enclosing instance already maps is legal same-function
+    // recursion at a different type (`Ref (Ref T)` comparing its `Ref T`
+    // elements); the fresh inferred value must win, exactly as the backend's
+    // specialization queue keeps the inferred substitutions and only fills
+    // missing entries from the active environment. The enclosing environment
+    // stays the fallback for parameters the callable type does not determine,
+    // such as captured outer parameters.
+    let same_kind = matches!(
+        (&existing, &incoming),
+        (SubstitutionValue::Type(_), SubstitutionValue::Type(_))
+            | (SubstitutionValue::Effects(_), SubstitutionValue::Effects(_))
+    );
+    if same_kind {
+        match (existing_source, incoming_source) {
+            (SubstitutionSource::EnclosingInstance, SubstitutionSource::Inferred)
+                if !incoming.is_placeholder() =>
+            {
+                return Ok(incoming);
+            }
+            (SubstitutionSource::Inferred, SubstitutionSource::EnclosingInstance)
+                if !existing.is_placeholder() =>
+            {
+                return Ok(existing);
+            }
+            _ => {}
+        }
+    }
     match (existing, incoming) {
         (SubstitutionValue::Type(existing), SubstitutionValue::Type(incoming)) => {
             if existing == incoming {
@@ -1934,14 +1978,22 @@ impl<'a> ParameterCollector<'a> {
     }
 
     fn collect_symbol_type(&mut self, symbol: SymbolId) {
-        let value_type = self
-            .program
-            .symbols
-            .get(symbol)
-            .map(|symbol| symbol.value_type.clone());
-        if let Some(value_type) = value_type {
-            self.collect_type(&value_type);
+        let Some(metadata) = self.program.symbols.get(symbol) else {
+            return;
+        };
+        // A function binding whose declared type still contains a declared
+        // parameter is a compile-time generic template: the backend stores
+        // only its initialization state and never a runtime value of that
+        // type, so its parameters cannot make anything relevant. This also
+        // covers a generic local function's shared-cell capture, whose
+        // recorded capture type is the template itself.
+        if metadata.storage == SymbolStorage::FunctionBinding
+            && contains_type_parameter(&metadata.value_type)
+        {
+            return;
         }
+        let value_type = metadata.value_type.clone();
+        self.collect_type(&value_type);
     }
 
     fn collect_function_type(&mut self, function: &CheckedFunctionType) {
@@ -2050,14 +2102,20 @@ impl<'a> ParameterCollector<'a> {
         match &item.kind {
             LoweredItemKind::Binding(binding) => {
                 self.family("item.binding");
-                if let Some(symbol) = binding.symbol {
-                    self.collect_symbol_type(symbol);
-                }
-                if let Some(value) = binding.value {
-                    self.collect_expression(value);
-                }
-                if let Some(operation) = binding.reactive {
-                    self.collect_reactive_operation(operation);
+                // A generic binding's value is a compile-time function
+                // template: the backend records only its initialization state
+                // and never evaluates the template value, so its declared
+                // parameters cannot make anything relevant to this instance.
+                if !binding.generic {
+                    if let Some(symbol) = binding.symbol {
+                        self.collect_symbol_type(symbol);
+                    }
+                    if let Some(value) = binding.value {
+                        self.collect_expression(value);
+                    }
+                    if let Some(operation) = binding.reactive {
+                        self.collect_reactive_operation(operation);
+                    }
                 }
             }
             LoweredItemKind::PatternBinding(binding) => {
@@ -2352,7 +2410,10 @@ impl<'a> ParameterCollector<'a> {
         self.collect_function_type(&value.function_type);
         if let Some(closure) = &value.closure {
             for capture in &closure.captures {
-                self.collect_type(&capture.value_type);
+                // Collect through the symbol so a compile-time template's
+                // shared-cell capture never contributes its declared
+                // parameters; the capture's recorded type is the template.
+                self.collect_symbol_type(capture.capture.symbol);
             }
             for substitution in &closure.substitutions.types {
                 self.collect_type(&substitution.value_type);
@@ -2674,6 +2735,31 @@ impl LoweredProgram {
         let environment = builder.resolve()?;
         require_concrete_substitutions(&environment, &relevant, origin)?;
         Ok((environment, relevant))
+    }
+
+    /// Stage 3.3: the substitution environment composed from the enclosing
+    /// instance and an evidence-only site's recipe (a trait call, index read,
+    /// indexed assignment, or formatting interpolation).
+    ///
+    /// No target-template inference runs here: the selected function may only
+    /// be known after the evidence resolves, so this environment is used to
+    /// resolve the recipe first and to concretize recorded method types for
+    /// structural artifact keys.
+    pub(crate) fn site_environment(
+        &self,
+        origin: &Origin,
+        substitutions: &CallSubstitutions,
+        enclosing: Option<&SubstitutionEnvironment>,
+    ) -> Result<SubstitutionEnvironment, Diagnostic> {
+        let mut builder = EnvironmentBuilder::new(origin);
+        let enclosing_map = enclosing
+            .map(|enclosing| enclosing.substitution_map())
+            .unwrap_or_default();
+        if let Some(enclosing) = enclosing {
+            builder.add_enclosing(enclosing);
+        }
+        builder.add_site(substitutions, &enclosing_map);
+        builder.resolve()
     }
 
     /// Every record family the collector visits for one function template.
@@ -3367,6 +3453,84 @@ mod tests {
             .expect("an empty site recipe is completed by the checked callable type");
         let parameter = relevant.type_parameters().next().expect("T");
         assert_eq!(environment.type_value(parameter), Some(&CheckedType::I32));
+    }
+
+    #[test]
+    fn inferred_values_override_a_stale_enclosing_instantiation() {
+        // Legal same-function recursion at a different type: the enclosing
+        // instance maps `T` to `Ref I32` while the nested call re-instantiates
+        // it to `I32`. The fresh inferred value must win, in either candidate
+        // order, matching the backend's specialization queue.
+        for candidates in [
+            vec![
+                (
+                    0,
+                    SubstitutionValue::Type(CheckedType::Ref(Box::new(CheckedType::I32))),
+                    SubstitutionSource::EnclosingInstance,
+                ),
+                (
+                    0,
+                    SubstitutionValue::Type(CheckedType::I32),
+                    SubstitutionSource::Inferred,
+                ),
+            ],
+            vec![
+                (
+                    0,
+                    SubstitutionValue::Type(CheckedType::I32),
+                    SubstitutionSource::Inferred,
+                ),
+                (
+                    0,
+                    SubstitutionValue::Type(CheckedType::Ref(Box::new(CheckedType::I32))),
+                    SubstitutionSource::EnclosingInstance,
+                ),
+            ],
+        ] {
+            let environment = build_environment(candidates).expect("the fresh inferred value wins");
+            assert_eq!(
+                environment.type_value(TypeParameterId(0)),
+                Some(&CheckedType::I32)
+            );
+        }
+
+        // An inferred placeholder never overrides a concrete enclosing value.
+        let environment = build_environment(vec![
+            (
+                0,
+                SubstitutionValue::Type(CheckedType::Inferred),
+                SubstitutionSource::Inferred,
+            ),
+            (
+                0,
+                SubstitutionValue::Type(CheckedType::I32),
+                SubstitutionSource::EnclosingInstance,
+            ),
+        ])
+        .expect("the concrete enclosing value completes the placeholder");
+        assert_eq!(
+            environment.type_value(TypeParameterId(0)),
+            Some(&CheckedType::I32)
+        );
+
+        // A recorded site value still conflicts with the fresh inference.
+        let error = build_environment(vec![
+            (
+                0,
+                SubstitutionValue::Type(CheckedType::U8),
+                SubstitutionSource::Site,
+            ),
+            (
+                0,
+                SubstitutionValue::Type(CheckedType::I32),
+                SubstitutionSource::Inferred,
+            ),
+        ])
+        .expect_err("site and inference still diagnose");
+        assert!(
+            error.message.contains("conflicting substitutions"),
+            "{error:?}"
+        );
     }
 
     #[test]

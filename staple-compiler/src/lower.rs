@@ -14,6 +14,7 @@ use std::marker::PhantomData;
 
 use staple_syntax::{Diagnostic, Expression, Item, Pattern, Span, SyntaxId};
 
+use crate::specialization::SpecializationCatalog;
 use crate::{
     BuiltinType, CheckedAccess, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
     CheckedFunctionalDependency, CheckedMutation, CheckedProductType, CheckedPropagation,
@@ -24,6 +25,7 @@ use crate::{
 };
 
 mod instance_resolution;
+mod worklist;
 
 // Stage 3.2 resolver API consumed by Stage 3.3. The implementation stays in a
 // lowering child module so it can read the owned `LoweredProgram` directly;
@@ -33,6 +35,16 @@ pub(crate) use instance_resolution::{
     InstanceResolutionRequest, InstanceResolutionTarget, RelevantParameters,
     ResolvedInstanceRequest, SubstitutionEntry, SubstitutionEnvironment, SubstitutionSource,
     SubstitutionValue,
+};
+
+// Stage 3.3 worklist API. The graph records identity, roots, dependency edges,
+// and artifact requests; Stage 3.4 materializes instance bodies.
+#[allow(unused_imports)] // Stage 3.4 consumes these worklist types.
+pub(crate) use worklist::{
+    LoweredArtifactDependency, LoweredArtifactDependencyKind, LoweredArtifactRequest,
+    LoweredArtifactRequestRoot, LoweredCompilerHelperRequest, LoweredFunctionInstance,
+    LoweredHelperRequester, LoweredInstanceDependency, LoweredInstanceDependencyKind,
+    LoweredInstanceRequest,
 };
 
 macro_rules! arena_id {
@@ -87,6 +99,8 @@ arena_id!(LoweredReactiveCallbackId);
 arena_id!(LoweredCoroutinePlanId);
 arena_id!(LoweredCoroId);
 arena_id!(LoweredAwaitId);
+arena_id!(FunctionInstanceId);
+arena_id!(LoweredArtifactRequestId);
 
 /// Deterministic, append-only storage whose handles cannot be mixed with
 /// handles from another lowered-node family.
@@ -114,6 +128,10 @@ impl<T, I: ArenaId> Arena<T, I> {
 
     fn contains(&self, id: I) -> bool {
         id.index() < self.values.len()
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
     }
 
     fn get(&self, id: I) -> Option<&T> {
@@ -1958,6 +1976,19 @@ pub(crate) struct LoweredProgram {
     coros: Arena<LoweredCoro, LoweredCoroId>,
     awaits: Arena<LoweredAwait, LoweredAwaitId>,
     initializers: Arena<LoweredInitializer, InitializerId>,
+    /// Stage 3.3 reachable function instances in first-discovery order; the
+    /// matching key of each instance is interned in `specializations` at the
+    /// instance's own ordinal.
+    instances: Arena<LoweredFunctionInstance, FunctionInstanceId>,
+    /// Constructor-adapter and structural-method requests in first-discovery
+    /// order; the matching key is interned in `specializations`.
+    artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
+    /// Compiler-helper requests the Stage 3 graph carries unresolved; Stage 4
+    /// closes their generated bodies and dependencies.
+    helper_requests: Vec<LoweredCompilerHelperRequest>,
+    /// Append-only instance/artifact key catalog. Stage 3.3 alone reserves
+    /// ordinals, before visiting a body, so recursion converges.
+    specializations: SpecializationCatalog,
     semantic_ids: LoweredSemanticIds,
     string_formatting: LoweredStringFormatting,
     /// Transient lowering state: the number of currently enclosing loops,
@@ -5644,7 +5675,7 @@ impl LoweredProgram {
         };
         if let Some(function) = module.trait_impl_method(trait_id, &completed, method) {
             let implementation = self
-                .trait_implementation_id(trait_id, method, function)
+                .trait_implementation_id(trait_id, method, function, &completed)
                 .ok_or_else(|| {
                     Diagnostic::new(
                         origin.span.clone(),
@@ -5698,17 +5729,34 @@ impl LoweredProgram {
         }
     }
 
-    /// Finds the lowered trait implementation that provides `method`.
+    /// Finds the lowered trait implementation that provides `method` for the
+    /// completed trait arguments.
+    ///
+    /// A default method function is shared by every implementation that does
+    /// not override it, so the implementation header must match the completed
+    /// arguments; matching only the method function would record the first
+    /// implementation that happens to share the default.
     fn trait_implementation_id(
         &self,
         trait_id: TraitId,
         method: TraitMethodId,
         function: FunctionId,
+        arguments: &[CheckedType],
     ) -> Option<LoweredTraitImplementationId> {
         self.trait_implementations
             .iter()
             .find(|(_, metadata)| {
                 metadata.trait_id == trait_id
+                    && !metadata.negative
+                    && metadata.arguments.len() == arguments.len()
+                    && metadata
+                        .arguments
+                        .iter()
+                        .zip(arguments)
+                        .all(|(template, argument)| {
+                            let mut substitutions = HashMap::new();
+                            infer_type_parameters(template, argument, &mut substitutions)
+                        })
                     && metadata
                         .methods
                         .iter()
@@ -12616,6 +12664,12 @@ impl Lowerer {
             diagnostics.extend(program.snapshot(module));
         }
         diagnostics.extend(program.validate());
+        if diagnostics.is_empty() {
+            diagnostics.extend(program.build_specialization_worklist());
+        }
+        if diagnostics.is_empty() {
+            diagnostics.extend(program.validate_specializations());
+        }
         if diagnostics.is_empty() {
             diagnostics.extend(program.validate_source_coverage(module));
         }

@@ -1193,7 +1193,7 @@ pub(crate) struct SpecializationNameCollision {
 /// contract: family order (`instances`, then `artifacts`) followed by ordinal.
 /// Names depend only on the ordinal and the structural kind, never on
 /// `HashMap` iteration, `Debug` output, or a hash value.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SpecializationCatalog {
     instances: Vec<InstanceKey>,
     instance_lookup: HashMap<InstanceKey, usize>,
