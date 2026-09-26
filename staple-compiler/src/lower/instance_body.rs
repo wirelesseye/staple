@@ -3644,6 +3644,174 @@ mod tests {
             .unwrap_or_else(|| panic!("no instance for function {}", function.0))
     }
 
+    /// Every checked value carried by a body must be free of declared
+    /// template parameters after substitution.
+    fn assert_body_has_no_parameters(
+        program: &LoweredProgram,
+        instance: &super::super::LoweredFunctionInstance,
+    ) {
+        let body = instance.body.as_ref().expect("instance body");
+        assert!(
+            !contains_type_parameter(&CheckedType::Function(body.signature.clone())),
+            "body signature still contains a declared parameter"
+        );
+        for bound in &body.bounds {
+            for argument in &bound.arguments {
+                assert!(!contains_type_parameter(argument));
+            }
+        }
+        for parameter in &body.parameters {
+            assert!(!contains_type_parameter(&parameter.value_type));
+        }
+        for capture in &body.captures {
+            assert!(!contains_type_parameter(&capture.value_type));
+        }
+        for (_, expression) in body.expressions.iter() {
+            assert!(
+                !contains_type_parameter(&expression.value_type),
+                "expression {:?} keeps a declared parameter",
+                expression.origin.span
+            );
+            for resource in &expression.effects.resources {
+                assert!(!contains_type_parameter(&resource.value_type));
+            }
+        }
+        for (_, call) in body.calls.iter() {
+            assert!(!contains_type_parameter(&CheckedType::Function(
+                call.function_type.clone()
+            )));
+            assert!(!contains_type_parameter(&call.result_type));
+            for argument in &call.arguments {
+                assert!(!contains_type_parameter(&argument.expected));
+            }
+        }
+        for (_, pattern) in body.patterns.iter() {
+            assert!(!contains_type_parameter(&pattern.value_type));
+        }
+        for (_, place) in body.places.iter() {
+            assert!(!contains_type_parameter(&place.value_type));
+        }
+        let _ = program;
+    }
+
+    #[test]
+    fn generic_instances_substitute_signatures_separately() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+            "let second: U8 = identity (1 satisfies U8)\n",
+        ));
+        materialize(&mut program);
+        let identity = function_id(&program, "identity");
+        let instances = program
+            .instances
+            .iter()
+            .filter(|(_, instance)| instance.template == identity)
+            .map(|(_, instance)| instance)
+            .collect::<Vec<_>>();
+        assert_eq!(instances.len(), 2, "one body per distinct substitution");
+        let mut parameters = instances
+            .iter()
+            .map(
+                |instance| match instance.body.as_ref().unwrap().signature.parameter.as_ref() {
+                    CheckedType::Parameter { .. } => {
+                        panic!("a materialized body cannot keep a declared parameter")
+                    }
+                    concrete => concrete.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        parameters.sort_by_key(|value| format!("{value:?}"));
+        assert_eq!(parameters, vec![CheckedType::I32, CheckedType::U8]);
+        for instance in &instances {
+            assert_body_has_no_parameters(&program, instance);
+        }
+        let template = program
+            .functions
+            .get(identity)
+            .expect("the template stays generic");
+        assert!(
+            matches!(
+                template.signature.parameter.as_ref(),
+                CheckedType::Parameter { .. }
+            ),
+            "the source template remains unchanged"
+        );
+    }
+
+    #[test]
+    fn repeated_product_counts_substitute_in_bodies() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+            "let repeated: (I32; 3) = repeat 7 3\n",
+        ));
+        materialize(&mut program);
+        let mut found = 0;
+        for (_, instance) in program.instances.iter() {
+            let body = instance.body.as_ref().expect("instance body");
+            assert_body_has_no_parameters(&program, instance);
+            for (_, expression) in body.expressions.iter() {
+                if let LoweredExpressionKind::RepeatedProduct(repeated) = &expression.kind {
+                    found += 1;
+                    match &repeated.count {
+                        super::super::LoweredRepeatCount::Symbolic(count) => {
+                            assert!(!contains_type_parameter(count));
+                        }
+                        super::super::LoweredRepeatCount::Fixed(count) => {
+                            assert_eq!(*count, 3);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            found, 1,
+            "the repeated product survives into exactly one concrete body"
+        );
+    }
+
+    #[test]
+    fn nested_closures_and_captures_materialize_concretely() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "def make: <T where Copy T> T -> (() -> T) = value => () => value\n",
+            "let produced: () -> I32 = make 7\n",
+        ));
+        materialize(&mut program);
+        let make = function_id(&program, "make");
+        let instance = program
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.template == make)
+            .map(|(_, instance)| instance)
+            .expect("make instance");
+        assert_body_has_no_parameters(&program, instance);
+        let body = instance.body.as_ref().unwrap();
+        assert!(
+            body.callable_values
+                .iter()
+                .any(|(_, value)| value.closure.is_some()),
+            "the nested closure construction is cloned into the body"
+        );
+    }
+
+    #[test]
+    fn identical_requests_share_one_body() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+            "let second: I32 = identity 1\n",
+        ));
+        materialize(&mut program);
+        let identity = function_id(&program, "identity");
+        let instances = program
+            .instances
+            .iter()
+            .filter(|(_, instance)| instance.template == identity)
+            .collect::<Vec<_>>();
+        assert_eq!(instances.len(), 1, "identical requests share one instance");
+        assert!(instances[0].1.body.is_some());
+    }
+
     #[test]
     fn nongeneric_instance_body_matches_its_template() {
         let (_, mut program) =
