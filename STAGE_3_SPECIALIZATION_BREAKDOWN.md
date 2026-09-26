@@ -80,6 +80,8 @@ Focused tests cover eager-root/backend agreement, unused-generic absence, repeat
 
 The implementation sequence, owned-body representation, target-binding contract, and focused gates are detailed in [STAGE_3_4_CONCRETE_INSTANCE_BODIES_PLAN.md](STAGE_3_4_CONCRETE_INSTANCE_BODIES_PLAN.md).
 
+**Step 1 — schema and remap coverage: complete.** The private `lower/instance_body.rs` child module owns `LoweredInstanceBody` with instance-local arenas for every function-owned Stage 2 family, concrete signature/bounds/parameter/capture metadata, per-site binding tables, and the global coroutine plan the body owns. `LoweredProgram::materialize_instance_bodies` materializes in Stage 3.3 ordinal order and `validate_instance_bodies` walks reachability, concreteness, bindings, and plan ownership; focused tests cover nongeneric/clone agreement, unchanged templates, body-less templates, and local-ID-only traversal. Later steps record substitution, dispatch binding, concrete-sensitive recomputation, and the full validator/documentation handoff.
+
 - Clone each reachable template into an instance-owned body, substituting all checked types, effect rows, bounds, trait arguments, aggregate/count metadata, capture types, resource requirements, and coroutine frame metadata.
 - Replace known-function call and callable-value targets with their interned instance references; retain the existing direct versus indirect call decision and closure-environment mode. Preserve ABI argument order and move/mutation/drop facts.
 - Resolve each trait-dependent call, index operation, indexed assignment, and interpolation to its concrete explicit or structural evidence. Store the selected method/function reference or typed structural request on the instance node.

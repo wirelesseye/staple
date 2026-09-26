@@ -1226,8 +1226,24 @@ impl SpecializationCatalog {
         self.instances.get(ordinal.0)
     }
 
+    /// The ordinal already interned for a key, when it was reserved. Stage 3.4
+    /// uses this to bind a re-resolved site to the Stage 3.3 instance and
+    /// must not introduce a second identity for the same key.
+    pub(crate) fn instance_ordinal(&self, key: &InstanceKey) -> Option<InstanceOrdinal> {
+        self.instance_lookup
+            .get(key)
+            .map(|ordinal| InstanceOrdinal(*ordinal))
+    }
+
     pub(crate) fn artifact(&self, ordinal: ArtifactOrdinal) -> Option<&ArtifactRequestKey> {
         self.artifacts.get(ordinal.0)
+    }
+
+    /// The ordinal already interned for a generated-artifact key.
+    pub(crate) fn artifact_ordinal(&self, key: &ArtifactRequestKey) -> Option<ArtifactOrdinal> {
+        self.artifact_lookup
+            .get(key)
+            .map(|ordinal| ArtifactOrdinal(*ordinal))
     }
 
     pub(crate) fn instances(&self) -> impl Iterator<Item = (InstanceOrdinal, &InstanceKey)> {

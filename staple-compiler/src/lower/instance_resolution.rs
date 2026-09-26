@@ -1677,6 +1677,125 @@ impl LoweredProgram {
     }
 }
 
+impl LoweredProgram {
+    /// Completes one declared trait bound for a concrete instance: substitutes
+    /// the instance environment, then fills functional-dependency or inferred
+    /// positions from the owned catalogs exactly as the resolver does for a
+    /// `DeclaredBound` recipe. Stage 3.4 stores the completed bound as body
+    /// metadata, so no placeholder survives into an emitted body.
+    pub(crate) fn complete_declared_bound(
+        &self,
+        origin: &Origin,
+        bound: &CheckedTraitBound,
+        environment: &SubstitutionEnvironment,
+    ) -> Result<CheckedTraitBound, Diagnostic> {
+        let map = environment.substitution_map();
+        let substituted = CheckedTraitBound {
+            trait_id: bound.trait_id,
+            arguments: bound
+                .arguments
+                .iter()
+                .map(|argument| substitute_type(argument.clone(), &map))
+                .collect(),
+        };
+        if !substituted.arguments.iter().any(contains_inferred_type) {
+            for argument in &substituted.arguments {
+                if let Some(problem) = unresolved_type_problem(argument) {
+                    return Err(Diagnostic::new(
+                        origin.span.clone(),
+                        format!("trait bound argument `{argument}` is not concrete: {problem}"),
+                    ));
+                }
+            }
+            return Ok(substituted);
+        }
+        let bounds = TraitSelectionContext::new(self, Vec::new())
+            .expand_bounds(substitute_bounds(std::slice::from_ref(bound), &map));
+        let context = TraitSelectionContext::new(self, bounds);
+        let completed = context
+            .complete_obligation_arguments(substituted.trait_id, &substituted.arguments)
+            .filter(|completed| !completed.iter().any(contains_inferred_type))
+            .or_else(|| {
+                complete_bound_from_implementations(
+                    self,
+                    substituted.trait_id,
+                    &substituted.arguments,
+                )
+            })
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    origin.span.clone(),
+                    format!(
+                        "cannot complete the arguments of trait `{}` for this instance",
+                        context.trait_name(substituted.trait_id)
+                    ),
+                )
+            })?;
+        for argument in &completed {
+            if let Some(problem) = unresolved_type_problem(argument) {
+                return Err(Diagnostic::new(
+                    origin.span.clone(),
+                    format!(
+                        "completed trait bound argument `{argument}` is not concrete: {problem}"
+                    ),
+                ));
+            }
+        }
+        Ok(CheckedTraitBound {
+            trait_id: substituted.trait_id,
+            arguments: completed,
+        })
+    }
+}
+
+/// Completes functional-dependency positions of a concrete bound from the
+/// owned trait-implementation catalog: every non-negative implementation of
+/// the trait whose known positions unify contributes a candidate, and all
+/// candidates must agree. This is the implementation-side counterpart of
+/// `TraitSelectionContext::complete_obligation_arguments`.
+pub(crate) fn complete_bound_from_implementations(
+    program: &LoweredProgram,
+    trait_id: TraitId,
+    arguments: &[CheckedType],
+) -> Option<Vec<CheckedType>> {
+    let mut candidates = Vec::new();
+    for (_, implementation) in program.trait_implementations.iter() {
+        if implementation.negative
+            || implementation.trait_id != trait_id
+            || implementation.arguments.len() != arguments.len()
+        {
+            continue;
+        }
+        let mut substitutions = HashMap::new();
+        let matches = implementation
+            .arguments
+            .iter()
+            .zip(arguments)
+            .all(|(template, actual)| {
+                contains_inferred_type(actual)
+                    || infer_type_parameters(template, actual, &mut substitutions)
+            });
+        if matches {
+            let candidate = implementation
+                .arguments
+                .iter()
+                .cloned()
+                .map(|argument| substitute_type(argument, &substitutions))
+                .collect::<Vec<_>>();
+            if !candidate.iter().any(contains_inferred_type)
+                && !candidate.iter().any(contains_type_parameter)
+            {
+                candidates.push(candidate);
+            }
+        }
+    }
+    let mut completed = candidates.drain(..).next()?;
+    for candidate in candidates {
+        completed = merge_trait_arguments(&completed, &candidate)?;
+    }
+    Some(completed)
+}
+
 fn substitute_bounds(
     bounds: &[CheckedTraitBound],
     map: &HashMap<TypeParameterId, CheckedType>,

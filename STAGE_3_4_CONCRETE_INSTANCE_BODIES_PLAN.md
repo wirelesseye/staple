@@ -1,6 +1,6 @@
 # Stage 3.4 Plan: Materialize Concrete Instance Bodies
 
-**Status:** Planned. Stage 3.3 is implemented through `f30ee2b`; Stage 3.4 has not been implemented.
+**Status:** In progress. Stage 3.3 is implemented through `f30ee2b`. Step 1 (instance-body schema and remap coverage) is implemented; Steps 2-5 are being implemented step by step.
 
 ## Goal and boundary
 
@@ -33,6 +33,8 @@ The instance body must expose concrete target variants rather than retaining a `
 - Add empty-body and simple nongeneric-instance tests proving that the new root and local ID maps agree, source templates remain unchanged, and one instance can be traversed using only its owned body and shared semantic catalogs.
 
 **Gate:** The schema covers every Stage 2 family reachable from a function body and makes the instance/template boundary visible in types and validation.
+
+**Step 1 — complete.** The private `lower/instance_body.rs` child module defines `LoweredInstanceBody`: the template/`FunctionId` and origin, the concrete signature, substituted bounds, the local parameter pattern, ordered concrete parameter and capture metadata, the local root, the global coroutine plan it owns, concrete binding tables (`LoweredBindingSite` → `LoweredBoundTarget`) with resolved evidence, and its own typed arenas for blocks, items, expressions, patterns, places, calls, callable values, resource providers/uses, `with` records, reactive operations/callbacks, coroutine plans, `coro`, and `await` records. Template and instance IDs stay distinct by construction: instance references only index the body's own arenas, while semantic `FunctionId`/`SymbolId`/`TypeId`/trait IDs stay global. `LoweredProgram::materialize_instance_bodies` materializes in Stage 3.3 ordinal order from immutable program state and installs bodies only when no diagnostic was recorded; `validate_instance_bodies` walks each body for reachability/ownership, concrete checked values, target bindings, dependency/artifact agreement, and plan/await ownership. Every body clone match is exhaustive over `LoweredExpressionKind`, `LoweredItemKind`, `LoweredPlaceKind`, call target, trait-evidence shape, reactive operation, and await kind, so a new variant requires an explicit decision, and the per-family old-to-new maps register shared occurrences once. Focused tests prove a nongeneric instance body matches its template, materialization leaves the template arenas unchanged, body-less templates materialize empty bodies, and an instance body traverses using only instance-local IDs.
 
 ### Step 2 — Clone and substitute ordinary bodies
 

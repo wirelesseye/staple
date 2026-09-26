@@ -62,6 +62,9 @@ pub(crate) struct LoweredFunctionInstance {
     pub dependencies: Vec<LoweredInstanceDependency>,
     /// Generated-artifact references in traversal order.
     pub artifacts: Vec<LoweredArtifactDependency>,
+    /// The concrete Stage 3.4 body. `None` until materialization runs and for
+    /// instances whose template has no runtime body (externs, intrinsics).
+    pub body: Option<super::instance_body::LoweredInstanceBody>,
 }
 
 /// How one function instance entered the graph.
@@ -445,6 +448,7 @@ impl<'a> WorklistBuilder<'a> {
                 evidence: resolved.evidence,
                 dependencies: Vec::new(),
                 artifacts: Vec::new(),
+                body: None,
             });
             self.queue.push(id);
         }
@@ -1307,14 +1311,16 @@ impl<'a> WorklistBuilder<'a> {
             } => {
                 let function_type = match recorded_type.clone() {
                     Some(function_type) => function_type,
-                    None => match self.instantiate_method_type(origin, trait_id, method, arguments)
-                    {
-                        Ok(function_type) => function_type,
-                        Err(diagnostic) => {
-                            self.diagnostics.push(diagnostic);
-                            return;
+                    None => {
+                        match instantiate_method_type(program, origin, trait_id, method, arguments)
+                        {
+                            Ok(function_type) => function_type,
+                            Err(diagnostic) => {
+                                self.diagnostics.push(diagnostic);
+                                return;
+                            }
                         }
-                    },
+                    }
                 };
                 let evidence = if program.relevant_parameters(*function).is_empty() {
                     None
@@ -1353,7 +1359,9 @@ impl<'a> WorklistBuilder<'a> {
                         }
                     }
                     None => {
-                        match self.instantiate_method_type(origin, *trait_id, *method, arguments) {
+                        match instantiate_method_type(
+                            program, origin, *trait_id, *method, arguments,
+                        ) {
                             Ok(function_type) => function_type,
                             Err(diagnostic) => {
                                 self.diagnostics.push(diagnostic);
@@ -1387,67 +1395,68 @@ impl<'a> WorklistBuilder<'a> {
             }
         }
     }
+}
 
-    /// Instantiates a trait method's declared function type from the owned
-    /// catalogs, mirroring `TypedModule::instantiated_trait_method_type`.
-    fn instantiate_method_type(
-        &self,
-        origin: &Origin,
-        trait_id: TraitId,
-        method: TraitMethodId,
-        arguments: &[CheckedType],
-    ) -> Result<CheckedFunctionType, Diagnostic> {
-        let program = self.program;
-        let Some(trait_metadata) = program.traits.get(trait_id) else {
-            return Err(Diagnostic::new(
-                origin.span.clone(),
-                format!("trait {} is missing from the lowered catalog", trait_id.0),
-            ));
-        };
-        let Some(method_metadata) = program.trait_methods.get(method) else {
+/// Instantiates a trait method's declared function type from the owned
+/// catalogs, mirroring `TypedModule::instantiated_trait_method_type`.
+pub(super) fn instantiate_method_type(
+    program: &LoweredProgram,
+    origin: &Origin,
+    trait_id: TraitId,
+    method: TraitMethodId,
+    arguments: &[CheckedType],
+) -> Result<CheckedFunctionType, Diagnostic> {
+    let Some(trait_metadata) = program.traits.get(trait_id) else {
+        return Err(Diagnostic::new(
+            origin.span.clone(),
+            format!("trait {} is missing from the lowered catalog", trait_id.0),
+        ));
+    };
+    let Some(method_metadata) = program.trait_methods.get(method) else {
+        return Err(Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "trait method {} is missing from the lowered catalog",
+                method.0
+            ),
+        ));
+    };
+    if trait_metadata.parameters.len() != arguments.len() {
+        return Err(Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "trait {} has {} parameters for {} completed arguments",
+                trait_metadata.name,
+                trait_metadata.parameters.len(),
+                arguments.len()
+            ),
+        ));
+    }
+    let mut inferred = HashMap::new();
+    for (parameter, argument) in trait_metadata.parameters.iter().zip(arguments) {
+        if !infer_type_parameters(parameter, argument, &mut inferred) {
             return Err(Diagnostic::new(
                 origin.span.clone(),
                 format!(
-                    "trait method {} is missing from the lowered catalog",
-                    method.0
-                ),
-            ));
-        };
-        if trait_metadata.parameters.len() != arguments.len() {
-            return Err(Diagnostic::new(
-                origin.span.clone(),
-                format!(
-                    "trait {} has {} parameters for {} completed arguments",
-                    trait_metadata.name,
-                    trait_metadata.parameters.len(),
-                    arguments.len()
-                ),
-            ));
-        }
-        let mut inferred = HashMap::new();
-        for (parameter, argument) in trait_metadata.parameters.iter().zip(arguments) {
-            if !infer_type_parameters(parameter, argument, &mut inferred) {
-                return Err(Diagnostic::new(
-                    origin.span.clone(),
-                    format!(
-                        "cannot instantiate method `{}` of trait `{}` for argument `{argument}`",
-                        method_metadata.name, trait_metadata.name
-                    ),
-                ));
-            }
-        }
-        match substitute_type(method_metadata.value_type.clone(), &inferred) {
-            CheckedType::Function(function_type) => Ok(function_type),
-            other => Err(Diagnostic::new(
-                origin.span.clone(),
-                format!(
-                    "instantiated method `{}` of trait `{}` is not a function: {other}",
+                    "cannot instantiate method `{}` of trait `{}` for argument `{argument}`",
                     method_metadata.name, trait_metadata.name
                 ),
-            )),
+            ));
         }
     }
+    match substitute_type(method_metadata.value_type.clone(), &inferred) {
+        CheckedType::Function(function_type) => Ok(function_type),
+        other => Err(Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "instantiated method `{}` of trait `{}` is not a function: {other}",
+                method_metadata.name, trait_metadata.name
+            ),
+        )),
+    }
+}
 
+impl<'a> WorklistBuilder<'a> {
     fn traverse_reactive_operation(
         &mut self,
         operation: LoweredReactiveOperationId,
@@ -1554,7 +1563,7 @@ fn evidence_trait_id(evidence: &TraitEvidence) -> TraitId {
 /// Builds the site recipe for an evidence-only site from the trait's declared
 /// parameters and the site's completed arguments, matching the recipe lowered
 /// calls already record.
-fn trait_site_substitutions(
+pub(super) fn trait_site_substitutions(
     program: &LoweredProgram,
     trait_id: TraitId,
     arguments: &[CheckedType],
@@ -1570,7 +1579,7 @@ fn trait_site_substitutions(
 /// Substitutes a recorded method type through the enclosing or site
 /// environment. Leftover declared parameters are reported by the artifact key
 /// constructor at `origin`.
-fn concretize_function_type(
+pub(super) fn concretize_function_type(
     function_type: &CheckedFunctionType,
     environment: Option<&SubstitutionEnvironment>,
     origin: &Origin,

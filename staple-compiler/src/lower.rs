@@ -24,6 +24,7 @@ use crate::{
     TypeParameterId, TypedModule, contains_type_parameter, infer_type_parameters,
 };
 
+mod instance_body;
 mod instance_resolution;
 mod worklist;
 
@@ -45,6 +46,14 @@ pub(crate) use worklist::{
     LoweredArtifactRequestRoot, LoweredCompilerHelperRequest, LoweredFunctionInstance,
     LoweredHelperRequester, LoweredInstanceDependency, LoweredInstanceDependencyKind,
     LoweredInstanceRequest,
+};
+
+// Stage 3.4 instance-body API. Bodies are instance-owned and instance-local;
+// shared semantic catalogs stay at the program level.
+#[allow(unused_imports)] // Stage 3.5 and the backend consume these types.
+pub(crate) use instance_body::{
+    LoweredBindingSite, LoweredBoundTarget, LoweredInstanceBody, LoweredInstanceCapture,
+    LoweredInstanceParameter,
 };
 
 macro_rules! arena_id {
@@ -12668,6 +12677,12 @@ impl Lowerer {
         diagnostics.extend(program.validate());
         if diagnostics.is_empty() {
             diagnostics.extend(program.build_specialization_worklist());
+        }
+        if diagnostics.is_empty() {
+            diagnostics.extend(program.materialize_instance_bodies());
+        }
+        if diagnostics.is_empty() {
+            diagnostics.extend(program.validate_instance_bodies());
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.validate_specializations());
