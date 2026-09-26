@@ -111,7 +111,7 @@ Read from `codegen.rs` at `df249ce`; line numbers drift, function names are auth
 
 ## Stage 4.2 - Fixed-Point Artifact Closure Engine
 
-> **Separate plan recommended** (`STAGE_4_2_ARTIFACT_CLOSURE_PLAN.md`). This substage changes the shape of the Stage 3 pipeline (worklist and materialization become resumable) and every later substage depends on its API.
+> **Separate plan:** [STAGE_4_2_ARTIFACT_CLOSURE_PLAN.md](STAGE_4_2_ARTIFACT_CLOSURE_PLAN.md). This substage changes the shape of the Stage 3 pipeline (worklist and materialization become resumable) and every later substage depends on its API.
 
 - Recommended design: after Stage 3.4 materialization, run a round-based closure loop inside `Lowerer::lower`:
   1. Scan every not-yet-scanned owner (initializers, instances, artifacts) in catalog order and each site in lowered evaluation order; request the artifacts the site needs (drop sites, allocations with finalizers, closure constructions with finalizers, reactive operations, `coro` creations, intrinsic sites, constructor/structural sites already requested by Stage 3).
