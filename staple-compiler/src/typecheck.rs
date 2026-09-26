@@ -12398,7 +12398,7 @@ fn replace_product_default_policy(merged: CheckedType, expected: &CheckedType) -
     }
 }
 
-fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType> {
+pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType> {
     match (actual, expected) {
         (CheckedType::Error, _) | (_, CheckedType::Error) => Some(CheckedType::Error),
         (CheckedType::Never, expected) => Some(expected),
@@ -12729,7 +12729,7 @@ pub(crate) fn select_sum_alternative(
     }
 }
 
-fn effect_substitution_type(effects: CheckedEffectSet) -> CheckedType {
+pub(crate) fn effect_substitution_type(effects: CheckedEffectSet) -> CheckedType {
     CheckedType::Function(CheckedFunctionType {
         parameter_style: staple_syntax::FunctionParameterStyle::Single,
         default: None,
@@ -12740,7 +12740,7 @@ fn effect_substitution_type(effects: CheckedEffectSet) -> CheckedType {
         result: Box::new(CheckedType::Error),
     })
 }
-fn effect_substitution_value(value: &CheckedType) -> Option<&CheckedEffectSet> {
+pub(crate) fn effect_substitution_value(value: &CheckedType) -> Option<&CheckedEffectSet> {
     let CheckedType::Function(function) = value else {
         return None;
     };
@@ -12809,7 +12809,7 @@ fn infer_effect_parameter(
     true
 }
 
-fn substitute_effect_set(
+pub(crate) fn substitute_effect_set(
     effects: CheckedEffectSet,
     substitutions: &HashMap<TypeParameterId, CheckedType>,
 ) -> CheckedEffectSet {

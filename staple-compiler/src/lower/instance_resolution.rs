@@ -6,11 +6,15 @@
 //! is scanned under its own `FunctionId`, so a nested body contributes through
 //! the record that constructs or invokes it, not as ordinary children.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use staple_syntax::Diagnostic;
 
 use crate::{
-    CheckedEffectSet, CheckedFunctionType, CheckedTraitBound, CheckedType, FunctionId,
-    TraitEvidence, TypeParameterId,
+    CallSubstitutions, CheckedEffectSet, CheckedFunctionType, CheckedTraitBound, CheckedType,
+    FunctionId, TraitEvidence, TypeParameterId, contains_type_parameter, effect_substitution_type,
+    effect_substitution_value, infer_type_parameters, merge_types, substitute_effect_set,
+    substitute_type,
 };
 
 use super::*;
@@ -22,15 +26,36 @@ use super::*;
 pub(crate) struct RelevantParameters {
     types: BTreeSet<TypeParameterId>,
     effects: BTreeSet<TypeParameterId>,
+    /// Declaration names retained for diagnostics only; never identity.
+    names: BTreeMap<TypeParameterId, String>,
 }
 
 impl RelevantParameters {
-    pub(crate) fn insert_type(&mut self, parameter: TypeParameterId) {
+    fn notice_type(&mut self, parameter: TypeParameterId, name: &str) {
         self.types.insert(parameter);
+        self.names
+            .entry(parameter)
+            .or_insert_with(|| name.to_owned());
     }
 
-    pub(crate) fn insert_effect(&mut self, parameter: TypeParameterId) {
+    fn notice_effect(&mut self, parameter: TypeParameterId, name: &str) {
         self.effects.insert(parameter);
+        self.names
+            .entry(parameter)
+            .or_insert_with(|| name.to_owned());
+    }
+
+    /// The declared name of a relevant parameter, when it was observed.
+    pub(crate) fn name(&self, parameter: TypeParameterId) -> Option<&str> {
+        self.names.get(&parameter).map(String::as_str)
+    }
+
+    /// Diagnostic text for one parameter: its declared name when known.
+    pub(crate) fn display(&self, parameter: TypeParameterId) -> String {
+        match self.name(parameter) {
+            Some(name) => format!("`{name}`"),
+            None => format!("id {}", parameter.0),
+        }
     }
 
     pub(crate) fn contains_type(&self, parameter: TypeParameterId) -> bool {
@@ -107,6 +132,709 @@ pub(crate) const PARAMETER_RECORD_FAMILIES: &[&str] = &[
     "reactive-callback",
     "trait-evidence",
 ];
+
+/// Where a substitution value came from. Retained so a conflict can name the
+/// two disagreeing sources instead of silently overwriting one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubstitutionSource {
+    /// A value already concrete in the enclosing instance environment.
+    EnclosingInstance,
+    /// A value recorded on the Stage 2 call or callable-value site recipe.
+    Site,
+    /// A value inferred from the complete checked callable type at the site.
+    Inferred,
+}
+
+impl SubstitutionSource {
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            SubstitutionSource::EnclosingInstance => "the enclosing instance",
+            SubstitutionSource::Site => "the call site",
+            SubstitutionSource::Inferred => "the checked callable type",
+        }
+    }
+}
+
+/// One substitution value. Type and effect-row parameters stay distinct: a
+/// type parameter can never receive an effect row or the reverse.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SubstitutionValue {
+    Type(CheckedType),
+    Effects(CheckedEffectSet),
+}
+
+impl SubstitutionValue {
+    fn kind_name(&self) -> &'static str {
+        match self {
+            SubstitutionValue::Type(_) => "a type",
+            SubstitutionValue::Effects(_) => "an effect row",
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            SubstitutionValue::Type(value_type) => value_type.to_string(),
+            SubstitutionValue::Effects(effects) => effects.to_string(),
+        }
+    }
+
+    fn referenced_parameters(&self, out: &mut BTreeSet<TypeParameterId>) {
+        match self {
+            SubstitutionValue::Type(value_type) => collect_referenced_parameters(value_type, out),
+            SubstitutionValue::Effects(effects) => {
+                if let Some(variable) = &effects.variable {
+                    out.insert(variable.id);
+                }
+                for resource in &effects.resources {
+                    collect_referenced_parameters(&resource.value_type, out);
+                }
+            }
+        }
+    }
+
+    fn substitute(&self, map: &HashMap<TypeParameterId, CheckedType>) -> SubstitutionValue {
+        match self {
+            SubstitutionValue::Type(value_type) => {
+                SubstitutionValue::Type(substitute_type(value_type.clone(), map))
+            }
+            SubstitutionValue::Effects(effects) => {
+                SubstitutionValue::Effects(substitute_effect_set(effects.clone(), map))
+            }
+        }
+    }
+}
+
+/// One resolved entry of a `SubstitutionEnvironment`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SubstitutionEntry {
+    pub source: SubstitutionSource,
+    pub value: SubstitutionValue,
+}
+
+/// A resolved, conflict-free, concrete-or-chain environment for one request.
+/// Values may still reference another parameter of the same request; the final
+/// concreteness check rejects any that remain unresolved for a relevant
+/// parameter.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct SubstitutionEnvironment {
+    entries: BTreeMap<TypeParameterId, SubstitutionEntry>,
+}
+
+impl SubstitutionEnvironment {
+    pub(crate) fn entry(&self, parameter: TypeParameterId) -> Option<&SubstitutionEntry> {
+        self.entries.get(&parameter)
+    }
+
+    pub(crate) fn type_value(&self, parameter: TypeParameterId) -> Option<&CheckedType> {
+        match self.entries.get(&parameter).map(|entry| &entry.value) {
+            Some(SubstitutionValue::Type(value_type)) => Some(value_type),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn effect_value(&self, parameter: TypeParameterId) -> Option<&CheckedEffectSet> {
+        match self.entries.get(&parameter).map(|entry| &entry.value) {
+            Some(SubstitutionValue::Effects(effects)) => Some(effects),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (TypeParameterId, &SubstitutionEntry)> + '_ {
+        self.entries
+            .iter()
+            .map(|(parameter, entry)| (*parameter, entry))
+    }
+
+    /// The checker-shaped substitution map: type entries as-is, effect entries
+    /// encoded as the checker's error-shaped function carrier. The carrier
+    /// never enters a key; it exists only so the checker's own
+    /// `substitute_type`/`substitute_effect_set` can be reused verbatim.
+    pub(crate) fn substitution_map(&self) -> HashMap<TypeParameterId, CheckedType> {
+        self.entries
+            .iter()
+            .map(|(parameter, entry)| {
+                let value = match &entry.value {
+                    SubstitutionValue::Type(value_type) => value_type.clone(),
+                    SubstitutionValue::Effects(effects) => {
+                        effect_substitution_type(effects.clone())
+                    }
+                };
+                (*parameter, value)
+            })
+            .collect()
+    }
+
+    /// Retains only the entries for the given relevant parameters. Values that
+    /// transitively reference other outer parameters keep whatever entries
+    /// were needed to resolve them; callers hold the unpruned environment
+    /// while resolving.
+    pub(crate) fn pruned(&self, relevant: &RelevantParameters) -> SubstitutionEnvironment {
+        let mut entries = BTreeMap::new();
+        for parameter in relevant
+            .type_parameters()
+            .chain(relevant.effect_parameters())
+        {
+            if let Some(entry) = self.entries.get(&parameter) {
+                entries.insert(parameter, entry.clone());
+            }
+        }
+        SubstitutionEnvironment { entries }
+    }
+}
+
+fn collect_referenced_parameters(value_type: &CheckedType, out: &mut BTreeSet<TypeParameterId>) {
+    match value_type {
+        CheckedType::Parameter { id, .. } => {
+            out.insert(*id);
+        }
+        CheckedType::Ref(payload)
+        | CheckedType::Slice(payload)
+        | CheckedType::Buffer(payload)
+        | CheckedType::CPointer { pointee: payload } => collect_referenced_parameters(payload, out),
+        CheckedType::Array { element, count } => {
+            collect_referenced_parameters(element, out);
+            collect_referenced_parameters(count, out);
+        }
+        CheckedType::TypeConstructor { arguments, .. } | CheckedType::Opaque { arguments, .. } => {
+            for argument in arguments {
+                collect_referenced_parameters(argument, out);
+            }
+        }
+        CheckedType::Product(product) => {
+            for element in &product.elements {
+                collect_referenced_parameters(&element.value_type, out);
+            }
+        }
+        CheckedType::Sum(sum) => {
+            for alternative in &sum.alternatives {
+                collect_referenced_parameters(alternative, out);
+            }
+        }
+        CheckedType::Function(function) => {
+            collect_referenced_parameters(&function.parameter, out);
+            collect_referenced_effect_parameters(&function.effects, out);
+            collect_referenced_parameters(&function.result, out);
+        }
+        CheckedType::Distinct {
+            arguments,
+            representation,
+            ..
+        } => {
+            for argument in arguments {
+                collect_referenced_parameters(argument, out);
+            }
+            collect_referenced_parameters(representation, out);
+        }
+        CheckedType::Inferred
+        | CheckedType::Error
+        | CheckedType::Never
+        | CheckedType::I32
+        | CheckedType::I8
+        | CheckedType::I16
+        | CheckedType::I64
+        | CheckedType::U8
+        | CheckedType::U16
+        | CheckedType::U32
+        | CheckedType::U64
+        | CheckedType::ISize
+        | CheckedType::USize
+        | CheckedType::F32
+        | CheckedType::F64
+        | CheckedType::NumberLiteral(_)
+        | CheckedType::String
+        | CheckedType::StringLiteralSet(_)
+        | CheckedType::CString
+        | CheckedType::CChar => {}
+    }
+}
+
+fn collect_referenced_effect_parameters(
+    effects: &CheckedEffectSet,
+    out: &mut BTreeSet<TypeParameterId>,
+) {
+    if let Some(variable) = &effects.variable {
+        out.insert(variable.id);
+    }
+    for resource in &effects.resources {
+        collect_referenced_parameters(&resource.value_type, out);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SubstitutionCandidate {
+    value: SubstitutionValue,
+    source: SubstitutionSource,
+}
+
+/// Gathers raw candidates from the enclosing environment, the site recipe,
+/// and the checked callable type, then resolves them transitively. Conflicts
+/// are detected after substitution, so a chain (`T -> U`, `U -> I32`) agrees
+/// with a later direct value instead of being misreported.
+struct EnvironmentBuilder {
+    candidates: BTreeMap<TypeParameterId, Vec<SubstitutionCandidate>>,
+    origin: Origin,
+}
+
+impl EnvironmentBuilder {
+    fn new(origin: &Origin) -> Self {
+        EnvironmentBuilder {
+            candidates: BTreeMap::new(),
+            origin: origin.clone(),
+        }
+    }
+
+    fn add(
+        &mut self,
+        parameter: TypeParameterId,
+        value: SubstitutionValue,
+        source: SubstitutionSource,
+    ) {
+        self.candidates
+            .entry(parameter)
+            .or_default()
+            .push(SubstitutionCandidate { value, source });
+    }
+
+    fn add_enclosing(&mut self, environment: &SubstitutionEnvironment) {
+        for (parameter, entry) in environment.iter() {
+            self.add(parameter, entry.value.clone(), entry.source);
+        }
+    }
+
+    fn add_site(&mut self, substitutions: &CallSubstitutions) {
+        for substitution in &substitutions.types {
+            match effect_substitution_value(&substitution.value_type) {
+                Some(effects) => self.add(
+                    substitution.parameter,
+                    SubstitutionValue::Effects(effects.clone()),
+                    SubstitutionSource::Site,
+                ),
+                None => self.add(
+                    substitution.parameter,
+                    SubstitutionValue::Type(substitution.value_type.clone()),
+                    SubstitutionSource::Site,
+                ),
+            }
+        }
+        for substitution in &substitutions.effects {
+            self.add(
+                substitution.parameter,
+                SubstitutionValue::Effects(substitution.effects.clone()),
+                SubstitutionSource::Site,
+            );
+        }
+    }
+
+    fn add_inferred(&mut self, inferred: HashMap<TypeParameterId, CheckedType>) {
+        let mut entries = inferred.into_iter().collect::<Vec<_>>();
+        entries.sort_by_key(|(parameter, _)| parameter.0);
+        for (parameter, value_type) in entries {
+            match effect_substitution_value(&value_type) {
+                Some(effects) => self.add(
+                    parameter,
+                    SubstitutionValue::Effects(effects.clone()),
+                    SubstitutionSource::Inferred,
+                ),
+                None => self.add(
+                    parameter,
+                    SubstitutionValue::Type(value_type),
+                    SubstitutionSource::Inferred,
+                ),
+            }
+        }
+    }
+
+    fn resolve(&self) -> Result<SubstitutionEnvironment, Diagnostic> {
+        let order = self.resolution_order()?;
+        let mut entries = BTreeMap::new();
+        let mut map: HashMap<TypeParameterId, CheckedType> = HashMap::new();
+        for parameter in order {
+            let Some(candidates) = self.candidates.get(&parameter) else {
+                continue;
+            };
+            let mut merged: Option<SubstitutionCandidate> = None;
+            for candidate in candidates {
+                let value = candidate.value.substitute(&map);
+                merged = Some(match merged {
+                    None => SubstitutionCandidate {
+                        value,
+                        source: candidate.source,
+                    },
+                    Some(existing) => SubstitutionCandidate {
+                        value: merge_substitution_values(
+                            &self.origin,
+                            parameter,
+                            existing.value,
+                            existing.source,
+                            value,
+                            candidate.source,
+                        )?
+                        .substitute(&map),
+                        source: existing.source,
+                    },
+                });
+            }
+            let Some(merged) = merged else {
+                continue;
+            };
+            let encoded = match &merged.value {
+                SubstitutionValue::Type(value_type) => value_type.clone(),
+                SubstitutionValue::Effects(effects) => effect_substitution_type(effects.clone()),
+            };
+            map.insert(parameter, encoded);
+            entries.insert(
+                parameter,
+                SubstitutionEntry {
+                    source: merged.source,
+                    value: merged.value,
+                },
+            );
+        }
+        Ok(SubstitutionEnvironment { entries })
+    }
+
+    /// Stably orders parameter resolution by ascending ID with dependencies
+    /// first. A self-reference or longer cycle is reported before any
+    /// substitution runs, rather than relying on repeated substitution to
+    /// converge.
+    fn resolution_order(&self) -> Result<Vec<TypeParameterId>, Diagnostic> {
+        let mut dependencies: BTreeMap<TypeParameterId, BTreeSet<TypeParameterId>> =
+            BTreeMap::new();
+        let mut dependents: BTreeMap<TypeParameterId, BTreeSet<TypeParameterId>> = BTreeMap::new();
+        for (parameter, candidates) in &self.candidates {
+            let mut referenced = BTreeSet::new();
+            for candidate in candidates {
+                candidate.value.referenced_parameters(&mut referenced);
+            }
+            for dependency in referenced {
+                if dependency == *parameter {
+                    return Err(self.cycle_diagnostic(&[*parameter]));
+                }
+                if self.candidates.contains_key(&dependency) {
+                    dependencies
+                        .entry(*parameter)
+                        .or_default()
+                        .insert(dependency);
+                    dependents.entry(dependency).or_default().insert(*parameter);
+                }
+            }
+        }
+        let mut indegree: BTreeMap<TypeParameterId, usize> = self
+            .candidates
+            .keys()
+            .map(|parameter| {
+                (
+                    *parameter,
+                    dependencies.get(parameter).map_or(0, BTreeSet::len),
+                )
+            })
+            .collect();
+        let mut ready: BTreeSet<TypeParameterId> = indegree
+            .iter()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(parameter, _)| *parameter)
+            .collect();
+        let mut order = Vec::with_capacity(self.candidates.len());
+        while let Some(parameter) = ready.iter().next().copied() {
+            ready.remove(&parameter);
+            order.push(parameter);
+            if let Some(children) = dependents.get(&parameter) {
+                for child in children {
+                    if let Some(degree) = indegree.get_mut(child) {
+                        *degree -= 1;
+                        if *degree == 0 {
+                            ready.insert(*child);
+                        }
+                    }
+                }
+            }
+        }
+        if order.len() != self.candidates.len() {
+            let remaining: BTreeSet<TypeParameterId> = self
+                .candidates
+                .keys()
+                .filter(|parameter| !order.contains(parameter))
+                .copied()
+                .collect();
+            return Err(self.cycle_diagnostic(&self.find_cycle(&remaining, &dependencies)));
+        }
+        Ok(order)
+    }
+
+    fn find_cycle(
+        &self,
+        remaining: &BTreeSet<TypeParameterId>,
+        dependencies: &BTreeMap<TypeParameterId, BTreeSet<TypeParameterId>>,
+    ) -> Vec<TypeParameterId> {
+        let start = remaining
+            .iter()
+            .next()
+            .copied()
+            .expect("a cycle has at least one remaining node");
+        let mut path = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = start;
+        while visited.insert(current) {
+            path.push(current);
+            let Some(next) = dependencies
+                .get(&current)
+                .and_then(|dependencies| dependencies.iter().find(|next| remaining.contains(next)))
+            else {
+                break;
+            };
+            if let Some(position) = path.iter().position(|parameter| parameter == next) {
+                return path[position..].to_vec();
+            }
+            current = *next;
+        }
+        path
+    }
+
+    fn cycle_diagnostic(&self, cycle: &[TypeParameterId]) -> Diagnostic {
+        let mut names = cycle.to_vec();
+        if let Some(first) = cycle.first() {
+            names.push(*first);
+        }
+        let described = names
+            .iter()
+            .map(|parameter| format!("{}", parameter.0))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        Diagnostic::new(
+            self.origin.span.clone(),
+            format!("substitution cycle between instance parameters: {described}"),
+        )
+    }
+}
+
+fn merge_substitution_values(
+    origin: &Origin,
+    parameter: TypeParameterId,
+    existing: SubstitutionValue,
+    existing_source: SubstitutionSource,
+    incoming: SubstitutionValue,
+    incoming_source: SubstitutionSource,
+) -> Result<SubstitutionValue, Diagnostic> {
+    let conflict = |existing: &SubstitutionValue, incoming: &SubstitutionValue| {
+        Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "conflicting substitutions for parameter {}: {} gives {}, while {} gives {}",
+                parameter.0,
+                existing_source.description(),
+                existing.describe(),
+                incoming_source.description(),
+                incoming.describe()
+            ),
+        )
+    };
+    match (existing, incoming) {
+        (SubstitutionValue::Type(existing), SubstitutionValue::Type(incoming)) => {
+            if existing == incoming {
+                return Ok(SubstitutionValue::Type(existing));
+            }
+            if existing == CheckedType::Error || existing == CheckedType::Inferred {
+                return Ok(SubstitutionValue::Type(incoming));
+            }
+            if incoming == CheckedType::Error || incoming == CheckedType::Inferred {
+                return Ok(SubstitutionValue::Type(existing));
+            }
+            match merge_types(existing.clone(), incoming.clone()) {
+                Some(merged) if merged != CheckedType::Error => Ok(SubstitutionValue::Type(merged)),
+                _ => Err(conflict(
+                    &SubstitutionValue::Type(existing),
+                    &SubstitutionValue::Type(incoming),
+                )),
+            }
+        }
+        (SubstitutionValue::Effects(existing), SubstitutionValue::Effects(incoming)) => {
+            if existing == incoming {
+                return Ok(SubstitutionValue::Effects(existing));
+            }
+            let existing_is_wildcard = existing.variable.is_some()
+                && existing.resources.is_empty()
+                && existing.state.is_none();
+            let incoming_is_wildcard = incoming.variable.is_some()
+                && incoming.resources.is_empty()
+                && incoming.state.is_none();
+            if existing_is_wildcard {
+                return Ok(SubstitutionValue::Effects(incoming));
+            }
+            if incoming_is_wildcard {
+                return Ok(SubstitutionValue::Effects(existing));
+            }
+            Err(conflict(
+                &SubstitutionValue::Effects(existing),
+                &SubstitutionValue::Effects(incoming),
+            ))
+        }
+        (existing, incoming) => Err(Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "parameter {} receives {} from {} but {} from {}",
+                parameter.0,
+                existing.kind_name(),
+                existing_source.description(),
+                incoming.kind_name(),
+                incoming_source.description()
+            ),
+        )),
+    }
+}
+
+/// Requires every relevant parameter to have a concrete value of the right
+/// kind, reporting the first unresolved one at the request origin. A
+/// nonrelevant outer parameter never reaches this check and so never enters a
+/// key.
+pub(crate) fn require_concrete_substitutions(
+    environment: &SubstitutionEnvironment,
+    relevant: &RelevantParameters,
+    origin: &Origin,
+) -> Result<(), Diagnostic> {
+    for parameter in relevant.type_parameters() {
+        let Some(entry) = environment.entry(parameter) else {
+            return Err(unresolved_parameter_diagnostic(
+                origin,
+                relevant,
+                parameter,
+                "type",
+                "no substitution is available",
+            ));
+        };
+        match &entry.value {
+            SubstitutionValue::Type(value_type) => {
+                if let Some(problem) = unresolved_type_problem(value_type) {
+                    return Err(unresolved_parameter_diagnostic(
+                        origin, relevant, parameter, "type", problem,
+                    ));
+                }
+            }
+            SubstitutionValue::Effects(_) => {
+                return Err(unresolved_parameter_diagnostic(
+                    origin,
+                    relevant,
+                    parameter,
+                    "type",
+                    "the substitution is an effect row",
+                ));
+            }
+        }
+    }
+    for parameter in relevant.effect_parameters() {
+        let Some(entry) = environment.entry(parameter) else {
+            return Err(unresolved_parameter_diagnostic(
+                origin,
+                relevant,
+                parameter,
+                "effect",
+                "no substitution is available",
+            ));
+        };
+        match &entry.value {
+            SubstitutionValue::Effects(effects) => {
+                if let Some(variable) = &effects.variable {
+                    return Err(unresolved_parameter_diagnostic(
+                        origin,
+                        relevant,
+                        parameter,
+                        "effect",
+                        &format!("the row still names effect variable `{}`", variable.name),
+                    ));
+                }
+                for resource in &effects.resources {
+                    if let Some(problem) = unresolved_type_problem(&resource.value_type) {
+                        return Err(unresolved_parameter_diagnostic(
+                            origin, relevant, parameter, "effect", problem,
+                        ));
+                    }
+                }
+            }
+            SubstitutionValue::Type(_) => {
+                return Err(unresolved_parameter_diagnostic(
+                    origin,
+                    relevant,
+                    parameter,
+                    "effect",
+                    "the substitution is a type",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unresolved_parameter_diagnostic(
+    origin: &Origin,
+    relevant: &RelevantParameters,
+    parameter: TypeParameterId,
+    kind: &str,
+    problem: &str,
+) -> Diagnostic {
+    Diagnostic::new(
+        origin.span.clone(),
+        format!(
+            "cannot resolve {kind} parameter {} for this instance: {problem}",
+            relevant.display(parameter)
+        ),
+    )
+}
+
+/// The first unresolved placeholder inside a substituted value, if any. A
+/// declared parameter reference or a checker placeholder never reaches an
+/// instance boundary.
+pub(crate) fn unresolved_type_problem(value_type: &CheckedType) -> Option<&'static str> {
+    if contains_type_parameter(value_type) {
+        return Some("its value still contains a declared parameter");
+    }
+    if contains_placeholder(value_type) {
+        return Some("its value contains an inferred or error placeholder");
+    }
+    None
+}
+
+fn contains_placeholder(value_type: &CheckedType) -> bool {
+    match value_type {
+        CheckedType::Inferred | CheckedType::Error => true,
+        CheckedType::Ref(payload)
+        | CheckedType::Slice(payload)
+        | CheckedType::Buffer(payload)
+        | CheckedType::CPointer { pointee: payload } => contains_placeholder(payload),
+        CheckedType::Array { element, count } => {
+            contains_placeholder(element) || contains_placeholder(count)
+        }
+        CheckedType::TypeConstructor { arguments, .. } | CheckedType::Opaque { arguments, .. } => {
+            arguments.iter().any(contains_placeholder)
+        }
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| contains_placeholder(&element.value_type)),
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_placeholder),
+        CheckedType::Function(function) => {
+            contains_placeholder(&function.parameter)
+                || function
+                    .effects
+                    .resources
+                    .iter()
+                    .any(|resource| contains_placeholder(&resource.value_type))
+                || contains_placeholder(&function.result)
+        }
+        CheckedType::Distinct {
+            arguments,
+            representation,
+            ..
+        } => arguments.iter().any(contains_placeholder) || contains_placeholder(representation),
+        _ => false,
+    }
+}
 
 struct ParameterCollector<'a> {
     program: &'a LoweredProgram,
@@ -212,7 +940,7 @@ impl<'a> ParameterCollector<'a> {
 
     fn collect_effect_set(&mut self, effects: &CheckedEffectSet) {
         if let Some(variable) = &effects.variable {
-            self.relevant.insert_effect(variable.id);
+            self.relevant.notice_effect(variable.id, &variable.name);
         }
         for resource in &effects.resources {
             self.collect_type(&resource.value_type);
@@ -249,7 +977,7 @@ impl<'a> ParameterCollector<'a> {
             | CheckedType::StringLiteralSet(_)
             | CheckedType::CString
             | CheckedType::CChar => {}
-            CheckedType::Parameter { id, .. } => self.relevant.insert_type(*id),
+            CheckedType::Parameter { id, name, .. } => self.relevant.notice_type(*id, name),
             CheckedType::Ref(payload)
             | CheckedType::Slice(payload)
             | CheckedType::Buffer(payload)
@@ -866,6 +1594,60 @@ impl LoweredProgram {
         collector.relevant
     }
 
+    /// Builds the resolved substitution environment for one request.
+    ///
+    /// The enclosing environment and the site recipe are merged first, then
+    /// the target template's full checked signature is matched against the
+    /// complete checked callable type at the site and any missing values are
+    /// inferred from it. The inference runs against a pre-resolved site type,
+    /// so enclosing values are honored, and every relevant parameter must end
+    /// up concrete or a source diagnostic at `origin` is returned.
+    pub(crate) fn resolve_substitutions(
+        &self,
+        function: FunctionId,
+        origin: &Origin,
+        function_type: &CheckedFunctionType,
+        substitutions: &CallSubstitutions,
+        enclosing: Option<&SubstitutionEnvironment>,
+    ) -> Result<(SubstitutionEnvironment, RelevantParameters), Diagnostic> {
+        let Some(template) = self.functions.get(function) else {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                format!("function {} has no lowered template", function.0),
+            ));
+        };
+        let relevant = self.relevant_parameters(function);
+        let signature = template.signature.clone();
+        let mut builder = EnvironmentBuilder::new(origin);
+        if let Some(enclosing) = enclosing {
+            builder.add_enclosing(enclosing);
+        }
+        builder.add_site(substitutions);
+        let pre_resolved = builder.resolve()?;
+        let map = pre_resolved.substitution_map();
+        let actual = substitute_type(CheckedType::Function(function_type.clone()), &map);
+        let mut inferred = HashMap::new();
+        if !infer_type_parameters(
+            &CheckedType::Function(signature.clone()),
+            &actual,
+            &mut inferred,
+        ) {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "checked callable type `{}` does not match the template signature `{}` for function {}",
+                    CheckedType::Function(function_type.clone()),
+                    CheckedType::Function(signature.clone()),
+                    function.0
+                ),
+            ));
+        }
+        builder.add_inferred(inferred);
+        let environment = builder.resolve()?;
+        require_concrete_substitutions(&environment, &relevant, origin)?;
+        Ok((environment, relevant))
+    }
+
     /// Every record family the collector visits for one function template.
     /// Used by the coverage test to prove each parameter-bearing family has an
     /// explicit collector decision.
@@ -1140,6 +1922,544 @@ mod tests {
                 "the coverage fixture never reached collector family {family}; \
                  add a record of that family or record an explicit no-parameter decision"
             );
+        }
+    }
+
+    fn test_origin() -> Origin {
+        Origin {
+            syntax: SyntaxId(7),
+            span: Span::from(0..3),
+        }
+    }
+
+    fn parameter_type(id: usize, name: &str) -> CheckedType {
+        CheckedType::Parameter {
+            id: TypeParameterId(id),
+            name: name.to_owned(),
+            sized: true,
+        }
+    }
+
+    fn nominal(id: usize, name: &str) -> CheckedType {
+        CheckedType::TypeConstructor {
+            id: TypeId(id),
+            name: name.to_owned(),
+            arguments: Vec::new(),
+        }
+    }
+
+    fn io_effects() -> CheckedEffectSet {
+        CheckedEffectSet::canonical(vec![CheckedResource {
+            value_type: nominal(11, "IO"),
+            mutable: false,
+        }])
+    }
+
+    fn build_environment(
+        candidates: Vec<(usize, SubstitutionValue, SubstitutionSource)>,
+    ) -> Result<SubstitutionEnvironment, Diagnostic> {
+        let origin = test_origin();
+        let mut builder = EnvironmentBuilder::new(&origin);
+        for (parameter, value, source) in candidates {
+            builder.add(TypeParameterId(parameter), value, source);
+        }
+        builder.resolve()
+    }
+
+    fn chain_candidate(
+        parameter: usize,
+        referenced: usize,
+        source: SubstitutionSource,
+    ) -> (usize, SubstitutionValue, SubstitutionSource) {
+        (
+            parameter,
+            SubstitutionValue::Type(parameter_type(referenced, "T")),
+            source,
+        )
+    }
+
+    #[test]
+    fn agreeing_sources_merge_and_conflicts_diagnose() {
+        let environment = build_environment(vec![
+            (
+                0,
+                SubstitutionValue::Type(CheckedType::I32),
+                SubstitutionSource::EnclosingInstance,
+            ),
+            (
+                0,
+                SubstitutionValue::Type(CheckedType::I32),
+                SubstitutionSource::Site,
+            ),
+            (
+                0,
+                SubstitutionValue::Type(CheckedType::I32),
+                SubstitutionSource::Inferred,
+            ),
+            (
+                1,
+                SubstitutionValue::Type(CheckedType::I32),
+                SubstitutionSource::Site,
+            ),
+            (
+                1,
+                SubstitutionValue::Type(CheckedType::I32),
+                SubstitutionSource::Inferred,
+            ),
+        ])
+        .expect("agreeing sources resolve");
+        assert_eq!(
+            environment.type_value(TypeParameterId(0)),
+            Some(&CheckedType::I32)
+        );
+        assert_eq!(
+            environment.type_value(TypeParameterId(1)),
+            Some(&CheckedType::I32)
+        );
+
+        // A placeholder candidate is completed by a concrete one, not treated
+        // as a conflict.
+        let environment = build_environment(vec![
+            (
+                0,
+                SubstitutionValue::Type(CheckedType::Inferred),
+                SubstitutionSource::Inferred,
+            ),
+            (
+                0,
+                SubstitutionValue::Type(CheckedType::U8),
+                SubstitutionSource::Site,
+            ),
+        ])
+        .expect("a placeholder is completed");
+        assert_eq!(
+            environment.type_value(TypeParameterId(0)),
+            Some(&CheckedType::U8)
+        );
+
+        let error = build_environment(vec![
+            (
+                3,
+                SubstitutionValue::Type(CheckedType::I32),
+                SubstitutionSource::Site,
+            ),
+            (
+                3,
+                SubstitutionValue::Type(CheckedType::U8),
+                SubstitutionSource::Inferred,
+            ),
+        ])
+        .expect_err("conflicting concrete values diagnose");
+        assert!(
+            error
+                .message
+                .contains("conflicting substitutions for parameter 3"),
+            "{error:?}"
+        );
+        assert!(error.message.contains("the call site"), "{error:?}");
+        assert!(error.message.contains("checked callable type"), "{error:?}");
+    }
+
+    #[test]
+    fn type_effect_kind_mismatch_diagnoses() {
+        let error = build_environment(vec![
+            (
+                4,
+                SubstitutionValue::Type(CheckedType::I32),
+                SubstitutionSource::Site,
+            ),
+            (
+                4,
+                SubstitutionValue::Effects(io_effects()),
+                SubstitutionSource::Inferred,
+            ),
+        ])
+        .expect_err("a type and an effect row for one parameter diagnose");
+        assert!(
+            error.message.contains("receives a type from the call site"),
+            "{error:?}"
+        );
+        assert!(
+            error
+                .message
+                .contains("an effect row from the checked callable type"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn transitive_chains_resolve_in_parameter_order() {
+        let environment = build_environment(vec![
+            chain_candidate(5, 6, SubstitutionSource::Site),
+            (
+                6,
+                SubstitutionValue::Type(CheckedType::I64),
+                SubstitutionSource::EnclosingInstance,
+            ),
+        ])
+        .expect("a chain resolves");
+        assert_eq!(
+            environment.type_value(TypeParameterId(5)),
+            Some(&CheckedType::I64)
+        );
+
+        let environment = build_environment(vec![
+            chain_candidate(7, 8, SubstitutionSource::Site),
+            chain_candidate(8, 9, SubstitutionSource::Site),
+            (
+                9,
+                SubstitutionValue::Type(CheckedType::I32),
+                SubstitutionSource::EnclosingInstance,
+            ),
+        ])
+        .expect("a longer chain resolves");
+        assert_eq!(
+            environment.type_value(TypeParameterId(7)),
+            Some(&CheckedType::I32)
+        );
+        assert_eq!(
+            environment.type_value(TypeParameterId(8)),
+            Some(&CheckedType::I32)
+        );
+    }
+
+    #[test]
+    fn self_and_longer_cycles_are_detected_before_substitution() {
+        let error = build_environment(vec![chain_candidate(10, 10, SubstitutionSource::Site)])
+            .expect_err("a self-reference diagnoses");
+        assert!(error.message.contains("substitution cycle"), "{error:?}");
+
+        let error = build_environment(vec![
+            chain_candidate(11, 12, SubstitutionSource::Site),
+            chain_candidate(12, 11, SubstitutionSource::Site),
+        ])
+        .expect_err("a longer cycle diagnoses");
+        assert!(error.message.contains("substitution cycle"), "{error:?}");
+    }
+
+    #[test]
+    fn relevant_parameters_must_be_concrete() {
+        let origin = test_origin();
+        let mut relevant = RelevantParameters::default();
+        relevant.notice_type(TypeParameterId(20), "T");
+        relevant.notice_effect(TypeParameterId(21), "E");
+
+        let empty = SubstitutionEnvironment::default();
+        let error = require_concrete_substitutions(&empty, &relevant, &origin)
+            .expect_err("a missing entry diagnoses");
+        assert!(error.message.contains("`T`"), "{error:?}");
+
+        let mut builder = EnvironmentBuilder::new(&origin);
+        builder.add(
+            TypeParameterId(20),
+            SubstitutionValue::Type(CheckedType::I32),
+            SubstitutionSource::Site,
+        );
+        let half = builder.resolve().expect("type-only environment");
+        let error = require_concrete_substitutions(&half, &relevant, &origin)
+            .expect_err("a missing effect entry diagnoses");
+        assert!(error.message.contains("`E`"), "{error:?}");
+
+        let mut builder = EnvironmentBuilder::new(&origin);
+        builder.add(
+            TypeParameterId(20),
+            SubstitutionValue::Type(CheckedType::Inferred),
+            SubstitutionSource::Site,
+        );
+        builder.add(
+            TypeParameterId(21),
+            SubstitutionValue::Effects(CheckedEffectSet {
+                variable: Some(crate::CheckedEffectVariable {
+                    id: TypeParameterId(99),
+                    name: "Outer".to_owned(),
+                }),
+                resources: Vec::new(),
+                state: None,
+            }),
+            SubstitutionSource::Site,
+        );
+        let placeholder = builder.resolve().expect("placeholder environment resolves");
+        let error = require_concrete_substitutions(&placeholder, &relevant, &origin)
+            .expect_err("placeholders diagnose");
+        assert!(error.message.contains("placeholder"), "{error:?}");
+
+        let mut builder = EnvironmentBuilder::new(&origin);
+        builder.add(
+            TypeParameterId(20),
+            SubstitutionValue::Type(CheckedType::I32),
+            SubstitutionSource::Site,
+        );
+        builder.add(
+            TypeParameterId(21),
+            SubstitutionValue::Effects(io_effects()),
+            SubstitutionSource::Site,
+        );
+        let concrete = builder.resolve().expect("concrete environment resolves");
+        require_concrete_substitutions(&concrete, &relevant, &origin)
+            .expect("a concrete environment passes");
+
+        let pruned = concrete.pruned(&relevant);
+        assert_eq!(pruned.len(), 2);
+        assert!(pruned.type_value(TypeParameterId(20)).is_some());
+        assert!(pruned.effect_value(TypeParameterId(21)).is_some());
+    }
+
+    fn direct_call<'a>(program: &'a LoweredProgram, name: &str) -> (FunctionId, &'a LoweredCall) {
+        let target = function_id(program, name);
+        let call = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| match &call.target {
+                LoweredCallableTarget::DirectFunction { function, .. } if *function == target => {
+                    Some(call)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no direct call to {name}"));
+        (target, call)
+    }
+
+    fn resolve_named_call(
+        program: &LoweredProgram,
+        name: &str,
+    ) -> (SubstitutionEnvironment, RelevantParameters) {
+        let (function, call) = direct_call(program, name);
+        program
+            .resolve_substitutions(
+                function,
+                &call.origin,
+                &call.function_type,
+                &call.substitutions,
+                None,
+            )
+            .unwrap_or_else(|diagnostic| panic!("{name} should resolve: {diagnostic:?}"))
+    }
+
+    #[test]
+    fn result_only_parameter_infers_from_the_checked_callable_type() {
+        let (_, program) = lower(concat!(
+            "type Phantom T = ctor ()\n",
+            "def phantom_result: <T> () -> Phantom T = () => Phantom ()\n",
+            "let hidden: Phantom I32 = phantom_result ()\n",
+        ));
+        let (environment, relevant) = resolve_named_call(&program, "phantom_result");
+        let parameter = relevant.type_parameters().next().expect("T is relevant");
+        assert_eq!(
+            environment.type_value(parameter),
+            Some(&CheckedType::I32),
+            "the result-only argument resolves to its concrete value"
+        );
+    }
+
+    #[test]
+    fn nonempty_fixed_effect_rows_infer_from_the_callable_type() {
+        let (_, program) = lower(concat!(
+            "use std.io.IO\n",
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def with_io: () ->{IO} () = () => ()\n",
+            "def call_io: () ->{IO} I32 = () => evaluate { with_io (); 0 }\n",
+        ));
+        let (environment, relevant) = resolve_named_call(&program, "evaluate");
+        let type_parameter = relevant.type_parameters().next().expect("T is relevant");
+        let effect_parameter = relevant.effect_parameters().next().expect("E is relevant");
+        assert_eq!(
+            environment.type_value(type_parameter),
+            Some(&CheckedType::I32)
+        );
+        let effects = environment
+            .effect_value(effect_parameter)
+            .expect("E resolves to a concrete row");
+        assert!(effects.variable.is_none());
+        assert!(
+            !effects.resources.is_empty(),
+            "the IO resource stays in the row: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn empty_effect_rows_resolve() {
+        let (_, program) = lower(concat!(
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "let pure: I32 = evaluate { 0 }\n",
+        ));
+        let (environment, relevant) = resolve_named_call(&program, "evaluate");
+        let effect_parameter = relevant.effect_parameters().next().expect("E is relevant");
+        let effects = environment
+            .effect_value(effect_parameter)
+            .expect("E resolves");
+        assert!(effects.variable.is_none());
+        assert!(effects.is_empty(), "the row stays empty: {effects:?}");
+    }
+
+    #[test]
+    fn state_effects_resolve_into_the_effect_row() {
+        let (_, program) = lower(concat!(
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "let mut count = 0\n",
+            "def use_state: () ->{state} I32 = () => evaluate { count = count + 1; count }\n",
+        ));
+        let (environment, relevant) = resolve_named_call(&program, "evaluate");
+        let effect_parameter = relevant.effect_parameters().next().expect("E is relevant");
+        let effects = environment
+            .effect_value(effect_parameter)
+            .expect("E resolves");
+        assert!(effects.variable.is_none());
+        assert!(
+            effects.state.is_some(),
+            "the state effect stays in the row: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn partial_site_substitutions_are_completed_by_inference() {
+        let (_, program) = lower(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let applied: I32 = identity 1\n",
+        ));
+        let (function, call) = direct_call(&program, "identity");
+        let (environment, relevant) = program
+            .resolve_substitutions(
+                function,
+                &call.origin,
+                &call.function_type,
+                &CallSubstitutions::default(),
+                None,
+            )
+            .expect("an empty site recipe is completed by the checked callable type");
+        let parameter = relevant.type_parameters().next().expect("T");
+        assert_eq!(environment.type_value(parameter), Some(&CheckedType::I32));
+    }
+
+    #[test]
+    fn recorded_and_inferred_sources_conflict_at_the_origin() {
+        let (_, program) = lower(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let applied: I32 = identity 1\n",
+        ));
+        let (function, call) = direct_call(&program, "identity");
+        let parameter = program
+            .relevant_parameters(function)
+            .type_parameters()
+            .next()
+            .expect("T");
+        let substitutions = CallSubstitutions {
+            types: vec![crate::CallTypeSubstitution {
+                parameter,
+                value_type: CheckedType::U8,
+            }],
+            effects: Vec::new(),
+        };
+        let error = program
+            .resolve_substitutions(
+                function,
+                &call.origin,
+                &call.function_type,
+                &substitutions,
+                None,
+            )
+            .expect_err("a recorded value that disagrees with inference diagnoses");
+        assert!(
+            error.message.contains("conflicting substitutions"),
+            "{error:?}"
+        );
+
+        let substitutions = CallSubstitutions {
+            types: Vec::new(),
+            effects: vec![crate::CallEffectSubstitution {
+                parameter,
+                effects: io_effects(),
+            }],
+        };
+        let error = program
+            .resolve_substitutions(
+                function,
+                &call.origin,
+                &call.function_type,
+                &substitutions,
+                None,
+            )
+            .expect_err("an effect row recorded for a type parameter diagnoses");
+        assert!(
+            error.message.contains("receives an effect row"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn unconstrained_and_mismatched_requests_diagnose_at_the_origin() {
+        let (_, program) = lower(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let applied: I32 = identity 1\n",
+        ));
+        let (function, call) = direct_call(&program, "identity");
+        let unresolved = CheckedFunctionType {
+            parameter: Box::new(parameter_type(99, "Outer")),
+            result: Box::new(parameter_type(99, "Outer")),
+            ..checked_function_type(CheckedType::I32, CheckedType::I32)
+        };
+        let error = program
+            .resolve_substitutions(
+                function,
+                &call.origin,
+                &unresolved,
+                &CallSubstitutions::default(),
+                None,
+            )
+            .expect_err("an unconstrained parameter diagnoses");
+        assert!(
+            error.message.contains("cannot resolve type parameter"),
+            "{error:?}"
+        );
+        assert!(error.message.contains("`T`"), "{error:?}");
+
+        let mismatched = checked_function_type(CheckedType::I32, CheckedType::U8);
+        let error = program
+            .resolve_substitutions(
+                function,
+                &call.origin,
+                &mismatched,
+                &CallSubstitutions::default(),
+                None,
+            )
+            .expect_err("a mismatched callable type diagnoses");
+        assert!(
+            error
+                .message
+                .contains("does not match the template signature"),
+            "{error:?}"
+        );
+    }
+
+    fn checked_function_type(parameter: CheckedType, result: CheckedType) -> CheckedFunctionType {
+        CheckedFunctionType {
+            parameter: Box::new(parameter),
+            parameter_style: staple_syntax::FunctionParameterStyle::Single,
+            default: None,
+            mutations: Vec::new(),
+            moves: Vec::new(),
+            effects: CheckedEffectSet::default(),
+            result: Box::new(result),
+        }
+    }
+
+    #[test]
+    fn repeated_product_counts_and_curried_layers_resolve() {
+        let (_, program) = lower(concat!(
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+            "let repeated: (I32; 3) = repeat 7 3\n",
+        ));
+        let (environment, relevant) = resolve_named_call(&program, "repeat");
+        let mut parameters = relevant.type_parameters();
+        let first = parameters.next().expect("T");
+        let second = parameters.next().expect("N");
+        assert!(parameters.next().is_none());
+        match environment.type_value(first) {
+            Some(value) => assert_eq!(value, &CheckedType::I32),
+            None => panic!("T should resolve"),
+        }
+        match environment.type_value(second) {
+            Some(CheckedType::NumberLiteral(3)) | Some(CheckedType::USize) => {}
+            other => panic!("N should resolve to the repeated count, got {other:?}"),
         }
     }
 }
