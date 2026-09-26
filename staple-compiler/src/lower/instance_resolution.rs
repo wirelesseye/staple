@@ -11,6 +11,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use staple_syntax::Diagnostic;
 
+use crate::specialization::{
+    CanonicalEffectSet, CanonicalType, InstanceKey, InstanceSubstitution, canonical_evidence,
+};
 use crate::{
     CallSubstitutions, CheckedEffectSet, CheckedFunctionType, CheckedTraitBound,
     CheckedTraitImplementation, CheckedType, FunctionId, StructuralTraitMethod, TraitEvidence,
@@ -192,6 +195,21 @@ impl SubstitutionValue {
                     collect_referenced_parameters(&resource.value_type, out);
                 }
             }
+        }
+    }
+
+    fn is_self_placeholder(&self, parameter: TypeParameterId) -> bool {
+        match self {
+            SubstitutionValue::Type(CheckedType::Parameter { id, .. }) => *id == parameter,
+            SubstitutionValue::Effects(effects) => {
+                effects
+                    .variable
+                    .as_ref()
+                    .is_some_and(|variable| variable.id == parameter)
+                    && effects.resources.is_empty()
+                    && effects.state.is_none()
+            }
+            _ => false,
         }
     }
 
@@ -400,6 +418,11 @@ impl EnvironmentBuilder {
         value: SubstitutionValue,
         source: SubstitutionSource,
     ) {
+        // `P -> P` is a tautology, not a substitution; keeping it would look
+        // like a cycle and would also hide a genuinely missing value.
+        if value.is_self_placeholder(parameter) {
+            return;
+        }
         self.candidates
             .entry(parameter)
             .or_default()
@@ -408,13 +431,26 @@ impl EnvironmentBuilder {
 
     fn add_enclosing(&mut self, environment: &SubstitutionEnvironment) {
         for (parameter, entry) in environment.iter() {
-            self.add(parameter, entry.value.clone(), entry.source);
+            self.add(
+                parameter,
+                entry.value.clone(),
+                SubstitutionSource::EnclosingInstance,
+            );
         }
     }
 
-    fn add_site(&mut self, substitutions: &CallSubstitutions) {
+    /// Adds the site recipe with every value already substituted through the
+    /// enclosing environment, so a self-mapping like `T -> T` recorded by the
+    /// checker at a recursive site resolves to the enclosing concrete value
+    /// instead of masquerading as a cycle.
+    fn add_site(
+        &mut self,
+        substitutions: &CallSubstitutions,
+        enclosing: &HashMap<TypeParameterId, CheckedType>,
+    ) {
         for substitution in &substitutions.types {
-            match effect_substitution_value(&substitution.value_type) {
+            let value_type = substitute_type(substitution.value_type.clone(), enclosing);
+            match effect_substitution_value(&value_type) {
                 Some(effects) => self.add(
                     substitution.parameter,
                     SubstitutionValue::Effects(effects.clone()),
@@ -422,15 +458,16 @@ impl EnvironmentBuilder {
                 ),
                 None => self.add(
                     substitution.parameter,
-                    SubstitutionValue::Type(substitution.value_type.clone()),
+                    SubstitutionValue::Type(value_type),
                     SubstitutionSource::Site,
                 ),
             }
         }
         for substitution in &substitutions.effects {
+            let effects = substitute_effect_set(substitution.effects.clone(), enclosing);
             self.add(
                 substitution.parameter,
-                SubstitutionValue::Effects(substitution.effects.clone()),
+                SubstitutionValue::Effects(effects),
                 SubstitutionSource::Site,
             );
         }
@@ -1614,6 +1651,184 @@ fn substitute_concrete_arguments(
     Ok(substituted)
 }
 
+/// The complete result of resolving one specialization request: the concrete
+/// key, the concrete environment Stage 3.4 reuses for body substitution, the
+/// relevant parameter set, and the resolved evidence. Stage 3.3 alone interns
+/// keys and decides reachability; this value carries no catalog position.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedInstanceRequest {
+    pub key: InstanceKey,
+    pub environment: SubstitutionEnvironment,
+    pub relevant: RelevantParameters,
+    pub evidence: Option<TraitEvidence>,
+    pub origin: Origin,
+}
+
+/// How a request relates to the enclosing instance.
+#[derive(Clone, Copy)]
+pub(crate) enum InstanceResolutionTarget<'a> {
+    /// A root request: no enclosing instance environment.
+    Root,
+    /// A nested request whose environment composes with the enclosing one.
+    Nested(&'a ResolvedInstanceRequest),
+    /// A same-function recursive reference that reuses the current closure
+    /// environment. The completed key must equal the enclosing instance's key.
+    Current(&'a ResolvedInstanceRequest),
+}
+
+/// One Stage 3.2 resolver input: the target function, the requesting origin,
+/// the complete checked callable type at the site, the raw Stage 2 recipe, and
+/// the enclosing-instance relationship.
+pub(crate) struct InstanceResolutionRequest<'a> {
+    pub function: FunctionId,
+    pub origin: Origin,
+    pub function_type: CheckedFunctionType,
+    pub substitutions: CallSubstitutions,
+    pub evidence: Option<TraitEvidence>,
+    pub target: InstanceResolutionTarget<'a>,
+}
+
+impl LoweredProgram {
+    /// Resolves one request end to end: composed environment, selected
+    /// evidence, concrete key, and the relevant environment for Stage 3.4.
+    ///
+    /// A `Current` target enforces the existing prohibition on polymorphic
+    /// recursion: a recursive request whose normalized key differs from the
+    /// enclosing instance key diagnoses instead of interning a second
+    /// specialization, and an equal key returns the enclosing instance.
+    pub(crate) fn resolve_instance_request(
+        &self,
+        request: &InstanceResolutionRequest<'_>,
+    ) -> Result<ResolvedInstanceRequest, Diagnostic> {
+        let enclosing = match request.target {
+            InstanceResolutionTarget::Root => None,
+            InstanceResolutionTarget::Nested(enclosing)
+            | InstanceResolutionTarget::Current(enclosing) => Some(enclosing),
+        };
+        let resolved = (|| {
+            let (environment, relevant) = self.resolve_substitutions(
+                request.function,
+                &request.origin,
+                &request.function_type,
+                &request.substitutions,
+                enclosing.map(|enclosing| &enclosing.environment),
+            )?;
+            let evidence = self.resolve_trait_evidence(
+                &request.origin,
+                request.evidence.as_ref(),
+                &environment,
+            )?;
+            let key = build_instance_key(
+                request.function,
+                &environment,
+                &relevant,
+                evidence.as_ref(),
+                &request.origin,
+            )?;
+            Ok::<_, Diagnostic>((environment, relevant, evidence, key))
+        })();
+        let (environment, relevant, evidence, key) = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                if matches!(request.target, InstanceResolutionTarget::Current(_)) {
+                    return Err(self.polymorphic_recursion_diagnostic(request, Some(&error)));
+                }
+                return Err(error);
+            }
+        };
+        if let InstanceResolutionTarget::Current(enclosing) = request.target {
+            if key != enclosing.key {
+                return Err(self.polymorphic_recursion_diagnostic(request, None));
+            }
+            return Ok(ResolvedInstanceRequest {
+                key: enclosing.key.clone(),
+                environment: enclosing.environment.clone(),
+                relevant: enclosing.relevant.clone(),
+                evidence: enclosing.evidence.clone(),
+                origin: request.origin.clone(),
+            });
+        }
+        Ok(ResolvedInstanceRequest {
+            key,
+            environment,
+            relevant,
+            evidence,
+            origin: request.origin.clone(),
+        })
+    }
+
+    fn polymorphic_recursion_diagnostic(
+        &self,
+        request: &InstanceResolutionRequest<'_>,
+        cause: Option<&Diagnostic>,
+    ) -> Diagnostic {
+        let name = self
+            .functions
+            .get(request.function)
+            .map(|function| function.name.clone())
+            .unwrap_or_else(|| format!("function {}", request.function.0));
+        let message = match cause {
+            Some(cause) => format!(
+                "polymorphic recursion: recursive call to `{name}` does not reuse the enclosing instance ({})",
+                cause.message
+            ),
+            None => format!(
+                "polymorphic recursion: recursive call to `{name}` requests a different instance than the enclosing one"
+            ),
+        };
+        Diagnostic::new(request.origin.span.clone(), message)
+    }
+}
+
+/// Builds the concrete key from the pruned relevant environment and resolved
+/// evidence. Every value and evidence argument is canonicalized with the
+/// Stage 3.1 concrete converters, which reject leftover declared parameters,
+/// effect variables, and checker placeholders.
+fn build_instance_key(
+    function: FunctionId,
+    environment: &SubstitutionEnvironment,
+    relevant: &RelevantParameters,
+    evidence: Option<&TraitEvidence>,
+    origin: &Origin,
+) -> Result<InstanceKey, Diagnostic> {
+    let mut substitutions = Vec::new();
+    for parameter in relevant.type_parameters() {
+        let Some(value_type) = environment.type_value(parameter) else {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "cannot form an instance key: type parameter {} has no concrete value",
+                    relevant.display(parameter)
+                ),
+            ));
+        };
+        substitutions.push(InstanceSubstitution::Type {
+            parameter,
+            value: CanonicalType::concrete(value_type, origin)?,
+        });
+    }
+    for parameter in relevant.effect_parameters() {
+        let Some(effects) = environment.effect_value(parameter) else {
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "cannot form an instance key: effect parameter {} has no concrete row",
+                    relevant.display(parameter)
+                ),
+            ));
+        };
+        substitutions.push(InstanceSubstitution::Effect {
+            parameter,
+            effects: CanonicalEffectSet::concrete(effects, origin)?,
+        });
+    }
+    let evidence = evidence
+        .map(|evidence| canonical_evidence(evidence, origin))
+        .transpose()?;
+    InstanceKey::new(function, substitutions, evidence)
+        .map_err(|error| Diagnostic::new(origin.span.clone(), error.message()))
+}
+
 struct ParameterCollector<'a> {
     program: &'a LoweredProgram,
     relevant: RelevantParameters,
@@ -2397,10 +2612,13 @@ impl LoweredProgram {
         let relevant = self.relevant_parameters(function);
         let signature = template.signature.clone();
         let mut builder = EnvironmentBuilder::new(origin);
+        let enclosing_map = enclosing
+            .map(|enclosing| enclosing.substitution_map())
+            .unwrap_or_default();
         if let Some(enclosing) = enclosing {
             builder.add_enclosing(enclosing);
         }
-        builder.add_site(substitutions);
+        builder.add_site(substitutions, &enclosing_map);
         let pre_resolved = builder.resolve()?;
         let map = pre_resolved.substitution_map();
         let actual = substitute_type(CheckedType::Function(function_type.clone()), &map);
@@ -2906,9 +3124,17 @@ mod tests {
 
     #[test]
     fn self_and_longer_cycles_are_detected_before_substitution() {
-        let error = build_environment(vec![chain_candidate(10, 10, SubstitutionSource::Site)])
-            .expect_err("a self-reference diagnoses");
+        let error = build_environment(vec![(
+            10,
+            SubstitutionValue::Type(CheckedType::Ref(Box::new(parameter_type(10, "T")))),
+            SubstitutionSource::Site,
+        )])
+        .expect_err("a self-reference diagnoses");
         assert!(error.message.contains("substitution cycle"), "{error:?}");
+
+        let tautology = build_environment(vec![chain_candidate(10, 10, SubstitutionSource::Site)])
+            .expect("a tautological self-mapping is not a cycle");
+        assert!(tautology.is_empty());
 
         let error = build_environment(vec![
             chain_candidate(11, 12, SubstitutionSource::Site),
@@ -3806,6 +4032,347 @@ mod tests {
             ) => assert_eq!(before, after),
             _ => panic!("expected the structural selection to be preserved"),
         }
+    }
+
+    fn resolved_root(program: &LoweredProgram, name: &str) -> ResolvedInstanceRequest {
+        let target = function_id(program, name);
+        let call = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| match &call.target {
+                LoweredCallableTarget::DirectFunction {
+                    function,
+                    environment: LoweredCallEnvironment::None,
+                } if *function == target => Some(call),
+                _ => None,
+            })
+            .or_else(|| {
+                program
+                    .calls
+                    .iter()
+                    .find_map(|(_, call)| match &call.target {
+                        LoweredCallableTarget::DirectFunction { function, .. }
+                            if *function == target =>
+                        {
+                            Some(call)
+                        }
+                        _ => None,
+                    })
+            })
+            .unwrap_or_else(|| panic!("no call to {name}"));
+        program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function: target,
+                origin: call.origin.clone(),
+                function_type: call.function_type.clone(),
+                substitutions: call.substitutions.clone(),
+                evidence: call.evidence.clone(),
+                target: InstanceResolutionTarget::Root,
+            })
+            .unwrap_or_else(|diagnostic| panic!("{name} should resolve: {diagnostic:?}"))
+    }
+
+    #[test]
+    fn repeated_equivalent_requests_yield_equal_keys() {
+        let (_, program) = lower(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+            "let second: I32 = identity 1\n",
+        ));
+        let calls = direct_calls(&program, "identity");
+        assert_eq!(calls.len(), 2);
+        let mut keys = Vec::new();
+        for (function, call) in calls {
+            let resolved = program
+                .resolve_instance_request(&InstanceResolutionRequest {
+                    function,
+                    origin: call.origin.clone(),
+                    function_type: call.function_type.clone(),
+                    substitutions: call.substitutions.clone(),
+                    evidence: call.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                })
+                .expect("the request resolves");
+            keys.push(resolved.key);
+        }
+        assert_eq!(keys[0], keys[1], "equivalent requests yield equal keys");
+    }
+
+    #[test]
+    fn irrelevant_outer_substitutions_deduplicate() {
+        let (_, program) = lower(concat!(
+            "def ignore: <T where Copy T> I32 -> I32 = value => value\n",
+            "let applied = ignore 1\n",
+        ));
+        let function = function_id(&program, "ignore");
+        let parameter =
+            match &program.functions.get(function).expect("ignore").bounds[0].arguments[0] {
+                CheckedType::Parameter { id, .. } => *id,
+                other => panic!("expected a declared bound parameter, got {other:?}"),
+            };
+        let function_type = checked_function_type(CheckedType::I32, CheckedType::I32);
+        let mut keys = Vec::new();
+        for value_type in [CheckedType::I32, CheckedType::U8] {
+            let substitutions = CallSubstitutions {
+                types: vec![crate::CallTypeSubstitution {
+                    parameter,
+                    value_type,
+                }],
+                effects: Vec::new(),
+            };
+            let resolved = program
+                .resolve_instance_request(&InstanceResolutionRequest {
+                    function,
+                    origin: test_origin(),
+                    function_type: function_type.clone(),
+                    substitutions,
+                    evidence: None,
+                    target: InstanceResolutionTarget::Root,
+                })
+                .expect("the irrelevant parameter is not required");
+            assert!(
+                resolved.key.substitutions().is_empty(),
+                "an irrelevant outer parameter never enters the key"
+            );
+            keys.push(resolved.key);
+        }
+        assert_eq!(keys[0], keys[1]);
+    }
+
+    #[test]
+    fn capture_dependent_substitutions_separate_instances() {
+        let (_, program) = lower(concat!(
+            "def maker: <T where Copy T> T -> () -> I32 = value => () => {\n",
+            "  let copied: T = value\n",
+            "  0\n",
+            "}\n",
+            "let made_i32 = maker 1\n",
+            "let made_string = maker \"x\"\n",
+        ));
+        let thunk = program
+            .functions
+            .iter()
+            .find(|(_, _, function)| {
+                !function.captures.is_empty()
+                    && function.signature.parameter.as_ref() == &CheckedType::empty_product()
+            })
+            .map(|(_, id, _)| id)
+            .expect("the anonymous closure");
+        let (value_id, value) = program
+            .callable_values
+            .iter()
+            .find(|(_, value)| {
+                matches!(
+                    &value.target,
+                    LoweredCallableTarget::DirectFunction { function, .. } if *function == thunk
+                ) && value.closure.is_some()
+            })
+            .expect("the closure construction value");
+        let _ = value_id;
+
+        let mut keys = Vec::new();
+        for call in direct_calls(&program, "maker") {
+            let outer = program
+                .resolve_instance_request(&InstanceResolutionRequest {
+                    function: call.0,
+                    origin: call.1.origin.clone(),
+                    function_type: call.1.function_type.clone(),
+                    substitutions: call.1.substitutions.clone(),
+                    evidence: call.1.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                })
+                .expect("the enclosing instance resolves");
+            let resolved = program
+                .resolve_instance_request(&InstanceResolutionRequest {
+                    function: thunk,
+                    origin: value.origin.clone(),
+                    function_type: value.function_type.clone(),
+                    substitutions: value.substitutions.clone(),
+                    evidence: value.evidence.clone(),
+                    target: InstanceResolutionTarget::Nested(&outer),
+                })
+                .expect("the nested closure resolves");
+            assert!(
+                !resolved.key.substitutions().is_empty(),
+                "the captured outer parameter enters the closure key"
+            );
+            keys.push(resolved.key);
+        }
+        assert_eq!(keys.len(), 2);
+        assert_ne!(
+            keys[0], keys[1],
+            "different captured outer arguments separate the closure instances"
+        );
+    }
+
+    #[test]
+    fn same_key_recursion_succeeds_and_changed_keys_diagnose() {
+        let (_, program) = lower(concat!(
+            "def recursive: <T where Copy T> T -> T = value => recursive value\n",
+            "let result: I32 = recursive 1\n",
+        ));
+        let outer = resolved_root(&program, "recursive");
+        let (recursive, inner) = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| match &call.target {
+                LoweredCallableTarget::DirectFunction {
+                    function,
+                    environment: LoweredCallEnvironment::Current,
+                } => Some((*function, call)),
+                _ => None,
+            })
+            .expect("the recursive call keeps the current environment");
+        let resolved = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function: recursive,
+                origin: inner.origin.clone(),
+                function_type: inner.function_type.clone(),
+                substitutions: inner.substitutions.clone(),
+                evidence: inner.evidence.clone(),
+                target: InstanceResolutionTarget::Current(&outer),
+            })
+            .expect("same-key recursion succeeds");
+        assert_eq!(resolved.key, outer.key);
+
+        let changed = checked_function_type(CheckedType::U8, CheckedType::U8);
+        let error = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function: recursive,
+                origin: test_origin(),
+                function_type: changed,
+                substitutions: CallSubstitutions::default(),
+                evidence: None,
+                target: InstanceResolutionTarget::Current(&outer),
+            })
+            .expect_err("a changed recursive substitution diagnoses");
+        assert!(error.message.contains("polymorphic recursion"), "{error:?}");
+    }
+
+    #[test]
+    fn function_valued_recursion_reuses_the_current_environment() {
+        let (_, program) = lower(concat!(
+            "def recursive_value: I32 -> I32 = value => {\n",
+            "  let self_ref = recursive_value\n",
+            "  self_ref value\n",
+            "}\n",
+            "let result: I32 = recursive_value 1\n",
+        ));
+        let recursive_value = function_id(&program, "recursive_value");
+        let signature = program
+            .functions
+            .get(recursive_value)
+            .expect("recursive_value")
+            .signature
+            .clone();
+        let outer = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function: recursive_value,
+                origin: test_origin(),
+                function_type: signature,
+                substitutions: CallSubstitutions::default(),
+                evidence: None,
+                target: InstanceResolutionTarget::Root,
+            })
+            .expect("the outer instance resolves");
+        let (value_id, value) = program
+            .callable_values
+            .iter()
+            .find(|(_, value)| {
+                matches!(
+                    &value.target,
+                    LoweredCallableTarget::DirectFunction { function, .. }
+                        if *function == recursive_value
+                ) && value
+                    .closure
+                    .as_ref()
+                    .is_some_and(|closure| closure.environment == LoweredClosureEnvironment::Stored)
+            })
+            .expect("the recursive function value");
+        let _ = value_id;
+        let resolved = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function: match value.target {
+                    LoweredCallableTarget::DirectFunction { function, .. } => function,
+                    _ => unreachable!(),
+                },
+                origin: value.origin.clone(),
+                function_type: value.function_type.clone(),
+                substitutions: value.substitutions.clone(),
+                evidence: value.evidence.clone(),
+                target: InstanceResolutionTarget::Current(&outer),
+            })
+            .expect("the recursive value reuses the current instance");
+        assert_eq!(resolved.key, outer.key);
+    }
+
+    #[test]
+    fn unresolved_requests_never_reach_a_key() {
+        let (_, program) = lower(concat!(
+            "trait TestAbsent T { absent: T -> Bool }\n",
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def absent_bound: <T where TestAbsent T> T -> Bool = value => absent value\n",
+            "let applied: I32 = identity 1\n",
+        ));
+        let identity = function_id(&program, "identity");
+        let unresolved = CheckedFunctionType {
+            parameter: Box::new(parameter_type(99, "Outer")),
+            result: Box::new(parameter_type(99, "Outer")),
+            ..checked_function_type(CheckedType::I32, CheckedType::I32)
+        };
+        let error = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function: identity,
+                origin: test_origin(),
+                function_type: unresolved,
+                substitutions: CallSubstitutions::default(),
+                evidence: None,
+                target: InstanceResolutionTarget::Root,
+            })
+            .expect_err("an unresolved parameter never reaches a key");
+        assert!(
+            error.message.contains("cannot resolve type parameter"),
+            "{error:?}"
+        );
+
+        let absent_bound = function_id(&program, "absent_bound");
+        let absent_result = program
+            .functions
+            .get(absent_bound)
+            .expect("absent_bound")
+            .signature
+            .result
+            .as_ref()
+            .clone();
+        let evidence = declared_bound_evidence_in(&program, "TestAbsent", absent_bound);
+        let error = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function: absent_bound,
+                origin: test_origin(),
+                function_type: checked_function_type(CheckedType::I32, absent_result),
+                substitutions: CallSubstitutions {
+                    types: vec![crate::CallTypeSubstitution {
+                        parameter: match evidence {
+                            TraitEvidence::DeclaredBound { ref arguments, .. } => {
+                                match &arguments[0] {
+                                    CheckedType::Parameter { id, .. } => *id,
+                                    other => panic!("expected a parameter, got {other:?}"),
+                                }
+                            }
+                            _ => unreachable!(),
+                        },
+                        value_type: CheckedType::I32,
+                    }],
+                    effects: Vec::new(),
+                },
+                evidence: Some(evidence),
+                target: InstanceResolutionTarget::Root,
+            })
+            .expect_err("unresolved evidence never reaches a key");
+        assert!(
+            error.message.contains("no implementation of trait"),
+            "{error:?}"
+        );
     }
 
     #[test]

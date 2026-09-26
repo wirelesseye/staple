@@ -658,66 +658,68 @@ impl InstanceRequest {
             substitutions,
             self.evidence
                 .as_ref()
-                .map(|evidence| self.canonical_evidence(evidence))
+                .map(|evidence| canonical_evidence(evidence, &self.origin))
                 .transpose()?,
         )
         .map_err(|error| origin_diagnostic(&self.origin, error.message()))
     }
+}
 
-    fn canonical_evidence(
-        &self,
-        evidence: &TraitEvidence,
-    ) -> Result<CanonicalEvidence, Diagnostic> {
-        match evidence {
-            TraitEvidence::ExplicitImplementation {
-                trait_id,
-                method,
-                function,
-                arguments,
-                ..
-            } => Ok(CanonicalEvidence::ExplicitImplementation {
-                trait_id: *trait_id,
-                method: *method,
-                function: *function,
-                arguments: self.canonical_arguments(arguments)?,
-            }),
-            TraitEvidence::Structural {
-                trait_id,
-                method,
-                structural,
-                arguments,
-            } => Ok(CanonicalEvidence::Structural {
-                trait_id: *trait_id,
-                method: *method,
-                structural: *structural,
-                arguments: self.canonical_arguments(arguments)?,
-            }),
-            TraitEvidence::DeclaredBound { trait_id, .. } => Err(origin_diagnostic(
-                &self.origin,
-                format!(
-                    "trait {} evidence is still a declared bound; Stage 3.2 must resolve it before an instance key exists",
-                    trait_id.0
-                ),
-            )),
-            TraitEvidence::RejectedImplementation { trait_id, .. } => Err(origin_diagnostic(
-                &self.origin,
-                format!(
-                    "trait {} evidence is a negative implementation and never forms an instance key",
-                    trait_id.0
-                ),
-            )),
-        }
+/// Converts resolved trait evidence into its canonical key form. Declared
+/// bounds and negative obligations never reach a key.
+pub(crate) fn canonical_evidence(
+    evidence: &TraitEvidence,
+    origin: &Origin,
+) -> Result<CanonicalEvidence, Diagnostic> {
+    match evidence {
+        TraitEvidence::ExplicitImplementation {
+            trait_id,
+            method,
+            function,
+            arguments,
+            ..
+        } => Ok(CanonicalEvidence::ExplicitImplementation {
+            trait_id: *trait_id,
+            method: *method,
+            function: *function,
+            arguments: canonical_arguments(arguments, origin)?,
+        }),
+        TraitEvidence::Structural {
+            trait_id,
+            method,
+            structural,
+            arguments,
+        } => Ok(CanonicalEvidence::Structural {
+            trait_id: *trait_id,
+            method: *method,
+            structural: *structural,
+            arguments: canonical_arguments(arguments, origin)?,
+        }),
+        TraitEvidence::DeclaredBound { trait_id, .. } => Err(origin_diagnostic(
+            origin,
+            format!(
+                "trait {} evidence is still a declared bound; Stage 3.2 must resolve it before an instance key exists",
+                trait_id.0
+            ),
+        )),
+        TraitEvidence::RejectedImplementation { trait_id, .. } => Err(origin_diagnostic(
+            origin,
+            format!(
+                "trait {} evidence is a negative implementation and never forms an instance key",
+                trait_id.0
+            ),
+        )),
     }
+}
 
-    fn canonical_arguments(
-        &self,
-        arguments: &[CheckedType],
-    ) -> Result<Vec<CanonicalType>, Diagnostic> {
-        arguments
-            .iter()
-            .map(|argument| CanonicalType::concrete(argument, &self.origin))
-            .collect()
-    }
+fn canonical_arguments(
+    arguments: &[CheckedType],
+    origin: &Origin,
+) -> Result<Vec<CanonicalType>, Diagnostic> {
+    arguments
+        .iter()
+        .map(|argument| CanonicalType::concrete(argument, origin))
+        .collect()
 }
 
 /// The canonical adapter a callable value needs. Mirrors
