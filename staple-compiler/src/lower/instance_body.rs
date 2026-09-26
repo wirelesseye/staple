@@ -155,6 +155,9 @@ pub(crate) struct LoweredInstanceBody {
     /// The global Stage 3.3 plan this body owns, when the template is a
     /// coroutine body thunk. The local plan is `plans[0]`.
     pub plan_template: Option<LoweredCoroutinePlanId>,
+    /// The instance-local providers seeded from the concrete effect row, in
+    /// row order. They are ownership roots for the body.
+    pub function_providers: Vec<LoweredResourceProviderId>,
     /// Concrete bindings for every dispatch/construction site.
     pub bindings: BTreeMap<LoweredBindingSite, LoweredBoundTarget>,
     /// Resolved evidence for every trait-dependent site.
@@ -205,6 +208,7 @@ impl LoweredInstanceBody {
             captures: Vec::new(),
             root: None,
             plan_template: None,
+            function_providers: Vec::new(),
             bindings: BTreeMap::new(),
             evidence: BTreeMap::new(),
             blocks: Arena::default(),
@@ -396,6 +400,7 @@ struct BodyCloner<'a> {
     artifacts_by_key: &'a HashMap<ArtifactRequestKey, ArtifactOrdinal>,
     substitution: HashMap<TypeParameterId, CheckedType>,
     body: LoweredInstanceBody,
+    active_providers: Vec<LoweredResourceProviderId>,
     diagnostics: Vec<Diagnostic>,
     blocks: HashMap<BlockId, BlockId>,
     items: HashMap<ItemId, ItemId>,
@@ -441,6 +446,7 @@ impl<'a> BodyCloner<'a> {
             artifacts_by_key,
             substitution,
             body: LoweredInstanceBody::empty(template, origin),
+            active_providers: Vec::new(),
             diagnostics: Vec::new(),
             blocks: HashMap::new(),
             items: HashMap::new(),
@@ -516,6 +522,7 @@ impl<'a> BodyCloner<'a> {
             })
             .collect();
         self.body.parameter_pattern = self.clone_pattern(function.parameter_pattern);
+        self.seed_function_providers(template);
         if let Some(plan) = self.program.coroutine_plan_by_thunk.get(&template).copied() {
             self.clone_plan(plan);
         }
@@ -1245,6 +1252,176 @@ impl<'a> BodyCloner<'a> {
             })
     }
 
+    /// Seeds the instance-local providers from the concrete effect row, in
+    /// row order. A template provider whose substituted resource matches is
+    /// cloned (with its position updated); a resource that only exists after
+    /// substitution of a generic effect variable gets a fresh provider. They
+    /// are body ownership roots.
+    fn seed_function_providers(&mut self, template: FunctionId) {
+        let concrete = self.body.signature.effects.resources.clone();
+        let template_providers = self
+            .program
+            .resource_providers
+            .iter()
+            .filter(|(_, provider)| {
+                provider.kind == super::LoweredProviderOriginKind::FunctionParameter
+                    && provider.owner == super::ExpressionOwner::Function(template)
+            })
+            .map(|(id, provider)| {
+                (
+                    id,
+                    self.ty(&provider.resource.value_type),
+                    provider.resource.mutable,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut consumed = vec![false; template_providers.len()];
+        for (position, resource) in concrete.iter().enumerate() {
+            let matched = template_providers
+                .iter()
+                .enumerate()
+                .find(|(index, (_, value_type, mutable))| {
+                    !consumed[*index]
+                        && *value_type == resource.value_type
+                        && *mutable == resource.mutable
+                })
+                .map(|(index, (id, _, _))| {
+                    consumed[index] = true;
+                    *id
+                });
+            let cloned = match matched {
+                Some(id) => {
+                    let cloned = self.clone_resource_provider(id);
+                    if let Some(provider) = self.body.resource_providers.get_mut(cloned) {
+                        provider.target =
+                            super::LoweredProviderTarget::EffectParameter { position };
+                    }
+                    cloned
+                }
+                None => self.create_function_provider(position, resource),
+            };
+            self.body.function_providers.push(cloned);
+            self.active_providers.push(cloned);
+        }
+    }
+
+    /// Creates a fresh function-parameter provider for a concrete effect-row
+    /// position that the generic template did not materialize.
+    fn create_function_provider(
+        &mut self,
+        position: usize,
+        resource: &CheckedResource,
+    ) -> LoweredResourceProviderId {
+        let indirect = resource.mutable || !self.program.concrete_is_copy(&resource.value_type);
+        let provider = LoweredResourceProvider {
+            origin: self.body.origin.clone(),
+            resource: self.resource(resource),
+            kind: super::LoweredProviderOriginKind::FunctionParameter,
+            target: super::LoweredProviderTarget::EffectParameter { position },
+            parent: None,
+            owner: super::ExpressionOwner::Function(self.body.template),
+            indirect,
+            borrow: indirect,
+            storage: super::LoweredProviderStorage::Materialized,
+            scope_exit: super::LoweredScopeExit::Ordinary,
+        };
+        self.body.resource_providers.push(provider)
+    }
+
+    /// Rebuilds a call's hidden effect-row bindings when substitution changed
+    /// the row (a generic effect row kept no providers, or an expanded row
+    /// changed its order). Existing bindings whose concrete resource type
+    /// still matches are preserved; the rest select the innermost active
+    /// provider with the exact concrete type, matching the backend's rule.
+    fn rebind_hidden_resources(&mut self, call: &mut LoweredCall) {
+        let passes_hidden = !matches!(
+            call.target.category(),
+            LoweredCallableCategory::ExternalFunction
+                | LoweredCallableCategory::Intrinsic
+                | LoweredCallableCategory::Constructor
+        );
+        if !passes_hidden
+            || call.resource_bindings.len() == call.function_type.effects.resources.len()
+        {
+            return;
+        }
+        let existing = call
+            .resource_bindings
+            .iter()
+            .map(|use_| {
+                (
+                    *use_,
+                    self.body
+                        .resource_uses
+                        .get(*use_)
+                        .map(|use_| use_.resource.value_type.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut consumed = vec![false; existing.len()];
+        let mut bindings = Vec::new();
+        for resource in &call.function_type.effects.resources {
+            let reused = existing
+                .iter()
+                .enumerate()
+                .find(|(index, (_, value_type))| {
+                    !consumed[*index] && value_type.as_ref() == Some(&resource.value_type)
+                })
+                .map(|(index, (use_, _))| {
+                    consumed[index] = true;
+                    *use_
+                });
+            if let Some(use_) = reused {
+                bindings.push(use_);
+                continue;
+            }
+            let provider = self
+                .active_providers
+                .iter()
+                .rev()
+                .find(|provider| {
+                    self.body
+                        .resource_providers
+                        .get(**provider)
+                        .is_some_and(|provider| provider.resource.value_type == resource.value_type)
+                })
+                .copied();
+            match provider {
+                Some(provider) => {
+                    let borrow =
+                        resource.mutable || !self.program.concrete_is_copy(&resource.value_type);
+                    let pass_mode = if borrow {
+                        super::LoweredArgumentPassMode::BorrowedPointer
+                    } else {
+                        super::LoweredArgumentPassMode::Value
+                    };
+                    let indirect = self
+                        .body
+                        .resource_providers
+                        .get(provider)
+                        .is_some_and(|provider| provider.indirect);
+                    let use_ = self.body.resource_uses.push(LoweredResourceUse {
+                        origin: call.origin.clone(),
+                        resource: resource.clone(),
+                        provider: Some(provider),
+                        kind: super::LoweredResourceUseKind::HiddenArgument,
+                        pass_mode,
+                        indirect,
+                    });
+                    bindings.push(use_);
+                }
+                None => self.diagnostics.push(Diagnostic::new(
+                    call.origin.span.clone(),
+                    format!(
+                        "resource `{}` is not available for the concrete instance",
+                        resource.value_type
+                    ),
+                )),
+            }
+        }
+        call.resource_bindings = bindings;
+    }
+
     /// Recomputes concrete-sensitive call-argument pass decisions from the
     /// substituted parameter types, mirroring the lowering rule.
     fn recompute_call_arguments(&self, call: &mut LoweredCall) {
@@ -1554,6 +1731,8 @@ impl<'a> BodyCloner<'a> {
         call.reactive = call
             .reactive
             .map(|operation| self.clone_operation(operation));
+        self.recompute_call_arguments(&mut call);
+        self.rebind_hidden_resources(&mut call);
         let new = self.body.calls.push(call);
         self.calls.insert(id, new);
         for (index, argument) in original.arguments.iter().enumerate() {
@@ -1692,9 +1871,11 @@ impl<'a> BodyCloner<'a> {
             return error_with(self);
         };
         let value = self.clone_expression(original.value);
-        let body = self.clone_block(original.body);
         let provider = self.clone_resource_provider(original.provider);
         self.recompute_with_provider(provider, value);
+        self.active_providers.push(provider);
+        let body = self.clone_block(original.body);
+        self.active_providers.pop();
         let new = self.body.withs.push(LoweredWith {
             origin: original.origin,
             provider,
@@ -2646,6 +2827,58 @@ impl<'a> BodyValidator<'a> {
                 "instance body template disagrees with its instance",
             );
         }
+        if let Some(template) = self.program.functions.get(self.instance.template) {
+            let template_parameters = template.parameters.iter().copied().collect::<Vec<_>>();
+            let body_parameters = self
+                .body
+                .parameters
+                .iter()
+                .map(|parameter| parameter.symbol)
+                .collect::<Vec<_>>();
+            if template_parameters != body_parameters {
+                self.report(
+                    self.body.origin.span.clone(),
+                    "instance body parameter order disagrees with its template",
+                );
+            }
+            let template_captures = template
+                .captures
+                .iter()
+                .map(|capture| {
+                    (
+                        capture.symbol,
+                        capture.borrowed,
+                        capture.non_owning,
+                        capture.requires_cell,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let body_captures = self
+                .body
+                .captures
+                .iter()
+                .map(|capture| {
+                    (
+                        capture.capture.symbol,
+                        capture.capture.borrowed,
+                        capture.capture.non_owning,
+                        capture.capture.requires_cell,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if template_captures != body_captures {
+                self.report(
+                    self.body.origin.span.clone(),
+                    "instance body capture order disagrees with its template",
+                );
+            }
+            if template.body.is_some() != self.body.root.is_some() {
+                self.report(
+                    self.body.origin.span.clone(),
+                    "instance body root presence disagrees with its template",
+                );
+            }
+        }
         self.check_concrete_type(
             &self.body.origin,
             &CheckedType::Function(self.body.signature.clone()),
@@ -2685,6 +2918,9 @@ impl<'a> BodyValidator<'a> {
                 self.instance.origin.span.clone(),
                 "instance body has no root for a template with a body",
             );
+        }
+        for provider in &self.body.function_providers {
+            self.visit_provider(*provider);
         }
         if let Some(plan) = self.body.plan_template {
             self.visit_plan(plan);
@@ -3091,6 +3327,25 @@ impl<'a> BodyValidator<'a> {
                 }
             }
         }
+        let passes_hidden = !matches!(
+            call.target.category(),
+            LoweredCallableCategory::ExternalFunction
+                | LoweredCallableCategory::Intrinsic
+                | LoweredCallableCategory::Constructor
+        );
+        if passes_hidden
+            && call.resource_bindings.len() != call.function_type.effects.resources.len()
+        {
+            self.report(
+                origin.span.clone(),
+                format!(
+                    "call hidden-resource bindings disagree with the concrete effect row ({} bindings for {} resources, category {:?})",
+                    call.resource_bindings.len(),
+                    call.function_type.effects.resources.len(),
+                    call.target.category()
+                ),
+            );
+        }
         if let Some(operation) = call.reactive {
             self.visit_operation(operation);
         }
@@ -3250,8 +3505,48 @@ impl<'a> BodyValidator<'a> {
         if let Some(body) = plan.body {
             self.visit_block(body);
         }
+        let mut states = Vec::new();
         for await_ in &plan.awaits {
+            if let Some(record) = self.body.awaits.get(*await_) {
+                if record.owning_plan != id {
+                    self.report(
+                        record.origin.span.clone(),
+                        "await is listed by a plan it does not belong to",
+                    );
+                }
+                if record.resume_state == 0 || record.resume_state > plan.resume_points {
+                    self.report(
+                        record.origin.span.clone(),
+                        "await resume state is outside the plan's resume points",
+                    );
+                }
+                states.push(record.resume_state);
+            } else {
+                self.report(
+                    plan.origin.span.clone(),
+                    "coroutine plan lists a missing await",
+                );
+            }
             self.visit_await(*await_);
+        }
+        let expected = (1..=states.len()).collect::<Vec<_>>();
+        if states != expected {
+            self.report(
+                plan.origin.span.clone(),
+                "coroutine plan await order disagrees with its resume states",
+            );
+        }
+        for state in plan
+            .wait_await_states
+            .iter()
+            .chain(&plan.until_await_states)
+        {
+            if *state == 0 || *state > plan.resume_points {
+                self.report(
+                    plan.origin.span.clone(),
+                    "coroutine cancellation state is outside the plan's resume points",
+                );
+            }
         }
     }
 
@@ -4263,6 +4558,163 @@ mod tests {
                 assert_eq!(cloned.temporary, original.temporary);
             }
         }
+    }
+
+    fn instance_body_snapshot(program: &LoweredProgram) -> Vec<String> {
+        program
+            .instances
+            .iter()
+            .map(|(id, instance)| {
+                format!(
+                    "instance {} {} {:?}",
+                    id.index(),
+                    instance.name,
+                    instance.body
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn repeated_lowering_produces_stable_bodies() {
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def discard: <T> move T -> () = move value => { value; () }\n",
+            "let first: I32 = identity 1\n",
+            "let second: U8 = identity (1 satisfies U8)\n",
+            "let third: () = discard 2\n",
+        );
+        let (_, mut first) = lower_with_worklist(source);
+        let (_, mut second) = lower_with_worklist(source);
+        materialize(&mut first);
+        materialize(&mut second);
+        assert_eq!(
+            instance_body_snapshot(&first),
+            instance_body_snapshot(&second),
+            "repeated lowering must produce byte-identical instance bodies"
+        );
+    }
+
+    #[test]
+    fn materialization_cannot_mutate_templates() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+        ));
+        let template_expressions = program
+            .expressions
+            .iter()
+            .map(|(_, expression)| format!("{expression:?}"))
+            .collect::<Vec<_>>();
+        let template_calls = program
+            .calls
+            .iter()
+            .map(|(_, call)| format!("{call:?}"))
+            .collect::<Vec<_>>();
+        materialize(&mut program);
+        assert_eq!(
+            template_expressions,
+            program
+                .expressions
+                .iter()
+                .map(|(_, expression)| format!("{expression:?}"))
+                .collect::<Vec<_>>(),
+            "materialization must not mutate template expressions"
+        );
+        assert_eq!(
+            template_calls,
+            program
+                .calls
+                .iter()
+                .map(|(_, call)| format!("{call:?}"))
+                .collect::<Vec<_>>(),
+            "materialization must not mutate template calls"
+        );
+    }
+
+    #[test]
+    fn coroutine_plans_and_await_links_materialize() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "use std.coroutine.*\n",
+            "use std.io.(IO, println)\n",
+            "def worker: () -> Coroutine{IO} I32 = () => coro { println \"work\"; 7 }\n",
+            "def driver: () -> Coroutine{} I32 = () => coro { let v = await (coro { 7 }); v + 1 }\n",
+            "let sched = scheduler ()\n",
+            "with Tasks = task_scope (sched) {\n",
+            "  let _ = spawn (driver ())\n",
+            "  let _ = pump (sched, 4)\n",
+            "}\n",
+        ));
+        materialize(&mut program);
+        let mut saw_plan = false;
+        let mut saw_creation_link = false;
+        for (_, instance) in program.instances.iter() {
+            let body = instance.body.as_ref().unwrap();
+            if body.plan_template.is_some() {
+                saw_plan = true;
+            }
+            for (coro_id, _) in body.coros.iter() {
+                if let Some(LoweredBoundTarget::Instance(owner)) =
+                    body.binding(LoweredBindingSite::Coro(coro_id))
+                {
+                    saw_creation_link = true;
+                    assert!(
+                        program
+                            .instances
+                            .get(*owner)
+                            .and_then(|instance| instance.body.as_ref())
+                            .is_some_and(|body| body.plan_template.is_some()),
+                        "a coroutine creation binds its body thunk's plan"
+                    );
+                }
+            }
+            for (await_id, await_) in body.awaits.iter() {
+                if let LoweredAwaitKind::ChildCoroutine { plan: Some(_), .. } = &await_.kind {
+                    assert!(
+                        matches!(
+                            body.binding(LoweredBindingSite::AwaitChildPlan(await_id)),
+                            Some(LoweredBoundTarget::Instance(_))
+                        ),
+                        "an identified child plan binds to its thunk instance"
+                    );
+                }
+            }
+        }
+        assert!(saw_plan, "a coroutine body thunk owns its plan");
+        assert!(
+            saw_creation_link,
+            "a coroutine creation binds to its body thunk instance"
+        );
+    }
+
+    #[test]
+    fn reactive_callbacks_bind_in_bodies() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "let signal count = 0\n",
+            "def install: () ->{state} () = () => {\n",
+            "  with Reactive = reactive_scope () {\n",
+            "    reaction { let current = count; () }\n",
+            "    count = 1\n",
+            "  }\n",
+            "}\n",
+            "install ()\n",
+        ));
+        materialize(&mut program);
+        let mut saw_callback = false;
+        for (_, instance) in program.instances.iter() {
+            let body = instance.body.as_ref().unwrap();
+            for (callback_id, _) in body.reactive_callbacks.iter() {
+                if let Some(LoweredBoundTarget::Instance(_)) =
+                    body.binding(LoweredBindingSite::ReactiveCallback(callback_id))
+                {
+                    saw_callback = true;
+                }
+            }
+        }
+        assert!(
+            saw_callback,
+            "a reaction callback thunk binds to its instance"
+        );
     }
 
     #[test]
