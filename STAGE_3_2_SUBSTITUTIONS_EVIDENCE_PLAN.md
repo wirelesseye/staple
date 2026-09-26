@@ -1,6 +1,6 @@
 # Stage 3.2 Plan: Resolve Substitutions and Relevant Parameters
 
-**Status:** Steps 1–4 complete. Step 5 in progress. Stage 3.1 is complete.
+**Status:** Complete. All five steps implemented, the resolver gate passes, and the full workspace suite is green. Stage 3.3 consumes the resolver next.
 
 ## Goal and starting point
 
@@ -116,3 +116,21 @@ Gate: every request presented to the resolver produces one concrete, validated k
 - The site recipe is now substituted through the enclosing environment before candidates enter the builder, and a tautological `T -> T` mapping is dropped as a no-op instead of masquerading as a cycle; enclosing entries are relabeled `EnclosingInstance` in a nested request so conflict provenance stays accurate. This is what lets a checker-recorded recursive site (`environment: Current`) reuse the enclosing concrete values.
 - Focused tests cover: repeated equivalent requests yielding equal keys; irrelevant outer substitutions producing empty-substitution equal keys; capture-dependent outer substitutions producing distinct closure keys; same-key recursion returning the enclosing key; a changed recursive substitution diagnosing as polymorphic recursion; a function-valued self reference reusing the enclosing instance; and requests with unresolved parameters or evidence never reaching a key.
 - Gate: `cargo fmt --all`, `cargo check --workspace`, `cargo test --workspace` (1113 tests, including the 37 resolver tests), and `git diff --check` pass. Step 5 (validate against current checking and emission) is next.
+
+### Step 5 — Validate against current checking and emission (complete)
+
+- Added the remaining focused fixtures and transition comparisons:
+  - a cross-module fixture (a file module exporting a generic `wrap`, called from the entry) resolves through owned catalogs with no `TypedModule` fallback;
+  - a coroutine body thunk capturing an outer generic parameter keeps that parameter relevant and resolves as a nested request;
+  - `resolved_values_agree_with_legacy_specialization_inference` runs the legacy `infer_type_parameters` over the checked template signature and complete site callable type for `identity`, a result-only `Phantom` generic, and the curried `repeat` generic, and asserts every inferred type and effect value equals the resolver's environment;
+  - `resolved_methods_agree_with_the_legacy_selector` compares the resolved explicit method function with `TypedModule::trait_impl_method` for a direct implementation, a defaulted method, and a conditional implementation whose bound is discharged recursively;
+  - `resolved_keys_feed_the_append_only_catalog` proves two equivalent resolved requests reserve the same `SpecializationCatalog` ordinal.
+- Exercised the CLI with the worktree standard library: `staple compile --emit llvm`, `staple compile --emit object`, and `staple run` on a program using a declared-bound trait method, a result-only generic, and a curried repeated-product generic all succeeded (11820-line LLVM module, 81760-byte object, zero exit status). The legacy backend remains the emitted path; Stage 3.2 changes no emission.
+- Gate: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (1118 tests, including the 42 resolver tests), and `git diff --check` pass.
+
+### Stage 3.2 completion and Stage 3.3 handoff
+
+- The resolver gate holds: `LoweredProgram::resolve_instance_request` turns any well-typed request into one concrete, validated `ResolvedInstanceRequest` (key, environment, relevant set, resolved evidence, origin) or a source diagnostic at the request origin. It never consults LLVM state, a backend substitution map, `TypedModule`, or a runtime trait lookup, and it interns nothing.
+- Stage 3.3 consumes `crate::lower::{InstanceResolutionRequest, InstanceResolutionTarget, ResolvedInstanceRequest, SubstitutionEnvironment, RelevantParameters, ...}`. For calls it builds a request from the lowered `LoweredCall` (`function`, `origin`, `function_type`, `substitutions`, `evidence`) and a `Root`/`Nested`/`Current` target; for callable values and closure constructions it uses `LoweredCallableValue`/`LoweredClosureConstruction`. `LoweredCallEnvironment::Current` calls and `LoweredClosureEnvironment::Current` closures map to `InstanceResolutionTarget::Current`, which enforces the polymorphic-recursion prohibition and returns the enclosing instance when the key matches.
+- Stage 3.3 alone calls `SpecializationCatalog::reserve_instance`/`reserve_artifact` (before visiting a body), records dependency edges and request origins, and decides reachability; the resolver is discovery-order independent.
+- Deferred to later stages as planned: body cloning and substitution (3.4), generated helper artifacts (Stage 4), and LLVM migration (Stage 5).

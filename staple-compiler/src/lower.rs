@@ -25,6 +25,16 @@ use crate::{
 
 mod instance_resolution;
 
+// Stage 3.2 resolver API consumed by Stage 3.3. The implementation stays in a
+// lowering child module so it can read the owned `LoweredProgram` directly;
+// these re-exports name the handoff types for the rest of the crate.
+#[allow(unused_imports)] // Stage 3.3 consumes these handoff types.
+pub(crate) use instance_resolution::{
+    InstanceResolutionRequest, InstanceResolutionTarget, RelevantParameters,
+    ResolvedInstanceRequest, SubstitutionEntry, SubstitutionEnvironment, SubstitutionSource,
+    SubstitutionValue,
+};
+
 macro_rules! arena_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

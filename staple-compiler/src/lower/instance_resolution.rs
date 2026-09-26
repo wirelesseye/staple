@@ -4375,6 +4375,231 @@ mod tests {
         );
     }
 
+    fn checked_program_at(
+        entry: &std::path::Path,
+        source: &str,
+        root: &std::path::Path,
+    ) -> TypedModule {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(standard_library_root())
+            .with_module_root(root)
+            .load_source_at(entry, source)
+            .expect("test source should load");
+        let resolved = NameResolver::new()
+            .resolve_program(program)
+            .expect("test source should resolve");
+        TypeChecker::new()
+            .check(resolved)
+            .expect("test source should type check")
+    }
+
+    #[test]
+    fn cross_module_generic_functions_resolve_against_owned_catalogs() {
+        let root =
+            std::env::temp_dir().join(format!("staple-instance-resolution-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("temp root");
+        std::fs::write(
+            root.join("tools.sta"),
+            "pub mod\npub def wrap: <T where Copy T> T -> T = value => value\n",
+        )
+        .expect("write module");
+        let entry = root.join("main.sta");
+        let module =
+            checked_program_at(&entry, "use tools.wrap\nlet wrapped: I32 = wrap 1\n", &root);
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+        let (function, call) = direct_call(&program, "wrap");
+        let resolved = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function,
+                origin: call.origin.clone(),
+                function_type: call.function_type.clone(),
+                substitutions: call.substitutions.clone(),
+                evidence: call.evidence.clone(),
+                target: InstanceResolutionTarget::Root,
+            })
+            .expect("a cross-module generic request resolves");
+        let parameter = resolved
+            .relevant
+            .type_parameters()
+            .next()
+            .expect("T is relevant");
+        assert_eq!(
+            resolved.environment.type_value(parameter),
+            Some(&CheckedType::I32)
+        );
+    }
+
+    #[test]
+    fn coroutine_body_thunks_keep_their_outer_parameters() {
+        let (_, program) = lower(concat!(
+            "use std.coroutine.*\n",
+            "def make_task: <T where Copy T> T -> Coroutine{} T = value => coro { value }\n",
+            "let task = make_task 1\n",
+        ));
+        let thunk = program
+            .functions
+            .iter()
+            .find(|(_, _, function)| function.class.coroutine_body)
+            .map(|(_, id, _)| id)
+            .expect("the coroutine body thunk");
+        let relevant = program.relevant_parameters(thunk);
+        assert_eq!(
+            relevant.type_parameters().count(),
+            1,
+            "the captured outer parameter stays relevant to the coroutine thunk"
+        );
+        let outer = resolved_root(&program, "make_task");
+        let resolved = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function: thunk,
+                origin: test_origin(),
+                function_type: match &program.functions.get(thunk).expect("thunk").signature {
+                    signature => signature.clone(),
+                },
+                substitutions: CallSubstitutions::default(),
+                evidence: None,
+                target: InstanceResolutionTarget::Nested(&outer),
+            })
+            .expect("the coroutine thunk instance resolves");
+        assert!(!resolved.key.substitutions().is_empty());
+    }
+
+    #[test]
+    fn resolved_values_agree_with_legacy_specialization_inference() {
+        let (module, program) = lower(concat!(
+            "type Phantom T = ctor ()\n",
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def phantom_result: <T> () -> Phantom T = () => Phantom ()\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+            "let applied: I32 = identity 1\n",
+            "let hidden: Phantom I32 = phantom_result ()\n",
+            "let repeated: (I32; 3) = repeat 7 3\n",
+        ));
+        for name in ["identity", "phantom_result", "repeat"] {
+            let (function, call) = direct_call(&program, name);
+            let template = module
+                .type_of_function(function)
+                .expect("checked template signature");
+            let mut legacy = HashMap::new();
+            let unifies = infer_type_parameters(
+                &CheckedType::Function(template.clone()),
+                &CheckedType::Function(call.function_type.clone()),
+                &mut legacy,
+            );
+            assert!(unifies, "the legacy path infers `{name}` substitutions");
+            let (environment, _) = program
+                .resolve_substitutions(
+                    function,
+                    &call.origin,
+                    &call.function_type,
+                    &call.substitutions,
+                    None,
+                )
+                .unwrap_or_else(|diagnostic| panic!("{name} should resolve: {diagnostic:?}"));
+            for (parameter, value_type) in legacy {
+                match effect_substitution_value(&value_type) {
+                    Some(effects) => {
+                        let resolved = environment.effect_value(parameter).unwrap_or_else(|| {
+                            panic!("`{name}` should resolve effect parameter {parameter:?}")
+                        });
+                        assert_eq!(resolved, effects, "`{name}` effect row agrees with legacy");
+                    }
+                    None => {
+                        let resolved = environment.type_value(parameter).unwrap_or_else(|| {
+                            panic!("`{name}` should resolve type parameter {parameter:?}")
+                        });
+                        assert_eq!(
+                            resolved, &value_type,
+                            "`{name}` type substitution agrees with legacy"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolved_methods_agree_with_the_legacy_selector() {
+        let (module, program) = lower(concat!(
+            "trait TestShow T { test_show: T -> Bool }\n",
+            "impl TestShow I32 { def test_show = _ => True }\n",
+            "trait TestDefaulted T {\n",
+            "  test_primary: T -> Bool\n",
+            "  test_fallback: T -> Bool = value => test_primary value\n",
+            "}\n",
+            "impl TestDefaulted I32 { def test_primary = _ => True }\n",
+            "trait TestInner T { inner_test: T -> I32 }\n",
+            "trait TestOuter T { outer_test: T -> I32 }\n",
+            "impl TestInner I32 { def inner_test = _ => 1 }\n",
+            "impl<T where TestInner T> TestOuter T { def outer_test = value => inner_test value }\n",
+            "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
+            "def fallback_bound: <T where TestDefaulted T> T -> Bool = value => test_fallback value\n",
+            "def use_outer: <T where TestOuter T> T -> I32 = value => outer_test value\n",
+            "let shown: Bool = show_bound 1\n",
+            "let fell: Bool = fallback_bound 1\n",
+            "let out: I32 = use_outer 1\n",
+        ));
+        for (name, trait_name) in [
+            ("show_bound", "TestShow"),
+            ("fallback_bound", "TestDefaulted"),
+            ("use_outer", "TestOuter"),
+        ] {
+            let owner = function_id(&program, name);
+            let environment = enclosing_environment(&program, name);
+            let evidence = declared_bound_evidence_in(&program, trait_name, owner);
+            let resolved = resolve_evidence(&program, &evidence, &environment);
+            let TraitEvidence::ExplicitImplementation {
+                trait_id,
+                method,
+                arguments,
+                function,
+                ..
+            } = &resolved
+            else {
+                panic!("expected an explicit selection for {name}");
+            };
+            let legacy = module
+                .trait_impl_method(*trait_id, arguments, *method)
+                .expect("the legacy selector agrees an implementation exists");
+            assert_eq!(
+                *function, legacy,
+                "the resolver agrees with the legacy selector for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_keys_feed_the_append_only_catalog() {
+        let (_, program) = lower(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+            "let second: I32 = identity 1\n",
+        ));
+        let mut catalog = crate::specialization::SpecializationCatalog::default();
+        let mut ordinals = Vec::new();
+        for (function, call) in direct_calls(&program, "identity") {
+            let resolved = program
+                .resolve_instance_request(&InstanceResolutionRequest {
+                    function,
+                    origin: call.origin.clone(),
+                    function_type: call.function_type.clone(),
+                    substitutions: call.substitutions.clone(),
+                    evidence: call.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                })
+                .expect("the request resolves");
+            ordinals.push(catalog.reserve_instance(resolved.key));
+        }
+        assert_eq!(
+            ordinals[0], ordinals[1],
+            "equivalent resolved requests reserve one instance"
+        );
+        assert_eq!(catalog.instances().count(), 1);
+    }
+
     #[test]
     fn repeated_product_counts_and_curried_layers_resolve() {
         let (_, program) = lower(concat!(
