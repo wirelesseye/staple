@@ -174,7 +174,7 @@ Read from `codegen.rs` at `df249ce`; line numbers drift, function names are auth
 
 ## Stage 4.5 - Coroutine Resume/Cleanup and Reactive Runners
 
-> **Separate plan recommended for coroutines** (`STAGE_4_5_COROUTINE_ARTIFACTS_PLAN.md`); reactive runners are small enough to include in it or inline here.
+> **Separate plan:** [STAGE_4_5_COROUTINE_AND_REACTIVE_ARTIFACTS_PLAN.md](STAGE_4_5_COROUTINE_AND_REACTIVE_ARTIFACTS_PLAN.md), covering coroutine codes, the three reactive runner families, and two Stage 4.4 gaps found while planning (reactive callback environment finalizers and coroutine-body ownership parity).
 
 - Coroutines: key the resume/cleanup pair by the coroutine body thunk's `FunctionInstanceId` (so each instantiation of a generic enclosing function gets its own pair). The plan records frame layout inputs from the owned `LoweredCoroutinePlan` and the instance body (header, resource bundle order, capture order and concrete types, frame bindings, resume-state count, awaited result types, wait/`until` cancellation states), the closure finalizer for the thunk environment, and the drop glue for frame bindings and captures that `cleanup` releases. Bind every `coro` creation site and `await` child link to the pair. Replace `typed_module.coroutine_plan`/`implicit_thunk_for` lookups with plan/instance references.
 - Reactive runners: `ReactionRunner`, `UntilRunner`, and `DerivedRunner` keyed by owner + lowered reactive-operation/binding site; plans record the callback's bound instance or indirect closure route, callback closure type, ordered callback resources, and payload slot order. Bind each Stage 2.6 reactive operation to its runner.
