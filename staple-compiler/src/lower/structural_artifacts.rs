@@ -1028,6 +1028,21 @@ mod tests {
             if expected_finalizer {
                 saw_droppable = true;
                 assert!(!legacy_is_copy, "a droppable payload is never `Copy`");
+                let finalizer = finalizer.as_ref().expect("the planned finalizer");
+                let artifact = lowered
+                    .program
+                    .artifacts
+                    .get(LoweredArtifactRequestId::from_index(
+                        finalizer.artifact.expect("bound after closure").index(),
+                    ))
+                    .expect("finalizer artifact");
+                match artifact.plan.as_ref() {
+                    Some(LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload {
+                        glue: Some(_),
+                        ..
+                    })) => {}
+                    other => panic!("the payload finalizer is expanded with glue: {other:?}"),
+                }
             } else {
                 saw_copy = true;
             }

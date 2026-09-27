@@ -247,6 +247,15 @@ Stage 4.4 is the first substage with a real scanner. Following the 4.2 recipe, a
   - buffers of droppable and `Copy` elements.
 - **Gate:** every finalizer plan is expanded with bound glue. The finalizer set agrees with legacy's `gc_finalizers` population (Step 6).
 
+**Step 3 notes (complete):**
+
+- **Expander.** `expand_gc_finalizer` fills all four subkinds and is registered with `ProductionHooks` (`expands_body` reports `GcFinalizer`), so every 4.3-requested payload finalizer from the constructor adapters is expanded with bound glue; the constructor-adapter fixture now asserts that. `Payload`/`Cell`/`Buffer` require `concrete_needs_drop` of their value/element and request its `DropGlue` as the single planned callee.
+- **Capture facts.** `LoweredSymbol` gained `mutable_storage` (the exact `TypedModule::has_mutable_storage` predicate, computed once at snapshot). `LoweredClosureCapture` (construction sites) and `LoweredInstanceCapture` (instance bodies) gained `requires_initialization_state`, `mutable_storage`, and `derived`, and `LoweredInstanceBody::captures()` exposes the latter. Stage 2 closure lowering fills them from the typed module; Stage 3.4 materialization fills them from the owned symbol catalog, so a closure's own body and every construction site agree.
+- **Closure environment.** `expand_gc_finalizer` reads the drops from the key's closure instance body (never the site), verifies the key's capture types canonicalize to the body's own captures, and lists droppable captures in reverse capture order with legacy `ensure_closure_finalizer`'s skips (initialization state, mutable storage, derived, borrowed). The install gate stays separate and is mirrored in the scanner design: `!requires_initialization_state && !borrowed && needs_drop`, so a legitimately installed finalizer may drop nothing.
+- **Fixtures.** The hook fixture requests `Payload`/`Cell`/`Buffer` over droppable values and closure environments for by-value (`Owned`, dropped), mutable (`CellValue`; gate fires, body drops nothing), borrowed (`BorrowedValue`; the gate excludes it and the body skips it), derived (`DerivedValue`; gate fires, body drops nothing), and two generic instantiations (`CString`, `Wrapped`) that produce two keys. The sweep then walks every `Fresh` non-empty closure construction and requires the planned drop set to equal the construction's `drops_value` set when the gate fires, and to be empty for gate-excluded plans.
+- **Measurements.** The finalizer fixture closes in 1 round with growth 13.
+- **Gate:** met. Every finalizer plan in the catalog is expanded with bound glue and the workspace suite passes 1234 tests; the legacy `gc_finalizers` population comparison lands in Step 6.
+
 ### Step 4: Scanner and owned bindings
 
 - Implement the scanner over instance bodies and initializers for every site in the table, and the owned-binding collector. Requests for uses go through `ClosureRequest { use_site: Some(..) }`, so the engine records uses and edges.

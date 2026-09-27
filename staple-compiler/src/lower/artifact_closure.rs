@@ -272,8 +272,16 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 };
                 super::cleanup_artifacts::expand_drop_glue(program, artifact, plan)
             }
-            ArtifactRequestKey::GcFinalizer(_)
-            | ArtifactRequestKey::CoroutineCodes(_)
+            ArtifactRequestKey::GcFinalizer(_) => {
+                let LoweredArtifactPlan::GcFinalizer(plan) = plan else {
+                    return Err(vec![Diagnostic::new(
+                        record.origin.span.clone(),
+                        "gc-finalizer artifact carries a mismatched plan".to_string(),
+                    )]);
+                };
+                super::cleanup_artifacts::expand_gc_finalizer(program, artifact, plan)
+            }
+            ArtifactRequestKey::CoroutineCodes(_)
             | ArtifactRequestKey::ReactionRunner(_)
             | ArtifactRequestKey::UntilRunner(_)
             | ArtifactRequestKey::DerivedRunner(_)
@@ -287,6 +295,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
             ArtifactRequestKey::ConstructorAdapter(_)
                 | ArtifactRequestKey::StructuralMethod(_)
                 | ArtifactRequestKey::DropGlue(_)
+                | ArtifactRequestKey::GcFinalizer(_)
         )
     }
 }

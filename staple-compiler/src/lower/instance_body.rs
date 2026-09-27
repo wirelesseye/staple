@@ -57,11 +57,17 @@ pub(crate) struct LoweredInstanceParameter {
 }
 
 /// One capture of an instance body: the template capture record plus its
-/// concrete checked type.
+/// concrete checked type and the cleanup facts the closure finalizer mirrors.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredInstanceCapture {
     pub capture: LoweredCapture,
     pub value_type: CheckedType,
+    /// The captured symbol requires initialization state.
+    pub requires_initialization_state: bool,
+    /// The captured symbol needs mutable storage.
+    pub mutable_storage: bool,
+    /// The captured symbol is a derived binding.
+    pub derived: bool,
 }
 
 /// A dispatch or construction site inside one instance body. Sites are keys
@@ -307,6 +313,12 @@ impl LoweredInstanceBody {
 
     pub(crate) fn plan(&self, id: LoweredCoroutinePlanId) -> Option<&LoweredCoroutinePlan> {
         self.plans.get(id)
+    }
+
+    /// The body's ordered captures with their concrete types and the cleanup
+    /// facts a closure-environment finalizer mirrors.
+    pub(crate) fn captures(&self) -> &[LoweredInstanceCapture] {
+        &self.captures
     }
 
     /// The concrete binding at a site, when the body has one.
@@ -584,9 +596,16 @@ impl<'a> BodyCloner<'a> {
         self.body.captures = function
             .captures
             .iter()
-            .map(|capture| LoweredInstanceCapture {
-                capture: capture.clone(),
-                value_type: self.symbol_type(capture.symbol),
+            .map(|capture| {
+                let symbol = self.program.symbols.get(capture.symbol);
+                LoweredInstanceCapture {
+                    capture: capture.clone(),
+                    value_type: self.symbol_type(capture.symbol),
+                    requires_initialization_state: symbol
+                        .is_some_and(|symbol| symbol.requires_initialization_check),
+                    mutable_storage: symbol.is_some_and(|symbol| symbol.mutable_storage),
+                    derived: symbol.is_some_and(|symbol| symbol.derived),
+                }
             })
             .collect();
         self.body.parameter_pattern = self.clone_pattern(function.parameter_pattern);
@@ -1866,6 +1885,7 @@ impl<'a> BodyCloner<'a> {
                         {
                             value_type = CheckedType::Function(concrete_function_type.clone());
                         }
+                        let symbol = self.program.symbols.get(capture.capture.symbol);
                         LoweredClosureCapture {
                             capture: capture.capture.clone(),
                             drops_value: capture.owns_value
@@ -1873,6 +1893,10 @@ impl<'a> BodyCloner<'a> {
                             value_type,
                             access: capture.access,
                             owns_value: capture.owns_value,
+                            requires_initialization_state: symbol
+                                .is_some_and(|symbol| symbol.requires_initialization_check),
+                            mutable_storage: symbol.is_some_and(|symbol| symbol.mutable_storage),
+                            derived: symbol.is_some_and(|symbol| symbol.derived),
                         }
                     })
                     .collect(),

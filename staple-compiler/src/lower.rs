@@ -769,6 +769,13 @@ pub(crate) struct LoweredClosureCapture {
     pub owns_value: bool,
     /// The capture requires a drop when the environment is destroyed.
     pub drops_value: bool,
+    /// The captured symbol requires initialization state.
+    pub requires_initialization_state: bool,
+    /// The captured symbol needs mutable storage (a `mut` binding, signal, or
+    /// mutating parameter).
+    pub mutable_storage: bool,
+    /// The captured symbol is a derived binding.
+    pub derived: bool,
 }
 
 /// A closure construction plan: the target function, its ordered captures,
@@ -1875,6 +1882,9 @@ pub(crate) struct LoweredSymbol {
     pub value_type: CheckedType,
     pub storage: SymbolStorage,
     pub requires_initialization_check: bool,
+    /// Mirrors `TypedModule::has_mutable_storage`: an ordinary `mut` binding,
+    /// a signal, or a parameter with an explicit mutation effect.
+    pub mutable_storage: bool,
     pub derived: bool,
     pub signal: bool,
     pub mutated_parameter: bool,
@@ -2450,6 +2460,7 @@ impl LoweredProgram {
             value_type,
             storage,
             requires_initialization_check: resolved.requires_initialization_state(symbol),
+            mutable_storage: mutable,
             derived,
             signal,
             mutated_parameter: module.is_mutated_parameter(symbol),
@@ -5879,12 +5890,20 @@ impl LoweredProgram {
             };
             let owns_value = access == LoweredCaptureAccess::ByValue && !capture.non_owning;
             let drops_value = owns_value && module.type_needs_drop(&value_type);
+            let requires_initialization_state = module
+                .resolved()
+                .requires_initialization_state(capture.symbol);
+            let mutable_storage = module.has_mutable_storage(capture.symbol);
+            let derived = module.is_derived_symbol(capture.symbol);
             captures.push(LoweredClosureCapture {
                 capture: capture.clone(),
                 value_type,
                 access,
                 owns_value,
                 drops_value,
+                requires_initialization_state,
+                mutable_storage,
+                derived,
             });
         }
         Ok(LoweredClosureConstruction {
