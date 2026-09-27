@@ -1863,6 +1863,8 @@ mod tests {
 
         // Drop glue: the legacy type set equals the plan key set, and every
         // legacy call tree matches its plan branch, function, and nested order.
+        // The legacy set walks every call tree, because a type dropped only
+        // inside another type's glue is still a `DropGlue` key.
         let mut legacy_types = std::collections::HashSet::new();
         for call in &legacy.drop_calls {
             assert!(
@@ -1870,9 +1872,18 @@ mod tests {
                 "legacy only drops droppable values: {:?}",
                 call.value_type
             );
+        }
+        let mut pending = legacy.drop_calls.iter().collect::<Vec<_>>();
+        while let Some(call) = pending.pop() {
+            // Nested no-op calls are the representation drops the plan omits
+            // by equivalence; they name no glue.
+            if matches!(call.branch, LegacyDropBranch::NoOp) {
+                continue;
+            }
             legacy_types.insert(
                 CanonicalType::concrete(&call.value_type, &origin).expect("concrete drop type"),
             );
+            pending.extend(&call.nested);
         }
         let mut plan_types = std::collections::HashSet::new();
         for (_, artifact) in program.artifacts.iter() {
@@ -2302,6 +2313,14 @@ mod tests {
                 "  let outer = c_string \"a\"\n",
                 "  when { value > 0 => { let inner = c_string \"b\"; inspect inner }, else => inspect outer }\n",
                 "}\n",
+            ),
+            // `(CString | I32)` is dropped only inside the product's glue,
+            // never as a root, so the legacy type set must walk nested calls.
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "def make: () -> (I32, (CString | I32)) = () => (1, 5)\n",
+                "def run: () -> () = () => { let p = make (); () }\n",
+                "let e = run ()\n",
             ),
         ] {
             coverage.merge(assert_cleanup_matches_legacy(source));
