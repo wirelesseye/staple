@@ -1889,10 +1889,10 @@ mod tests {
         for adapter in &legacy.constructor_adapters {
             let callable_type =
                 CanonicalFunctionType::concrete(&adapter.callable_type, &origin).expect("concrete");
-            let plan = program
+            let matches = program
                 .artifacts
                 .iter()
-                .find_map(|(_, artifact)| {
+                .filter_map(|(_, artifact)| {
                     match (
                         program.specializations.artifact(artifact.ordinal),
                         artifact.plan.as_ref(),
@@ -1906,12 +1906,14 @@ mod tests {
                         _ => None,
                     }
                 })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "legacy constructor adapter for symbol {} has no matching plan",
-                        adapter.symbol.0
-                    )
-                });
+                .collect::<Vec<_>>();
+            let [plan] = matches.as_slice() else {
+                panic!(
+                    "legacy constructor adapter for symbol {} matches {} plans, expected exactly one",
+                    adapter.symbol.0,
+                    matches.len()
+                );
+            };
             match &plan.construction {
                 ConstructorConstruction::ManagedRef { finalizer, .. } => {
                     assert!(
@@ -1952,10 +1954,13 @@ mod tests {
             let arguments = canonical_arguments(&method.arguments);
             let function_type = CanonicalFunctionType::concrete(&method.function_type, &origin)
                 .expect("concrete legacy method type");
-            let plan = program
+            // Match by the legacy cache identity `(kind, arguments)` so a second
+            // catalog plan that differs only in its callable type is caught as
+            // a duplicate rather than silently skipped.
+            let matches = program
                 .artifacts
                 .iter()
-                .find_map(|(_, artifact)| {
+                .filter_map(|(_, artifact)| {
                     match (
                         program.specializations.artifact(artifact.ordinal),
                         artifact.plan.as_ref(),
@@ -1963,21 +1968,26 @@ mod tests {
                         (
                             Some(ArtifactRequestKey::StructuralMethod(key)),
                             Some(LoweredArtifactPlan::StructuralMethod(plan)),
-                        ) if key.structural == method.structural
-                            && key.arguments == arguments
-                            && key.callable_type == function_type =>
-                        {
-                            Some(plan)
+                        ) if key.structural == method.structural && key.arguments == arguments => {
+                            Some((key, plan))
                         }
                         _ => None,
                     }
                 })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "legacy {:?} body for {:?} has no matching plan",
-                        method.structural, method.arguments
-                    )
-                });
+                .collect::<Vec<_>>();
+            let [(key, plan)] = matches.as_slice() else {
+                panic!(
+                    "legacy {:?} body for {:?} matches {} plans, expected exactly one",
+                    method.structural,
+                    method.arguments,
+                    matches.len()
+                );
+            };
+            assert_eq!(
+                key.callable_type, function_type,
+                "legacy {:?} body for {:?} uses the plan's callable type",
+                method.structural, method.arguments
+            );
             match &plan.body {
                 StructuralBody::ProductDebug { steps, write } => {
                     assert_eq!(method.structural, StructuralTraitMethod::Debug);
@@ -2076,6 +2086,9 @@ mod tests {
                         legacy.structural_methods.iter().any(|method| {
                             method.structural == key.structural
                                 && canonical_arguments(&method.arguments) == key.arguments
+                                && CanonicalFunctionType::concrete(&method.function_type, &origin)
+                                    .expect("concrete legacy method type")
+                                    == key.callable_type
                         }),
                         "structural plan for {:?} has no legacy emission",
                         key.structural
