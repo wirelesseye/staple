@@ -1,6 +1,6 @@
 # Stage 4.4 Plan: Ownership Cleanup — Drop Glue, Finalizers, and Clone
 
-**Status:** Step 1 complete. Steps 2-7 remain. Stage 4.3 is complete through `69b2441`: constructor-adapter and structural-method plans, the planned-callee mechanism (`PlannedInstance`/`PlannedArtifact`, `bind_artifact_plan_callees`, `check_planned_callees`, plan equality in the fixed-point re-check), and the legacy transition recorder in `codegen.rs`. Stage 4.3 already *requests* two Stage 4.4 key families with placeholder plans:
+**Status:** Complete. All seven steps landed; see the step notes below and the Step 7 hand-off. Stage 4.3 is complete through `69b2441`: constructor-adapter and structural-method plans, the planned-callee mechanism (`PlannedInstance`/`PlannedArtifact`, `bind_artifact_plan_callees`, `check_planned_callees`, plan equality in the fixed-point re-check), and the legacy transition recorder in `codegen.rs`. Stage 4.3 already *requests* two Stage 4.4 key families with placeholder plans:
 
 - `GcFinalizer::Payload` from `ManagedRef` constructor adapters;
 - `DropGlue` from structural `MutateReplace`.
@@ -322,17 +322,43 @@ While extending the recorder, also close 4.3 review finding 2: compare `IndexSwi
 - **Legacy gaps found.** Emission of a `Never`-valued loop body (`loop { droppable }`) fails with "cannot generate code for an erroneous type", and an inline `c_string` extern temporary also fails legacy emission; the `LoopBodyResult` and `CStringTemporary` sites are therefore covered by the scanner fixture instead of the transition comparison. `Wait`/`Resolver` values are not droppable in the coroutine programs tested (their `RuntimeRelease` bodies remain covered by the hook-based step-2 fixture).
 - **Gate:** met. The transition comparison passes on the representative fixtures and the standard-library program, and the workspace suite passes 1239 tests.
 
-### Step 7: Gates and handoff
+**Step 7 notes (complete):**
 
-- Run `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace --quiet`, and `git diff --check`. Run the CLI `--emit llvm`, `--emit object`, and `run` paths with the worktree standard library.
-- Record in this file:
-  - the final plan schemas and use-site table;
-  - the owned-binding contract, including registration order and what Stage 5 must still derive (the exit schedule and live flags);
-  - the builders Stage 4.5 reuses for coroutine frames (`DropGlue` requests, `GcFinalizer::{Cell, ClosureEnvironment}`);
-  - the `RuntimeRelease`/`CStringFree` hand-off to Stage 4.6;
-  - the generic-`Drop` language gap;
-  - the observed closure maxima.
-- Update [STAGE_4_GENERATED_ARTIFACTS_BREAKDOWN.md](STAGE_4_GENERATED_ARTIFACTS_BREAKDOWN.md) and [TYPED_LOWERING_PLAN.md](TYPED_LOWERING_PLAN.md).
+- **Gates.** `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace --quiet` (1239 tests), and `git diff --check` pass. `staple compile --emit llvm`, `staple compile --emit object`, and `staple run` succeed with the worktree standard library on a program that creates and drops CString/user-`Drop`/coroutine values (run exits 0).
+
+##### Final plan schemas and use-site table
+
+- `DropGluePlan { value_type: CheckedType, body }` with `DropGlueBody::{Unexpanded, UserDrop { method: PlannedInstance, representation: Option<PlannedArtifact> }, CoroutineCleanup, RuntimeRelease(RuntimeRelease), CStringFree, Product { fields: Vec<DroppedElement> }, Sum { alternatives: Vec<DroppedAlternative> }, Distinct { representation: PlannedArtifact }}`; `DroppedElement`/`DroppedAlternative` carry the index, concrete type, and glue.
+- `GcFinalizerPlan::{Payload { value_type, glue: Option<PlannedArtifact> }, Cell { value_type, glue }, ClosureEnvironment { closure: FunctionInstanceId, captures: Vec<CheckedType>, drops: Option<Vec<DroppedCapture>> }, Buffer { element, glue }}`; `DroppedCapture` carries the index, concrete type, and glue in reverse capture order.
+- Use sites (all owner-local; cleanup sites carry `use_site: Some(..)`): `DiscardedResult(ItemId)`, `ReplacedValue(ItemId)`, `LoopBodyResult(ExpressionId)`, `CallTemporary { call, argument }`, `CStringTemporary(LoweredCallId)`, `WildcardDiscard(PatternId)`, `OwnedBinding(SymbolId)`, `CellFinalizer(SymbolId)`, `ClosureEnvironment(LoweredCallableValueId)`, `RefConstruction(LoweredCallId)`, `DropIntrinsic(LoweredCallId)`, `CStringConversion(LoweredCallId)`, `CompletionOrphan(LoweredCallId)`, `BufferAllocation(LoweredCallId)`, `BufferCloneFinalizer(LoweredCallId)`, `BufferCloneElement(LoweredCallId)`. The owned-binding and cell sites name the bound `SymbolId` rather than a pattern because a plain `let name = value` has no lowered pattern; `LoweredOwnedBinding.pattern` remains `Option<PatternId>`.
+- Per-site order: a call's own cleanup (`Ref` finalizer, intrinsic drop, buffer finalizer) precedes its C-string temporary, then mutation temporaries in reverse argument order; `BufferClone` records the element `Clone` instance use before the destination finalizer.
+
+##### Owned-binding contract (Stage 5 hand-off)
+
+- `LoweredOwnedBinding { symbol: SymbolId, pattern: Option<PatternId>, storage: OwnedStorage::{Value, Cell}, value_type: CheckedType, glue: Option<ArtifactOrdinal> }` is stored on `LoweredInstanceBody::owned_bindings` and `LoweredProgram::initializer_owned_bindings`.
+- **Registration order** is legacy `owned_order`: the parameter pattern first, then bindings in lowered evaluation order (nested blocks, match arms, loop bodies, and propagating pattern bindings included). Module globals are never owned; only nested initializer block locals qualify. Stage 5 drops in reverse order from a scope's start mark.
+- `Value` entries are SSA locals with a live flag; `Cell` entries are owned binding cells. Captured mutable/derived bindings are **not** owned records: they are GC cells with a `GcFinalizer::Cell`, exactly as legacy `allocate_binding_cell` chooses.
+- **Stage 5 must still derive** the exit schedule (which exits run which drops: block end, match arm, logical, `break`/`continue`, `return`, `?` propagation) and the runtime live flags; Stage 4.4 records only the ordered obligations and their glue.
+
+##### Stage 4.5 hand-off (coroutine frames)
+
+- Reuse `request_drop_glue` (a `DropGlue` request plus `PlannedArtifact`) for frame bindings and captures.
+- Reuse `GcFinalizer::Cell` for captured frame-binding cells inside `ensure_coroutine_codes`, and `GcFinalizer::ClosureEnvironment` for coroutine thunk environments with `install_finalizer = false` handled at the pair.
+- `LoweredCoroutinePlan::{frame_bindings, captures, await_result_types}` and `LoweredInstanceBody::captures()` supply the concrete types; `DropGlueBody::CoroutineCleanup` already covers dropping a `Coroutine` value through the frame header slot.
+
+##### Stage 4.6 hand-off
+
+- `RuntimeRelease::{SchedulerDestroy, WaitDrop, ResolverDrop, CompletionTokenRelease}` and `DropGlueBody::CStringFree` name every non-structural release. Stage 4.6 turns them into `LoweredRuntimeRequirements` (`__staple_sched_destroy`, `__staple_completion_wait_drop`, `__staple_completion_resolver_drop`, `__staple_completion_token_release`, `free`) instead of re-deriving them from emission.
+
+##### Language gap
+
+- A generic `Drop` implementation (`impl<T> Drop (Box T)`) is accepted by the checker but never selected: both legacy `drop_method_for` and the owned `drop_implementation_for` require the implementation's single trait argument to equal the concrete type exactly. Stage 4.4 mirrors the gap (the `Box` fixture asserts a generic implementation is not selected) and does not fix it.
+
+##### Observed maxima
+
+- The 4.4 hook/transition fixtures close in at most 1 closure round with growth at most 13 (the finalizer fixture); the standard-library program closes in 1 round with growth 4. The Stage 4.2 defensive bounds (64 rounds, `max(templates * 64, 1024)` growth) remain far above these.
+
+- **Status:** Stage 4.4 is complete: expanded drop-glue and finalizer plans, owned-binding records, every cleanup and clone site use, and the legacy transition comparison for cleanup. Stage 4.5 (coroutine resume/cleanup and reactive runners) is next.
 
 ## Risks
 
