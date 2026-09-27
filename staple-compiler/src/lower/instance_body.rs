@@ -154,8 +154,10 @@ pub(crate) enum OwnedStorage {
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredOwnedBinding {
     pub symbol: SymbolId,
-    /// The owner-local binding or `at` pattern that introduces the symbol.
-    pub pattern: PatternId,
+    /// The owner-local pattern that introduces the symbol, when the binding
+    /// has one (a parameter, `let` pattern, or match arm pattern). A plain
+    /// `let name = value` binding lowers to a binding item without a pattern.
+    pub pattern: Option<PatternId>,
     pub storage: OwnedStorage,
     /// The concrete value type from the owner's binding pattern.
     pub value_type: CheckedType,

@@ -33,7 +33,7 @@ use super::{
     LoweredArtifactRequestRoot, LoweredCallId, LoweredCallableValueId, LoweredInstanceBody,
     LoweredInstanceDependency, LoweredInstanceDependencyKind, LoweredInstanceRequest,
     LoweredProgram, Origin, PatternId, PlannedCalleeRef, PlannedCalleeRefMut,
-    ResolvedInstanceRequest,
+    ResolvedInstanceRequest, SymbolId,
 };
 use crate::specialization::{ArtifactOrdinal, ArtifactRequestKey};
 
@@ -106,10 +106,12 @@ pub(crate) enum ArtifactUseSite {
     CStringTemporary(LoweredCallId),
     /// A wildcard pattern discarding a droppable value.
     WildcardDiscard(PatternId),
-    /// An owned binding's scope-exit drop; also the owned-binding record.
-    OwnedBinding(PatternId),
+    /// An owned binding's scope-exit drop; also the owned-binding record. The
+    /// symbol is a semantic catalog ID; the owning use record disambiguates
+    /// which owner-local binding it names.
+    OwnedBinding(SymbolId),
     /// A captured binding cell's finalizer.
-    CellFinalizer(PatternId),
+    CellFinalizer(SymbolId),
     /// A closure environment's finalizer.
     ClosureEnvironment(LoweredCallableValueId),
     /// A managed `Ref` allocation's payload finalizer.
@@ -187,22 +189,14 @@ pub(super) trait ArtifactFamilyHooks {
 pub(super) struct ProductionHooks;
 
 impl ArtifactFamilyHooks for ProductionHooks {
-    fn scan_initializer(
-        &self,
-        _program: &LoweredProgram,
-        _initializer: InitializerId,
-    ) -> ScanResult {
+    fn scan_initializer(&self, program: &LoweredProgram, initializer: InitializerId) -> ScanResult {
         // Family scanners are composed in the fixed order 4.3 -> 4.4 -> 4.5 ->
-        // 4.6. Stage 4.2 registers none.
-        Ok(Vec::new())
+        // 4.6. Stage 4.4 owns the ownership-cleanup scanner.
+        super::cleanup_artifacts::scan_initializer(program, initializer)
     }
 
-    fn scan_instance(
-        &self,
-        _program: &LoweredProgram,
-        _instance: FunctionInstanceId,
-    ) -> ScanResult {
-        Ok(Vec::new())
+    fn scan_instance(&self, program: &LoweredProgram, instance: FunctionInstanceId) -> ScanResult {
+        super::cleanup_artifacts::scan_instance(program, instance)
     }
 
     fn expand(
@@ -488,6 +482,10 @@ impl LoweredProgram {
 
             if new_instances.is_empty() {
                 let diagnostics = self.bind_artifact_plan_callees();
+                if !diagnostics.is_empty() {
+                    return diagnostics;
+                }
+                let diagnostics = super::cleanup_artifacts::collect_owned_bindings(self);
                 if !diagnostics.is_empty() {
                     return diagnostics;
                 }
@@ -1004,6 +1002,7 @@ impl LoweredProgram {
         self.check_requester_integrity(&mut diagnostics);
         self.check_use_edge_agreement(&mut diagnostics);
         self.check_planned_callees(hooks, &mut diagnostics);
+        super::cleanup_artifacts::check_owned_bindings(self, &mut diagnostics);
         self.check_request_root_acyclicity(&mut diagnostics);
         self.check_closure_fixed_point(hooks, &mut diagnostics);
         diagnostics
@@ -1508,14 +1507,28 @@ impl LoweredProgram {
                     report("pattern", id.index());
                 }
             }
-            ArtifactUseSite::OwnedBinding(id) => {
-                if !pattern(id) {
-                    report("pattern", id.index());
+            ArtifactUseSite::OwnedBinding(symbol) => {
+                if !self.symbols.get(symbol).is_some_and(|record| {
+                    !matches!(
+                        record.storage,
+                        crate::SymbolStorage::GlobalStorage
+                            | crate::SymbolStorage::FunctionBinding
+                            | crate::SymbolStorage::ExternalSymbol
+                    )
+                }) {
+                    report("symbol", symbol.0);
                 }
             }
-            ArtifactUseSite::CellFinalizer(id) => {
-                if !pattern(id) {
-                    report("pattern", id.index());
+            ArtifactUseSite::CellFinalizer(symbol) => {
+                if !self.symbols.get(symbol).is_some_and(|record| {
+                    !matches!(
+                        record.storage,
+                        crate::SymbolStorage::GlobalStorage
+                            | crate::SymbolStorage::FunctionBinding
+                            | crate::SymbolStorage::ExternalSymbol
+                    )
+                }) {
+                    report("symbol", symbol.0);
                 }
             }
             ArtifactUseSite::ClosureEnvironment(id) => {

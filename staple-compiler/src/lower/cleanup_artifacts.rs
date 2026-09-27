@@ -10,20 +10,24 @@
 //! builders, and the scanner/owned-binding collector (Step 4) reads the drop
 //! facts Stage 3.4 already computed on materialized bodies.
 
+use std::collections::HashSet;
+
 use staple_syntax::{Diagnostic, Span};
 
-use super::artifact_closure::{ClosureRequest, ExpansionResult};
+use super::artifact_closure::{ArtifactUseSite, ClosureRequest, ExpansionResult, ScanResult};
 use super::instance_resolution::{
     InstanceResolutionRequest, InstanceResolutionTarget, RuntimeOpaqueKind,
 };
 use super::{
-    ArenaId, CallSubstitutions, DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture,
-    DroppedElement, GcFinalizerPlan, LoweredArtifactDependencyKind, LoweredArtifactPlan,
-    LoweredArtifactRequestId, LoweredInstanceDependencyKind, LoweredProgram, Origin,
-    PlannedArtifact, PlannedInstance, RuntimeRelease,
+    ArenaId, BlockId, CallSubstitutions, DropGlueBody, DropGluePlan, DroppedAlternative,
+    DroppedCapture, DroppedElement, ExpressionId, GcFinalizerPlan, InitializerId, ItemId,
+    LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
+    LoweredInstanceBody, LoweredInstanceDependencyKind, LoweredItemKind, LoweredOwnedBinding,
+    LoweredProgram, Origin, OwnedStorage, PatternId, PlaceId, PlannedArtifact, PlannedInstance,
+    RuntimeRelease, SymbolId,
 };
-use crate::specialization::{ArtifactRequestKey, CanonicalType};
-use crate::{CheckedType, FunctionId};
+use crate::specialization::{ArtifactRequestKey, CanonicalType, GcFinalizerKey};
+use crate::{CheckedType, FunctionId, IntrinsicFunction};
 
 /// Expands one drop-glue artifact: the selected cleanup body for the plan's
 /// concrete value type, mirroring the legacy decision order, plus the nested
@@ -212,6 +216,1151 @@ fn closure_environment_drops(
         });
     }
     Ok(drops)
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4.4 scanner and owned-binding collector.
+// ---------------------------------------------------------------------------
+
+/// The owner whose cleanup sites a scan reads: a materialized instance body or
+/// a module initializer. Instance bodies own private arenas; initializer sites
+/// index the program's template arenas.
+#[derive(Clone, Copy)]
+enum OwnerArenas<'a> {
+    Instance(&'a LoweredInstanceBody),
+    Initializer(InitializerId),
+}
+
+impl<'a> OwnerArenas<'a> {
+    fn block(self, program: &'a LoweredProgram, id: BlockId) -> Option<&'a super::LoweredBlock> {
+        match self {
+            OwnerArenas::Instance(body) => body.block(id),
+            OwnerArenas::Initializer(_) => program.blocks.get(id),
+        }
+    }
+
+    fn item(self, program: &'a LoweredProgram, id: ItemId) -> Option<&'a super::LoweredItem> {
+        match self {
+            OwnerArenas::Instance(body) => body.item(id),
+            OwnerArenas::Initializer(_) => program.items.get(id),
+        }
+    }
+
+    fn expression(
+        self,
+        program: &'a LoweredProgram,
+        id: ExpressionId,
+    ) -> Option<&'a super::LoweredExpression> {
+        match self {
+            OwnerArenas::Instance(body) => body.expression(id),
+            OwnerArenas::Initializer(_) => program.expressions.get(id),
+        }
+    }
+
+    fn pattern(
+        self,
+        program: &'a LoweredProgram,
+        id: PatternId,
+    ) -> Option<&'a super::LoweredPattern> {
+        match self {
+            OwnerArenas::Instance(body) => body.pattern(id),
+            OwnerArenas::Initializer(_) => program.patterns.get(id),
+        }
+    }
+
+    fn place(self, program: &'a LoweredProgram, id: PlaceId) -> Option<&'a super::LoweredPlace> {
+        match self {
+            OwnerArenas::Instance(body) => body.place(id),
+            OwnerArenas::Initializer(_) => program.places.get(id),
+        }
+    }
+
+    fn call(
+        self,
+        program: &'a LoweredProgram,
+        id: super::LoweredCallId,
+    ) -> Option<&'a super::LoweredCall> {
+        match self {
+            OwnerArenas::Instance(body) => body.call(id),
+            OwnerArenas::Initializer(_) => program.calls.get(id),
+        }
+    }
+
+    fn callable_value(
+        self,
+        program: &'a LoweredProgram,
+        id: super::LoweredCallableValueId,
+    ) -> Option<&'a super::LoweredCallableValue> {
+        match self {
+            OwnerArenas::Instance(body) => body.callable_value(id),
+            OwnerArenas::Initializer(_) => program.callable_values.get(id),
+        }
+    }
+
+    fn with(
+        self,
+        program: &'a LoweredProgram,
+        id: super::LoweredWithId,
+    ) -> Option<&'a super::LoweredWith> {
+        match self {
+            OwnerArenas::Instance(body) => body.withs.get(id),
+            OwnerArenas::Initializer(_) => program.withs.get(id),
+        }
+    }
+}
+
+/// One owned-binding draft produced by the shared walk, before its glue is
+/// bound through the owner's use records.
+struct OwnedBindingDraft {
+    symbol: SymbolId,
+    pattern: Option<PatternId>,
+    storage: OwnedStorage,
+    value_type: CheckedType,
+    origin: Origin,
+}
+
+/// The cleanup decisions one walk reports.
+trait CleanupVisitor {
+    fn drop_site(
+        &mut self,
+        site: ArtifactUseSite,
+        value_type: &CheckedType,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>>;
+
+    fn finalizer_site(
+        &mut self,
+        site: ArtifactUseSite,
+        key: GcFinalizerKey,
+        plan: GcFinalizerPlan,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>>;
+
+    fn owned_binding(&mut self, draft: OwnedBindingDraft) -> Result<(), Vec<Diagnostic>>;
+
+    fn cell_finalizer(
+        &mut self,
+        symbol: SymbolId,
+        value_type: &CheckedType,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>>;
+}
+
+/// The scanning visitor: every site becomes a closure request with its exact
+/// use site, so the engine records a use and an edge.
+struct ScanVisitor<'a> {
+    program: &'a LoweredProgram,
+    requests: Vec<ClosureRequest>,
+}
+
+impl ScanVisitor<'_> {
+    fn request_drop(
+        &mut self,
+        site: ArtifactUseSite,
+        value_type: &CheckedType,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if !self.program.concrete_needs_drop(value_type) {
+            return Ok(());
+        }
+        let canonical =
+            CanonicalType::concrete(value_type, origin).map_err(|diagnostic| vec![diagnostic])?;
+        self.requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::DropGlue(canonical),
+            plan: LoweredArtifactPlan::DropGlue(DropGluePlan {
+                value_type: value_type.clone(),
+                body: DropGlueBody::Unexpanded,
+            }),
+            kind: LoweredArtifactDependencyKind::DropGlue,
+            origin: origin.clone(),
+            use_site: Some(site),
+        });
+        Ok(())
+    }
+}
+
+impl CleanupVisitor for ScanVisitor<'_> {
+    fn drop_site(
+        &mut self,
+        site: ArtifactUseSite,
+        value_type: &CheckedType,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        self.request_drop(site, value_type, origin)
+    }
+
+    fn finalizer_site(
+        &mut self,
+        site: ArtifactUseSite,
+        key: GcFinalizerKey,
+        plan: GcFinalizerPlan,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        self.requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::GcFinalizer(key),
+            plan: LoweredArtifactPlan::GcFinalizer(plan),
+            kind: LoweredArtifactDependencyKind::GcFinalizer,
+            origin: origin.clone(),
+            use_site: Some(site),
+        });
+        Ok(())
+    }
+
+    fn owned_binding(&mut self, draft: OwnedBindingDraft) -> Result<(), Vec<Diagnostic>> {
+        self.request_drop(
+            ArtifactUseSite::OwnedBinding(draft.symbol),
+            &draft.value_type,
+            &draft.origin,
+        )
+    }
+
+    fn cell_finalizer(
+        &mut self,
+        symbol: SymbolId,
+        value_type: &CheckedType,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if !self.program.concrete_needs_drop(value_type) {
+            return Ok(());
+        }
+        let canonical =
+            CanonicalType::concrete(value_type, origin).map_err(|diagnostic| vec![diagnostic])?;
+        self.requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(canonical)),
+            plan: LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Cell {
+                value_type: value_type.clone(),
+                glue: None,
+            }),
+            kind: LoweredArtifactDependencyKind::GcFinalizer,
+            origin: origin.clone(),
+            use_site: Some(ArtifactUseSite::CellFinalizer(symbol)),
+        });
+        Ok(())
+    }
+}
+
+/// The collecting visitor: records owned bindings for the post-closure pass.
+struct CollectVisitor {
+    drafts: Vec<OwnedBindingDraft>,
+}
+
+impl CleanupVisitor for CollectVisitor {
+    fn drop_site(
+        &mut self,
+        _site: ArtifactUseSite,
+        _value_type: &CheckedType,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    fn finalizer_site(
+        &mut self,
+        _site: ArtifactUseSite,
+        _key: GcFinalizerKey,
+        _plan: GcFinalizerPlan,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    fn owned_binding(&mut self, draft: OwnedBindingDraft) -> Result<(), Vec<Diagnostic>> {
+        self.drafts.push(draft);
+        Ok(())
+    }
+
+    fn cell_finalizer(
+        &mut self,
+        _symbol: SymbolId,
+        _value_type: &CheckedType,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+}
+
+/// Walks one owner in lowered evaluation order, reporting every cleanup
+/// decision. The traversal mirrors the Stage 3.3 first-visit order: parameters
+/// first, then block items in order, then the block result, with each
+/// expression's operands in evaluation order.
+struct CleanupWalker<'a> {
+    program: &'a LoweredProgram,
+    owner: OwnerArenas<'a>,
+    visitor: &'a mut dyn CleanupVisitor,
+    visited_blocks: HashSet<BlockId>,
+    visited_items: HashSet<ItemId>,
+    visited_expressions: HashSet<ExpressionId>,
+    visited_patterns: HashSet<PatternId>,
+    visited_places: HashSet<PlaceId>,
+    visited_calls: HashSet<super::LoweredCallId>,
+    visited_callable_values: HashSet<super::LoweredCallableValueId>,
+    seen_symbols: HashSet<SymbolId>,
+}
+
+/// A scan error that cannot be attributed to one site.
+type WalkResult = Result<(), Vec<Diagnostic>>;
+
+impl<'a> CleanupWalker<'a> {
+    fn run(mut self) -> WalkResult {
+        if let OwnerArenas::Instance(body) = self.owner {
+            let parameter_pattern = body.parameter_pattern;
+            self.walk_pattern(parameter_pattern)?;
+        }
+        let root = match self.owner {
+            OwnerArenas::Instance(body) => body.root,
+            OwnerArenas::Initializer(id) => self
+                .program
+                .initializers
+                .get(id)
+                .map(|initializer| initializer.body),
+        };
+        if let Some(root) = root {
+            self.walk_block(root)?;
+        }
+        Ok(())
+    }
+
+    fn walk_block(&mut self, id: BlockId) -> WalkResult {
+        if !self.visited_blocks.insert(id) {
+            return Ok(());
+        }
+        let Some(block) = self.owner.block(self.program, id) else {
+            return Ok(());
+        };
+        let items = block.items.clone();
+        let result = block.result;
+        for item in items {
+            self.walk_item(item)?;
+        }
+        if let Some(result) = result {
+            self.walk_expression(result)?;
+        }
+        Ok(())
+    }
+
+    fn walk_item(&mut self, id: ItemId) -> WalkResult {
+        if !self.visited_items.insert(id) {
+            return Ok(());
+        }
+        let Some(item) = self.owner.item(self.program, id) else {
+            return Ok(());
+        };
+        let origin = item.origin.clone();
+        let kind = item.kind.clone();
+        match kind {
+            LoweredItemKind::Binding(binding) => {
+                if binding.generic {
+                    return Ok(());
+                }
+                let symbol = binding.symbol;
+                let value_type = binding.value.and_then(|value| {
+                    self.owner
+                        .expression(self.program, value)
+                        .map(|expression| expression.value_type.clone())
+                });
+                let Some(symbol) = symbol else {
+                    return Ok(());
+                };
+                let Some(value_type) = value_type else {
+                    return Ok(());
+                };
+                // A derived binding is evaluated lazily by its own evaluator
+                // thunk; legacy allocates its cell and never emits the
+                // initializer inline.
+                if binding.derived {
+                    self.register_binding(symbol, None, &value_type, &origin)?;
+                    return Ok(());
+                }
+                // A mutable binding allocates its cell before the value
+                // evaluates; other bindings register after it.
+                let is_cell = self.is_cell_symbol(symbol);
+                if is_cell {
+                    self.register_binding(symbol, None, &value_type, &origin)?;
+                }
+                if let Some(value) = binding.value {
+                    self.walk_expression(value)?;
+                }
+                if !is_cell {
+                    self.register_binding(symbol, None, &value_type, &origin)?;
+                }
+            }
+            LoweredItemKind::PatternBinding(binding) => {
+                self.walk_expression(binding.value)?;
+                self.walk_pattern(binding.pattern)?;
+            }
+            LoweredItemKind::Assignment(assignment) => {
+                self.walk_place(assignment.target)?;
+                self.walk_expression(assignment.value)?;
+                if assignment.drop_previous
+                    && let Some(value_type) = self
+                        .owner
+                        .place(self.program, assignment.target)
+                        .map(|place| place.value_type.clone())
+                {
+                    self.visitor.drop_site(
+                        ArtifactUseSite::ReplacedValue(id),
+                        &value_type,
+                        &origin,
+                    )?;
+                }
+            }
+            LoweredItemKind::Return(item) => {
+                self.walk_expression(item.value)?;
+            }
+            LoweredItemKind::Break(item) => {
+                if let Some(value) = item.value {
+                    self.walk_expression(value)?;
+                }
+            }
+            LoweredItemKind::Continue(_) => {}
+            LoweredItemKind::Expression(item) => {
+                let value_type = self
+                    .owner
+                    .expression(self.program, item.expression)
+                    .map(|expression| expression.value_type.clone());
+                if item.drop_result
+                    && let Some(value_type) = value_type
+                {
+                    self.visitor.drop_site(
+                        ArtifactUseSite::DiscardedResult(id),
+                        &value_type,
+                        &origin,
+                    )?;
+                }
+                self.walk_expression(item.expression)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn walk_place(&mut self, id: PlaceId) -> WalkResult {
+        if !self.visited_places.insert(id) {
+            return Ok(());
+        }
+        let Some(place) = self.owner.place(self.program, id) else {
+            return Ok(());
+        };
+        let kind = place.kind.clone();
+        match kind {
+            super::LoweredPlaceKind::Temporary { expression } => {
+                self.walk_expression(expression)?
+            }
+            super::LoweredPlaceKind::Dereference {
+                reference,
+                dereference: _,
+            } => self.walk_expression(reference)?,
+            super::LoweredPlaceKind::ProductElement { base, .. }
+            | super::LoweredPlaceKind::Representation { base } => self.walk_place(base)?,
+            super::LoweredPlaceKind::Indexed { base, index } => {
+                self.walk_place(base)?;
+                self.walk_expression(index)?;
+            }
+            super::LoweredPlaceKind::Symbol { .. }
+            | super::LoweredPlaceKind::CapturedCell { .. }
+            | super::LoweredPlaceKind::Resource { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn walk_pattern(&mut self, id: PatternId) -> WalkResult {
+        if !self.visited_patterns.insert(id) {
+            return Ok(());
+        }
+        let Some(pattern) = self.owner.pattern(self.program, id) else {
+            return Ok(());
+        };
+        let origin = pattern.origin.clone();
+        let value_type = pattern.value_type.clone();
+        let kind = pattern.kind.clone();
+        match kind {
+            super::LoweredPatternKind::Wildcard => {
+                self.visitor.drop_site(
+                    ArtifactUseSite::WildcardDiscard(id),
+                    &value_type,
+                    &origin,
+                )?;
+            }
+            super::LoweredPatternKind::Binding {
+                symbol: Some(symbol),
+                ..
+            } => {
+                self.register_binding(symbol, Some(id), &value_type, &origin)?;
+            }
+            super::LoweredPatternKind::Binding { symbol: None, .. }
+            | super::LoweredPatternKind::Literal { .. } => {}
+            super::LoweredPatternKind::Product { elements, .. } => {
+                for element in elements {
+                    self.walk_pattern(element)?;
+                }
+            }
+            super::LoweredPatternKind::Nominal { argument, .. } => {
+                self.walk_pattern(argument)?;
+            }
+            super::LoweredPatternKind::At { binding, pattern } => {
+                self.walk_pattern(binding)?;
+                self.walk_pattern(pattern)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn walk_expression(&mut self, id: ExpressionId) -> WalkResult {
+        if !self.visited_expressions.insert(id) {
+            return Ok(());
+        }
+        let Some(expression) = self.owner.expression(self.program, id) else {
+            return Ok(());
+        };
+        let origin = expression.origin.clone();
+        let kind = expression.kind.clone();
+        match kind {
+            super::LoweredExpressionKind::Deferred(_)
+            | super::LoweredExpressionKind::Stage26Deferred(_) => {}
+            super::LoweredExpressionKind::Block(block) => self.walk_block(block)?,
+            super::LoweredExpressionKind::Name(_)
+            | super::LoweredExpressionKind::Integer(_)
+            | super::LoweredExpressionKind::Float(_)
+            | super::LoweredExpressionKind::String(_)
+            | super::LoweredExpressionKind::CString(_) => {}
+            super::LoweredExpressionKind::Access(access) => self.walk_expression(access.base)?,
+            super::LoweredExpressionKind::Product(product) => {
+                for step in &product.steps {
+                    match step {
+                        super::LoweredProductStep::Positional { expression, .. }
+                        | super::LoweredProductStep::Designated { expression, .. }
+                        | super::LoweredProductStep::PositionalSpread { expression, .. }
+                        | super::LoweredProductStep::NamedSpread { expression, .. }
+                        | super::LoweredProductStep::Default { expression, .. } => {
+                            self.walk_expression(*expression)?;
+                        }
+                    }
+                }
+                for field in &product.fields {
+                    self.walk_expression(*field)?;
+                }
+            }
+            super::LoweredExpressionKind::RepeatedProduct(product) => {
+                self.walk_expression(product.expression)?;
+            }
+            super::LoweredExpressionKind::Satisfies(satisfies) => {
+                self.walk_expression(satisfies.value)?;
+            }
+            super::LoweredExpressionKind::Logical(logical) => {
+                self.walk_expression(logical.left)?;
+                self.walk_expression(logical.right)?;
+            }
+            super::LoweredExpressionKind::Loop(loop_) => {
+                self.walk_block(loop_.body)?;
+                if loop_.drops_body_result {
+                    // Legacy drops the loop body's block value, not the
+                    // `break`-value result type.
+                    let body_result = self
+                        .owner
+                        .block(self.program, loop_.body)
+                        .and_then(|block| block.result)
+                        .and_then(|result| self.owner.expression(self.program, result))
+                        .map(|expression| expression.value_type.clone());
+                    if let Some(body_result) = body_result {
+                        self.visitor.drop_site(
+                            ArtifactUseSite::LoopBodyResult(id),
+                            &body_result,
+                            &origin,
+                        )?;
+                    }
+                }
+            }
+            super::LoweredExpressionKind::Match(match_) => {
+                self.walk_expression(match_.subject)?;
+                for arm in &match_.arms {
+                    self.walk_pattern(arm.pattern)?;
+                    self.walk_expression(arm.body)?;
+                }
+            }
+            super::LoweredExpressionKind::Index(index) => {
+                self.walk_expression(index.base)?;
+                self.walk_expression(index.index)?;
+            }
+            super::LoweredExpressionKind::StringTemplate(template) => {
+                for part in &template.parts {
+                    if let super::LoweredStringTemplatePart::Interpolation(interpolation) = part {
+                        self.walk_expression(interpolation.expression)?;
+                    }
+                }
+            }
+            super::LoweredExpressionKind::Call(call) => self.walk_call(call)?,
+            super::LoweredExpressionKind::CallableValue(value) => {
+                self.walk_callable_value(value, id)?;
+            }
+            super::LoweredExpressionKind::Resource(_) => {}
+            super::LoweredExpressionKind::With(with) => {
+                if let Some(with) = self.owner.with(self.program, with) {
+                    let value = with.value;
+                    let body = with.body;
+                    self.walk_expression(value)?;
+                    self.walk_block(body)?;
+                }
+            }
+            super::LoweredExpressionKind::Coro(_) | super::LoweredExpressionKind::Await(_) => {}
+        }
+        Ok(())
+    }
+
+    fn walk_call(&mut self, id: super::LoweredCallId) -> WalkResult {
+        if !self.visited_calls.insert(id) {
+            return Ok(());
+        }
+        let Some(call) = self.owner.call(self.program, id) else {
+            return Ok(());
+        };
+        let origin = call.origin.clone();
+        let target = call.target.clone();
+        let steps = call.steps.clone();
+        let arguments = call.arguments.clone();
+        let result_type = call.result_type.clone();
+        let c_string_temporary = call.c_string_temporary;
+        if let Some(callee) = call.callee {
+            self.walk_expression(callee)?;
+        }
+        for step in &steps {
+            match step {
+                super::LoweredCallStep::Callee { expression }
+                | super::LoweredCallStep::ProductElement { expression, .. }
+                | super::LoweredCallStep::ProductSpread { expression, .. }
+                | super::LoweredCallStep::NamedProductSpread { expression, .. }
+                | super::LoweredCallStep::Default { expression, .. } => {
+                    self.walk_expression(*expression)?;
+                }
+                super::LoweredCallStep::Argument { argument } => {
+                    if let Some(expression) = arguments
+                        .get(*argument)
+                        .and_then(|argument| argument.expression)
+                    {
+                        self.walk_expression(expression)?;
+                    }
+                }
+                super::LoweredCallStep::Resource { .. } | super::LoweredCallStep::Invoke => {}
+            }
+        }
+
+        // Call-specific cleanup runs when the invocation executes.
+        match &target {
+            super::LoweredCallableTarget::Constructor {
+                recursive: Some(_), ..
+            } => {
+                if let CheckedType::Ref(payload) = &result_type
+                    && self.program.concrete_needs_drop(payload)
+                {
+                    let canonical = CanonicalType::concrete(payload, &origin)
+                        .map_err(|diagnostic| vec![diagnostic])?;
+                    self.visitor.finalizer_site(
+                        ArtifactUseSite::RefConstruction(id),
+                        GcFinalizerKey::Payload(canonical),
+                        GcFinalizerPlan::Payload {
+                            value_type: payload.as_ref().clone(),
+                            glue: None,
+                        },
+                        &origin,
+                    )?;
+                }
+            }
+            super::LoweredCallableTarget::Intrinsic { intrinsic, .. } => match intrinsic {
+                IntrinsicFunction::Drop => {
+                    if let Some(argument) = arguments.first() {
+                        self.visitor.drop_site(
+                            ArtifactUseSite::DropIntrinsic(id),
+                            &argument.expected,
+                            &origin,
+                        )?;
+                    }
+                }
+                IntrinsicFunction::StringFromCString => {
+                    self.visitor.drop_site(
+                        ArtifactUseSite::CStringConversion(id),
+                        &CheckedType::CString,
+                        &origin,
+                    )?;
+                }
+                IntrinsicFunction::ResolverComplete => {
+                    if let Some(argument) = arguments.last() {
+                        self.visitor.drop_site(
+                            ArtifactUseSite::CompletionOrphan(id),
+                            &argument.expected,
+                            &origin,
+                        )?;
+                    }
+                }
+                IntrinsicFunction::BufferWithCapacity => {
+                    if let CheckedType::Buffer(element) = &result_type
+                        && self.program.concrete_needs_drop(element)
+                    {
+                        let canonical = CanonicalType::concrete(element, &origin)
+                            .map_err(|diagnostic| vec![diagnostic])?;
+                        self.visitor.finalizer_site(
+                            ArtifactUseSite::BufferAllocation(id),
+                            GcFinalizerKey::Buffer(canonical),
+                            GcFinalizerPlan::Buffer {
+                                element: element.as_ref().clone(),
+                                glue: None,
+                            },
+                            &origin,
+                        )?;
+                    }
+                }
+                IntrinsicFunction::BufferClone => {
+                    if let CheckedType::Buffer(element) = &result_type
+                        && self.program.concrete_needs_drop(element)
+                    {
+                        let canonical = CanonicalType::concrete(element, &origin)
+                            .map_err(|diagnostic| vec![diagnostic])?;
+                        self.visitor.finalizer_site(
+                            ArtifactUseSite::BufferCloneFinalizer(id),
+                            GcFinalizerKey::Buffer(canonical),
+                            GcFinalizerPlan::Buffer {
+                                element: element.as_ref().clone(),
+                                glue: None,
+                            },
+                            &origin,
+                        )?;
+                    }
+                }
+                _ => {}
+            },
+            super::LoweredCallableTarget::DirectFunction { .. }
+            | super::LoweredCallableTarget::IndirectClosure { .. }
+            | super::LoweredCallableTarget::ExternalFunction { .. }
+            | super::LoweredCallableTarget::Constructor {
+                recursive: None, ..
+            }
+            | super::LoweredCallableTarget::TraitImplementation { .. }
+            | super::LoweredCallableTarget::StructuralTraitMethod { .. }
+            | super::LoweredCallableTarget::CompilerHelper { .. } => {}
+        }
+
+        if c_string_temporary {
+            self.visitor.drop_site(
+                ArtifactUseSite::CStringTemporary(id),
+                &CheckedType::CString,
+                &origin,
+            )?;
+        }
+        // Legacy drops mutation temporaries in reverse collection order.
+        for (index, argument) in arguments.iter().enumerate().rev() {
+            if argument.drops_after_call {
+                self.visitor.drop_site(
+                    ArtifactUseSite::CallTemporary {
+                        call: id,
+                        argument: index,
+                    },
+                    &argument.expected,
+                    &origin,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn walk_callable_value(
+        &mut self,
+        id: super::LoweredCallableValueId,
+        _expression: ExpressionId,
+    ) -> WalkResult {
+        if !self.visited_callable_values.insert(id) {
+            return Ok(());
+        }
+        let Some(value) = self.owner.callable_value(self.program, id) else {
+            return Ok(());
+        };
+        let origin = value.origin.clone();
+        let Some(closure) = &value.closure else {
+            return Ok(());
+        };
+        // Only a fresh, non-empty environment installs a closure finalizer.
+        if closure.environment != super::LoweredClosureEnvironment::Fresh
+            || closure.captures.is_empty()
+        {
+            return Ok(());
+        }
+        // The install gate: some capture that neither requires initialization
+        // state nor is borrowed has a droppable type.
+        let gate = closure.captures.iter().any(|capture| {
+            !capture.requires_initialization_state
+                && !capture.capture.borrowed
+                && self.program.concrete_needs_drop(&capture.value_type)
+        });
+        if !gate {
+            return Ok(());
+        }
+        let closure_instance = match self.owner {
+            OwnerArenas::Instance(body) => body
+                .binding(super::LoweredBindingSite::CallableValue(id))
+                .and_then(|binding| match binding {
+                    super::LoweredBoundTarget::Instance(instance) => Some(*instance),
+                    _ => None,
+                }),
+            OwnerArenas::Initializer(_) => None,
+        };
+        let closure_instance = match closure_instance {
+            Some(instance) => instance,
+            None => {
+                // Initializer closures have no binding table; resolve the
+                // closure function's instance the same way Stage 3.3 does.
+                let request = InstanceResolutionRequest {
+                    function: closure.function,
+                    origin: origin.clone(),
+                    function_type: value.function_type.clone(),
+                    substitutions: closure.substitutions.clone(),
+                    evidence: None,
+                    target: InstanceResolutionTarget::Root,
+                };
+                let resolved = self
+                    .program
+                    .resolve_instance_request(&request)
+                    .map_err(|diagnostic| vec![diagnostic])?;
+                let Some(ordinal) = self.program.specializations.instance_ordinal(&resolved.key)
+                else {
+                    return Ok(());
+                };
+                super::FunctionInstanceId::from_index(ordinal.index())
+            }
+        };
+        let captures = closure
+            .captures
+            .iter()
+            .map(|capture| CanonicalType::concrete(&capture.value_type, &origin))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|diagnostic| vec![diagnostic])?;
+        let ordinal = self
+            .program
+            .instances
+            .get(closure_instance)
+            .map(|instance| instance.ordinal);
+        let Some(ordinal) = ordinal else {
+            return Ok(());
+        };
+        self.visitor.finalizer_site(
+            ArtifactUseSite::ClosureEnvironment(id),
+            GcFinalizerKey::ClosureEnvironment {
+                closure: ordinal,
+                captures: captures.clone(),
+            },
+            GcFinalizerPlan::ClosureEnvironment {
+                closure: closure_instance,
+                captures: closure
+                    .captures
+                    .iter()
+                    .map(|capture| capture.value_type.clone())
+                    .collect(),
+                drops: None,
+            },
+            &origin,
+        )
+    }
+
+    fn is_cell_symbol(&self, symbol: SymbolId) -> bool {
+        self.program
+            .symbols
+            .get(symbol)
+            .is_some_and(|record| record.mutable_storage || record.derived)
+    }
+
+    /// Reports one bound symbol, mirroring legacy `bind_pattern_value` and
+    /// `compile_item`: a mutable or derived binding owns its cell (or gets a
+    /// captured-cell finalizer), every other binding owns its value unless it
+    /// is non-owning or arrives through a mutated-parameter pointer.
+    fn register_binding(
+        &mut self,
+        symbol: SymbolId,
+        pattern: Option<PatternId>,
+        value_type: &CheckedType,
+        origin: &Origin,
+    ) -> WalkResult {
+        if !self.seen_symbols.insert(symbol) {
+            return Ok(());
+        }
+        if !self.program.concrete_needs_drop(value_type) {
+            return Ok(());
+        }
+        let Some(record) = self.program.symbols.get(symbol) else {
+            return Ok(());
+        };
+        if matches!(
+            record.storage,
+            super::SymbolStorage::GlobalStorage
+                | super::SymbolStorage::FunctionBinding
+                | super::SymbolStorage::ExternalSymbol
+        ) || record.mutated_parameter
+        {
+            return Ok(());
+        }
+        let draft = |storage| OwnedBindingDraft {
+            symbol,
+            pattern,
+            storage,
+            value_type: value_type.clone(),
+            origin: origin.clone(),
+        };
+        if record.mutable_storage || record.derived {
+            if record.captured {
+                self.visitor.cell_finalizer(symbol, value_type, origin)?;
+            } else {
+                self.visitor.owned_binding(draft(OwnedStorage::Cell))?;
+            }
+        } else if !record.non_owning {
+            self.visitor.owned_binding(draft(OwnedStorage::Value))?;
+        }
+        Ok(())
+    }
+}
+
+/// Scans one materialized instance body for cleanup sites, in lowered
+/// evaluation order.
+pub(super) fn scan_instance(
+    program: &LoweredProgram,
+    instance: super::FunctionInstanceId,
+) -> ScanResult {
+    let Some(record) = program.instances.get(instance) else {
+        return Ok(Vec::new());
+    };
+    let Some(body) = record.body.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let mut visitor = ScanVisitor {
+        program,
+        requests: Vec::new(),
+    };
+    walk_owner(program, OwnerArenas::Instance(body), &mut visitor)?;
+    Ok(visitor.requests)
+}
+
+/// Scans one module initializer for cleanup sites, in lowered evaluation
+/// order.
+pub(super) fn scan_initializer(program: &LoweredProgram, initializer: InitializerId) -> ScanResult {
+    if program.initializers.get(initializer).is_none() {
+        return Ok(Vec::new());
+    }
+    let mut visitor = ScanVisitor {
+        program,
+        requests: Vec::new(),
+    };
+    walk_owner(program, OwnerArenas::Initializer(initializer), &mut visitor)?;
+    Ok(visitor.requests)
+}
+
+fn walk_owner(
+    program: &LoweredProgram,
+    owner: OwnerArenas<'_>,
+    visitor: &mut dyn CleanupVisitor,
+) -> WalkResult {
+    CleanupWalker {
+        program,
+        owner,
+        visitor,
+        visited_blocks: HashSet::new(),
+        visited_items: HashSet::new(),
+        visited_expressions: HashSet::new(),
+        visited_patterns: HashSet::new(),
+        visited_places: HashSet::new(),
+        visited_calls: HashSet::new(),
+        visited_callable_values: HashSet::new(),
+        seen_symbols: HashSet::new(),
+    }
+    .run()
+}
+
+/// Collects every owner's owned bindings and binds each one's glue through the
+/// owner's `OwnedBinding` use record. Runs once after the closure fixed point.
+pub(super) fn collect_owned_bindings(program: &mut LoweredProgram) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut instance_drafts = Vec::new();
+    for (id, instance) in program.instances.iter() {
+        let Some(body) = &instance.body else {
+            continue;
+        };
+        let mut visitor = CollectVisitor { drafts: Vec::new() };
+        if let Err(mut problems) = walk_owner(program, OwnerArenas::Instance(body), &mut visitor) {
+            diagnostics.append(&mut problems);
+            continue;
+        }
+        instance_drafts.push((id, visitor.drafts));
+    }
+    let mut initializer_drafts = Vec::new();
+    for (id, _) in program.initializers.iter() {
+        let mut visitor = CollectVisitor { drafts: Vec::new() };
+        if let Err(mut problems) = walk_owner(program, OwnerArenas::Initializer(id), &mut visitor) {
+            diagnostics.append(&mut problems);
+            continue;
+        }
+        initializer_drafts.push((id, visitor.drafts));
+    }
+
+    for (id, drafts) in instance_drafts {
+        let uses = program
+            .instances
+            .get(id)
+            .and_then(|instance| instance.body.as_ref())
+            .map(|body| body.artifact_uses.clone())
+            .unwrap_or_default();
+        let mut records = Vec::new();
+        for draft in drafts {
+            match bind_owned_binding(&uses, draft, &mut diagnostics) {
+                Some(record) => records.push(record),
+                None => continue,
+            }
+        }
+        if let Some(instance) = program.instances.get_mut(id)
+            && let Some(body) = instance.body.as_mut()
+        {
+            body.owned_bindings = records;
+        }
+    }
+    for (id, drafts) in initializer_drafts {
+        let uses = program
+            .initializer_artifact_uses
+            .get(id.index())
+            .cloned()
+            .unwrap_or_default();
+        let mut records = Vec::new();
+        for draft in drafts {
+            match bind_owned_binding(&uses, draft, &mut diagnostics) {
+                Some(record) => records.push(record),
+                None => continue,
+            }
+        }
+        if let Some(slot) = program.initializer_owned_bindings.get_mut(id.index()) {
+            *slot = records;
+        }
+    }
+    diagnostics
+}
+
+/// Binds one draft's glue through the owner's use records and produces the
+/// stored record.
+fn bind_owned_binding(
+    uses: &[super::LoweredArtifactUse],
+    draft: OwnedBindingDraft,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<LoweredOwnedBinding> {
+    let glue = uses.iter().find_map(|use_| {
+        (use_.site == ArtifactUseSite::OwnedBinding(draft.symbol)).then_some(use_.artifact)
+    });
+    let Some(glue) = glue else {
+        diagnostics.push(Diagnostic::new(
+            draft.origin.span.clone(),
+            format!(
+                "owned binding symbol {} has no recorded drop-glue use",
+                draft.symbol.0
+            ),
+        ));
+        return None;
+    };
+    Some(LoweredOwnedBinding {
+        symbol: draft.symbol,
+        pattern: draft.pattern,
+        storage: draft.storage,
+        value_type: draft.value_type,
+        glue: Some(glue),
+    })
+}
+
+/// Validates the collected owned bindings: every record carries a bound glue
+/// that matches its concrete type, every owned-binding use has a record, and
+/// no owner repeats a symbol.
+pub(super) fn check_owned_bindings(program: &LoweredProgram, diagnostics: &mut Vec<Diagnostic>) {
+    for (id, instance) in program.instances.iter() {
+        let Some(body) = &instance.body else {
+            continue;
+        };
+        check_owner_bindings(
+            program,
+            &format!("function instance {}", id.index()),
+            &body.owned_bindings,
+            &body.artifact_uses,
+            diagnostics,
+        );
+    }
+    for (id, _) in program.initializers.iter() {
+        if let Some(records) = program.initializer_owned_bindings.get(id.index()) {
+            let uses = program
+                .initializer_artifact_uses
+                .get(id.index())
+                .cloned()
+                .unwrap_or_default();
+            check_owner_bindings(
+                program,
+                &format!("initializer {}", id.index()),
+                records,
+                &uses,
+                diagnostics,
+            );
+        }
+    }
+}
+
+fn check_owner_bindings(
+    program: &LoweredProgram,
+    owner: &str,
+    records: &[LoweredOwnedBinding],
+    uses: &[super::LoweredArtifactUse],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut seen = HashSet::new();
+    for record in records {
+        if !seen.insert(record.symbol) {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!("{owner} records owned binding {} twice", record.symbol.0),
+            ));
+        }
+        let canonical = match CanonicalType::concrete(&record.value_type, &Origin::compiler()) {
+            Ok(canonical) => canonical,
+            Err(diagnostic) => {
+                diagnostics.push(diagnostic);
+                continue;
+            }
+        };
+        let Some(glue) = record.glue else {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!("{owner} has an unbound owned binding {}", record.symbol.0),
+            ));
+            continue;
+        };
+        let key_matches = program
+            .specializations
+            .artifact(glue)
+            .is_some_and(|key| *key == ArtifactRequestKey::DropGlue(canonical));
+        if !key_matches {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!(
+                    "{owner} binds owned binding {} to a drop glue that is not its value type",
+                    record.symbol.0
+                ),
+            ));
+        }
+        let use_matches = uses.iter().any(|use_| {
+            use_.site == ArtifactUseSite::OwnedBinding(record.symbol) && use_.artifact == glue
+        });
+        if !use_matches {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!(
+                    "{owner} has no owned-binding use record for symbol {}",
+                    record.symbol.0
+                ),
+            ));
+        }
+    }
+    for use_ in uses {
+        if let ArtifactUseSite::OwnedBinding(symbol) = use_.site
+            && !records.iter().any(|record| record.symbol == symbol)
+        {
+            diagnostics.push(Diagnostic::new(
+                use_.origin.span.clone(),
+                format!("{owner} has an owned-binding use with no record"),
+            ));
+        }
+    }
 }
 
 /// Builds one drop-glue body in the legacy decision order.
@@ -408,8 +1557,8 @@ mod tests {
     use crate::{
         ArenaId, CheckedType, DropGlueBody, DropGluePlan, FunctionInstanceId, LoweredArtifactPlan,
         LoweredArtifactRequestId, LoweredClosureCapture, LoweredInstanceDependencyKind,
-        LoweredProgram, Lowerer, NameResolver, Origin, ProgramLoader, RuntimeRelease, TypeChecker,
-        TypedModule,
+        LoweredProgram, Lowerer, NameResolver, Origin, OwnedStorage, ProgramLoader, RuntimeRelease,
+        TypeChecker, TypedModule,
     };
 
     use super::super::artifact_closure::{
@@ -482,21 +1631,21 @@ mod tests {
     impl ArtifactFamilyHooks for CleanupHooks {
         fn scan_initializer(
             &self,
-            _program: &LoweredProgram,
-            _initializer: crate::InitializerId,
+            program: &LoweredProgram,
+            initializer: crate::InitializerId,
         ) -> ScanResult {
-            Ok(Vec::new())
+            super::scan_initializer(program, initializer)
         }
 
         fn scan_instance(
             &self,
-            _program: &LoweredProgram,
+            program: &LoweredProgram,
             instance: FunctionInstanceId,
         ) -> ScanResult {
+            let mut requests = super::scan_instance(program, instance)?;
             if instance != self.seed {
-                return Ok(Vec::new());
+                return Ok(requests);
             }
-            let mut requests = Vec::new();
             for (value_type, site) in &self.types {
                 let canonical = CanonicalType::concrete(value_type, &self.origin).unwrap_or_else(
                     |diagnostic| panic!("type {value_type:?} is not concrete: {diagnostic:?}"),
@@ -920,21 +2069,23 @@ mod tests {
     impl ArtifactFamilyHooks for FinalizerHooks {
         fn scan_initializer(
             &self,
-            _program: &LoweredProgram,
-            _initializer: crate::InitializerId,
+            program: &LoweredProgram,
+            initializer: crate::InitializerId,
         ) -> ScanResult {
-            Ok(Vec::new())
+            super::scan_initializer(program, initializer)
         }
 
         fn scan_instance(
             &self,
-            _program: &LoweredProgram,
+            program: &LoweredProgram,
             instance: FunctionInstanceId,
         ) -> ScanResult {
+            let mut requests = super::scan_instance(program, instance)?;
             if instance != self.seed {
-                return Ok(Vec::new());
+                return Ok(requests);
             }
-            Ok(self.requests.clone())
+            requests.extend(self.requests.clone());
+            Ok(requests)
         }
 
         fn expand(
@@ -1489,6 +2640,275 @@ mod tests {
         eprintln!(
             "stage 4.4 finalizer closure stats: {:?}",
             program.closure_stats
+        );
+    }
+
+    /// The single instance of one declared function.
+    fn instance_of(program: &LoweredProgram, name: &str) -> FunctionInstanceId {
+        let template = program
+            .functions
+            .iter()
+            .find(|(_, _, function)| {
+                function.name == name || function.name.ends_with(&format!(".{name}"))
+            })
+            .map(|(_, id, _)| id)
+            .unwrap_or_else(|| panic!("no lowered function named {name}"));
+        program
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.template == template)
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| panic!("no instance of {name}"))
+    }
+
+    fn instance_bindings(program: &LoweredProgram, name: &str) -> Vec<(OwnedStorage, CheckedType)> {
+        program
+            .instances
+            .get(instance_of(program, name))
+            .and_then(|instance| instance.body.as_ref())
+            .map(|body| {
+                body.owned_bindings
+                    .iter()
+                    .map(|record| (record.storage, record.value_type.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    const SCANNER_FIXTURE: &str = concat!(
+        "use std.cinterop.*\n",
+        "extern \"c\" { inspect: CString -> I32 }\n",
+        "def make_c: () -> CString = () => c_string \"x\"\n",
+        "def discard_result: () -> () = () => { make_c (); () }\n",
+        "def ignore: (CString) -> I32 = _ => 0\n",
+        "def drop_body: () -> Never = () => loop { make_c () }\n",
+        "def owned_param: move CString -> CString = move value => value\n",
+        "def mutate_c: move (CString, CString) -> (CString, CString) = move pair => {\n",
+        "  let mut copy = pair\n",
+        "  copy[0] = c_string \"b\"\n",
+        "  copy\n",
+        "}\n",
+        "def cell_finalizer: () -> (() -> I32) = () => {\n",
+        "  let mut cell = c_string \"a\"\n",
+        "  cell = c_string \"b\"\n",
+        "  () => inspect cell\n",
+        "}\n",
+        "def closure_env: move CString -> (() -> I32) = move value => () => inspect value\n",
+        "def make_ref: () -> Ref CString = () => Ref (c_string \"x\")\n",
+        "def convert: CString -> String = value => CString.to_string value\n",
+        "def nested: (I32) -> I32 = value => {\n",
+        "  let outer = c_string \"a\"\n",
+        "  when { value > 0 => { let inner = c_string \"b\"; inspect inner }, else => inspect outer }\n",
+        "}\n",
+        "def loop_local: () -> I32 = () => loop {\n",
+        "  let item = c_string \"x\"\n",
+        "  break (inspect item)\n",
+        "}\n",
+        "let discarded = discard_result ()\n",
+        "let ignored = ignore (c_string \"x\")\n",
+        "let mutated = mutate_c (c_string \"a\", c_string \"c\")\n",
+        "let celled = cell_finalizer ()\n",
+        "let closure = closure_env (c_string \"e\")\n",
+        "let reference = make_ref ()\n",
+        "let converted = convert (c_string \"c\")\n",
+        "let nested_value = nested 1\n",
+    );
+
+    #[test]
+    fn cleanup_scanner_records_sites_and_owned_bindings() {
+        let module = checked_program(SCANNER_FIXTURE);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .expect("the scanner fixture lowers and validates");
+        let program = &lowered.program;
+
+        let mut sites = HashSet::new();
+        for (_, instance) in program.instances.iter() {
+            if let Some(body) = &instance.body {
+                sites.extend(body.artifact_uses.iter().map(|use_| use_.site));
+            }
+        }
+        for uses in &program.initializer_artifact_uses {
+            sites.extend(uses.iter().map(|use_| use_.site));
+        }
+        let has = |predicate: fn(&ArtifactUseSite) -> bool| sites.iter().any(predicate);
+        assert!(
+            has(|site| matches!(site, ArtifactUseSite::DiscardedResult(_))),
+            "a discarded CString statement site"
+        );
+        assert!(
+            has(|site| matches!(site, ArtifactUseSite::ReplacedValue(_))),
+            "an assignment replacing a droppable value site"
+        );
+        assert!(
+            has(|site| matches!(site, ArtifactUseSite::LoopBodyResult(_))),
+            "a loop body result drop site"
+        );
+        assert!(
+            has(|site| matches!(site, ArtifactUseSite::WildcardDiscard(_))),
+            "a wildcard parameter discard site"
+        );
+        assert!(
+            has(|site| matches!(site, ArtifactUseSite::OwnedBinding(_))),
+            "an owned binding site"
+        );
+        assert!(
+            has(|site| matches!(site, ArtifactUseSite::CellFinalizer(_))),
+            "a captured cell finalizer site"
+        );
+        assert!(
+            has(|site| matches!(site, ArtifactUseSite::ClosureEnvironment(_))),
+            "a closure environment finalizer site"
+        );
+        assert!(
+            has(|site| matches!(site, ArtifactUseSite::RefConstruction(_))),
+            "a managed `Ref` construction finalizer site"
+        );
+        assert!(
+            has(|site| matches!(site, ArtifactUseSite::CStringConversion(_))),
+            "a C-string conversion drop site"
+        );
+
+        // A moved parameter is owned; a wildcard parameter registers nothing.
+        assert_eq!(
+            instance_bindings(program, "owned_param"),
+            vec![(OwnedStorage::Value, CheckedType::CString)]
+        );
+        assert!(instance_bindings(program, "ignore").is_empty());
+
+        // A moved product parameter and a mutable local: value then cell, in
+        // registration order.
+        let mutated = instance_bindings(program, "mutate_c");
+        assert_eq!(mutated.len(), 2, "{mutated:?}");
+        assert_eq!(mutated[0].0, OwnedStorage::Value);
+        assert_eq!(mutated[1].0, OwnedStorage::Cell);
+        assert!(
+            matches!(&mutated[0].1, CheckedType::Product(_)),
+            "the pair parameter owns the product value: {mutated:?}"
+        );
+        assert_eq!(mutated[0].1, mutated[1].1);
+
+        // The captured mutable cell is a finalizer, not an owned binding.
+        assert!(
+            instance_bindings(program, "cell_finalizer").is_empty(),
+            "a captured cell is cleaned up by its GC finalizer"
+        );
+
+        // Nested block locals register in evaluation order: the outer `let`
+        // then the match-arm block's `let`.
+        let nested = instance_bindings(program, "nested");
+        assert_eq!(
+            nested,
+            vec![
+                (OwnedStorage::Value, CheckedType::CString),
+                (OwnedStorage::Value, CheckedType::CString)
+            ],
+            "the function's own and nested block locals"
+        );
+
+        // A loop-body local registers like any other block local.
+        assert_eq!(
+            instance_bindings(program, "loop_local"),
+            vec![(OwnedStorage::Value, CheckedType::CString)]
+        );
+
+        // The order is deterministic across repeated lowering.
+        let second = Lowerer::new()
+            .lower(&module)
+            .expect("the second lowering validates");
+        let first = program
+            .instances
+            .iter()
+            .map(|(id, instance)| {
+                let bindings = instance
+                    .body
+                    .as_ref()
+                    .map(|body| {
+                        body.owned_bindings
+                            .iter()
+                            .map(|record| {
+                                (
+                                    record.symbol.0,
+                                    record.storage,
+                                    CanonicalType::concrete(
+                                        &record.value_type,
+                                        &Origin::compiler(),
+                                    )
+                                    .expect("concrete owned type"),
+                                    record.glue.map(|glue| glue.index()),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                (id.index(), bindings)
+            })
+            .collect::<Vec<_>>();
+        let second = second
+            .program
+            .instances
+            .iter()
+            .map(|(id, instance)| {
+                let bindings = instance
+                    .body
+                    .as_ref()
+                    .map(|body| {
+                        body.owned_bindings
+                            .iter()
+                            .map(|record| {
+                                (
+                                    record.symbol.0,
+                                    record.storage,
+                                    CanonicalType::concrete(
+                                        &record.value_type,
+                                        &Origin::compiler(),
+                                    )
+                                    .expect("concrete owned type"),
+                                    record.glue.map(|glue| glue.index()),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                (id.index(), bindings)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(first, second, "owned-binding order is deterministic");
+    }
+
+    #[test]
+    fn cleanup_scanner_gate_covers_the_standard_library() {
+        let module = checked_program(concat!(
+            "use std.cinterop.*\n",
+            "use std.coroutine.*\n",
+            "extern \"c\" { inspect: CString -> I32 }\n",
+            "def make_c: () -> CString = () => c_string \"x\"\n",
+            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def consume: move Coroutine{} I32 -> I32 = move value => 1\n",
+            "let created = task ()\n",
+            "let debugged = \"${(1, 2):?}\"\n",
+            "let consumed = consume (task ())\n",
+            "let stale = { let value = make_c (); inspect value }\n",
+        ));
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .expect("the standard-library fixture lowers and validates");
+        assert!(
+            lowered
+                .program
+                .instances
+                .iter()
+                .any(
+                    |(_, instance)| instance.body.as_ref().is_some_and(|body| body
+                        .owned_bindings
+                        .iter()
+                        .any(|record| record.glue.is_some()))
+                ),
+            "the standard-library fixture records owned bindings with bound glue"
+        );
+        eprintln!(
+            "stage 4.4 scanner closure stats: {:?}",
+            lowered.program.closure_stats
         );
     }
 

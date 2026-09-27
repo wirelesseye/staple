@@ -1885,6 +1885,10 @@ pub(crate) struct LoweredSymbol {
     /// Mirrors `TypedModule::has_mutable_storage`: an ordinary `mut` binding,
     /// a signal, or a parameter with an explicit mutation effect.
     pub mutable_storage: bool,
+    /// The symbol is captured by some function.
+    pub captured: bool,
+    /// The symbol is non-owning (a value frozen by borrowing through `Ref`).
+    pub non_owning: bool,
     pub derived: bool,
     pub signal: bool,
     pub mutated_parameter: bool,
@@ -2461,6 +2465,8 @@ impl LoweredProgram {
             storage,
             requires_initialization_check: resolved.requires_initialization_state(symbol),
             mutable_storage: mutable,
+            captured: captured.contains(&symbol),
+            non_owning: module.is_non_owning_symbol(symbol),
             derived,
             signal,
             mutated_parameter: module.is_mutated_parameter(symbol),
@@ -14485,12 +14491,12 @@ mod tests {
         assert!(baseline.validate_instance_bodies().is_empty());
 
         let lowered = Lowerer::new().lower(&module).expect("lowering succeeds");
-        // Stage 4.3 expands constructor-adapter plans but adds no Stage 3
-        // instances or artifacts: ordinals, names, and keys are unchanged.
-        // Only the owned plan bodies differ, so compare identity rather than
-        // the full plan snapshot.
-        assert_eq!(baseline.instances.len(), lowered.program.instances.len());
-        assert_eq!(baseline.artifacts.len(), lowered.program.artifacts.len());
+        // Stage 4.3/4.4 expand plans and the 4.4 scanner appends generated
+        // artifacts and uses, but the Stage 3 prefix keeps its ordinals,
+        // names, and keys. Only appended entries differ, so compare identity
+        // rather than the full plan snapshot.
+        assert!(lowered.program.instances.len() >= baseline.instances.len());
+        assert!(lowered.program.artifacts.len() >= baseline.artifacts.len());
         assert_eq!(
             baseline
                 .instances
@@ -14501,6 +14507,7 @@ mod tests {
                 .program
                 .instances
                 .iter()
+                .take(baseline.instances.len())
                 .map(|(id, instance)| (id.index(), instance.name.clone()))
                 .collect::<Vec<_>>(),
             "Stage 3 instance ordinals and names are unchanged"
@@ -14515,6 +14522,7 @@ mod tests {
                 .program
                 .artifacts
                 .iter()
+                .take(baseline.artifacts.len())
                 .map(|(id, artifact)| (id.index(), artifact.name.clone()))
                 .collect::<Vec<_>>(),
             "Stage 3 artifact ordinals and names are unchanged"
@@ -14533,41 +14541,25 @@ mod tests {
             expanded_adapters > 0,
             "the fixture reserves a constructor adapter"
         );
-        assert!(
-            lowered
-                .program
-                .initializer_artifacts
-                .iter()
-                .all(Vec::is_empty),
-            "placeholder hooks request no initializer artifacts"
-        );
-        assert!(
-            lowered
-                .program
-                .initializer_artifact_uses
-                .iter()
-                .all(Vec::is_empty)
-        );
-        assert!(
-            lowered
-                .program
-                .initializer_instances
-                .iter()
-                .all(Vec::is_empty)
-        );
-        assert!(
-            lowered
-                .program
-                .initializer_instance_uses
-                .iter()
-                .all(Vec::is_empty)
-        );
+        // The Stage 4.4 scanner records cleanup uses and edges, so the fixture
+        // must show at least one of each; the validator already proved the
+        // one-to-one agreement inside `Lowerer::lower`.
+        let mut artifact_uses = 0;
         for (_, instance) in lowered.program.instances.iter() {
             if let Some(body) = &instance.body {
-                assert!(body.artifact_uses.is_empty());
-                assert!(body.instance_uses.is_empty());
+                artifact_uses += body.artifact_uses.len();
             }
         }
+        artifact_uses += lowered
+            .program
+            .initializer_artifact_uses
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
+        assert!(
+            artifact_uses > 0,
+            "the cleanup scanner records at least one artifact use"
+        );
     }
 
     #[test]

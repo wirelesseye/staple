@@ -1154,6 +1154,9 @@ mod tests {
                         "structural artifact arguments are concrete"
                     );
                 }
+                // Stage 4.4 adds cleanup artifacts over the same catalog.
+                Some(ArtifactRequestKey::DropGlue(_))
+                | Some(ArtifactRequestKey::GcFinalizer(_)) => {}
                 Some(other) => panic!("unexpected artifact family `{}`", other.family_name()),
                 None => panic!("artifact without a catalog key"),
             }
