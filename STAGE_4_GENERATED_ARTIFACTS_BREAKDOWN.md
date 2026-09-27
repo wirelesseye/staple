@@ -153,7 +153,7 @@ Read from `codegen.rs` at `df249ce`; line numbers drift, function names are auth
 
 ## Stage 4.4 - Ownership Cleanup: Drop Glue, Finalizers, and Clone
 
-> **Separate plan recommended** (`STAGE_4_4_CLEANUP_ARTIFACTS_PLAN.md`). Cleanup is recursive over types, touches every body family's drop facts, and is the most ABI-sensitive part of Stage 4.
+> **Separate plan:** [STAGE_4_4_CLEANUP_ARTIFACTS_PLAN.md](STAGE_4_4_CLEANUP_ARTIFACTS_PLAN.md). Cleanup is recursive over types, touches every body family's drop facts, and is the most ABI-sensitive part of Stage 4.
 
 - Define `DropGlue(CanonicalType)` with a plan mirroring `compile_drop_value`/`compile_conditional_drop` exactly: selected user `Drop` method (owned re-implementation of `drop_method_for` over the trait-implementation catalog, including its exact-argument matching rule, and resolving to a `FunctionInstanceId`), then representation drop for `Distinct`; coroutine cleanup; scheduler/wait/resolver/completion-token runtime release; CString free; product elements and sum alternatives that need drop (via `concrete_needs_drop`), in the backend's order. Decide and document whether drop glue is emitted as a callable artifact or kept as an inline plan referenced by drop sites (recommendation: a keyed plan the backend may still inline, so Stage 5 does not change code shape or ABI).
 - Bind every drop fact on lowered bodies (discarded values, replaced assignments, loop-body results, `drops_after_call`, temporaries, captures, owned cells, scope exits, early return/propagation/cancellation cleanup) to its `DropGlue` artifact.
