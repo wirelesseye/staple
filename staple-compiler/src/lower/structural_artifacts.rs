@@ -21,7 +21,7 @@ use super::instance_resolution::{
 use super::worklist::instantiate_method_type;
 use super::{
     ArenaId, CallSubstitutions, CallTypeSubstitution, CheckedProductType, ConstructorAdapterPlan,
-    ConstructorConstruction, DebugDelegate, DebugStep, DropGluePlan, GcFinalizerPlan,
+    ConstructorConstruction, DebugDelegate, DebugStep, DropGlueBody, DropGluePlan, GcFinalizerPlan,
     IndexedElement, LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
     LoweredInstanceDependencyKind, LoweredProgram, LoweredTraitImplementationId, Origin,
     PlannedArtifact, PlannedCallee, PlannedInstance, StructuralBody, StructuralMethodPlan,
@@ -81,6 +81,7 @@ pub(super) fn expand_constructor_adapter(
                     key: key.clone(),
                     plan: LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload {
                         value_type: payload.clone(),
+                        glue: None,
                     }),
                     kind: LoweredArtifactDependencyKind::GcFinalizer,
                     origin: origin.clone(),
@@ -702,6 +703,7 @@ fn structural_mutate_body(
             key: key.clone(),
             plan: LoweredArtifactPlan::DropGlue(DropGluePlan {
                 value_type: element.clone(),
+                body: DropGlueBody::Unexpanded,
             }),
             kind: LoweredArtifactDependencyKind::DropGlue,
             origin: origin.clone(),

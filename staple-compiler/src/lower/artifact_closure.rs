@@ -28,10 +28,11 @@ use staple_syntax::{Diagnostic, Span};
 
 use super::worklist::{GraphRecorder, LoweredScanOwner, TraversalOwner, WorklistBuilder};
 use super::{
-    ArenaId, FunctionInstanceId, InitializerId, LoweredArtifactDependency,
+    ArenaId, ExpressionId, FunctionInstanceId, InitializerId, ItemId, LoweredArtifactDependency,
     LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
-    LoweredArtifactRequestRoot, LoweredInstanceDependency, LoweredInstanceDependencyKind,
-    LoweredInstanceRequest, LoweredProgram, Origin, PlannedCalleeRef, PlannedCalleeRefMut,
+    LoweredArtifactRequestRoot, LoweredCallId, LoweredCallableValueId, LoweredInstanceBody,
+    LoweredInstanceDependency, LoweredInstanceDependencyKind, LoweredInstanceRequest,
+    LoweredProgram, Origin, PatternId, PlannedCalleeRef, PlannedCalleeRefMut,
     ResolvedInstanceRequest,
 };
 use crate::specialization::{ArtifactOrdinal, ArtifactRequestKey};
@@ -81,14 +82,50 @@ pub(super) enum ClosureRequest {
 }
 
 /// Sites in one owner body that use a generated artifact. Stage 4.2 defines no
-/// family variants; Stages 4.4 and 4.5 add drop facts, allocations, closure
-/// constructions, reactive operations, `coro` creations, and intrinsic calls.
-/// Every match on this enum must stay exhaustive.
+/// family variants; Stage 4.4 adds the ownership-cleanup sites (drops,
+/// finalizers, and buffer clones); Stage 4.5 adds reactive operations and
+/// `coro` creations. Every match on this enum must stay exhaustive, and every
+/// variant's ID must be interpreted in the owning body's own arenas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ArtifactUseSite {
     /// A scripted test site identified by its position in the hook table.
     #[cfg(test)]
     Test(u32),
+    /// A discarded expression-statement result (`drop_result`).
+    DiscardedResult(ItemId),
+    /// An assignment that drops the place's previous value (`drop_previous`).
+    ReplacedValue(ItemId),
+    /// A loop body's result dropped before the back edge (`drops_body_result`).
+    LoopBodyResult(ExpressionId),
+    /// A call temporary dropped after the call (`drops_after_call`).
+    CallTemporary {
+        call: LoweredCallId,
+        argument: usize,
+    },
+    /// An extern call's C-string temporary drop.
+    CStringTemporary(LoweredCallId),
+    /// A wildcard pattern discarding a droppable value.
+    WildcardDiscard(PatternId),
+    /// An owned binding's scope-exit drop; also the owned-binding record.
+    OwnedBinding(PatternId),
+    /// A captured binding cell's finalizer.
+    CellFinalizer(PatternId),
+    /// A closure environment's finalizer.
+    ClosureEnvironment(LoweredCallableValueId),
+    /// A managed `Ref` allocation's payload finalizer.
+    RefConstruction(LoweredCallId),
+    /// The `Drop` intrinsic's argument drop.
+    DropIntrinsic(LoweredCallId),
+    /// A C-string conversion dropping its source `CString`.
+    CStringConversion(LoweredCallId),
+    /// A completion intrinsic dropping an orphaned handle.
+    CompletionOrphan(LoweredCallId),
+    /// A buffer allocation's element finalizer.
+    BufferAllocation(LoweredCallId),
+    /// A buffer clone's destination-buffer finalizer.
+    BufferCloneFinalizer(LoweredCallId),
+    /// A buffer clone's per-element `Clone` call (an instance use).
+    BufferCloneElement(LoweredCallId),
 }
 
 /// One artifact use recorded on its owner in scan order. The validator proves
@@ -333,6 +370,7 @@ impl LoweredProgram {
         self.initializer_artifacts = vec![Vec::new(); self.initializers.len()];
         self.initializer_instance_uses = vec![Vec::new(); self.initializers.len()];
         self.initializer_instances = vec![Vec::new(); self.initializers.len()];
+        self.initializer_owned_bindings = vec![Vec::new(); self.initializers.len()];
 
         let budget = GrowthBudget {
             baseline_instances: self.instances.len(),
@@ -918,6 +956,14 @@ impl<'a> UseEdge<'a> {
     }
 }
 
+/// The owner whose arenas a use site's IDs must resolve in. Instance bodies
+/// own private arenas; initializer sites index the program's template arenas.
+#[derive(Clone, Copy)]
+enum UseSiteOwner<'a> {
+    Instance(&'a LoweredInstanceBody),
+    Initializer(InitializerId),
+}
+
 /// The request-root walk node used by the acyclicity check.
 #[derive(Debug, Clone, Copy)]
 enum RequestRoot {
@@ -1147,9 +1193,16 @@ impl LoweredProgram {
                 continue;
             }
             if !plan.supports_planned_callees() {
-                // Stage 4.4-4.6 families still carry raw requests on the
+                // Stage 4.5-4.6 families still carry raw requests on the
                 // artifact; their plan schema gains callee slots when their
                 // own substage lands.
+                continue;
+            }
+            if !plan.is_expanded() {
+                // A request-time marker names no callees yet. A registered
+                // expander that leaves the marker in place is reported above,
+                // so a marker here belongs to a family whose expander has not
+                // landed and whose artifact-owned edges stay request-based.
                 continue;
             }
 
@@ -1267,8 +1320,10 @@ impl LoweredProgram {
                 .iter()
                 .map(|use_| (use_.site, UseEdge::instance_use(use_)))
                 .collect::<Vec<_>>();
+            let site_owner = UseSiteOwner::Instance(body);
             self.agree_uses_with_edges(
                 &owner,
+                site_owner,
                 "artifact",
                 artifact_uses,
                 artifact_edges,
@@ -1276,6 +1331,7 @@ impl LoweredProgram {
             );
             self.agree_uses_with_edges(
                 &owner,
+                site_owner,
                 "instance",
                 instance_uses,
                 instance_edges,
@@ -1313,8 +1369,10 @@ impl LoweredProgram {
                 .iter()
                 .map(UseEdge::instance_edge)
                 .collect::<Vec<_>>();
+            let site_owner = UseSiteOwner::Initializer(id);
             self.agree_uses_with_edges(
                 &owner,
+                site_owner,
                 "artifact",
                 artifact_uses,
                 artifact_edges,
@@ -1322,6 +1380,7 @@ impl LoweredProgram {
             );
             self.agree_uses_with_edges(
                 &owner,
+                site_owner,
                 "instance",
                 instance_uses,
                 instance_edges,
@@ -1335,13 +1394,14 @@ impl LoweredProgram {
     fn agree_uses_with_edges(
         &self,
         owner: &str,
+        site_owner: UseSiteOwner<'_>,
         family: &str,
         uses: Vec<(ArtifactUseSite, UseEdge<'_>)>,
         mut edges: Vec<UseEdge<'_>>,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         for (site, use_) in uses {
-            self.check_use_site(owner, site, diagnostics);
+            self.check_use_site(owner, site_owner, site, use_.origin, diagnostics);
             match edges.iter().position(|edge| *edge == use_) {
                 Some(index) => {
                     edges.remove(index);
@@ -1360,26 +1420,126 @@ impl LoweredProgram {
         }
     }
 
-    /// Stage 4.2 can only validate the scripted test site. Later families
-    /// replace this arm with body-arena checks for their site variants.
-    #[cfg(test)]
+    /// Every use site's ID must resolve inside the owning body's own arenas, so
+    /// a scanner cannot tie an edge to a site that Stage 5 could not emit from.
     fn check_use_site(
         &self,
-        _owner: &str,
-        _site: ArtifactUseSite,
-        _diagnostics: &mut Vec<Diagnostic>,
-    ) {
-    }
-
-    #[cfg(not(test))]
-    fn check_use_site(
-        &self,
-        _owner: &str,
+        owner: &str,
+        site_owner: UseSiteOwner<'_>,
         site: ArtifactUseSite,
-        _diagnostics: &mut Vec<Diagnostic>,
+        origin: &Origin,
+        diagnostics: &mut Vec<Diagnostic>,
     ) {
-        // No family variants exist yet, so no use site can be constructed.
-        match site {}
+        let mut report = |kind: &str, index: usize| {
+            diagnostics.push(Diagnostic::new(
+                origin.span.clone(),
+                format!("{owner} has an artifact use site {kind} {index} outside its own arenas"),
+            ));
+        };
+        let item = |id: ItemId| match site_owner {
+            UseSiteOwner::Instance(body) => body.item(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.items.get(id).is_some(),
+        };
+        let expression = |id: ExpressionId| match site_owner {
+            UseSiteOwner::Instance(body) => body.expression(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.expressions.get(id).is_some(),
+        };
+        let pattern = |id: PatternId| match site_owner {
+            UseSiteOwner::Instance(body) => body.pattern(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.patterns.get(id).is_some(),
+        };
+        let call = |id: LoweredCallId| match site_owner {
+            UseSiteOwner::Instance(body) => body.call(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.calls.get(id).is_some(),
+        };
+        let callable_value = |id: LoweredCallableValueId| match site_owner {
+            UseSiteOwner::Instance(body) => body.callable_value(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.callable_values.get(id).is_some(),
+        };
+        match site {
+            #[cfg(test)]
+            ArtifactUseSite::Test(_) => {}
+            ArtifactUseSite::DiscardedResult(id) => {
+                if !item(id) {
+                    report("item", id.index());
+                }
+            }
+            ArtifactUseSite::ReplacedValue(id) => {
+                if !item(id) {
+                    report("item", id.index());
+                }
+            }
+            ArtifactUseSite::LoopBodyResult(id) => {
+                if !expression(id) {
+                    report("expression", id.index());
+                }
+            }
+            ArtifactUseSite::CallTemporary { call: id, .. } => {
+                if !call(id) {
+                    report("call", id.index());
+                }
+            }
+            ArtifactUseSite::CStringTemporary(id) => {
+                if !call(id) {
+                    report("call", id.index());
+                }
+            }
+            ArtifactUseSite::WildcardDiscard(id) => {
+                if !pattern(id) {
+                    report("pattern", id.index());
+                }
+            }
+            ArtifactUseSite::OwnedBinding(id) => {
+                if !pattern(id) {
+                    report("pattern", id.index());
+                }
+            }
+            ArtifactUseSite::CellFinalizer(id) => {
+                if !pattern(id) {
+                    report("pattern", id.index());
+                }
+            }
+            ArtifactUseSite::ClosureEnvironment(id) => {
+                if !callable_value(id) {
+                    report("callable value", id.index());
+                }
+            }
+            ArtifactUseSite::RefConstruction(id) => {
+                if !call(id) {
+                    report("call", id.index());
+                }
+            }
+            ArtifactUseSite::DropIntrinsic(id) => {
+                if !call(id) {
+                    report("call", id.index());
+                }
+            }
+            ArtifactUseSite::CStringConversion(id) => {
+                if !call(id) {
+                    report("call", id.index());
+                }
+            }
+            ArtifactUseSite::CompletionOrphan(id) => {
+                if !call(id) {
+                    report("call", id.index());
+                }
+            }
+            ArtifactUseSite::BufferAllocation(id) => {
+                if !call(id) {
+                    report("call", id.index());
+                }
+            }
+            ArtifactUseSite::BufferCloneFinalizer(id) => {
+                if !call(id) {
+                    report("call", id.index());
+                }
+            }
+            ArtifactUseSite::BufferCloneElement(id) => {
+                if !call(id) {
+                    report("call", id.index());
+                }
+            }
+        }
     }
 
     /// Following `request` roots from any instance or artifact must terminate
@@ -1687,7 +1847,7 @@ mod tests {
     };
     use crate::{
         CallSubstitutions, CallTypeSubstitution, CheckedType, DebugDelegate, DebugStep,
-        DropGluePlan, FunctionId, GcFinalizerPlan, InstanceResolutionRequest,
+        DropGlueBody, DropGluePlan, FunctionId, GcFinalizerPlan, InstanceResolutionRequest,
         InstanceResolutionTarget, NameResolver, PlannedArtifact, PlannedCallee, PlannedInstance,
         ProgramLoader, ReactiveRunnerPlan, StructuralBody, StructuralMethodPlan,
         StructuralTraitMethod, TraitId, TraitMethodId, TypeChecker, TypedModule, substitute_type,
@@ -1855,7 +2015,10 @@ mod tests {
             CanonicalType::concrete(&value_type, origin).expect("a concrete drop-glue type");
         ClosureRequest::Artifact {
             key: ArtifactRequestKey::DropGlue(canonical),
-            plan: LoweredArtifactPlan::DropGlue(DropGluePlan { value_type }),
+            plan: LoweredArtifactPlan::DropGlue(DropGluePlan {
+                value_type,
+                body: DropGlueBody::Unexpanded,
+            }),
             kind: LoweredArtifactDependencyKind::DropGlue,
             origin: origin.clone(),
             use_site: site,
@@ -1871,7 +2034,10 @@ mod tests {
             CanonicalType::concrete(&value_type, origin).expect("a concrete payload type");
         ClosureRequest::Artifact {
             key: ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(canonical)),
-            plan: LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload { value_type }),
+            plan: LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload {
+                value_type,
+                glue: None,
+            }),
             kind: LoweredArtifactDependencyKind::GcFinalizer,
             origin: origin.clone(),
             use_site: site,
@@ -2459,11 +2625,23 @@ mod tests {
             ));
             if let Some(body) = &instance.body {
                 out.push_str(&format!(
-                    "  uses={:?}\n",
+                    "  uses={:?} instance_uses={:?} owned={:?}\n",
                     body.artifact_uses
                         .iter()
                         .map(|use_| (use_.artifact.index(), use_.kind.description(), use_.site))
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>(),
+                    body.instance_uses
+                        .iter()
+                        .map(|use_| (use_.instance.index(), use_.kind.description(), use_.site))
+                        .collect::<Vec<_>>(),
+                    body.owned_bindings
+                        .iter()
+                        .map(|binding| (
+                            binding.symbol.0,
+                            binding.storage,
+                            binding.glue.map(|glue| glue.index())
+                        ))
+                        .collect::<Vec<_>>(),
                 ));
             }
         }
@@ -2474,7 +2652,7 @@ mod tests {
                 .map(|key| key.family_name())
                 .unwrap_or("<missing>");
             out.push_str(&format!(
-                "artifact {} name={} family={family} root={:?} edges={:?} instances={:?} expanded={}\n",
+                "artifact {} name={} family={family} root={:?} edges={:?} instances={:?} expanded={} plan={:?}\n",
                 id.index(),
                 artifact.name,
                 artifact.request,
@@ -2489,6 +2667,7 @@ mod tests {
                     .map(|edge| (edge.instance.index(), edge.kind.description(), edge.closure_phase))
                     .collect::<Vec<_>>(),
                 artifact.expanded,
+                artifact.plan,
             ));
         }
         out
@@ -2746,6 +2925,7 @@ mod tests {
         broken.artifacts.get_mut(artifact).expect("artifact").plan =
             Some(LoweredArtifactPlan::DropGlue(DropGluePlan {
                 value_type: CheckedType::U8,
+                body: DropGlueBody::Unexpanded,
             }));
         assert!(
             messages(&broken.validate_specializations())
@@ -2788,6 +2968,38 @@ mod tests {
             messages(&broken.validate_artifact_closure(&TestHooks::default()))
                 .iter()
                 .any(|message| message.contains("cyclic request root"))
+        );
+    }
+
+    #[test]
+    fn closure_use_site_outside_the_owner_arenas_is_diagnosed() {
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+        );
+        let mut program = stage_three(source);
+        let seed = identity_instance(&program, 0);
+        let origin = instance_origin(&program, seed);
+        let mut hooks = TestHooks::default();
+        hooks.instance_requests.insert(
+            seed.index(),
+            vec![vec![drop_glue_request(
+                CheckedType::Ref(Box::new(CheckedType::I32)),
+                &origin,
+                // The item position is far outside the owner's body arena.
+                Some(ArtifactUseSite::DiscardedResult(ItemId::from_index(
+                    1_000_000,
+                ))),
+            )]],
+        );
+        let diagnostics = program.close_artifact_catalog(&hooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.validate_artifact_closure(&hooks);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("outside its own arenas")),
+            "{diagnostics:?}"
         );
     }
 
@@ -3193,6 +3405,7 @@ mod tests {
                     key: drop_key,
                     plan: LoweredArtifactPlan::DropGlue(DropGluePlan {
                         value_type: drop_type,
+                        body: DropGlueBody::Unexpanded,
                     }),
                     kind: LoweredArtifactDependencyKind::DropGlue,
                     origin: origin.clone(),
@@ -3361,6 +3574,7 @@ mod tests {
                 key: drop_key,
                 plan: LoweredArtifactPlan::DropGlue(DropGluePlan {
                     value_type: drop_type,
+                    body: DropGlueBody::Unexpanded,
                 }),
                 kind: LoweredArtifactDependencyKind::DropGlue,
                 origin: origin.clone(),
@@ -3438,9 +3652,11 @@ mod tests {
         let origin = instance_origin(&program, seed);
         let first = LoweredArtifactPlan::DropGlue(DropGluePlan {
             value_type: CheckedType::I32,
+            body: DropGlueBody::Unexpanded,
         });
         let second = LoweredArtifactPlan::DropGlue(DropGluePlan {
             value_type: CheckedType::I64,
+            body: DropGlueBody::Unexpanded,
         });
         let hooks = PlanChangingHooks {
             seed,

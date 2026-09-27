@@ -3164,9 +3164,9 @@ mod tests {
     #[test]
     fn every_artifact_key_family_has_a_matching_placeholder_plan() {
         use crate::{
-            ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, DropGluePlan,
-            ExternAdapterPlan, GcFinalizerPlan, LoweredArtifactPlan, ReactiveRunnerPlan,
-            StructuralBody, StructuralMethodPlan,
+            ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, DropGlueBody,
+            DropGluePlan, ExternAdapterPlan, GcFinalizerPlan, LoweredArtifactPlan,
+            ReactiveRunnerPlan, StructuralBody, StructuralMethodPlan,
         };
         let keys = stage_4_artifact_families();
         let node = nominal(7, "Node");
@@ -3193,19 +3193,24 @@ mod tests {
             }),
             LoweredArtifactPlan::DropGlue(DropGluePlan {
                 value_type: node.clone(),
+                body: DropGlueBody::Unexpanded,
             }),
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload {
                 value_type: node.clone(),
+                glue: None,
             }),
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Cell {
                 value_type: node.clone(),
+                glue: None,
             }),
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::ClosureEnvironment {
                 closure: instance,
                 captures: vec![CheckedType::I32],
+                drops: None,
             }),
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Buffer {
                 element: node.clone(),
+                glue: None,
             }),
             LoweredArtifactPlan::CoroutineCodes(CoroutineCodesPlan { body: instance }),
             LoweredArtifactPlan::ReactionRunner(runner.clone()),
@@ -3258,6 +3263,7 @@ mod tests {
             (
                 LoweredArtifactPlan::DropGlue(DropGluePlan {
                     value_type: CheckedType::I64,
+                    body: DropGlueBody::Unexpanded,
                 }),
                 ArtifactRequestKey::DropGlue(concrete(&node)),
             ),
@@ -3284,6 +3290,7 @@ mod tests {
                 LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::ClosureEnvironment {
                     closure: crate::FunctionInstanceId::for_test(1),
                     captures: vec![CheckedType::I32],
+                    drops: None,
                 }),
                 ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment {
                     closure: InstanceOrdinal(0),

@@ -133,6 +133,31 @@ impl LoweredBoundTarget {
     }
 }
 
+/// How the backend tracks one owned binding for scope-exit cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnedStorage {
+    /// An SSA local value with a live flag.
+    Value,
+    /// A binding cell dropped conditionally on its cell state.
+    Cell,
+}
+
+/// One owned binding record: the symbol the legacy backend registers with
+/// `track_symbol_ownership` or `allocate_binding_cell`, with its concrete
+/// type and the drop glue bound through the `OwnedBinding` use record.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredOwnedBinding {
+    pub symbol: SymbolId,
+    /// The owner-local binding or `at` pattern that introduces the symbol.
+    pub pattern: PatternId,
+    pub storage: OwnedStorage,
+    /// The concrete value type from the owner's binding pattern.
+    pub value_type: CheckedType,
+    /// The drop-glue artifact the scope-exit cleanup calls. Filled by the
+    /// post-closure owned-binding collector through the use record.
+    pub glue: Option<ArtifactOrdinal>,
+}
+
 /// One concrete, instance-owned function body.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredInstanceBody {
@@ -171,6 +196,9 @@ pub(crate) struct LoweredInstanceBody {
     /// order. The validator proves these agree one-to-one with the instance's
     /// closure-phase instance edges.
     pub instance_uses: Vec<LoweredInstanceUse>,
+    /// The symbols the legacy backend tracks for scope-exit cleanup, in
+    /// registration order (pattern traversal order).
+    pub owned_bindings: Vec<LoweredOwnedBinding>,
     // Instance-local arenas. IDs are meaningful only inside this body.
     pub(super) blocks: Arena<LoweredBlock, BlockId>,
     pub(super) items: Arena<LoweredItem, ItemId>,
@@ -222,6 +250,7 @@ impl LoweredInstanceBody {
             evidence: BTreeMap::new(),
             artifact_uses: Vec::new(),
             instance_uses: Vec::new(),
+            owned_bindings: Vec::new(),
             blocks: Arena::default(),
             items: Arena::default(),
             expressions: Arena::default(),

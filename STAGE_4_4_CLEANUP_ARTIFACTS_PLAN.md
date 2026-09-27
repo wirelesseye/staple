@@ -1,6 +1,6 @@
 # Stage 4.4 Plan: Ownership Cleanup — Drop Glue, Finalizers, and Clone
 
-**Status:** Not started. Stage 4.3 is complete through `69b2441`: constructor-adapter and structural-method plans, the planned-callee mechanism (`PlannedInstance`/`PlannedArtifact`, `bind_artifact_plan_callees`, `check_planned_callees`, plan equality in the fixed-point re-check), and the legacy transition recorder in `codegen.rs`. Stage 4.3 already *requests* two Stage 4.4 key families with placeholder plans:
+**Status:** Step 1 complete. Steps 2-7 remain. Stage 4.3 is complete through `69b2441`: constructor-adapter and structural-method plans, the planned-callee mechanism (`PlannedInstance`/`PlannedArtifact`, `bind_artifact_plan_callees`, `check_planned_callees`, plan equality in the fixed-point re-check), and the legacy transition recorder in `codegen.rs`. Stage 4.3 already *requests* two Stage 4.4 key families with placeholder plans:
 
 - `GcFinalizer::Payload` from `ManagedRef` constructor adapters;
 - `DropGlue` from structural `MutateReplace`.
@@ -197,6 +197,18 @@ Stage 4.4 is the first substage with a real scanner. Following the 4.2 recipe, a
 - Update the Stage 4.3 requesters (the constructor `ManagedRef` finalizer and `MutateReplace` drop glue) to the marker forms. Their keys and kinds do not change.
 - Extend the normalized snapshot with owned bindings, uses, and plan bodies.
 - **Gate:** placeholder expanders are still in place and the full suite passes. The snapshot shows marker plans. A corruption test proves that a use site pointing outside the owner's arena is diagnosed.
+
+**Step 1 notes (complete):**
+
+- **Drop-glue schema.** `DropGluePlan { value_type, body: DropGlueBody }` with `DropGlueBody::{Unexpanded, UserDrop { method: PlannedInstance, representation: Option<PlannedArtifact> }, CoroutineCleanup, RuntimeRelease(RuntimeRelease), CStringFree, Product { fields }, Sum { alternatives }, Distinct { representation }}`; `RuntimeRelease::{SchedulerDestroy, WaitDrop, ResolverDrop, CompletionTokenRelease}`; `DroppedElement`/`DroppedAlternative` name the field/alternative index, concrete type, and bound glue. Every variant except `Unexpanded` is non-empty, so `is_expanded`/`supports_planned_callees` are meaningful immediately.
+- **Finalizer schema.** `GcFinalizerPlan::Payload`/`Cell`/`Buffer` now carry `glue: Option<PlannedArtifact>` and `ClosureEnvironment` carries `drops: Option<Vec<DroppedCapture>>`; `Option::None` is the request-time marker. `DroppedCapture` names the capture index, concrete type, and bound glue in reverse capture order.
+- **Callees.** `visit_callees`/`visit_callees_mut` walk both families in request order (user-drop method then representation; product fields; sum alternatives; distinct representation; finalizer glue; capture drops), and `supports_planned_callees` reports both. `check_planned_callees` skips a plan that is still a request-time marker, so the pre-expander snapshot stays valid while the schema is ready.
+- **Dependency kinds.** `LoweredInstanceDependencyKind::{DropMethod, CloneMethod}` added with descriptions.
+- **Use sites.** The sixteen Stage 4.4 `ArtifactUseSite` variants are defined with exhaustive owner-aware `check_use_site` arms that resolve every site ID in the owning body's own arenas (initializer sites index the program's template arenas). `closure_use_site_outside_the_owner_arenas_is_diagnosed` proves an out-of-arena site is reported.
+- **Owned bindings.** `LoweredOwnedBinding { symbol, pattern, storage: OwnedStorage::{Value, Cell}, value_type, glue: Option<ArtifactOrdinal> }` is stored in registration order on `LoweredInstanceBody::owned_bindings`; `LoweredProgram::initializer_owned_bindings` is sized and reset by `close_artifact_catalog`. The collector that fills them (and binds `glue` through the `OwnedBinding` use record) is Step 4.
+- **Requesters.** The 4.3 constructor-adapter `GcFinalizer::Payload` and structural `MutateReplace` `DropGlue` requests now use the marker forms; keys and dependency kinds are unchanged.
+- **Snapshot.** The closure snapshot renders plan bodies, instance uses, and owned bindings.
+- **Gate:** met. Placeholder expanders are still registered, the whole workspace suite passes (1230 tests), the snapshot shows marker plans, and the new corruption test diagnoses a use site outside the owner's arenas.
 
 ### Step 2: Drop glue
 

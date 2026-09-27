@@ -56,7 +56,7 @@ pub(crate) use worklist::{
 #[allow(unused_imports)] // Stage 3.5 and the backend consume these types.
 pub(crate) use instance_body::{
     LoweredBindingSite, LoweredBoundTarget, LoweredInstanceBody, LoweredInstanceCapture,
-    LoweredInstanceParameter,
+    LoweredInstanceParameter, LoweredOwnedBinding, OwnedStorage,
 };
 
 // Stage 4.2 closure API. The engine scans owners and expands artifacts through
@@ -71,9 +71,10 @@ pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredIn
 #[allow(unused_imports)] // Stage 4.2+ attach and validate these plans.
 pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, DebugDelegate, DebugStep,
-    DropGluePlan, ExternAdapterPlan, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan,
-    PlannedArtifact, PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance,
-    ReactiveRunnerPlan, StructuralBody, StructuralMethodPlan, SumAlternative, TraitDelegate,
+    DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement,
+    ExternAdapterPlan, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlannedArtifact,
+    PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReactiveRunnerPlan,
+    RuntimeRelease, StructuralBody, StructuralMethodPlan, SumAlternative, TraitDelegate,
 };
 
 macro_rules! arena_id {
@@ -2044,6 +2045,9 @@ pub(crate) struct LoweredProgram {
     /// by `InitializerId` in request order. Stage 3 initializer instance
     /// requests stay request-root-only; only closure-phase scans add entries.
     initializer_instances: Vec<Vec<LoweredInstanceDependency>>,
+    /// Stage 4.4 owned bindings of nested initializer block locals, indexed by
+    /// `InitializerId` in registration order. Module globals are never owned.
+    initializer_owned_bindings: Vec<Vec<LoweredOwnedBinding>>,
     /// Append-only instance/artifact key catalog. Stage 3.3 alone reserves
     /// ordinals, before visiting a body, so recursion converges.
     specializations: SpecializationCatalog,

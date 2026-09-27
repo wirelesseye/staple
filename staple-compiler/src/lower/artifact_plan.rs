@@ -192,18 +192,21 @@ impl LoweredArtifactPlan {
             (LoweredArtifactPlan::GcFinalizer(plan), ArtifactRequestKey::GcFinalizer(key)) => {
                 match (plan, key) {
                     (
-                        GcFinalizerPlan::Payload { value_type },
+                        GcFinalizerPlan::Payload { value_type, .. },
                         GcFinalizerKey::Payload(expected),
                     )
-                    | (GcFinalizerPlan::Cell { value_type }, GcFinalizerKey::Cell(expected))
+                    | (GcFinalizerPlan::Cell { value_type, .. }, GcFinalizerKey::Cell(expected))
                     | (
                         GcFinalizerPlan::Buffer {
                             element: value_type,
+                            ..
                         },
                         GcFinalizerKey::Buffer(expected),
                     ) => same_type(value_type, expected),
                     (
-                        GcFinalizerPlan::ClosureEnvironment { closure, captures },
+                        GcFinalizerPlan::ClosureEnvironment {
+                            closure, captures, ..
+                        },
                         GcFinalizerKey::ClosureEnvironment {
                             closure: expected_closure,
                             captures: expected_captures,
@@ -263,13 +266,16 @@ impl LoweredArtifactPlan {
     pub(crate) fn supports_planned_callees(&self) -> bool {
         matches!(
             self,
-            LoweredArtifactPlan::ConstructorAdapter(_) | LoweredArtifactPlan::StructuralMethod(_)
+            LoweredArtifactPlan::ConstructorAdapter(_)
+                | LoweredArtifactPlan::StructuralMethod(_)
+                | LoweredArtifactPlan::DropGlue(_)
+                | LoweredArtifactPlan::GcFinalizer(_)
         )
     }
 
     /// Whether expansion replaced the request-time marker for this family.
-    /// Families without a marker (every Stage 4.1 placeholder) are always
-    /// expanded.
+    /// Families without a marker (every remaining Stage 4.1 placeholder) are
+    /// always expanded.
     pub(crate) fn is_expanded(&self) -> bool {
         match self {
             LoweredArtifactPlan::ConstructorAdapter(plan) => {
@@ -278,6 +284,13 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::StructuralMethod(plan) => {
                 !matches!(plan.body, StructuralBody::Unexpanded)
             }
+            LoweredArtifactPlan::DropGlue(plan) => !matches!(plan.body, DropGlueBody::Unexpanded),
+            LoweredArtifactPlan::GcFinalizer(plan) => match plan {
+                GcFinalizerPlan::Payload { glue, .. }
+                | GcFinalizerPlan::Cell { glue, .. }
+                | GcFinalizerPlan::Buffer { glue, .. } => glue.is_some(),
+                GcFinalizerPlan::ClosureEnvironment { drops, .. } => drops.is_some(),
+            },
             _ => true,
         }
     }
@@ -305,6 +318,8 @@ impl LoweredArtifactPlan {
         match self {
             LoweredArtifactPlan::ConstructorAdapter(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees(visit),
+            LoweredArtifactPlan::DropGlue(plan) => plan.visit_callees(visit),
+            LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees(visit),
             _ => {}
         }
     }
@@ -313,6 +328,8 @@ impl LoweredArtifactPlan {
         match self {
             LoweredArtifactPlan::ConstructorAdapter(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees_mut(visit),
+            LoweredArtifactPlan::DropGlue(plan) => plan.visit_callees_mut(visit),
+            LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees_mut(visit),
             _ => {}
         }
     }
@@ -636,10 +653,138 @@ pub(crate) struct SumAlternative {
     pub alternative: CheckedType,
 }
 
-/// The plan shape of one drop-glue body.
+/// The plan shape of one drop-glue body: the concrete value type and the
+/// ordered cleanup decision mirroring `compile_drop_value` exactly.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DropGluePlan {
     pub value_type: CheckedType,
+    /// The owned cleanup decision. `Unexpanded` at request time.
+    pub body: DropGlueBody,
+}
+
+/// One drop-glue body, mirroring the legacy decision order.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DropGlueBody {
+    /// Request-time only: the family expander replaces this marker.
+    Unexpanded,
+    /// Call the selected user `Drop` implementation on a borrowed pointer,
+    /// then drop the representation when it needs drop.
+    UserDrop {
+        /// The selected `Drop` implementation method instance.
+        method: PlannedInstance,
+        /// The `Distinct` representation's own drop glue, requested only when
+        /// the representation needs drop.
+        representation: Option<PlannedArtifact>,
+    },
+    /// Load the cleanup function from the coroutine frame header and call it
+    /// indirectly; no planned callee.
+    CoroutineCleanup,
+    /// Call the runtime release for one opaque runtime type.
+    RuntimeRelease(RuntimeRelease),
+    /// Call `free` on the C-string pointer.
+    CStringFree,
+    /// Drop each listed field in the recorded order, which is reverse element
+    /// order; only droppable fields are listed.
+    Product { fields: Vec<DroppedElement> },
+    /// Switch on the tag and drop the listed alternatives; only droppable
+    /// alternatives are listed, in tag order.
+    Sum {
+        alternatives: Vec<DroppedAlternative>,
+    },
+    /// Drop the claimed `Distinct` representation.
+    Distinct { representation: PlannedArtifact },
+}
+
+/// The runtime release one opaque-type drop performs. Stage 4.6 turns these
+/// into `LoweredRuntimeRequirements`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeRelease {
+    SchedulerDestroy,
+    WaitDrop,
+    ResolverDrop,
+    CompletionTokenRelease,
+}
+
+/// One dropped product field.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DroppedElement {
+    /// The field's position in the product.
+    pub index: usize,
+    pub value_type: CheckedType,
+    pub glue: PlannedArtifact,
+}
+
+/// One dropped sum alternative.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DroppedAlternative {
+    /// The alternative's position in the sum.
+    pub index: usize,
+    pub value_type: CheckedType,
+    pub glue: PlannedArtifact,
+}
+
+impl DropGluePlan {
+    fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
+        match &self.body {
+            DropGlueBody::Unexpanded
+            | DropGlueBody::CoroutineCleanup
+            | DropGlueBody::RuntimeRelease(_)
+            | DropGlueBody::CStringFree => {}
+            DropGlueBody::UserDrop {
+                method,
+                representation,
+            } => {
+                visit(PlannedCalleeRef::Instance(method));
+                if let Some(representation) = representation {
+                    visit(PlannedCalleeRef::Artifact(representation));
+                }
+            }
+            DropGlueBody::Product { fields } => {
+                for field in fields {
+                    visit(PlannedCalleeRef::Artifact(&field.glue));
+                }
+            }
+            DropGlueBody::Sum { alternatives } => {
+                for alternative in alternatives {
+                    visit(PlannedCalleeRef::Artifact(&alternative.glue));
+                }
+            }
+            DropGlueBody::Distinct { representation } => {
+                visit(PlannedCalleeRef::Artifact(representation));
+            }
+        }
+    }
+
+    fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
+        match &mut self.body {
+            DropGlueBody::Unexpanded
+            | DropGlueBody::CoroutineCleanup
+            | DropGlueBody::RuntimeRelease(_)
+            | DropGlueBody::CStringFree => {}
+            DropGlueBody::UserDrop {
+                method,
+                representation,
+            } => {
+                visit(PlannedCalleeRefMut::Instance(method));
+                if let Some(representation) = representation {
+                    visit(PlannedCalleeRefMut::Artifact(representation));
+                }
+            }
+            DropGlueBody::Product { fields } => {
+                for field in fields {
+                    visit(PlannedCalleeRefMut::Artifact(&mut field.glue));
+                }
+            }
+            DropGlueBody::Sum { alternatives } => {
+                for alternative in alternatives {
+                    visit(PlannedCalleeRefMut::Artifact(&mut alternative.glue));
+                }
+            }
+            DropGlueBody::Distinct { representation } => {
+                visit(PlannedCalleeRefMut::Artifact(representation));
+            }
+        }
+    }
 }
 
 /// The plan shape of one garbage-collector finalizer.
@@ -647,19 +792,73 @@ pub(crate) struct DropGluePlan {
 pub(crate) enum GcFinalizerPlan {
     Payload {
         value_type: CheckedType,
+        /// The payload's drop glue, absent only in the request-time marker.
+        glue: Option<PlannedArtifact>,
     },
     Cell {
         value_type: CheckedType,
+        /// The cell value's drop glue, absent only in the request-time marker.
+        glue: Option<PlannedArtifact>,
     },
     ClosureEnvironment {
         /// The closure's own function instance; its position is the key's
         /// instance ordinal.
         closure: FunctionInstanceId,
         captures: Vec<CheckedType>,
+        /// The captures the finalizer drops, in reverse capture order.
+        /// `None` at request time.
+        drops: Option<Vec<DroppedCapture>>,
     },
     Buffer {
         element: CheckedType,
+        /// The element's drop glue, absent only in the request-time marker.
+        glue: Option<PlannedArtifact>,
     },
+}
+
+/// One capture dropped by a closure-environment finalizer.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DroppedCapture {
+    /// The capture's position in environment order.
+    pub index: usize,
+    pub value_type: CheckedType,
+    pub glue: PlannedArtifact,
+}
+
+impl GcFinalizerPlan {
+    fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
+        match self {
+            GcFinalizerPlan::Payload { glue, .. }
+            | GcFinalizerPlan::Cell { glue, .. }
+            | GcFinalizerPlan::Buffer { glue, .. } => {
+                if let Some(glue) = glue {
+                    visit(PlannedCalleeRef::Artifact(glue));
+                }
+            }
+            GcFinalizerPlan::ClosureEnvironment { drops, .. } => {
+                for drop in drops.iter().flatten() {
+                    visit(PlannedCalleeRef::Artifact(&drop.glue));
+                }
+            }
+        }
+    }
+
+    fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
+        match self {
+            GcFinalizerPlan::Payload { glue, .. }
+            | GcFinalizerPlan::Cell { glue, .. }
+            | GcFinalizerPlan::Buffer { glue, .. } => {
+                if let Some(glue) = glue {
+                    visit(PlannedCalleeRefMut::Artifact(glue));
+                }
+            }
+            GcFinalizerPlan::ClosureEnvironment { drops, .. } => {
+                for drop in drops.iter_mut().flatten() {
+                    visit(PlannedCalleeRefMut::Artifact(&mut drop.glue));
+                }
+            }
+        }
+    }
 }
 
 /// The plan shape of one coroutine body's resume/cleanup pair.

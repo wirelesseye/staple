@@ -153,6 +153,10 @@ pub(crate) enum LoweredInstanceDependencyKind {
     ReactiveCallback,
     /// A coroutine body thunk created by a `coro` expression.
     CoroutineBody,
+    /// The user `Drop` implementation a drop-glue plan calls.
+    DropMethod,
+    /// The `Clone` method a buffer-clone element copy calls.
+    CloneMethod,
 }
 
 impl LoweredInstanceDependencyKind {
@@ -169,6 +173,8 @@ impl LoweredInstanceDependencyKind {
             LoweredInstanceDependencyKind::DerivedEvaluator => "derived-evaluator",
             LoweredInstanceDependencyKind::ReactiveCallback => "reactive-callback",
             LoweredInstanceDependencyKind::CoroutineBody => "coroutine-body",
+            LoweredInstanceDependencyKind::DropMethod => "drop-method",
+            LoweredInstanceDependencyKind::CloneMethod => "clone-method",
         }
     }
 }
