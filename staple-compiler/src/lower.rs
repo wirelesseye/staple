@@ -26,6 +26,7 @@ use crate::{
 
 mod artifact_closure;
 mod artifact_plan;
+mod cleanup_artifacts;
 mod graph_validation;
 mod instance_body;
 mod instance_resolution;

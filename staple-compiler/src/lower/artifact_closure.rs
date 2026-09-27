@@ -263,8 +263,16 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 };
                 super::structural_artifacts::expand_structural_method(program, artifact, plan)
             }
-            ArtifactRequestKey::DropGlue(_)
-            | ArtifactRequestKey::GcFinalizer(_)
+            ArtifactRequestKey::DropGlue(_) => {
+                let LoweredArtifactPlan::DropGlue(plan) = plan else {
+                    return Err(vec![Diagnostic::new(
+                        record.origin.span.clone(),
+                        "drop-glue artifact carries a mismatched plan".to_string(),
+                    )]);
+                };
+                super::cleanup_artifacts::expand_drop_glue(program, artifact, plan)
+            }
+            ArtifactRequestKey::GcFinalizer(_)
             | ArtifactRequestKey::CoroutineCodes(_)
             | ArtifactRequestKey::ReactionRunner(_)
             | ArtifactRequestKey::UntilRunner(_)
@@ -276,7 +284,9 @@ impl ArtifactFamilyHooks for ProductionHooks {
     fn expands_body(&self, key: &ArtifactRequestKey) -> bool {
         matches!(
             key,
-            ArtifactRequestKey::ConstructorAdapter(_) | ArtifactRequestKey::StructuralMethod(_)
+            ArtifactRequestKey::ConstructorAdapter(_)
+                | ArtifactRequestKey::StructuralMethod(_)
+                | ArtifactRequestKey::DropGlue(_)
         )
     }
 }

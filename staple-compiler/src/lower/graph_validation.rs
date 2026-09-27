@@ -1647,6 +1647,158 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Stage 4.4 drop-glue transition comparison.
+    // ------------------------------------------------------------------
+
+    /// Every naturally requested `DropGlue` plan agrees with the typed module:
+    /// the key's type needs drop, a user-drop body selects exactly
+    /// `drop_method_for`, and every non-user body is planned only when no user
+    /// implementation matches.
+    fn assert_drop_glue_plans_agree(source: &str) -> (usize, crate::ClosureStats) {
+        let module = checked_program(source);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .expect("source should lower through the production closure");
+        let program = &lowered.program;
+        let stats = program
+            .closure_stats
+            .expect("the production closure records its stats");
+        let mut plans = 0;
+        for (_, artifact) in program.artifacts.iter() {
+            let Some(crate::LoweredArtifactPlan::DropGlue(plan)) = &artifact.plan else {
+                continue;
+            };
+            plans += 1;
+            assert!(
+                module.type_needs_drop(&plan.value_type),
+                "drop glue `{}` is only requested for a droppable type",
+                plan.value_type
+            );
+            match &plan.body {
+                crate::DropGlueBody::Unexpanded => {
+                    panic!("drop glue `{}` was never expanded", plan.value_type)
+                }
+                crate::DropGlueBody::UserDrop { method, .. } => {
+                    let expected = module.drop_method_for(&plan.value_type).unwrap_or_else(|| {
+                        panic!(
+                            "a planned user drop for `{}` has no legacy selection",
+                            plan.value_type
+                        )
+                    });
+                    let bound = program
+                        .instances
+                        .get(method.instance.expect("bound after closure"))
+                        .expect("method instance");
+                    assert_eq!(bound.template, expected);
+                    assert_eq!(
+                        method.kind,
+                        LoweredInstanceDependencyKind::DropMethod,
+                        "the user-drop edge uses the drop-method kind"
+                    );
+                }
+                _ => assert!(
+                    module.drop_method_for(&plan.value_type).is_none(),
+                    "a non-user body is planned for `{}` although a user implementation matches",
+                    plan.value_type
+                ),
+            }
+        }
+        (plans, stats)
+    }
+
+    #[test]
+    fn drop_glue_plans_agree_with_the_typed_module() {
+        let mut plans = 0;
+        let mut max_rounds = 0;
+        let mut max_growth = 0;
+        for source in [
+            concat!(
+                "type Resource = ctor I32\n",
+                "impl Drop Resource { def drop = Resource value => () }\n",
+                "def mutate_resource: move (Resource, Resource) -> (Resource, Resource) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = Resource 3\n",
+                "  copy\n",
+                "}\n",
+                "let replaced = mutate_resource (Resource 1, Resource 2)\n",
+            ),
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "type Handle = ctor CString\n",
+                "impl Drop Handle { def drop = Handle value => () }\n",
+                "type Wrapped = ctor CString\n",
+                "def mutate_handle: move (Handle, Handle) -> (Handle, Handle) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = Handle (c_string \"b\")\n",
+                "  copy\n",
+                "}\n",
+                "def mutate_wrapped: move (Wrapped, Wrapped) -> (Wrapped, Wrapped) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = Wrapped (c_string \"b\")\n",
+                "  copy\n",
+                "}\n",
+                "def mutate_c_string: move (CString, CString) -> (CString, CString) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = c_string \"b\"\n",
+                "  copy\n",
+                "}\n",
+                "def mutate_product: move ((I32, CString), (I32, CString)) -> ((I32, CString), (I32, CString)) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = (1, c_string \"b\")\n",
+                "  copy\n",
+                "}\n",
+                "def mutate_nested: move (((I32, CString), I32), ((I32, CString), I32)) -> (((I32, CString), I32), ((I32, CString), I32)) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = ((1, c_string \"b\"), 2)\n",
+                "  copy\n",
+                "}\n",
+                "let a = mutate_handle (Handle (c_string \"a\"), Handle (c_string \"c\"))\n",
+                "let b = mutate_wrapped (Wrapped (c_string \"a\"), Wrapped (c_string \"c\"))\n",
+                "let c = mutate_c_string (c_string \"a\", c_string \"c\")\n",
+                "let d = mutate_product ((1, c_string \"a\"), (2, c_string \"c\"))\n",
+                "let e = mutate_nested (((1, c_string \"a\"), 2), ((3, c_string \"c\"), 4))\n",
+            ),
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "def pick: Bool -> (CString | I32) = condition => when { condition => c_string \"a\", else => 1 }\n",
+                "def mutate_sum: move ((CString | I32), (CString | I32)) -> ((CString | I32), (CString | I32)) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = pick True\n",
+                "  copy\n",
+                "}\n",
+                "let chosen = mutate_sum (pick False, pick True)\n",
+            ),
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "type Box T = ctor (T)\n",
+                "impl<T where Copy T> Drop (Box T) { def drop = Box value => () }\n",
+                "def mutate_box: move (Box CString, Box CString) -> (Box CString, Box CString) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = Box (c_string \"b\")\n",
+                "  copy\n",
+                "}\n",
+                "let boxed = mutate_box (Box (c_string \"a\"), Box (c_string \"c\"))\n",
+            ),
+        ] {
+            let (found, stats) = assert_drop_glue_plans_agree(source);
+            plans += found;
+            max_rounds = max_rounds.max(stats.rounds);
+            max_growth = max_growth.max(stats.growth);
+        }
+        assert!(
+            plans >= 7,
+            "the fixtures request several distinct drop-glue keys: {plans}"
+        );
+        assert!(
+            max_rounds <= 4,
+            "drop glue converges in a few rounds: {max_rounds} rounds, growth {max_growth}"
+        );
+        eprintln!(
+            "stage 4.4 drop-glue transition fixtures: {plans} plans, max {max_rounds} rounds, max growth {max_growth}"
+        );
+    }
+
+    // ------------------------------------------------------------------
     // Stage 4.3 formatting closure and legacy transition comparison.
     // ------------------------------------------------------------------
 

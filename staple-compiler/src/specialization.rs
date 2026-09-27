@@ -251,9 +251,31 @@ impl CanonicalType {
             CheckedType::Sum(sum) => CanonicalType::Sum {
                 alternatives: Self::convert_arguments(&sum.alternatives, origin, mode)?,
             },
-            CheckedType::Function(function) => CanonicalType::Function(Box::new(
-                CanonicalFunctionType::convert(function, origin, mode)?,
-            )),
+            CheckedType::Function(function) => {
+                // A concrete effect row is encoded as a function type with
+                // `Error` parameter and result (see
+                // `effect_substitution_type`), and coroutine/task type
+                // arguments carry that encoding. Canonicalize it as a
+                // never-parameter marker that keeps the canonical effect row,
+                // so a `Coroutine{E} T` argument list stays part of the key
+                // instead of rejecting the whole type as an error.
+                if function.parameter.as_ref() == &CheckedType::Error
+                    && function.result.as_ref() == &CheckedType::Error
+                {
+                    let marker = CheckedFunctionType {
+                        parameter: Box::new(CheckedType::Never),
+                        result: Box::new(CheckedType::Never),
+                        ..function.clone()
+                    };
+                    CanonicalType::Function(Box::new(CanonicalFunctionType::convert(
+                        &marker, origin, mode,
+                    )?))
+                } else {
+                    CanonicalType::Function(Box::new(CanonicalFunctionType::convert(
+                        function, origin, mode,
+                    )?))
+                }
+            }
             CheckedType::Distinct {
                 id,
                 arguments,

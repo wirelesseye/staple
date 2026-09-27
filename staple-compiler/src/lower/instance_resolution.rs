@@ -1677,6 +1677,17 @@ impl LoweredProgram {
     }
 }
 
+/// The opaque runtime types whose drop takes a dedicated cleanup route instead
+/// of a structural drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeOpaqueKind {
+    Coroutine,
+    Scheduler,
+    Wait,
+    Resolver,
+    CompletionToken,
+}
+
 impl LoweredProgram {
     /// Whether a fully substituted value type is `Copy`, using the owned trait
     /// and implementation catalogs. A concrete instance has no declared
@@ -1685,20 +1696,49 @@ impl LoweredProgram {
         TraitSelectionContext::new(self, Vec::new()).is_copy(value_type)
     }
 
+    /// The opaque runtime type identity of a fully substituted type, exactly
+    /// as `TypedModule`'s `is_*_type` predicates select it.
+    pub(crate) fn runtime_opaque_kind(
+        &self,
+        value_type: &CheckedType,
+    ) -> Option<RuntimeOpaqueKind> {
+        let CheckedType::Opaque { id, .. } = value_type else {
+            return None;
+        };
+        let ids = &self.semantic_ids;
+        if Some(*id) == ids.coroutine_type {
+            Some(RuntimeOpaqueKind::Coroutine)
+        } else if Some(*id) == ids.scheduler_type {
+            Some(RuntimeOpaqueKind::Scheduler)
+        } else if Some(*id) == ids.wait_type {
+            Some(RuntimeOpaqueKind::Wait)
+        } else if Some(*id) == ids.resolver_type {
+            Some(RuntimeOpaqueKind::Resolver)
+        } else if Some(*id) == ids.completion_token_type {
+            Some(RuntimeOpaqueKind::CompletionToken)
+        } else {
+            None
+        }
+    }
+
     /// Whether a fully substituted value type needs a drop, mirroring
     /// `TypedModule::type_needs_drop` with the owned trait catalogs and the
     /// coroutine/runtime type identities.
     pub(crate) fn concrete_needs_drop(&self, value_type: &CheckedType) -> bool {
-        let is_opaque = |candidate: Option<TypeId>| matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == candidate);
-        if is_opaque(self.semantic_ids.coroutine_type)
-            || is_opaque(self.semantic_ids.scheduler_type)
-            || is_opaque(self.semantic_ids.wait_type)
-            || is_opaque(self.semantic_ids.resolver_type)
-            || is_opaque(self.semantic_ids.completion_token_type)
-        {
+        if self.runtime_opaque_kind(value_type).is_some() {
             return true;
         }
         concrete_type_needs_drop(self, value_type)
+    }
+
+    /// The user `Drop` implementation selected for a fully substituted type,
+    /// mirroring `TypedModule::drop_method_for`: the implementation whose sole
+    /// trait argument equals `value_type` exactly, and the first method from
+    /// its method map. A generic implementation never matches a concrete type.
+    pub(crate) fn drop_method_for_concrete(&self, value_type: &CheckedType) -> Option<FunctionId> {
+        drop_implementation_for(self, value_type)
+            .and_then(|implementation| implementation.methods.first())
+            .map(|(_, function)| *function)
     }
 
     /// Completes one declared trait bound for a concrete instance: substitutes
@@ -1771,17 +1811,28 @@ impl LoweredProgram {
     }
 }
 
+/// The one-argument `Drop` implementation whose trait argument is exactly
+/// `value_type`, with the same predicate legacy `has_drop_implementation`
+/// uses. `concrete_type_needs_drop` and `drop_method_for_concrete` share this
+/// helper so gating and selection cannot drift.
+fn drop_implementation_for<'a>(
+    program: &'a LoweredProgram,
+    value_type: &CheckedType,
+) -> Option<&'a LoweredTraitImplementationMetadata> {
+    let drop_trait = program.semantic_ids.drop_trait?;
+    program
+        .trait_implementations
+        .iter()
+        .find_map(|(_, implementation)| {
+            (implementation.trait_id == drop_trait
+                && implementation.arguments.len() == 1
+                && implementation.arguments[0] == *value_type)
+                .then_some(implementation)
+        })
+}
+
 fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) -> bool {
-    if program.semantic_ids.drop_trait.is_some_and(|drop_trait| {
-        program
-            .trait_implementations
-            .iter()
-            .any(|(_, implementation)| {
-                implementation.trait_id == drop_trait
-                    && implementation.arguments.len() == 1
-                    && implementation.arguments[0] == *value_type
-            })
-    }) {
+    if drop_implementation_for(program, value_type).is_some() {
         return true;
     }
     match value_type {
