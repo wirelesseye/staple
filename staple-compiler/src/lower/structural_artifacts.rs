@@ -225,6 +225,27 @@ pub(super) fn select_concrete_trait_method(
     method: TraitMethodId,
     arguments: &[CheckedType],
 ) -> Result<SelectedTraitMethod, Diagnostic> {
+    select_concrete_trait_method_with_kind(
+        program,
+        origin,
+        trait_id,
+        method,
+        arguments,
+        LoweredInstanceDependencyKind::TraitMethod,
+    )
+}
+
+/// The same selection with an explicit instance-edge kind, so the
+/// `BufferClone` element copy records a `CloneMethod` edge instead of the
+/// generic trait-method kind.
+pub(super) fn select_concrete_trait_method_with_kind(
+    program: &LoweredProgram,
+    origin: &Origin,
+    trait_id: TraitId,
+    method: TraitMethodId,
+    arguments: &[CheckedType],
+    instance_kind: LoweredInstanceDependencyKind,
+) -> Result<SelectedTraitMethod, Diagnostic> {
     let evidence = TraitEvidence::DeclaredBound {
         trait_id,
         method: Some(method),
@@ -282,7 +303,7 @@ pub(super) fn select_concrete_trait_method(
             let callee = PlannedCallee::Instance(PlannedInstance {
                 key: resolved_instance.key.clone(),
                 instance: None,
-                kind: LoweredInstanceDependencyKind::TraitMethod,
+                kind: instance_kind,
             });
             Ok(SelectedTraitMethod {
                 arguments: completed,
@@ -290,7 +311,7 @@ pub(super) fn select_concrete_trait_method(
                 callee_type,
                 request: ClosureRequest::Instance {
                     resolved: resolved_instance,
-                    kind: LoweredInstanceDependencyKind::TraitMethod,
+                    kind: instance_kind,
                     origin: origin.clone(),
                     use_site: None,
                 },

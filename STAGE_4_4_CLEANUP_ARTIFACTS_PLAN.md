@@ -284,6 +284,12 @@ Stage 4.4 is the first substage with a real scanner. Following the 4.2 recipe, a
 - Fixtures: cloning a buffer of `Copy` elements (blanket `impl<T where Copy T> Clone T`), of a nominal type with an explicit `Clone`, and of a nested `Buffer` (the `Clone (Buffer T)` implementation), each with droppable and non-droppable elements.
 - **Gate:** the selected `Clone` instance matches legacy `trait_method_code(Clone, [element])`.
 
+**Step 5 notes (complete):**
+
+- **Selection.** `select_concrete_trait_method_with_kind` parameterizes the 4.3 selection helper with the instance-edge kind; the existing `select_concrete_trait_method` delegates with `TraitMethod`. The `BufferClone` scanner arm now first selects the element's `Clone` method through `semantic_ids.clone_trait` and its first declared method with kind `CloneMethod`, records it as an instance use at `ArtifactUseSite::BufferCloneElement(call)`, and then requests the destination `GcFinalizer::Buffer` when the element needs drop, matching the documented element-then-finalizer site order.
+- **Fixtures.** `buffer_clone_sites_select_the_clone_instance_and_finalizer` lowers a fixture with the blanket `impl<T where Copy T> Clone T` (`Buffer I32`), an explicit `impl Clone Owned` over a user-`Drop` nominal (`Buffer Owned`, droppable), and a nested `Buffer (Buffer I32)` that resolves the header-only generic `impl<T where Clone T> Clone (Buffer T)`. For every `BufferCloneElement` use it requires kind `CloneMethod`, the call's buffer element type, and a bound instance whose template equals `TypedModule::trait_impl_method(Clone, [element], clone)`; the droppable element also has a `BufferCloneFinalizer` artifact use.
+- **Gate:** met. The selected clone instances match the typed module's `Clone` selection, and the workspace suite passes 1237 tests. The legacy `trait_method_code` recorder comparison lands in Step 6.
+
 ### Step 6: Legacy transition comparison
 
 Extend the `#[cfg(test)]` recorder in `codegen.rs`.

@@ -344,6 +344,14 @@ trait CleanupVisitor {
         value_type: &CheckedType,
         origin: &Origin,
     ) -> Result<(), Vec<Diagnostic>>;
+
+    fn instance_use(
+        &mut self,
+        site: ArtifactUseSite,
+        resolved: super::instance_resolution::ResolvedInstanceRequest,
+        kind: LoweredInstanceDependencyKind,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>>;
 }
 
 /// The scanning visitor: every site becomes a closure request with its exact
@@ -437,6 +445,22 @@ impl CleanupVisitor for ScanVisitor<'_> {
         });
         Ok(())
     }
+
+    fn instance_use(
+        &mut self,
+        site: ArtifactUseSite,
+        resolved: super::instance_resolution::ResolvedInstanceRequest,
+        kind: LoweredInstanceDependencyKind,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        self.requests.push(ClosureRequest::Instance {
+            resolved,
+            kind,
+            origin: origin.clone(),
+            use_site: Some(site),
+        });
+        Ok(())
+    }
 }
 
 /// The collecting visitor: records owned bindings for the post-closure pass.
@@ -473,6 +497,16 @@ impl CleanupVisitor for CollectVisitor {
         &mut self,
         _symbol: SymbolId,
         _value_type: &CheckedType,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    fn instance_use(
+        &mut self,
+        _site: ArtifactUseSite,
+        _resolved: super::instance_resolution::ResolvedInstanceRequest,
+        _kind: LoweredInstanceDependencyKind,
         _origin: &Origin,
     ) -> Result<(), Vec<Diagnostic>> {
         Ok(())
@@ -907,6 +941,37 @@ impl<'a> CleanupWalker<'a> {
                     }
                 }
                 IntrinsicFunction::BufferClone => {
+                    if let CheckedType::Buffer(element) = &result_type {
+                        // The per-element `Clone` call is an instance use of the
+                        // selected method, first in the site order.
+                        if let Some(clone_trait) = self.program.semantic_ids.clone_trait
+                            && let Some(method) = self
+                                .program
+                                .traits
+                                .get(clone_trait)
+                                .and_then(|trait_| trait_.methods.first())
+                                .copied()
+                        {
+                            let selected =
+                                super::structural_artifacts::select_concrete_trait_method_with_kind(
+                                    self.program,
+                                    &origin,
+                                    clone_trait,
+                                    method,
+                                    std::slice::from_ref(element),
+                                    LoweredInstanceDependencyKind::CloneMethod,
+                                )
+                                .map_err(|diagnostic| vec![diagnostic])?;
+                            if let ClosureRequest::Instance { resolved, .. } = selected.request {
+                                self.visitor.instance_use(
+                                    ArtifactUseSite::BufferCloneElement(id),
+                                    resolved,
+                                    LoweredInstanceDependencyKind::CloneMethod,
+                                    &origin,
+                                )?;
+                            }
+                        }
+                    }
                     if let CheckedType::Buffer(element) = &result_type
                         && self.program.concrete_needs_drop(element)
                     {
@@ -2640,6 +2705,86 @@ mod tests {
         eprintln!(
             "stage 4.4 finalizer closure stats: {:?}",
             program.closure_stats
+        );
+    }
+
+    const BUFFER_CLONE_FIXTURE: &str = concat!(
+        "use std.buffer.*\n",
+        "use std.clone.Clone\n",
+        "use std.cinterop.(CString, c_string)\n",
+        "type Owned = ctor I32\n",
+        "impl Drop Owned { def drop = Owned value => () }\n",
+        "impl Clone Owned { def clone = Owned value => Owned value }\n",
+        "def clone_copy: (Buffer I32) -> Buffer I32 = buffer => Clone.clone buffer\n",
+        "def clone_owned: (Buffer Owned) -> Buffer Owned = buffer => Clone.clone buffer\n",
+        "def clone_nested: (Buffer (Buffer I32)) -> Buffer (Buffer I32) = buffer => Clone.clone buffer\n",
+        "let kept = 1\n",
+    );
+
+    #[test]
+    fn buffer_clone_sites_select_the_clone_instance_and_finalizer() {
+        let module = checked_program(BUFFER_CLONE_FIXTURE);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .expect("the buffer-clone fixture lowers and validates");
+        let program = &lowered.program;
+        let clone_trait = program
+            .semantic_ids
+            .clone_trait
+            .expect("the checker selected the Clone trait");
+        let method = program
+            .traits
+            .get(clone_trait)
+            .and_then(|trait_| trait_.methods.first())
+            .copied()
+            .expect("Clone declares a method");
+
+        let mut element_sites = 0;
+        let mut finalizer_sites = 0;
+        for (_, instance) in program.instances.iter() {
+            let Some(body) = &instance.body else {
+                continue;
+            };
+            for use_ in &body.instance_uses {
+                let ArtifactUseSite::BufferCloneElement(call) = use_.site else {
+                    continue;
+                };
+                element_sites += 1;
+                assert_eq!(
+                    use_.kind,
+                    LoweredInstanceDependencyKind::CloneMethod,
+                    "the element copy is a clone-method instance use"
+                );
+                let call = body.call(call).expect("the clone call");
+                let CheckedType::Buffer(element) = &call.result_type else {
+                    panic!("a buffer clone result is a buffer: {:?}", call.result_type);
+                };
+                let expected = module
+                    .trait_impl_method(clone_trait, std::slice::from_ref(element), method)
+                    .expect("legacy selects a Clone method for the element");
+                let bound = program
+                    .instances
+                    .get(use_.instance)
+                    .expect("the selected clone instance");
+                assert_eq!(
+                    bound.template, expected,
+                    "the planned element clone matches the typed-module selection for {element}"
+                );
+            }
+            for use_ in &body.artifact_uses {
+                if matches!(use_.site, ArtifactUseSite::BufferCloneFinalizer(_)) {
+                    finalizer_sites += 1;
+                }
+            }
+        }
+        assert!(
+            element_sites >= 3,
+            "every buffer clone selects an element Clone instance: {element_sites}"
+        );
+        // Only the CString-backed element needs a buffer finalizer.
+        assert!(
+            finalizer_sites >= 1,
+            "a buffer of droppable elements clones with a destination finalizer: {finalizer_sites}"
         );
     }
 
