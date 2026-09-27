@@ -61,6 +61,32 @@ struct ModuleEmitter<'module, 'context> {
     /// bodies attribute their own literals and delegates.
     #[cfg(test)]
     legacy_structural_stack: Vec<LegacyStructuralMethod>,
+    /// Test-only: open `compile_drop_value` frames, innermost last. A frame
+    /// popped at the top level becomes a root of `legacy_drop_roots`.
+    #[cfg(test)]
+    legacy_drop_stack: Vec<LegacyDropCall>,
+    #[cfg(test)]
+    legacy_drop_roots: Vec<LegacyDropCall>,
+    /// Test-only: every finalizer body created, in creation order.
+    #[cfg(test)]
+    legacy_finalizers: Vec<LegacyFinalizer>,
+    /// Test-only: every ownership registration per emitted function, in order.
+    #[cfg(test)]
+    legacy_owned: Vec<LegacyOwned>,
+    /// Test-only: the specialization currently being emitted, so ownership
+    /// registrations map back to their instance.
+    #[cfg(test)]
+    legacy_function_key: Option<(
+        FunctionId,
+        CheckedFunctionType,
+        HashMap<TypeParameterId, CheckedType>,
+    )>,
+    #[cfg(test)]
+    legacy_buffer_clones: Vec<LegacyBufferClone>,
+    /// Test-only: whether the most recent `set_gc_finalizer` call happened, so
+    /// the constructor-adapter record observes the real call.
+    #[cfg(test)]
+    legacy_finalizer_set: bool,
     active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
     expression_type_overrides: HashMap<staple_syntax::SyntaxId, CheckedType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
@@ -316,6 +342,20 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             legacy_structural_methods: Vec::new(),
             #[cfg(test)]
             legacy_structural_stack: Vec::new(),
+            #[cfg(test)]
+            legacy_drop_stack: Vec::new(),
+            #[cfg(test)]
+            legacy_drop_roots: Vec::new(),
+            #[cfg(test)]
+            legacy_finalizers: Vec::new(),
+            #[cfg(test)]
+            legacy_owned: Vec::new(),
+            #[cfg(test)]
+            legacy_function_key: None,
+            #[cfg(test)]
+            legacy_buffer_clones: Vec::new(),
+            #[cfg(test)]
+            legacy_finalizer_set: false,
             active_type_substitutions: HashMap::new(),
             expression_type_overrides: HashMap::new(),
             function_symbols: HashMap::new(),
@@ -431,6 +471,71 @@ pub(crate) struct LegacyStructuralMethod {
     pub(crate) deref_index_fast_path: Option<bool>,
     /// `Iterator.next`: the `Done` and `Yield` alternative indices.
     pub(crate) next_alternatives: Option<(usize, usize)>,
+    /// `Index`: whether the direct homogeneous load path was taken.
+    pub(crate) index_homogeneous: Option<bool>,
+    /// `Index`/`MutateIndex`: the target product length.
+    pub(crate) index_length: Option<usize>,
+    /// `MutateIndex`: whether the replaced element's cleanup ran.
+    pub(crate) mutate_drop_previous: Option<bool>,
+    /// `IntoIterator`: the source product the body iterated.
+    pub(crate) into_iterator_source: Option<CheckedType>,
+}
+
+/// Test-only: the cleanup branch one `compile_drop_value` call took.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LegacyDropBranch {
+    UserDrop(FunctionId),
+    CoroutineCleanup,
+    RuntimeRelease(&'static str),
+    CStringFree,
+    Product,
+    Sum,
+    Distinct,
+    NoOp,
+}
+
+/// Test-only: one `compile_drop_value` call with its nested calls in order.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LegacyDropCall {
+    pub(crate) value_type: CheckedType,
+    pub(crate) branch: LegacyDropBranch,
+    pub(crate) nested: Vec<LegacyDropCall>,
+}
+
+/// Test-only: one finalizer body the legacy backend created.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LegacyFinalizer {
+    Payload(CheckedType),
+    Cell(CheckedType),
+    ClosureEnvironment {
+        function: FunctionId,
+        capture_types: Vec<CheckedType>,
+        dropped: Vec<usize>,
+    },
+    Buffer(CheckedType),
+}
+
+/// Test-only: one legacy ownership registration in `owned_order`.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LegacyOwned {
+    pub(crate) function: FunctionId,
+    pub(crate) function_type: CheckedFunctionType,
+    pub(crate) substitutions: HashMap<TypeParameterId, CheckedType>,
+    pub(crate) symbol: SymbolId,
+    /// A binding cell (owned cell) versus an SSA value.
+    pub(crate) cell: bool,
+}
+
+/// Test-only: one `compile_buffer_clone` element `Clone` selection.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LegacyBufferClone {
+    pub(crate) element: CheckedType,
+    pub(crate) function: FunctionId,
 }
 
 #[cfg(test)]
@@ -442,6 +547,10 @@ pub(crate) struct LegacyEmissions {
     )>,
     pub(crate) constructor_adapters: Vec<LegacyConstructorAdapter>,
     pub(crate) structural_methods: Vec<LegacyStructuralMethod>,
+    pub(crate) drop_calls: Vec<LegacyDropCall>,
+    pub(crate) finalizers: Vec<LegacyFinalizer>,
+    pub(crate) owned: Vec<LegacyOwned>,
+    pub(crate) buffer_clones: Vec<LegacyBufferClone>,
 }
 
 /// Compiles one lowered module with the legacy backend and returns its typed
@@ -460,6 +569,10 @@ pub(crate) fn legacy_emissions(
         specializations: emitter.specialization_queue.clone(),
         constructor_adapters: emitter.legacy_constructor_adapters.clone(),
         structural_methods: emitter.legacy_structural_methods.clone(),
+        drop_calls: emitter.legacy_drop_roots.clone(),
+        finalizers: emitter.legacy_finalizers.clone(),
+        owned: emitter.legacy_owned.clone(),
+        buffer_clones: emitter.legacy_buffer_clones.clone(),
     })
 }
 
@@ -925,6 +1038,30 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         function: &ResolvedFunction,
         llvm_function: inkwell::values::FunctionValue<'context>,
     ) -> CodeGenerationResult<()> {
+        // Test-only: remember which concrete function is being emitted, so
+        // ownership registrations map back to their instance.
+        #[cfg(test)]
+        let previous_key = self.legacy_function_key.take();
+        #[cfg(test)]
+        {
+            let template = self
+                .typed_module
+                .type_of_function(function.id)
+                .cloned()
+                .expect("emitted functions are freshly checked");
+            let function_type = match substitute_type(
+                CheckedType::Function(template),
+                &self.active_type_substitutions,
+            ) {
+                CheckedType::Function(function_type) => function_type,
+                other => panic!("substituted function signature is not a function: {other:?}"),
+            };
+            self.legacy_function_key = Some((
+                function.id,
+                function_type,
+                self.active_type_substitutions.clone(),
+            ));
+        }
         let entry = self.context.append_basic_block(llvm_function, "entry");
         self.builder.position_at_end(entry);
 
@@ -950,7 +1087,38 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .build_return(Some(&return_value))
                 .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
         }
+        #[cfg(test)]
+        {
+            self.legacy_function_key = previous_key;
+        }
         Ok(())
+    }
+
+    /// Test-only: records one ownership registration under the function
+    /// currently being emitted.
+    #[cfg(test)]
+    fn legacy_record_owned(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        cell: bool,
+    ) {
+        let Some(function_id) = environment.function_id else {
+            return;
+        };
+        let Some((function, function_type, substitutions)) = &self.legacy_function_key else {
+            return;
+        };
+        if *function != function_id {
+            return;
+        }
+        self.legacy_owned.push(LegacyOwned {
+            function: *function,
+            function_type: function_type.clone(),
+            substitutions: substitutions.clone(),
+            symbol,
+            cell,
+        });
     }
 
     fn specialization_key(function_type: &CheckedFunctionType) -> String {
@@ -1044,27 +1212,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Some(inkwell::module::Linkage::Internal),
         );
         self.constructor_codes.insert((symbol, key), function);
-        #[cfg(test)]
-        {
-            let managed_ref = matches!(function_type.result.as_ref(), CheckedType::Ref(_));
-            let finalizer_set = matches!(
-                function_type.result.as_ref(),
-                CheckedType::Ref(payload) if self.typed_module.type_needs_drop(payload)
-            );
-            self.legacy_constructor_adapters
-                .push(LegacyConstructorAdapter {
-                    symbol,
-                    callable_type: function_type.clone(),
-                    managed_ref,
-                    finalizer_set,
-                });
-        }
 
         let previous_block = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
         let parameters = function.get_params();
         let value = self.build_product_value(&parameters[1..], Span::Compiler)?;
+        #[cfg(test)]
+        {
+            // Observe the actual `set_gc_finalizer` call rather than
+            // recomputing the predicate.
+            self.legacy_finalizer_set = false;
+        }
         let value = if let CheckedType::Ref(payload) = function_type.result.as_ref() {
             self.build_ref_value(value, payload, Span::Compiler)?
                 .as_basic_value_enum()
@@ -1074,6 +1233,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder
             .build_return(Some(&value))
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+        #[cfg(test)]
+        {
+            let managed_ref = matches!(function_type.result.as_ref(), CheckedType::Ref(_));
+            let finalizer_set = self.legacy_finalizer_set;
+            self.legacy_constructor_adapters
+                .push(LegacyConstructorAdapter {
+                    symbol,
+                    callable_type: function_type.clone(),
+                    managed_ref,
+                    finalizer_set,
+                });
+        }
         if let Some(block) = previous_block {
             self.builder.position_at_end(block);
         }
@@ -1503,9 +1674,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder
             .build_store(live, self.context.bool_type().const_int(1, false))
             .map_err(compiler_diagnostic)?;
+        let newly_owned = !environment.owned_order.contains(&symbol);
         environment.owned.insert(symbol, (value, value_type, live));
-        if !environment.owned_order.contains(&symbol) {
+        if newly_owned {
             environment.owned_order.push(symbol);
+            #[cfg(test)]
+            self.legacy_record_owned(environment, symbol, false);
         }
         Ok(())
     }
@@ -1580,7 +1754,44 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         value_type: &CheckedType,
         span: Span,
     ) -> CodeGenerationResult<()> {
+        #[cfg(test)]
+        self.legacy_drop_stack.push(LegacyDropCall {
+            value_type: value_type.clone(),
+            branch: LegacyDropBranch::NoOp,
+            nested: Vec::new(),
+        });
+        let result = self.compile_drop_value_inner(value, value_type, span);
+        #[cfg(test)]
+        {
+            let call = self
+                .legacy_drop_stack
+                .pop()
+                .expect("a drop frame was pushed above");
+            match self.legacy_drop_stack.last_mut() {
+                Some(parent) => parent.nested.push(call),
+                None => self.legacy_drop_roots.push(call),
+            }
+        }
+        result
+    }
+
+    /// Test-only: sets the branch of the innermost open drop frame.
+    #[cfg(test)]
+    fn legacy_drop_set_branch(&mut self, branch: LegacyDropBranch) {
+        if let Some(frame) = self.legacy_drop_stack.last_mut() {
+            frame.branch = branch;
+        }
+    }
+
+    fn compile_drop_value_inner(
+        &mut self,
+        value: BasicValueEnum<'context>,
+        value_type: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
         if let Some(function_id) = self.typed_module.drop_method_for(value_type) {
+            #[cfg(test)]
+            self.legacy_drop_set_branch(LegacyDropBranch::UserDrop(function_id));
             let function = self.functions.get(&function_id).copied().ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing compiled Drop implementation")
             })?;
@@ -1606,6 +1817,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
 
         if self.typed_module.is_coroutine_type(value_type) {
+            #[cfg(test)]
+            self.legacy_drop_set_branch(LegacyDropBranch::CoroutineCleanup);
             // Dropping a coroutine value runs its (idempotent) `cleanup`, which
             // destroys the captures of an unstarted coroutine and releases the
             // frame's GC root.
@@ -1633,6 +1846,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             return Ok(());
         }
         if self.typed_module.is_scheduler_type(value_type) {
+            #[cfg(test)]
+            self.legacy_drop_set_branch(LegacyDropBranch::RuntimeRelease("__staple_sched_destroy"));
             let BasicValueEnum::PointerValue(sched) = value else {
                 return Err(Diagnostic::new(span, "scheduler value is not a pointer"));
             };
@@ -1663,6 +1878,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             } else {
                 "__staple_completion_resolver_drop"
             };
+            #[cfg(test)]
+            self.legacy_drop_set_branch(LegacyDropBranch::RuntimeRelease(
+                if self.typed_module.is_wait_type(value_type) {
+                    "__staple_completion_wait_drop"
+                } else if self.typed_module.is_completion_token_type(value_type) {
+                    "__staple_completion_token_release"
+                } else {
+                    "__staple_completion_resolver_drop"
+                },
+            ));
             let drop_fn = self.coroutine_runtime_fn(
                 name,
                 self.context.void_type().fn_type(&[ptr_type.into()], false),
@@ -1675,6 +1900,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
         match value_type {
             CheckedType::CString => {
+                #[cfg(test)]
+                self.legacy_drop_set_branch(LegacyDropBranch::CStringFree);
                 let BasicValueEnum::PointerValue(pointer) = value else {
                     return Err(Diagnostic::new(
                         span,
@@ -1694,6 +1921,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map_err(|error| Diagnostic::new(span, error.to_string()))?;
             }
             CheckedType::Product(product) => {
+                #[cfg(test)]
+                self.legacy_drop_set_branch(LegacyDropBranch::Product);
                 let BasicValueEnum::StructValue(product_value) = value else {
                     return Err(Diagnostic::new(
                         span,
@@ -1712,6 +1941,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
             }
             CheckedType::Sum(sum) => {
+                #[cfg(test)]
+                self.legacy_drop_set_branch(LegacyDropBranch::Sum);
                 let BasicValueEnum::StructValue(sum_value) = value else {
                     return Err(Diagnostic::new(span, "sum has an invalid representation"));
                 };
@@ -1752,6 +1983,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.builder.position_at_end(merge);
             }
             CheckedType::Distinct { representation, .. } => {
+                #[cfg(test)]
+                self.legacy_drop_set_branch(LegacyDropBranch::Distinct);
                 self.compile_drop_value(value, representation, span)?;
             }
             _ => {}
@@ -2310,9 +2543,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let finalizer = self.ensure_cell_finalizer(&value_type)?;
                 self.set_gc_finalizer(cell, finalizer)?;
             } else {
+                let newly_owned = !environment.owned_order.contains(&symbol);
                 environment.owned_cells.insert(symbol);
-                if !environment.owned_order.contains(&symbol) {
+                if newly_owned {
                     environment.owned_order.push(symbol);
+                    #[cfg(test)]
+                    self.legacy_record_owned(environment, symbol, true);
                 }
             }
         }
@@ -3830,6 +4066,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             delegates: Vec::new(),
             deref_index_fast_path: None,
             next_alternatives: None,
+            index_homogeneous: None,
+            index_length: None,
+            mutate_drop_previous: None,
+            into_iterator_source: None,
         });
         let previous = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
@@ -3887,6 +4127,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     span.clone(),
                 )?,
             crate::StructuralTraitMethod::IntoIterator => {
+                #[cfg(test)]
+                if let Some(record) = self.legacy_structural_stack.last_mut() {
+                    record.into_iterator_source = arguments.first().cloned();
+                }
                 self.compile_structural_into_iterator_body(&values, span.clone())?
             }
             crate::StructuralTraitMethod::Iterator => self.compile_structural_next_body(
@@ -4283,6 +4527,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if let CheckedType::Product(product) = target
             && product.homogeneous_element().is_none()
         {
+            #[cfg(test)]
+            if let Some(record) = self.legacy_structural_stack.last_mut() {
+                record.index_homogeneous = Some(false);
+                record.index_length = Some(product.elements.len());
+            }
             let BasicValueEnum::StructValue(product_value) = value else {
                 return Err(Diagnostic::new(
                     span,
@@ -4362,6 +4611,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let CheckedType::Product(product) = target else {
             return Err(Diagnostic::new(span, "invalid structural Index target"));
         };
+        #[cfg(test)]
+        if let Some(record) = self.legacy_structural_stack.last_mut() {
+            record.index_homogeneous = Some(true);
+            record.index_length = Some(product.elements.len());
+        }
         let llvm_type = self.compile_type(target)?;
         let pointer = self
             .builder
@@ -4852,6 +5106,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .build_gep(llvm_type, pointer, &[position], "index.element")
         }
         .map_err(compiler_diagnostic)?;
+        #[cfg(test)]
+        if let Some(record) = self.legacy_structural_stack.last_mut() {
+            record.mutate_drop_previous = Some(self.typed_module.type_needs_drop(element));
+        }
         if self.typed_module.type_needs_drop(element) {
             let old = self
                 .builder
@@ -6123,6 +6381,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         );
         let function = self.llvm_module.add_function(&name, function_type, None);
         self.gc_finalizers.insert(key, function);
+        #[cfg(test)]
+        self.legacy_finalizers
+            .push(LegacyFinalizer::Payload(payload.clone()));
 
         let previous_block = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
@@ -6163,6 +6424,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         );
         let function = self.llvm_module.add_function(&name, function_type, None);
         self.gc_finalizers.insert(key, function);
+        #[cfg(test)]
+        self.legacy_finalizers
+            .push(LegacyFinalizer::Cell(value_type.clone()));
         let previous_block = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
@@ -6259,6 +6523,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.llvm_module
                     .add_function("__staple_gc_set_finalizer", setter_type, None)
             });
+        #[cfg(test)]
+        {
+            self.legacy_finalizer_set = true;
+        }
         self.builder
             .build_direct_call(
                 setter,
@@ -11301,6 +11569,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_load(environment_type, pointer, "closure.finalizer.environment")
             .map_err(compiler_diagnostic)?
             .into_struct_value();
+        #[cfg(test)]
+        let mut legacy_dropped = Vec::new();
         for (index, symbol) in closure.captures.iter().copied().enumerate().rev() {
             if self
                 .typed_module
@@ -11319,12 +11589,21 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             if !self.typed_module.type_needs_drop(&value_type) {
                 continue;
             }
+            #[cfg(test)]
+            legacy_dropped.push(index);
             let value = self
                 .builder
                 .build_extract_value(environment, index as u32, "closure.finalizer.capture")
                 .map_err(compiler_diagnostic)?;
             self.compile_drop_value(value, &value_type, Span::Compiler)?;
         }
+        #[cfg(test)]
+        self.legacy_finalizers
+            .push(LegacyFinalizer::ClosureEnvironment {
+                function: closure.id,
+                capture_types,
+                dropped: legacy_dropped,
+            });
         self.builder
             .build_return(None)
             .map_err(compiler_diagnostic)?;
@@ -13359,6 +13638,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             clone_method,
             call.syntax.span.clone(),
         )?;
+        #[cfg(test)]
+        if let Some(selected) = self.typed_module.trait_impl_method(
+            clone_trait,
+            std::slice::from_ref(element.as_ref()),
+            clone_method,
+        ) {
+            self.legacy_buffer_clones.push(LegacyBufferClone {
+                element: element.as_ref().clone(),
+                function: selected,
+            });
+        }
         let source_data = self.buffer_data_pointer(source, llvm_element)?;
         let destination_data = self.buffer_data_pointer(destination, llvm_element)?;
         let destination_length_slot = self
@@ -13550,6 +13840,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         );
         let function = self.llvm_module.add_function(&name, function_type, None);
         self.gc_finalizers.insert(key, function);
+        #[cfg(test)]
+        self.legacy_finalizers
+            .push(LegacyFinalizer::Buffer(element.clone()));
         let previous_block = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
         let check = self

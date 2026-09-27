@@ -2824,6 +2824,7 @@ mod tests {
         "use std.cinterop.*\n",
         "extern \"c\" { inspect: CString -> I32 }\n",
         "def make_c: () -> CString = () => c_string \"x\"\n",
+        "def extern_temp: () -> I32 = () => inspect (c_string \"x\")\n",
         "def discard_result: () -> () = () => { make_c (); () }\n",
         "def ignore: (CString) -> I32 = _ => 0\n",
         "def drop_body: () -> Never = () => loop { make_c () }\n",
@@ -2849,6 +2850,7 @@ mod tests {
         "  let item = c_string \"x\"\n",
         "  break (inspect item)\n",
         "}\n",
+        "def loop_body_drop: () -> Never = () => loop { make_c () }\n",
         "let discarded = discard_result ()\n",
         "let ignored = ignore (c_string \"x\")\n",
         "let mutated = mutate_c (c_string \"a\", c_string \"c\")\n",
@@ -2888,6 +2890,10 @@ mod tests {
         assert!(
             has(|site| matches!(site, ArtifactUseSite::LoopBodyResult(_))),
             "a loop body result drop site"
+        );
+        assert!(
+            has(|site| matches!(site, ArtifactUseSite::CStringTemporary(_))),
+            "an extern C-string temporary drop site"
         );
         assert!(
             has(|site| matches!(site, ArtifactUseSite::WildcardDiscard(_))),

@@ -524,11 +524,13 @@ mod tests {
 
     use inkwell::context::Context;
 
-    use crate::specialization::{ArtifactRequestKey, CanonicalFunctionType, CanonicalType};
+    use crate::specialization::{
+        ArtifactRequestKey, CanonicalFunctionType, CanonicalType, GcFinalizerKey,
+    };
     use crate::{
-        CallTypeSubstitution, CheckedFunctionType, ConstructorConstruction, DebugStep,
-        LoweredArtifactPlan, LoweredModule, Lowerer, NameResolver, PlannedCallee, ProgramLoader,
-        StructuralBody, StructuralTraitMethod, SubstitutionEnvironment, TypeChecker,
+        CallTypeSubstitution, CheckedFunctionType, CheckedType, ConstructorConstruction, DebugStep,
+        LoweredArtifactPlan, LoweredModule, Lowerer, NameResolver, PlannedArtifact, PlannedCallee,
+        ProgramLoader, StructuralBody, StructuralTraitMethod, SubstitutionEnvironment, TypeChecker,
         TypeParameterId, TypedModule,
     };
 
@@ -1526,8 +1528,11 @@ mod tests {
             .lower(&module)
             .expect("source should lower before the legacy comparison");
         let context = Context::create();
-        let legacy = crate::codegen::legacy_emissions(&context, &lowered)
-            .expect("the legacy backend should compile the module");
+        eprintln!("stage 4.4 fixture:\n{source}");
+        let legacy =
+            crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(|diagnostics| {
+                panic!("the legacy backend should compile the module: {diagnostics:?}\n{source}")
+            });
         let program = &lowered.program;
         for (function, function_type, substitutions) in &legacy.specializations {
             let name = program
@@ -1621,6 +1626,7 @@ mod tests {
                 "let debug = \"${pair:?}\"\n",
             ),
             concat!(
+                "use std.cinterop.(CString, c_string)\n",
                 "use std.coroutine.*\n",
                 "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
                 "let created = task ()\n",
@@ -1647,6 +1653,749 @@ mod tests {
             structural_methods > 0,
             "the comparison must see at least one structural method"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Stage 4.4 cleanup transition comparison.
+    // ------------------------------------------------------------------
+
+    /// The observed cleanup coverage of one transition fixture.
+    #[derive(Debug, Default)]
+    struct CleanupCoverage {
+        drop_kinds: std::collections::HashSet<&'static str>,
+        finalizer_kinds: std::collections::HashSet<&'static str>,
+        use_sites: std::collections::HashSet<&'static str>,
+        owned: usize,
+        buffer_clones: usize,
+    }
+
+    impl CleanupCoverage {
+        fn merge(&mut self, other: CleanupCoverage) {
+            self.drop_kinds.extend(other.drop_kinds);
+            self.finalizer_kinds.extend(other.finalizer_kinds);
+            self.use_sites.extend(other.use_sites);
+            self.owned += other.owned;
+            self.buffer_clones += other.buffer_clones;
+        }
+    }
+
+    fn drop_branch_name(branch: &crate::codegen::LegacyDropBranch) -> &'static str {
+        use crate::codegen::LegacyDropBranch;
+        match branch {
+            LegacyDropBranch::CoroutineCleanup => "coroutine-cleanup",
+            LegacyDropBranch::RuntimeRelease(name) => name,
+            LegacyDropBranch::CStringFree => "cstring-free",
+            LegacyDropBranch::Product => "product",
+            LegacyDropBranch::Sum => "sum",
+            LegacyDropBranch::Distinct => "distinct",
+            LegacyDropBranch::UserDrop(_) => "user-drop",
+            LegacyDropBranch::NoOp => "no-op",
+        }
+    }
+
+    fn drop_glue_plan_for<'a>(
+        program: &'a LoweredProgram,
+        value_type: &crate::CheckedType,
+    ) -> Option<&'a crate::DropGluePlan> {
+        let canonical = CanonicalType::concrete(value_type, &Origin::compiler()).ok()?;
+        let ordinal = program
+            .specializations
+            .artifact_ordinal(&ArtifactRequestKey::DropGlue(canonical))?;
+        program
+            .artifacts
+            .iter()
+            .find(|(_, artifact)| artifact.ordinal == ordinal)
+            .and_then(|(_, artifact)| artifact.plan.as_ref())
+            .and_then(|plan| match plan {
+                crate::LoweredArtifactPlan::DropGlue(plan) => Some(plan),
+                _ => None,
+            })
+    }
+
+    fn nested_glue_plan<'a>(
+        program: &'a LoweredProgram,
+        glue: &PlannedArtifact,
+    ) -> &'a crate::DropGluePlan {
+        let ordinal = glue.artifact.expect("bound after closure");
+        let artifact = program
+            .artifacts
+            .iter()
+            .find(|(_, artifact)| artifact.ordinal == ordinal)
+            .map(|(_, artifact)| artifact)
+            .expect("nested glue artifact");
+        match artifact.plan.as_ref().expect("expanded") {
+            crate::LoweredArtifactPlan::DropGlue(plan) => plan,
+            other => panic!("expected a nested drop-glue plan, got {other:?}"),
+        }
+    }
+
+    /// Requires one legacy drop call tree to match its plan: same branch, the
+    /// same user-drop function, and the same nested cleanups in order. Legacy
+    /// records the no-op nested calls the design drops by equivalence.
+    fn assert_drop_call_matches(
+        program: &LoweredProgram,
+        plan: &crate::DropGluePlan,
+        call: &crate::codegen::LegacyDropCall,
+    ) {
+        use crate::codegen::LegacyDropBranch;
+        use crate::{DropGlueBody, RuntimeRelease};
+        let nested = call
+            .nested
+            .iter()
+            .filter(|nested| !matches!(nested.branch, LegacyDropBranch::NoOp))
+            .collect::<Vec<_>>();
+        match (&plan.body, &call.branch) {
+            (
+                DropGlueBody::UserDrop {
+                    method,
+                    representation,
+                },
+                LegacyDropBranch::UserDrop(function),
+            ) => {
+                let bound = program
+                    .instances
+                    .get(method.instance.expect("bound after closure"))
+                    .expect("method instance");
+                assert_eq!(bound.template, *function, "the drop method function");
+                match (representation, nested.as_slice()) {
+                    (Some(glue), [inner]) => {
+                        assert_drop_call_matches(program, nested_glue_plan(program, glue), inner)
+                    }
+                    (None, []) => {}
+                    (None, inner) => panic!(
+                        "the plan omits a legacy representation drop for `{}`: {inner:?}",
+                        call.value_type
+                    ),
+                    (Some(_), []) => panic!(
+                        "the plan adds a representation drop legacy never calls for `{}`",
+                        call.value_type
+                    ),
+                    (Some(_), _) => panic!("a user drop has one representation drop"),
+                }
+            }
+            (DropGlueBody::CoroutineCleanup, LegacyDropBranch::CoroutineCleanup) => {
+                assert!(nested.is_empty())
+            }
+            (DropGlueBody::RuntimeRelease(planned), LegacyDropBranch::RuntimeRelease(name)) => {
+                let expected = match planned {
+                    RuntimeRelease::SchedulerDestroy => "__staple_sched_destroy",
+                    RuntimeRelease::WaitDrop => "__staple_completion_wait_drop",
+                    RuntimeRelease::ResolverDrop => "__staple_completion_resolver_drop",
+                    RuntimeRelease::CompletionTokenRelease => "__staple_completion_token_release",
+                };
+                assert_eq!(*name, expected, "the runtime release function");
+                assert!(nested.is_empty());
+            }
+            (DropGlueBody::CStringFree, LegacyDropBranch::CStringFree) => {
+                assert!(nested.is_empty())
+            }
+            (DropGlueBody::Product { fields }, LegacyDropBranch::Product) => {
+                assert_eq!(
+                    fields.len(),
+                    nested.len(),
+                    "the plan lists the same droppable fields for `{}`",
+                    call.value_type
+                );
+                for (field, inner) in fields.iter().zip(&nested) {
+                    assert_eq!(field.value_type, inner.value_type);
+                    assert_drop_call_matches(
+                        program,
+                        nested_glue_plan(program, &field.glue),
+                        inner,
+                    );
+                }
+            }
+            (DropGlueBody::Sum { alternatives }, LegacyDropBranch::Sum) => {
+                assert_eq!(
+                    alternatives.len(),
+                    nested.len(),
+                    "the plan lists the same droppable alternatives for `{}`",
+                    call.value_type
+                );
+                for (alternative, inner) in alternatives.iter().zip(&nested) {
+                    assert_eq!(alternative.value_type, inner.value_type);
+                    assert_drop_call_matches(
+                        program,
+                        nested_glue_plan(program, &alternative.glue),
+                        inner,
+                    );
+                }
+            }
+            (DropGlueBody::Distinct { representation }, LegacyDropBranch::Distinct) => {
+                match nested.as_slice() {
+                    [inner] => assert_drop_call_matches(
+                        program,
+                        nested_glue_plan(program, representation),
+                        inner,
+                    ),
+                    _ => panic!(
+                        "the distinct branch has exactly one representation drop for `{}`",
+                        call.value_type
+                    ),
+                }
+            }
+            (DropGlueBody::Unexpanded, _) => panic!("the drop glue was never expanded"),
+            (body, branch) => panic!(
+                "drop branch mismatch for `{}`: plan {body:?} vs legacy {branch:?}",
+                call.value_type
+            ),
+        }
+    }
+
+    /// One fixture's cleanup transition comparison: drop glue, finalizers,
+    /// owned bindings, and buffer-clone selections all agree with legacy
+    /// emission.
+    fn assert_cleanup_matches_legacy(source: &str) -> CleanupCoverage {
+        use crate::GcFinalizerPlan;
+        use crate::codegen::{LegacyDropBranch, LegacyFinalizer};
+        let mut coverage = CleanupCoverage::default();
+        let module = checked_program(source);
+        let lowered = Lowerer::new().lower(&module).unwrap_or_else(|diagnostics| {
+            panic!("source should lower through the production closure: {diagnostics:?}\n{source}")
+        });
+        let context = Context::create();
+        let legacy =
+            crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(|diagnostics| {
+                panic!("the legacy backend should compile the module: {diagnostics:?}\n{source}")
+            });
+        let program = &lowered.program;
+        let origin = Origin::compiler();
+
+        // Drop glue: the legacy type set equals the plan key set, and every
+        // legacy call tree matches its plan branch, function, and nested order.
+        let mut legacy_types = std::collections::HashSet::new();
+        for call in &legacy.drop_calls {
+            assert!(
+                !matches!(call.branch, LegacyDropBranch::NoOp),
+                "legacy only drops droppable values: {:?}",
+                call.value_type
+            );
+            legacy_types.insert(
+                CanonicalType::concrete(&call.value_type, &origin).expect("concrete drop type"),
+            );
+        }
+        let mut plan_types = std::collections::HashSet::new();
+        for (_, artifact) in program.artifacts.iter() {
+            let Some(crate::LoweredArtifactPlan::DropGlue(plan)) = &artifact.plan else {
+                continue;
+            };
+            plan_types.insert(
+                CanonicalType::concrete(&plan.value_type, &origin).expect("concrete plan type"),
+            );
+        }
+        assert_eq!(
+            legacy_types, plan_types,
+            "the legacy drop types equal the drop-glue keys"
+        );
+        for call in &legacy.drop_calls {
+            let plan = drop_glue_plan_for(program, &call.value_type)
+                .unwrap_or_else(|| panic!("no drop-glue plan for `{}`", call.value_type));
+            coverage.drop_kinds.insert(drop_branch_name(&call.branch));
+            assert_drop_call_matches(program, plan, call);
+        }
+
+        // Finalizers: every legacy finalizer matches exactly one plan and vice
+        // versa, with closure finalizers mapped through the closure instance.
+        let mut matched = std::collections::HashSet::new();
+        for finalizer in &legacy.finalizers {
+            match finalizer {
+                LegacyFinalizer::Payload(value_type) => {
+                    assert!(
+                        matched.insert(format!("payload:{:?}", canonical(value_type))),
+                        "legacy creates one payload finalizer per key"
+                    );
+                    let _ = assert_finalizer_plan(
+                        program,
+                        GcFinalizerKey::Payload(canonical(value_type)),
+                    );
+                }
+                LegacyFinalizer::Cell(value_type) => {
+                    assert!(matched.insert(format!("cell:{:?}", canonical(value_type))));
+                    let _ =
+                        assert_finalizer_plan(program, GcFinalizerKey::Cell(canonical(value_type)));
+                }
+                LegacyFinalizer::Buffer(element) => {
+                    assert!(matched.insert(format!("buffer:{:?}", canonical(element))));
+                    let _ =
+                        assert_finalizer_plan(program, GcFinalizerKey::Buffer(canonical(element)));
+                }
+                LegacyFinalizer::ClosureEnvironment {
+                    function,
+                    capture_types,
+                    dropped,
+                } => {
+                    let expected = capture_types
+                        .iter()
+                        .map(|capture| canonical(capture))
+                        .collect::<Vec<_>>();
+                    let instance = program
+                        .instances
+                        .iter()
+                        .find(|(_, instance)| {
+                            if instance.template != *function {
+                                return false;
+                            }
+                            let Some(body) = &instance.body else {
+                                return false;
+                            };
+                            body.captures()
+                                .iter()
+                                .map(|capture| canonical(&capture.value_type))
+                                .collect::<Vec<_>>()
+                                == expected
+                        })
+                        .map(|(id, _)| id)
+                        .unwrap_or_else(|| {
+                            panic!("no closure instance matches legacy finalizer {function:?}")
+                        });
+                    let ordinal = program
+                        .instances
+                        .get(instance)
+                        .expect("closure instance")
+                        .ordinal;
+                    matched.insert(format!("closure:{}:{expected:?}", ordinal.index()));
+                    let key = GcFinalizerKey::ClosureEnvironment {
+                        closure: ordinal,
+                        captures: expected,
+                    };
+                    let plan = assert_finalizer_plan(program, key);
+                    let GcFinalizerPlan::ClosureEnvironment { drops, .. } = plan else {
+                        panic!("expected a closure-environment plan")
+                    };
+                    let planned = drops.as_ref().expect("expanded");
+                    assert_eq!(
+                        planned.len(),
+                        dropped.len(),
+                        "the planned capture drop count matches legacy"
+                    );
+                    for (record, index) in planned.iter().zip(dropped) {
+                        assert_eq!(record.index, *index, "the dropped capture index");
+                        assert_eq!(
+                            canonical(&record.value_type),
+                            canonical(&capture_types[*index]),
+                            "the dropped capture type"
+                        );
+                    }
+                }
+            }
+            coverage.finalizer_kinds.insert(match finalizer {
+                LegacyFinalizer::Payload(_) => "payload",
+                LegacyFinalizer::Cell(_) => "cell",
+                LegacyFinalizer::ClosureEnvironment { .. } => "closure",
+                LegacyFinalizer::Buffer(_) => "buffer",
+            });
+        }
+        for (_, artifact) in program.artifacts.iter() {
+            let Some(crate::LoweredArtifactPlan::GcFinalizer(plan)) = &artifact.plan else {
+                continue;
+            };
+            let key = program
+                .specializations
+                .artifact(artifact.ordinal)
+                .expect("finalizer key");
+            assert!(
+                matched.contains(&legacy_finalizer_name(key)),
+                "every finalizer plan matches a legacy finalizer: {key:?}"
+            );
+            match plan {
+                GcFinalizerPlan::Payload { glue, .. }
+                | GcFinalizerPlan::Cell { glue, .. }
+                | GcFinalizerPlan::Buffer { glue, .. } => {
+                    assert!(glue.is_some(), "the finalizer references its glue");
+                }
+                GcFinalizerPlan::ClosureEnvironment { drops, .. } => {
+                    assert!(drops.is_some(), "the closure finalizer is expanded");
+                }
+            }
+        }
+
+        // Owned bindings: per emitted function, legacy registrations match the
+        // instance's records in order and storage kind.
+        let mut groups: std::collections::BTreeMap<usize, Vec<&crate::codegen::LegacyOwned>> =
+            std::collections::BTreeMap::new();
+        for owned in &legacy.owned {
+            let instance = program
+                .instance_for_legacy_specialization(
+                    owned.function,
+                    &owned.function_type,
+                    &owned.substitutions,
+                )
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no instance for legacy owned registrations in {:?}",
+                        owned.function
+                    )
+                });
+            groups.entry(instance.index()).or_default().push(owned);
+        }
+        for (instance_index, owned) in &groups {
+            let instance = FunctionInstanceId::from_index(*instance_index);
+            let body = program
+                .instances
+                .get(instance)
+                .and_then(|instance| instance.body.as_ref())
+                .expect("instance body");
+            coverage.owned += owned.len();
+            let expected = owned
+                .iter()
+                .map(|owned| (owned.symbol, owned.cell))
+                .collect::<Vec<_>>();
+            let actual = body
+                .owned_bindings
+                .iter()
+                .map(|record| (record.symbol, record.storage == crate::OwnedStorage::Cell))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual, expected,
+                "instance {} owned registrations and storage kinds",
+                instance_index
+            );
+        }
+
+        // Buffer clones: each legacy selection matches an element instance use.
+        let mut clone_uses = Vec::new();
+        for (_, instance) in program.instances.iter() {
+            let Some(body) = &instance.body else {
+                continue;
+            };
+            for use_ in &body.instance_uses {
+                if let crate::ArtifactUseSite::BufferCloneElement(call) = use_.site {
+                    let element = match &body.call(call).expect("clone call").result_type {
+                        crate::CheckedType::Buffer(element) => element.as_ref().clone(),
+                        other => panic!("buffer clone over a non-buffer: {other:?}"),
+                    };
+                    let bound = program
+                        .instances
+                        .get(use_.instance)
+                        .expect("clone instance")
+                        .template;
+                    clone_uses.push((element, bound));
+                }
+            }
+        }
+        let mut legacy_clones = legacy
+            .buffer_clones
+            .iter()
+            .map(|clone| (clone.element.clone(), clone.function))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            clone_uses.len(),
+            legacy_clones.len(),
+            "each legacy buffer clone matches exactly one planned instance use"
+        );
+        while let Some(use_) = clone_uses.pop() {
+            let position = legacy_clones
+                .iter()
+                .position(|clone| canonical(&clone.0) == canonical(&use_.0) && clone.1 == use_.1)
+                .unwrap_or_else(|| panic!("no legacy buffer clone matches {use_:?}"));
+            legacy_clones.remove(position);
+            coverage.buffer_clones += 1;
+        }
+        for (_, instance) in program.instances.iter() {
+            if let Some(body) = &instance.body {
+                for use_ in &body.instance_uses {
+                    coverage.use_sites.insert(use_site_name(use_.site));
+                }
+                for use_ in &body.artifact_uses {
+                    coverage.use_sites.insert(use_site_name(use_.site));
+                }
+            }
+        }
+        for uses in &program.initializer_artifact_uses {
+            for use_ in uses {
+                coverage.use_sites.insert(use_site_name(use_.site));
+            }
+        }
+        for uses in &program.initializer_instance_uses {
+            for use_ in uses {
+                coverage.use_sites.insert(use_site_name(use_.site));
+            }
+        }
+        coverage
+    }
+
+    fn canonical(value_type: &crate::CheckedType) -> CanonicalType {
+        CanonicalType::concrete(value_type, &Origin::compiler()).expect("a concrete type")
+    }
+
+    fn assert_finalizer_plan(
+        program: &LoweredProgram,
+        key: GcFinalizerKey,
+    ) -> &crate::GcFinalizerPlan {
+        let ordinal = program
+            .specializations
+            .artifact_ordinal(&ArtifactRequestKey::GcFinalizer(key))
+            .unwrap_or_else(|| panic!("no finalizer plan matches the legacy finalizer"));
+        program
+            .artifacts
+            .iter()
+            .find(|(_, artifact)| artifact.ordinal == ordinal)
+            .and_then(|(_, artifact)| artifact.plan.as_ref())
+            .and_then(|plan| match plan {
+                crate::LoweredArtifactPlan::GcFinalizer(plan) => Some(plan),
+                _ => None,
+            })
+            .expect("the finalizer plan is expanded")
+    }
+
+    /// The `matched` set key name for one finalizer key, mirroring the legacy
+    /// finalizer names so plan/finalizer matching is bidirectional.
+    fn legacy_finalizer_name(key: &ArtifactRequestKey) -> String {
+        match key {
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(value_type)) => {
+                format!("payload:{value_type:?}")
+            }
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(value_type)) => {
+                format!("cell:{value_type:?}")
+            }
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(element)) => {
+                format!("buffer:{element:?}")
+            }
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment {
+                closure,
+                captures,
+            }) => format!("closure:{}:{captures:?}", closure.index()),
+            _ => String::new(),
+        }
+    }
+
+    fn use_site_name(site: crate::ArtifactUseSite) -> &'static str {
+        use crate::ArtifactUseSite;
+        match site {
+            ArtifactUseSite::DiscardedResult(_) => "discarded",
+            ArtifactUseSite::ReplacedValue(_) => "replaced",
+            ArtifactUseSite::LoopBodyResult(_) => "loop-body",
+            ArtifactUseSite::CallTemporary { .. } => "call-temporary",
+            ArtifactUseSite::CStringTemporary(_) => "cstring-temporary",
+            ArtifactUseSite::WildcardDiscard(_) => "wildcard",
+            ArtifactUseSite::OwnedBinding(_) => "owned",
+            ArtifactUseSite::CellFinalizer(_) => "cell",
+            ArtifactUseSite::ClosureEnvironment(_) => "closure",
+            ArtifactUseSite::RefConstruction(_) => "ref",
+            ArtifactUseSite::DropIntrinsic(_) => "drop-intrinsic",
+            ArtifactUseSite::CStringConversion(_) => "cstring-conversion",
+            ArtifactUseSite::CompletionOrphan(_) => "completion-orphan",
+            ArtifactUseSite::BufferAllocation(_) => "buffer-allocation",
+            ArtifactUseSite::BufferCloneFinalizer(_) => "buffer-clone-finalizer",
+            ArtifactUseSite::BufferCloneElement(_) => "buffer-clone-element",
+            #[cfg(test)]
+            ArtifactUseSite::Test(_) => "test",
+        }
+    }
+
+    #[test]
+    fn stage_4_4_cleanup_matches_legacy_emission() {
+        let mut coverage = CleanupCoverage::default();
+        for source in [
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "type Resource = ctor I32\n",
+                "impl Drop Resource { def drop = Resource value => () }\n",
+                "type Handle = ctor CString\n",
+                "impl Drop Handle { def drop = Handle value => () }\n",
+                "type Wrapped = ctor CString\n",
+                "def make_c: () -> CString = () => c_string \"x\"\n",
+                "def discard_c: () -> () = () => { make_c (); () }\n",
+                "def extern_temp: () -> I32 = () => inspect (c_string \"x\")\n",
+                "def consume_mut: mut CString -> () = mut value => () \n",
+                "def call_temp: () -> () = () => { consume_mut (make_c ()); () }\n",
+                "def drop_value: () -> () = () => { drop (make_c ()); () }\n",
+                "def mutate_resource: move (Resource, Resource) -> (Resource, Resource) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = Resource 3\n",
+                "  copy\n",
+                "}\n",
+                "def mutate_handle: move (Handle, Handle) -> (Handle, Handle) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = Handle (c_string \"b\")\n",
+                "  copy\n",
+                "}\n",
+                "def mutate_wrapped: move (Wrapped, Wrapped) -> (Wrapped, Wrapped) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = Wrapped (c_string \"b\")\n",
+                "  copy\n",
+                "}\n",
+                "def mutate_c: move (CString, CString) -> (CString, CString) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = c_string \"b\"\n",
+                "  copy\n",
+                "}\n",
+                "def mutate_product: move ((I32, CString), (I32, CString)) -> ((I32, CString), (I32, CString)) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = (1, c_string \"b\")\n",
+                "  copy\n",
+                "}\n",
+                "def pick: Bool -> (CString | I32) = condition => when { condition => c_string \"a\", else => 1 }\n",
+                "def mutate_sum: move ((CString | I32), (CString | I32)) -> ((CString | I32), (CString | I32)) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = pick True\n",
+                "  copy\n",
+                "}\n",
+                "let a = mutate_resource (Resource 1, Resource 2)\n",
+                "let b = mutate_handle (Handle (c_string \"a\"), Handle (c_string \"c\"))\n",
+                "let c = mutate_wrapped (Wrapped (c_string \"a\"), Wrapped (c_string \"c\"))\n",
+                "let d = mutate_c (c_string \"a\", c_string \"c\")\n",
+                "let e = mutate_product ((1, c_string \"a\"), (2, c_string \"c\"))\n",
+                "let f = mutate_sum (pick False, pick True)\n",
+                "let g = discard_c ()\n",
+                "let h = extern_temp ()\n",
+                "let i = call_temp ()\n",
+                "let j = drop_value ()\n",
+            ),
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "use std.coroutine.*\n",
+                "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+                "def discard_task: () -> () = () => { task (); () }\n",
+                "def make_c: () -> CString = () => c_string \"x\"\n",
+                "def discard_scheduler: () -> () = () => { scheduler (); () }\n",
+                "def make_completion: () -> (wait: Wait I32, resolver: Resolver I32) = () => completion (scheduler ())\n",
+                "def discard_completion: () -> () = () => { make_completion (); () }\n",
+                "def make_token: () -> (wait: Wait (), token: CompletionToken) = () => completion_token (scheduler ())\n",
+                "def discard_token: () -> () = () => { make_token (); () }\n",
+                "def make_resolver: () -> (wait: Wait CString, resolver: Resolver CString) = () => completion (scheduler ())\n",
+                "def discard_orphan: () -> () = () => {\n",
+                "  let pending = make_resolver ()\n",
+                "  Resolver.complete (pending.resolver) (make_c ())\n",
+                "  ()\n",
+                "}\n",
+                "let a = discard_task ()\n",
+                "let b = discard_scheduler ()\n",
+                "let c = discard_completion ()\n",
+                "let d = discard_token ()\n",
+                "let e = discard_orphan ()\n",
+            ),
+            concat!(
+                "use std.buffer.*\n",
+                "use std.clone.Clone\n",
+                "use std.cinterop.*\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "def make_ref: () -> Ref CString = () => Ref (c_string \"x\")\n",
+                "def cell_finalizer: () -> (() -> I32) = () => {\n",
+                "  let mut cell = c_string \"a\"\n",
+                "  cell = c_string \"b\"\n",
+                "  () => inspect cell\n",
+                "}\n",
+                "def closure_env: move CString -> (() -> I32) = move value => () => inspect value\n",
+                "type Owned = ctor I32\n",
+                "impl Drop Owned { def drop = Owned value => () }\n",
+                "impl Clone Owned { def clone = Owned value => Owned value }\n",
+                "def make_buffer: () -> Buffer Owned = () => Buffer.with_capacity 2\n",
+                "def clone_owned: (Buffer Owned) -> Buffer Owned = buffer => Clone.clone buffer\n",
+                "def clone_copy: (Buffer I32) -> Buffer I32 = buffer => Clone.clone buffer\n",
+                "let a = make_ref ()\n",
+                "let b = cell_finalizer ()\n",
+                "let c = closure_env (c_string \"e\")\n",
+                "let d = make_buffer ()\n",
+            ),
+            concat!(
+                "use std.cinterop.*\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "def owned_param: move CString -> CString = move value => value\n",
+                "def mutate_pair: move (CString, CString) -> (CString, CString) = move pair => {\n",
+                "  let mut copy = pair\n",
+                "  copy[0] = c_string \"b\"\n",
+                "  copy\n",
+                "}\n",
+                "def nested: (I32) -> I32 = value => {\n",
+                "  let outer = c_string \"a\"\n",
+                "  when { value > 0 => { let inner = c_string \"b\"; inspect inner }, else => inspect outer }\n",
+                "}\n",
+            ),
+        ] {
+            coverage.merge(assert_cleanup_matches_legacy(source));
+        }
+        // `WaitDrop` and `ResolverDrop` are covered by the hook-based
+        // `drop_glue_bodies_mirror_the_legacy_decision_order` fixture, where
+        // the opaque types are requested directly; this program only makes
+        // scheduler and completion-token values droppable.
+        for kind in [
+            "user-drop",
+            "coroutine-cleanup",
+            "__staple_sched_destroy",
+            "__staple_completion_token_release",
+            "cstring-free",
+            "product",
+            "sum",
+            "distinct",
+        ] {
+            assert!(
+                coverage.drop_kinds.contains(kind),
+                "the fixtures cover the `{kind}` drop branch: {coverage:?}"
+            );
+        }
+        for kind in ["payload", "cell", "closure", "buffer"] {
+            assert!(
+                coverage.finalizer_kinds.contains(kind),
+                "the fixtures cover the `{kind}` finalizer: {coverage:?}"
+            );
+        }
+        // `loop-body` is covered by the scanner fixture; a `Never`-valued loop
+        // body trips a pre-existing legacy emission error ("cannot generate
+        // code for an erroneous type"), so the transition comparison cannot
+        // include it.
+        for site in [
+            "discarded",
+            "replaced",
+            "call-temporary",
+            "cstring-temporary",
+            "wildcard",
+            "owned",
+            "cell",
+            "closure",
+            "ref",
+            "drop-intrinsic",
+            "cstring-conversion",
+            "completion-orphan",
+            "buffer-allocation",
+            "buffer-clone-finalizer",
+            "buffer-clone-element",
+        ] {
+            assert!(
+                coverage.use_sites.contains(site),
+                "the fixtures cover the `{site}` use site: {coverage:?}"
+            );
+        }
+        assert!(coverage.owned >= 4, "owned registrations are compared");
+        assert!(
+            coverage.buffer_clones >= 2,
+            "buffer clone selections are compared"
+        );
+    }
+
+    #[test]
+    fn stage_4_4_cleanup_matches_legacy_on_standard_library_values() {
+        let source = concat!(
+            "use std.list.*\n",
+            "use std.buffer.*\n",
+            "use std.coroutine.*\n",
+            "def build: () -> List I32 = () => {\n",
+            "  let mut items: List I32 = List.with_capacity 4\n",
+            "  List.push (items) (1)\n",
+            "  List.push (items) (2)\n",
+            "  items\n",
+            "}\n",
+            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def discard_task: () -> () = () => { task (); () }\n",
+            "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
+            "let items = build ()\n",
+            "let size = List.length items\n",
+            "let text = show_pair (1, 2)\n",
+            "let created = task ()\n",
+            "let dropped = discard_task ()\n",
+        );
+        let coverage = assert_cleanup_matches_legacy(source);
+        assert!(
+            coverage.drop_kinds.contains("coroutine-cleanup")
+                && coverage.drop_kinds.contains("__staple_sched_destroy"),
+            "the standard-library program drops coroutine and scheduler values: {coverage:?}"
+        );
+        assert!(
+            coverage.use_sites.contains("discarded"),
+            "the standard-library program discards droppable results: {coverage:?}"
+        );
+        eprintln!("stage 4.4 stdlib cleanup coverage: {coverage:?}");
     }
 
     // ------------------------------------------------------------------
@@ -2206,13 +2955,92 @@ mod tests {
                     assert_eq!(method.next_alternatives, Some((done.index, yield_.index)));
                     assert!(method.delegates.is_empty());
                 }
-                StructuralBody::IndexSwitch { .. }
-                | StructuralBody::IndexLoad { .. }
-                | StructuralBody::MutateReplace { .. }
-                | StructuralBody::IntoIterator { .. } => {
+                StructuralBody::IndexSwitch { elements, output } => {
+                    assert_eq!(method.structural, StructuralTraitMethod::Index);
+                    assert_eq!(
+                        method.index_homogeneous,
+                        Some(false),
+                        "the plan switches because legacy did"
+                    );
+                    assert_eq!(method.index_length, Some(elements.len()));
+                    // The completed target argument is the source of truth for
+                    // the element order and types.
+                    let CheckedType::Product(target) = &method.arguments[0] else {
+                        panic!("an Index target is a product");
+                    };
+                    assert_eq!(target.elements.len(), elements.len());
+                    for (element, argument) in elements.iter().zip(&target.elements) {
+                        assert_eq!(element.element, argument.value_type);
+                        assert_eq!(
+                            element.coercion.is_some(),
+                            argument.value_type != *output,
+                            "a coercion is recorded exactly when the types differ"
+                        );
+                        if let Some((from, to)) = &element.coercion {
+                            assert_eq!(from, &argument.value_type);
+                            assert_eq!(to, output);
+                        }
+                    }
                     assert!(method.delegates.is_empty(), "no delegated callees");
                     assert_eq!(method.deref_index_fast_path, None);
                     assert_eq!(method.next_alternatives, None);
+                    assert!(method.debug_literals.is_empty());
+                }
+                StructuralBody::IndexLoad {
+                    element,
+                    length,
+                    output,
+                } => {
+                    assert_eq!(method.structural, StructuralTraitMethod::Index);
+                    assert_eq!(method.index_homogeneous, Some(true));
+                    assert_eq!(method.index_length, Some(*length));
+                    let CheckedType::Product(target) = &method.arguments[0] else {
+                        panic!("an Index target is a product");
+                    };
+                    assert_eq!(target.homogeneous_element(), Some(element));
+                    assert_eq!(target.elements.len(), *length);
+                    assert_eq!(output, &method.arguments[2]);
+                    assert!(method.delegates.is_empty(), "no delegated callees");
+                    assert!(method.debug_literals.is_empty());
+                }
+                StructuralBody::MutateReplace {
+                    element,
+                    length,
+                    drop_previous,
+                } => {
+                    assert_eq!(method.structural, StructuralTraitMethod::MutateIndex);
+                    let CheckedType::Product(target) = &method.arguments[0] else {
+                        panic!("a MutateIndex target is a product");
+                    };
+                    assert_eq!(target.elements.len(), *length);
+                    assert_eq!(
+                        method.mutate_drop_previous,
+                        Some(drop_previous.is_some()),
+                        "the planned drop-previous presence matches legacy"
+                    );
+                    if let Some(drop_previous) = drop_previous {
+                        assert_eq!(
+                            program
+                                .specializations
+                                .artifact(drop_previous.artifact.expect("bound after closure")),
+                            Some(&drop_previous.key),
+                        );
+                    }
+                    assert_eq!(element, &method.arguments[2]);
+                    assert!(method.delegates.is_empty(), "no delegated callees");
+                    assert_eq!(method.deref_index_fast_path, None);
+                    assert!(method.debug_literals.is_empty());
+                }
+                StructuralBody::IntoIterator { source, iterator } => {
+                    assert_eq!(method.structural, StructuralTraitMethod::IntoIterator);
+                    assert_eq!(
+                        method.into_iterator_source.as_ref(),
+                        Some(source),
+                        "the planned source matches the legacy source"
+                    );
+                    assert_eq!(&method.arguments[1], iterator);
+                    assert!(method.delegates.is_empty(), "no delegated callees");
+                    assert_eq!(method.deref_index_fast_path, None);
                     assert!(method.debug_literals.is_empty());
                 }
                 StructuralBody::Unexpanded => panic!("structural plan was never expanded"),
