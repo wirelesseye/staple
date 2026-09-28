@@ -2189,6 +2189,10 @@ mod tests {
             ArtifactUseSite::BufferAllocation(_) => "buffer-allocation",
             ArtifactUseSite::BufferCloneFinalizer(_) => "buffer-clone-finalizer",
             ArtifactUseSite::BufferCloneElement(_) => "buffer-clone-element",
+            ArtifactUseSite::CoroCreation(_) => "coro-creation",
+            ArtifactUseSite::ReactiveCallbackEnvironment(_) => "reactive-callback-environment",
+            ArtifactUseSite::DerivedEvaluatorEnvironment(_) => "derived-evaluator-environment",
+            ArtifactUseSite::ReactiveRunner(_) => "reactive-runner",
             #[cfg(test)]
             ArtifactUseSite::Test(_) => "test",
         }
@@ -2415,6 +2419,186 @@ mod tests {
             "the standard-library program discards droppable results: {coverage:?}"
         );
         eprintln!("stage 4.4 stdlib cleanup coverage: {coverage:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // Stage 4.5 carried-over gap fixtures.
+    // ------------------------------------------------------------------
+
+    /// Gap 1: a reaction whose callback thunk captures a droppable value gets
+    /// a legacy closure-environment finalizer, but the 4.4 scanner never
+    /// requests one. Step 3 adds the request at the reactive site; this test
+    /// fails until then, and is ignored until Steps 3 and 4 land.
+    #[test]
+    #[ignore = "Stage 4.5 gap 1: the reactive callback finalizer request lands in Step 3"]
+    fn stage_4_5_gap_reactive_callback_environment_finalizer_is_missing() {
+        let source = concat!(
+            "use std.cinterop.(CString, c_string)\n",
+            "extern \"c\" { inspect: CString -> I32 }\n",
+            "def subscribe: move CString ->{Reactive} () = move captured => reaction { inspect captured; () }\n",
+            "with Reactive = reactive_scope () { subscribe (c_string \"x\") }\n",
+        );
+        let module = checked_program(source);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}"));
+        let context = Context::create();
+        let legacy =
+            crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(|diagnostics| {
+                panic!("the legacy backend should compile: {diagnostics:?}")
+            });
+        let program = &lowered.program;
+
+        // The fixture's reaction callback thunk captures a droppable value, so
+        // legacy installs a finalizer for its environment.
+        let reactive_thunks = program
+            .reactive_callbacks
+            .iter()
+            .filter_map(|(_, callback)| callback.thunk)
+            .collect::<Vec<_>>();
+        assert!(
+            !reactive_thunks.is_empty(),
+            "the fixture records its reaction callback thunk"
+        );
+        let legacy_callback_finalizers = legacy
+            .finalizers
+            .iter()
+            .filter(|finalizer| {
+                matches!(
+                    finalizer,
+                    crate::codegen::LegacyFinalizer::ClosureEnvironment { function, .. }
+                        if reactive_thunks.contains(function)
+                )
+            })
+            .count();
+        assert!(
+            legacy_callback_finalizers > 0,
+            "legacy installs a finalizer for the droppable callback capture"
+        );
+
+        // Every installed callback finalizer must have an expanded plan.
+        let mut planned = 0;
+        for thunk in reactive_thunks {
+            let Some((instance, ordinal)) = program.instances.iter().find_map(|(id, instance)| {
+                (instance.template == thunk).then_some((id, instance.ordinal))
+            }) else {
+                continue;
+            };
+            let Some(body) = program
+                .instances
+                .get(instance)
+                .and_then(|i| i.body.as_ref())
+            else {
+                continue;
+            };
+            let captures = body.captures();
+            let gate = captures.iter().any(|capture| {
+                !capture.requires_initialization_state
+                    && !capture.capture.borrowed
+                    && program.concrete_needs_drop(&capture.value_type)
+            });
+            if !gate {
+                continue;
+            }
+            let key = ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment {
+                closure: ordinal,
+                captures: captures
+                    .iter()
+                    .map(|capture| canonical(&capture.value_type))
+                    .collect(),
+            });
+            assert!(
+                program.specializations.artifact_ordinal(&key).is_some(),
+                "the installed callback environment finalizer has a plan: {key:?}"
+            );
+            planned += 1;
+        }
+        assert!(
+            planned > 0,
+            "the fixture's droppable callback capture installs a planned finalizer"
+        );
+    }
+
+    /// Gap 2: coroutine-body ownership was never compared. `resume` emits with
+    /// no `function_id`, so no registration inside a coroutine body is
+    /// recorded, while the 4.4 collector registers the body's frame binding.
+    /// Step 4 reconciles both; this test fails until then, and is ignored
+    /// until Step 4 lands.
+    #[test]
+    #[ignore = "Stage 4.5 gap 2: coroutine-body ownership parity lands in Step 4"]
+    fn stage_4_5_gap_coroutine_body_ownership_is_compared() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "use std.cinterop.(CString, c_string)\n",
+            "extern \"c\" { inspect: CString -> I32 }\n",
+            "def task: () -> Coroutine{} I32 = () => coro {\n",
+            "  let frame_value = c_string \"a\"\n",
+            "  inspect frame_value\n",
+            "}\n",
+            "let created = task ()\n",
+        );
+        let module = checked_program(source);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}"));
+        let context = Context::create();
+        let legacy =
+            crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(|diagnostics| {
+                panic!("the legacy backend should compile: {diagnostics:?}")
+            });
+        let program = &lowered.program;
+
+        // The fixture's coroutine body binds a droppable frame cell.
+        let (body_instance, body) = program
+            .instances
+            .iter()
+            .find_map(|(id, instance)| {
+                let is_thunk = program
+                    .functions
+                    .get(instance.template)
+                    .is_some_and(|function| function.class.coroutine_body);
+                (is_thunk && instance.body.is_some())
+                    .then_some((id, instance.body.as_ref().unwrap()))
+            })
+            .expect("the fixture instantiates its coroutine body thunk");
+        assert!(
+            body.plan_template.is_some(),
+            "the body instance owns its coroutine plan"
+        );
+
+        // Per emitted function, including the coroutine body's resume, legacy
+        // registrations match the instance's owned-binding records in order
+        // and storage kind.
+        let mut groups: std::collections::BTreeMap<usize, Vec<&crate::codegen::LegacyOwned>> =
+            std::collections::BTreeMap::new();
+        for owned in &legacy.owned {
+            let Some(instance) = program.instance_for_legacy_specialization(
+                owned.function,
+                &owned.function_type,
+                &owned.substitutions,
+            ) else {
+                continue;
+            };
+            groups.entry(instance.index()).or_default().push(owned);
+        }
+        let expected = groups
+            .get(&body_instance.index())
+            .map(|owned| {
+                owned
+                    .iter()
+                    .map(|owned| (owned.symbol, owned.cell))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let actual = body
+            .owned_bindings
+            .iter()
+            .map(|record| (record.symbol, record.storage == crate::OwnedStorage::Cell))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual, expected,
+            "coroutine body owned registrations and storage kinds match legacy emission"
+        );
     }
 
     // ------------------------------------------------------------------

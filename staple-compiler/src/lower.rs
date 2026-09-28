@@ -71,11 +71,13 @@ pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredIn
 // filled by the substage that owns each artifact family.
 #[allow(unused_imports)] // Stage 4.2+ attach and validate these plans.
 pub(crate) use artifact_plan::{
-    ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, DebugDelegate, DebugStep,
-    DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement,
-    ExternAdapterPlan, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlannedArtifact,
-    PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReactiveRunnerPlan,
-    RuntimeRelease, StructuralBody, StructuralMethodPlan, SumAlternative, TraitDelegate,
+    ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
+    CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DropGlueBody,
+    DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement, ExternAdapterPlan,
+    GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlannedArtifact, PlannedCallee,
+    PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReactiveRunnerBody, ReactiveRunnerPlan,
+    RunnerResourceSlot, RuntimeRelease, StructuralBody, StructuralMethodPlan, SumAlternative,
+    TraitDelegate,
 };
 
 macro_rules! arena_id {

@@ -30,10 +30,10 @@ use super::worklist::{GraphRecorder, LoweredScanOwner, TraversalOwner, WorklistB
 use super::{
     ArenaId, ExpressionId, FunctionInstanceId, InitializerId, ItemId, LoweredArtifactDependency,
     LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
-    LoweredArtifactRequestRoot, LoweredCallId, LoweredCallableValueId, LoweredInstanceBody,
-    LoweredInstanceDependency, LoweredInstanceDependencyKind, LoweredInstanceRequest,
-    LoweredProgram, Origin, PatternId, PlannedCalleeRef, PlannedCalleeRefMut,
-    ResolvedInstanceRequest, SymbolId,
+    LoweredArtifactRequestRoot, LoweredCallId, LoweredCallableValueId, LoweredCoroId,
+    LoweredInstanceBody, LoweredInstanceDependency, LoweredInstanceDependencyKind,
+    LoweredInstanceRequest, LoweredProgram, LoweredReactiveCallbackId, LoweredReactiveOperationId,
+    Origin, PatternId, PlannedCalleeRef, PlannedCalleeRefMut, ResolvedInstanceRequest, SymbolId,
 };
 use crate::specialization::{ArtifactOrdinal, ArtifactRequestKey};
 
@@ -83,9 +83,10 @@ pub(super) enum ClosureRequest {
 
 /// Sites in one owner body that use a generated artifact. Stage 4.2 defines no
 /// family variants; Stage 4.4 adds the ownership-cleanup sites (drops,
-/// finalizers, and buffer clones); Stage 4.5 adds reactive operations and
-/// `coro` creations. Every match on this enum must stay exhaustive, and every
-/// variant's ID must be interpreted in the owning body's own arenas.
+/// finalizers, and buffer clones); Stage 4.5 adds `coro` creations, reactive
+/// callback/evaluator environments, and reactive runners. Every match on this
+/// enum must stay exhaustive, and every variant's ID must be interpreted in
+/// the owning body's own arenas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ArtifactUseSite {
     /// A scripted test site identified by its position in the hook table.
@@ -128,6 +129,17 @@ pub(crate) enum ArtifactUseSite {
     BufferCloneFinalizer(LoweredCallId),
     /// A buffer clone's per-element `Clone` call (an instance use).
     BufferCloneElement(LoweredCallId),
+    /// A `coro` creation's resume/cleanup pair, at the `Coro` expression.
+    CoroCreation(LoweredCoroId),
+    /// A reaction/batch/`until` callback thunk's installed environment
+    /// finalizer, before the runner's own use.
+    ReactiveCallbackEnvironment(LoweredReactiveCallbackId),
+    /// A derived evaluator thunk's installed environment finalizer, before the
+    /// runner's own use.
+    DerivedEvaluatorEnvironment(LoweredReactiveOperationId),
+    /// A reaction, `until`, or derived runner, after the callback
+    /// environment use.
+    ReactiveRunner(LoweredReactiveOperationId),
 }
 
 /// One artifact use recorded on its owner in scan order. The validator proves
@@ -1474,6 +1486,18 @@ impl LoweredProgram {
             UseSiteOwner::Instance(body) => body.callable_value(id).is_some(),
             UseSiteOwner::Initializer(_) => self.callable_values.get(id).is_some(),
         };
+        let coro = |id: LoweredCoroId| match site_owner {
+            UseSiteOwner::Instance(body) => body.coro(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.coros.get(id).is_some(),
+        };
+        let reactive_operation = |id: LoweredReactiveOperationId| match site_owner {
+            UseSiteOwner::Instance(body) => body.reactive_operation(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.reactive_operations.get(id).is_some(),
+        };
+        let reactive_callback = |id: LoweredReactiveCallbackId| match site_owner {
+            UseSiteOwner::Instance(body) => body.reactive_callback(id).is_some(),
+            UseSiteOwner::Initializer(_) => self.reactive_callbacks.get(id).is_some(),
+        };
         match site {
             #[cfg(test)]
             ArtifactUseSite::Test(_) => {}
@@ -1569,6 +1593,22 @@ impl LoweredProgram {
             ArtifactUseSite::BufferCloneElement(id) => {
                 if !call(id) {
                     report("call", id.index());
+                }
+            }
+            ArtifactUseSite::CoroCreation(id) => {
+                if !coro(id) {
+                    report("coro", id.index());
+                }
+            }
+            ArtifactUseSite::ReactiveCallbackEnvironment(id) => {
+                if !reactive_callback(id) {
+                    report("reactive callback", id.index());
+                }
+            }
+            ArtifactUseSite::DerivedEvaluatorEnvironment(id)
+            | ArtifactUseSite::ReactiveRunner(id) => {
+                if !reactive_operation(id) {
+                    report("reactive operation", id.index());
                 }
             }
         }
@@ -1881,8 +1921,9 @@ mod tests {
         CallSubstitutions, CallTypeSubstitution, CheckedType, DebugDelegate, DebugStep,
         DropGlueBody, DropGluePlan, FunctionId, GcFinalizerPlan, InstanceResolutionRequest,
         InstanceResolutionTarget, NameResolver, PlannedArtifact, PlannedCallee, PlannedInstance,
-        ProgramLoader, ReactiveRunnerPlan, StructuralBody, StructuralMethodPlan,
-        StructuralTraitMethod, TraitId, TraitMethodId, TypeChecker, TypedModule, substitute_type,
+        ProgramLoader, ReactiveRunnerBody, ReactiveRunnerPlan, StructuralBody,
+        StructuralMethodPlan, StructuralTraitMethod, TraitId, TraitMethodId, TypeChecker,
+        TypedModule, substitute_type,
     };
 
     use super::*;
@@ -2084,7 +2125,11 @@ mod tests {
     ) -> ClosureRequest {
         ClosureRequest::Artifact {
             key: ArtifactRequestKey::ReactionRunner(ReactiveRunnerKey { owner, site }),
-            plan: LoweredArtifactPlan::ReactionRunner(ReactiveRunnerPlan { owner, site }),
+            plan: LoweredArtifactPlan::ReactionRunner(ReactiveRunnerPlan {
+                owner,
+                site,
+                body: ReactiveRunnerBody::Unexpanded,
+            }),
             kind: LoweredArtifactDependencyKind::ReactionRunner,
             origin: origin.clone(),
             use_site,
@@ -3033,6 +3078,57 @@ mod tests {
                 .any(|message| message.contains("outside its own arenas")),
             "{diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn closure_stage_4_5_use_sites_outside_the_owner_arenas_are_diagnosed() {
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+        );
+        // Each request carries a distinct drop-glue key so every use is
+        // recorded, and an ID far outside the owner's body arenas.
+        let broken = [
+            (
+                CheckedType::Ref(Box::new(CheckedType::I32)),
+                ArtifactUseSite::CoroCreation(LoweredCoroId::from_index(1_000_000)),
+            ),
+            (
+                CheckedType::Ref(Box::new(CheckedType::U8)),
+                ArtifactUseSite::ReactiveCallbackEnvironment(
+                    LoweredReactiveCallbackId::from_index(1_000_000),
+                ),
+            ),
+            (
+                CheckedType::Ref(Box::new(CheckedType::U16)),
+                ArtifactUseSite::DerivedEvaluatorEnvironment(
+                    LoweredReactiveOperationId::from_index(1_000_000),
+                ),
+            ),
+            (
+                CheckedType::Ref(Box::new(CheckedType::I64)),
+                ArtifactUseSite::ReactiveRunner(LoweredReactiveOperationId::from_index(1_000_000)),
+            ),
+        ];
+        for (value_type, site) in broken {
+            let mut program = stage_three(source);
+            let seed = identity_instance(&program, 0);
+            let origin = instance_origin(&program, seed);
+            let mut hooks = TestHooks::default();
+            hooks.instance_requests.insert(
+                seed.index(),
+                vec![vec![drop_glue_request(value_type, &origin, Some(site))]],
+            );
+            let diagnostics = program.close_artifact_catalog(&hooks);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.validate_artifact_closure(&hooks);
+            assert!(
+                messages(&diagnostics)
+                    .iter()
+                    .any(|message| message.contains("outside its own arenas")),
+                "the {site:?} site is diagnosed: {diagnostics:?}"
+            );
+        }
     }
 
     #[test]

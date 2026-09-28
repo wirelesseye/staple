@@ -3188,7 +3188,7 @@ mod tests {
         use crate::{
             ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, DropGlueBody,
             DropGluePlan, ExternAdapterPlan, GcFinalizerPlan, LoweredArtifactPlan,
-            ReactiveRunnerPlan, StructuralBody, StructuralMethodPlan,
+            ReactiveRunnerBody, ReactiveRunnerPlan, StructuralBody, StructuralMethodPlan,
         };
         let keys = stage_4_artifact_families();
         let node = nominal(7, "Node");
@@ -3196,6 +3196,7 @@ mod tests {
         let runner = ReactiveRunnerPlan {
             owner: instance_owner(0),
             site: callback_site(0),
+            body: ReactiveRunnerBody::Unexpanded,
         };
         let plans = vec![
             LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
@@ -3234,7 +3235,10 @@ mod tests {
                 element: node.clone(),
                 glue: None,
             }),
-            LoweredArtifactPlan::CoroutineCodes(CoroutineCodesPlan { body: instance }),
+            LoweredArtifactPlan::CoroutineCodes(CoroutineCodesPlan {
+                body: instance,
+                frame: None,
+            }),
             LoweredArtifactPlan::ReactionRunner(runner.clone()),
             LoweredArtifactPlan::UntilRunner(runner.clone()),
             LoweredArtifactPlan::DerivedRunner(runner),
@@ -3303,6 +3307,7 @@ mod tests {
             (
                 LoweredArtifactPlan::CoroutineCodes(CoroutineCodesPlan {
                     body: crate::FunctionInstanceId::for_test(1),
+                    frame: None,
                 }),
                 ArtifactRequestKey::CoroutineCodes(CoroutineCodesKey {
                     body: InstanceOrdinal(0),
@@ -3323,6 +3328,7 @@ mod tests {
                 LoweredArtifactPlan::ReactionRunner(ReactiveRunnerPlan {
                     owner: instance_owner(1),
                     site: callback_site(0),
+                    body: ReactiveRunnerBody::Unexpanded,
                 }),
                 ArtifactRequestKey::ReactionRunner(ReactiveRunnerKey {
                     owner: instance_owner(0),

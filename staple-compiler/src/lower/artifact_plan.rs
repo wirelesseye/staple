@@ -34,8 +34,8 @@ use crate::specialization::{
     CanonicalFunctionType, CanonicalType, GcFinalizerKey, InstanceKey,
 };
 use crate::{
-    CheckedFunctionType, CheckedType, Origin, StructuralTraitMethod, SymbolId, TraitId,
-    TraitMethodId, TypeId,
+    CheckedFunctionType, CheckedResource, CheckedType, Origin, StructuralTraitMethod, SymbolId,
+    TraitId, TraitMethodId, TypeId,
 };
 
 /// The owned plan of one generated artifact, one variant per artifact family.
@@ -261,8 +261,8 @@ impl LoweredArtifactPlan {
 
     /// Whether this plan's schema records its callees as `PlannedCallee`s, so
     /// the closure validator can match them one-to-one with artifact-owned
-    /// edges. Families whose schema has no callee slots yet (Stage 4.4-4.6
-    /// fill them) keep their Stage 4.2 request-based representation.
+    /// edges. Families whose schema has no callee slots yet (Stage 4.6 fills
+    /// them) keep their Stage 4.2 request-based representation.
     pub(crate) fn supports_planned_callees(&self) -> bool {
         matches!(
             self,
@@ -270,11 +270,12 @@ impl LoweredArtifactPlan {
                 | LoweredArtifactPlan::StructuralMethod(_)
                 | LoweredArtifactPlan::DropGlue(_)
                 | LoweredArtifactPlan::GcFinalizer(_)
+                | LoweredArtifactPlan::CoroutineCodes(_)
         )
     }
 
     /// Whether expansion replaced the request-time marker for this family.
-    /// Families without a marker (every remaining Stage 4.1 placeholder) are
+    /// Families without a marker (the remaining Stage 4.1 placeholder) are
     /// always expanded.
     pub(crate) fn is_expanded(&self) -> bool {
         match self {
@@ -291,7 +292,13 @@ impl LoweredArtifactPlan {
                 | GcFinalizerPlan::Buffer { glue, .. } => glue.is_some(),
                 GcFinalizerPlan::ClosureEnvironment { drops, .. } => drops.is_some(),
             },
-            _ => true,
+            LoweredArtifactPlan::CoroutineCodes(plan) => plan.frame.is_some(),
+            LoweredArtifactPlan::ReactionRunner(plan)
+            | LoweredArtifactPlan::UntilRunner(plan)
+            | LoweredArtifactPlan::DerivedRunner(plan) => {
+                !matches!(plan.body, ReactiveRunnerBody::Unexpanded)
+            }
+            LoweredArtifactPlan::ExternAdapter(_) => true,
         }
     }
 
@@ -320,7 +327,11 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::DropGlue(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees(visit),
-            _ => {}
+            LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees(visit),
+            LoweredArtifactPlan::ReactionRunner(_)
+            | LoweredArtifactPlan::UntilRunner(_)
+            | LoweredArtifactPlan::DerivedRunner(_)
+            | LoweredArtifactPlan::ExternAdapter(_) => {}
         }
     }
 
@@ -330,7 +341,11 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::DropGlue(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees_mut(visit),
-            _ => {}
+            LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees_mut(visit),
+            LoweredArtifactPlan::ReactionRunner(_)
+            | LoweredArtifactPlan::UntilRunner(_)
+            | LoweredArtifactPlan::DerivedRunner(_)
+            | LoweredArtifactPlan::ExternAdapter(_) => {}
         }
     }
 }
@@ -867,6 +882,80 @@ pub(crate) struct CoroutineCodesPlan {
     /// The coroutine body thunk instance this pair belongs to; its position
     /// is the key's instance ordinal.
     pub body: FunctionInstanceId,
+    /// The frame facts the pair mirrors. `None` at request time.
+    pub frame: Option<CoroutineFramePlan>,
+}
+
+/// The frame facts one resume/cleanup pair mirrors: the frame cell order, the
+/// result and await types, the cancellation states, the deferred-resource
+/// bundle, and the thunk captures with their environment finalizer.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CoroutineFramePlan {
+    pub result_type: CheckedType,
+    pub resume_points: usize,
+    /// Frame bindings in plan order, which is frame cell order.
+    pub frame_bindings: Vec<CoroutineFrameBinding>,
+    pub await_result_types: Vec<CheckedType>,
+    /// One-based resume states whose `await` parks on a `Wait`.
+    pub wait_await_states: Vec<usize>,
+    /// One-based resume states whose `await` parks on an `until` child.
+    pub until_await_states: Vec<usize>,
+    /// Deferred-effect resource slots in effect-row order.
+    pub resources: Vec<CoroutineResourceSlot>,
+    /// The thunk's ordered concrete capture types, from its own instance body.
+    pub captures: Vec<CheckedType>,
+    /// The thunk's environment finalizer, requested exactly when the thunk has
+    /// any captures (not on the closure install gate).
+    pub capture_finalizer: Option<PlannedArtifact>,
+}
+
+/// One frame binding cell and the drop glue the cancel unwind calls on it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CoroutineFrameBinding {
+    pub symbol: SymbolId,
+    pub value_type: CheckedType,
+    /// The conditional cell drop's glue, present exactly when the substituted
+    /// type needs drop.
+    pub unwind_drop: Option<PlannedArtifact>,
+}
+
+/// One deferred-effect resource slot the resume entry unpacks.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CoroutineResourceSlot {
+    pub resource: CheckedResource,
+    /// The slot is loaded through a pointer rather than stored by value:
+    /// `mutable || !concrete_is_copy`.
+    pub indirect: bool,
+}
+
+impl CoroutineCodesPlan {
+    fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
+        let Some(frame) = &self.frame else {
+            return;
+        };
+        if let Some(finalizer) = &frame.capture_finalizer {
+            visit(PlannedCalleeRef::Artifact(finalizer));
+        }
+        for binding in &frame.frame_bindings {
+            if let Some(unwind_drop) = &binding.unwind_drop {
+                visit(PlannedCalleeRef::Artifact(unwind_drop));
+            }
+        }
+    }
+
+    fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
+        let Some(frame) = &mut self.frame else {
+            return;
+        };
+        if let Some(finalizer) = &mut frame.capture_finalizer {
+            visit(PlannedCalleeRefMut::Artifact(finalizer));
+        }
+        for binding in &mut frame.frame_bindings {
+            if let Some(unwind_drop) = &mut binding.unwind_drop {
+                visit(PlannedCalleeRefMut::Artifact(unwind_drop));
+            }
+        }
+    }
 }
 
 /// The plan shape of one reactive runner.
@@ -876,6 +965,39 @@ pub(crate) struct ReactiveRunnerPlan {
     pub owner: ArtifactSiteOwner,
     /// The lowered reactive-operation or binding site the runner serves.
     pub site: ArtifactSite,
+    /// The runner body decisions. `Unexpanded` at request time.
+    pub body: ReactiveRunnerBody,
+}
+
+/// How one reactive runner invokes its callback. Every runner calls
+/// indirectly through the closure value, so no variant names a callee.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ReactiveRunnerBody {
+    /// Request-time only: the family expander replaces this marker.
+    Unexpanded,
+    /// Load the callback closure and each resource slot, then indirect-call
+    /// the closure with `(environment, resources…)`.
+    Reaction {
+        callback_type: CheckedFunctionType,
+        resources: Vec<RunnerResourceSlot>,
+    },
+    /// If the completion is unresolved, indirect-call the predicate and
+    /// complete when its `Bool` result is alternative `0` (`True`).
+    Until { predicate_type: CheckedFunctionType },
+    /// Load the evaluator closure, indirect-call it with its environment, and
+    /// store the result through the output pointer.
+    Derived {
+        evaluator_type: CheckedFunctionType,
+        output_type: CheckedType,
+    },
+}
+
+/// One reaction resource payload slot; a slot is a pointer when
+/// `mutable || !concrete_is_copy`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RunnerResourceSlot {
+    pub resource: CheckedResource,
+    pub indirect: bool,
 }
 
 /// The plan shape of one extern closure adapter.

@@ -317,6 +317,24 @@ impl LoweredInstanceBody {
         self.plans.get(id)
     }
 
+    pub(crate) fn coro(&self, id: LoweredCoroId) -> Option<&LoweredCoro> {
+        self.coros.get(id)
+    }
+
+    pub(crate) fn reactive_operation(
+        &self,
+        id: LoweredReactiveOperationId,
+    ) -> Option<&super::LoweredReactiveOperation> {
+        self.reactive_operations.get(id)
+    }
+
+    pub(crate) fn reactive_callback(
+        &self,
+        id: LoweredReactiveCallbackId,
+    ) -> Option<&super::LoweredReactiveCallback> {
+        self.reactive_callbacks.get(id)
+    }
+
     /// The body's ordered captures with their concrete types and the cleanup
     /// facts a closure-environment finalizer mirrors.
     pub(crate) fn captures(&self) -> &[LoweredInstanceCapture] {
