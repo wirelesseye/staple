@@ -480,6 +480,44 @@ fn operation_references(
     }
 }
 
+/// The body instance of an initializer-owned `coro` creation: the Stage 3.3
+/// recipe with the plan's deferred effects. A key that was never interned is a
+/// diagnostic rather than a silent skip.
+fn initializer_body_instance(
+    program: &LoweredProgram,
+    plan: &LoweredCoroutinePlan,
+    origin: &Origin,
+) -> Result<FunctionInstanceId, Vec<Diagnostic>> {
+    let Some(mut function_type) = program
+        .functions
+        .get(plan.thunk)
+        .map(|function| function.signature.clone())
+    else {
+        return Err(vec![Diagnostic::new(
+            origin.span.clone(),
+            "coroutine body thunk has no lowered template".to_string(),
+        )]);
+    };
+    function_type.effects = plan.deferred_effects.clone();
+    let resolved = program
+        .resolve_instance_request(&InstanceResolutionRequest {
+            function: plan.thunk,
+            origin: origin.clone(),
+            function_type,
+            substitutions: CallSubstitutions::default(),
+            evidence: None,
+            target: InstanceResolutionTarget::Root,
+        })
+        .map_err(|diagnostic| vec![diagnostic])?;
+    let Some(ordinal) = program.specializations.instance_ordinal(&resolved.key) else {
+        return Err(vec![Diagnostic::new(
+            origin.span.clone(),
+            "coro body thunk instance was never interned".to_string(),
+        )]);
+    };
+    Ok(FunctionInstanceId::from_index(ordinal.index()))
+}
+
 /// The thunk instance for one callback or evaluator. An instance owner already
 /// binds it at the operation site; an initializer owner has no binding table,
 /// so the thunk is resolved with the Stage 3.3 recipe, and a key that was
@@ -517,6 +555,190 @@ fn resolve_thunk_instance(
         )]);
     };
     Ok(FunctionInstanceId::from_index(ordinal.index()))
+}
+
+/// Validates the Stage 4.5 plans and creation uses:
+///
+/// - every expanded pair re-expands to itself from its body instance, so a
+///   plan whose body is not a coroutine body thunk or whose frame facts
+///   disagree with the body's local plan is rejected;
+/// - every expanded runner re-expands to itself from its owner's operation
+///   and callback records, so a site that does not resolve to a matching
+///   reactive operation kind is rejected;
+/// - every `CoroCreation` use names the same body instance its
+///   `LoweredBindingSite::Coro` binding (or initializer recipe) resolves to.
+pub(super) fn check_stage_4_5(program: &LoweredProgram, diagnostics: &mut Vec<Diagnostic>) {
+    for (id, artifact) in program.artifacts.iter() {
+        let Some(plan) = artifact.plan.clone() else {
+            continue;
+        };
+        match plan {
+            LoweredArtifactPlan::CoroutineCodes(plan) => {
+                if plan.frame.is_none() {
+                    continue; // A registered expander rejects markers itself.
+                }
+                match expand_coroutine_codes(program, id, plan.clone()) {
+                    Ok((rebuilt, _)) => {
+                        if !rebuilt.eq_ignoring_bindings(&LoweredArtifactPlan::CoroutineCodes(plan))
+                        {
+                            diagnostics.push(Diagnostic::new(
+                                artifact.origin.span.clone(),
+                                format!(
+                                    "coroutine-codes artifact {} disagrees with its body instance's local plan",
+                                    id.index()
+                                ),
+                            ));
+                        }
+                    }
+                    Err(mut problems) => diagnostics.append(&mut problems),
+                }
+            }
+            LoweredArtifactPlan::ReactionRunner(plan) => {
+                if matches!(plan.body, ReactiveRunnerBody::Unexpanded) {
+                    continue;
+                }
+                match expand_reactive_runner(program, id, plan, ReactiveRunnerFamily::Reaction) {
+                    Ok((rebuilt, _)) => {
+                        if !rebuilt.eq_ignoring_bindings(&plan_original(program, id)) {
+                            diagnostics.push(Diagnostic::new(
+                                artifact.origin.span.clone(),
+                                format!(
+                                    "reaction-runner artifact {} disagrees with its owner's operation",
+                                    id.index()
+                                ),
+                            ));
+                        }
+                    }
+                    Err(mut problems) => diagnostics.append(&mut problems),
+                }
+            }
+            LoweredArtifactPlan::UntilRunner(plan) => {
+                if matches!(plan.body, ReactiveRunnerBody::Unexpanded) {
+                    continue;
+                }
+                match expand_reactive_runner(program, id, plan, ReactiveRunnerFamily::Until) {
+                    Ok((rebuilt, _)) => {
+                        if !rebuilt.eq_ignoring_bindings(&plan_original(program, id)) {
+                            diagnostics.push(Diagnostic::new(
+                                artifact.origin.span.clone(),
+                                format!(
+                                    "until-runner artifact {} disagrees with its owner's operation",
+                                    id.index()
+                                ),
+                            ));
+                        }
+                    }
+                    Err(mut problems) => diagnostics.append(&mut problems),
+                }
+            }
+            LoweredArtifactPlan::DerivedRunner(plan) => {
+                if matches!(plan.body, ReactiveRunnerBody::Unexpanded) {
+                    continue;
+                }
+                match expand_reactive_runner(program, id, plan, ReactiveRunnerFamily::Derived) {
+                    Ok((rebuilt, _)) => {
+                        if !rebuilt.eq_ignoring_bindings(&plan_original(program, id)) {
+                            diagnostics.push(Diagnostic::new(
+                                artifact.origin.span.clone(),
+                                format!(
+                                    "derived-runner artifact {} disagrees with its owner's operation",
+                                    id.index()
+                                ),
+                            ));
+                        }
+                    }
+                    Err(mut problems) => diagnostics.append(&mut problems),
+                }
+            }
+            _ => {}
+        }
+    }
+    check_creation_uses(program, diagnostics);
+}
+
+/// The stored plan of one artifact, for the re-expansion comparison.
+fn plan_original(
+    program: &LoweredProgram,
+    artifact: LoweredArtifactRequestId,
+) -> LoweredArtifactPlan {
+    program
+        .artifacts
+        .get(artifact)
+        .and_then(|record| record.plan.clone())
+        .unwrap_or_else(|| panic!("artifact {} has a plan while validating", artifact.index()))
+}
+
+/// Every `CoroCreation` use names the body instance its site resolves to.
+fn check_creation_uses(program: &LoweredProgram, diagnostics: &mut Vec<Diagnostic>) {
+    for (_, instance) in program.instances.iter() {
+        let Some(body) = instance.body.as_ref() else {
+            continue;
+        };
+        for use_ in &body.artifact_uses {
+            let ArtifactUseSite::CoroCreation(coro) = use_.site else {
+                continue;
+            };
+            let Some(ArtifactRequestKey::CoroutineCodes(key)) =
+                program.specializations.artifact(use_.artifact)
+            else {
+                continue; // The key agreement check reports a mismatched key.
+            };
+            let resolved = match body.binding(LoweredBindingSite::Coro(coro)) {
+                Some(LoweredBoundTarget::Instance(instance)) => Some(*instance),
+                _ => None,
+            };
+            let Some(resolved) = resolved else {
+                diagnostics.push(Diagnostic::new(
+                    use_.origin.span.clone(),
+                    "a coro creation use has no bound body instance".to_string(),
+                ));
+                continue;
+            };
+            let ordinal = program.instances.get(resolved).map(|record| record.ordinal);
+            if ordinal != Some(key.body) {
+                diagnostics.push(Diagnostic::new(
+                    use_.origin.span.clone(),
+                    "a coro creation use names a different body instance than its binding"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    for (index, _) in program.initializers.iter() {
+        let Some(uses) = program.initializer_artifact_uses.get(index.index()) else {
+            continue;
+        };
+        for use_ in uses {
+            let ArtifactUseSite::CoroCreation(coro) = use_.site else {
+                continue;
+            };
+            let Some(ArtifactRequestKey::CoroutineCodes(key)) =
+                program.specializations.artifact(use_.artifact)
+            else {
+                continue;
+            };
+            let Some(coro) = program.coros.get(coro) else {
+                continue;
+            };
+            let Some(plan) = program.coroutine_plans.get(coro.plan) else {
+                continue;
+            };
+            match initializer_body_instance(program, plan, &use_.origin) {
+                Ok(resolved) => {
+                    let ordinal = program.instances.get(resolved).map(|record| record.ordinal);
+                    if ordinal != Some(key.body) {
+                        diagnostics.push(Diagnostic::new(
+                            use_.origin.span.clone(),
+                            "a coro creation use names a different body instance than its thunk"
+                                .to_string(),
+                        ));
+                    }
+                }
+                Err(mut problems) => diagnostics.append(&mut problems),
+            }
+        }
+    }
 }
 
 /// Scans one materialized instance body for `coro` creations and reactive
@@ -589,36 +811,7 @@ impl Stage45ScanVisitor<'_> {
         {
             return Ok(*instance);
         }
-        let Some(mut function_type) = self
-            .program
-            .functions
-            .get(plan.thunk)
-            .map(|function| function.signature.clone())
-        else {
-            return Err(vec![Diagnostic::new(
-                origin.span.clone(),
-                "coroutine body thunk has no lowered template".to_string(),
-            )]);
-        };
-        function_type.effects = plan.deferred_effects.clone();
-        let resolved = self
-            .program
-            .resolve_instance_request(&InstanceResolutionRequest {
-                function: plan.thunk,
-                origin: origin.clone(),
-                function_type,
-                substitutions: CallSubstitutions::default(),
-                evidence: None,
-                target: InstanceResolutionTarget::Root,
-            })
-            .map_err(|diagnostic| vec![diagnostic])?;
-        let Some(ordinal) = self.program.specializations.instance_ordinal(&resolved.key) else {
-            return Err(vec![Diagnostic::new(
-                origin.span.clone(),
-                "coro body thunk instance was never interned".to_string(),
-            )]);
-        };
-        Ok(FunctionInstanceId::from_index(ordinal.index()))
+        initializer_body_instance(self.program, plan, origin)
     }
 
     fn request_pair(&mut self, id: LoweredCoroId, origin: &Origin) -> Result<(), Vec<Diagnostic>> {
@@ -1993,6 +2186,223 @@ mod tests {
                 | LoweredReactiveOperationKind::Until { .. }
                 | LoweredReactiveOperationKind::DerivedCreate { .. }
         )
+    }
+
+    /// Validates a deliberately corrupted program with the production hooks
+    /// and returns the diagnostics' messages.
+    fn validation_messages(program: &LoweredProgram) -> Vec<String> {
+        let hooks = super::super::artifact_closure::ProductionHooks;
+        program
+            .validate_artifact_closure(&hooks)
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    }
+
+    fn assert_message(messages: &[String], needle: &str) {
+        assert!(
+            messages.iter().any(|message| message.contains(needle)),
+            "expected a `{needle}` diagnostic, got {messages:?}"
+        );
+    }
+
+    fn coroutine_codes_artifact(program: &LoweredProgram) -> LoweredArtifactRequestId {
+        program
+            .artifacts
+            .iter()
+            .find(|(_, artifact)| {
+                matches!(artifact.plan, Some(LoweredArtifactPlan::CoroutineCodes(_)))
+            })
+            .map(|(id, _)| id)
+            .expect("the fixture requests a coroutine pair")
+    }
+
+    #[test]
+    fn a_coroutine_pair_over_a_non_thunk_body_is_diagnosed() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def plain: () -> I32 = () => 1\n",
+            "let a = task ()\n",
+            "let b = plain ()\n",
+        );
+        let (_module, mut lowered) = lower(source);
+        let program = &mut lowered.program;
+        let plain = program
+            .instances
+            .iter()
+            .find(|(_, instance)| {
+                program
+                    .functions
+                    .get(instance.template)
+                    .is_some_and(|function| function.name.ends_with("plain"))
+            })
+            .map(|(id, _)| id)
+            .expect("the plain instance");
+        let artifact = coroutine_codes_artifact(program);
+        let Some(LoweredArtifactPlan::CoroutineCodes(plan)) = program
+            .artifacts
+            .get_mut(artifact)
+            .expect("artifact")
+            .plan
+            .as_mut()
+        else {
+            panic!("the pair plan")
+        };
+        plan.body = plain;
+        assert_message(
+            &validation_messages(program),
+            "is not a coroutine body thunk",
+        );
+    }
+
+    #[test]
+    fn a_coroutine_pair_disagreeing_with_its_local_plan_is_diagnosed() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "let signal flag = 0\n",
+            "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+            "  let _ = await (until { flag >= 1 })\n",
+            "  ()\n",
+            "}\n",
+            "with Reactive = reactive_scope () { waiting () }\n",
+        );
+        let (_module, mut lowered) = lower(source);
+        let program = &mut lowered.program;
+        let artifact = coroutine_codes_artifact(program);
+        let Some(LoweredArtifactPlan::CoroutineCodes(plan)) = program
+            .artifacts
+            .get_mut(artifact)
+            .expect("artifact")
+            .plan
+            .as_mut()
+        else {
+            panic!("the pair plan")
+        };
+        let frame = plan.frame.as_mut().expect("expanded pair");
+        frame.resume_points += 1;
+        assert_message(
+            &validation_messages(program),
+            "disagrees with its body instance's local plan",
+        );
+    }
+
+    #[test]
+    fn a_coro_creation_use_naming_another_body_is_diagnosed() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "def first: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def second: () -> Coroutine{} I32 = () => coro { 2 }\n",
+            "let a = first ()\n",
+            "let b = second ()\n",
+        );
+        let (_module, mut lowered) = lower(source);
+        let program = &mut lowered.program;
+        let first = program
+            .instances
+            .iter()
+            .find(|(_, instance)| {
+                program
+                    .functions
+                    .get(instance.template)
+                    .is_some_and(|function| function.name.ends_with("first"))
+            })
+            .map(|(id, _)| id)
+            .expect("the first instance");
+        let (second, second_body) = program
+            .instances
+            .iter()
+            .find(|(_, instance)| {
+                program
+                    .functions
+                    .get(instance.template)
+                    .is_some_and(|function| function.name.ends_with("second"))
+            })
+            .map(|(id, instance)| (id, instance.body.as_ref().expect("second body")))
+            .expect("the second instance");
+        let second_bound = second_body
+            .coros
+            .iter()
+            .next()
+            .and_then(
+                |(id, _)| match second_body.binding(LoweredBindingSite::Coro(id)) {
+                    Some(LoweredBoundTarget::Instance(instance)) => Some(*instance),
+                    _ => None,
+                },
+            )
+            .expect("the second creation's body instance");
+        // Point the first creation's binding at the second body thunk.
+        let first_body = program
+            .instances
+            .get_mut(first)
+            .and_then(|instance| instance.body.as_mut())
+            .expect("the first body");
+        let coro = first_body
+            .coros
+            .iter()
+            .next()
+            .map(|(id, _)| id)
+            .expect("the first creation");
+        first_body.bindings.insert(
+            LoweredBindingSite::Coro(coro),
+            LoweredBoundTarget::Instance(second_bound),
+        );
+        let _ = second;
+        assert_message(
+            &validation_messages(program),
+            "names a different body instance than its binding",
+        );
+    }
+
+    #[test]
+    fn a_runner_site_without_a_matching_operation_is_diagnosed() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "let signal count = 0\n",
+            "def subscribe: () ->{Reactive} () = () => reaction { () }\n",
+            "def wait: () -> Coroutine{Reactive} () = () => coro {\n",
+            "  let _ = await (until { count >= 1 })\n",
+            "  ()\n",
+            "}\n",
+            "let a = with Reactive = reactive_scope () { subscribe () }\n",
+            "let b = with Reactive = reactive_scope () { wait () }\n",
+        );
+        let (_module, mut lowered) = lower(source);
+        let program = &mut lowered.program;
+        // The `until` predicate callback, which no reaction references.
+        let predicate = program
+            .reactive_operations
+            .iter()
+            .find_map(|(_, operation)| match &operation.kind {
+                LoweredReactiveOperationKind::Until { predicate, .. } => Some(*predicate),
+                _ => None,
+            })
+            .expect("the fixture's `until` predicate");
+        let artifact = program
+            .artifacts
+            .iter()
+            .find(|(_, artifact)| {
+                matches!(artifact.plan, Some(LoweredArtifactPlan::ReactionRunner(_)))
+            })
+            .map(|(id, _)| id)
+            .expect("the reaction runner");
+        let Some(LoweredArtifactPlan::ReactionRunner(plan)) = program
+            .artifacts
+            .get_mut(artifact)
+            .expect("artifact")
+            .plan
+            .as_mut()
+        else {
+            panic!("the runner plan")
+        };
+        plan.site = ArtifactSite::Callback(predicate);
+        let messages = validation_messages(program);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("has no matching reaction operation in its owner")),
+            "{messages:?}"
+        );
     }
 
     #[test]

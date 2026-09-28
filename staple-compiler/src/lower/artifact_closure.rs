@@ -1076,6 +1076,7 @@ impl LoweredProgram {
         self.check_use_edge_agreement(&mut diagnostics);
         self.check_planned_callees(hooks, &mut diagnostics);
         super::cleanup_artifacts::check_owned_bindings(self, &mut diagnostics);
+        super::coroutine_artifacts::check_stage_4_5(self, &mut diagnostics);
         self.check_request_root_acyclicity(&mut diagnostics);
         self.check_closure_fixed_point(hooks, &mut diagnostics);
         diagnostics
