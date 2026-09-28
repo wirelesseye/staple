@@ -2425,13 +2425,11 @@ mod tests {
     // Stage 4.5 carried-over gap fixtures.
     // ------------------------------------------------------------------
 
-    /// Gap 1: a reaction whose callback thunk captures a droppable value gets
-    /// a legacy closure-environment finalizer, but the 4.4 scanner never
-    /// requests one. Step 3 adds the request at the reactive site; this test
-    /// fails until then, and is ignored until Steps 3 and 4 land.
+    /// Gap 1 (closed by Step 3): a reaction whose callback thunk captures a
+    /// droppable value gets a legacy closure-environment finalizer, and the
+    /// 4.5 scanner requests the same plan at the reactive site.
     #[test]
-    #[ignore = "Stage 4.5 gap 1: the reactive callback finalizer request lands in Step 3"]
-    fn stage_4_5_gap_reactive_callback_environment_finalizer_is_missing() {
+    fn stage_4_5_reactive_callback_environment_finalizer_is_planned() {
         let source = concat!(
             "use std.cinterop.(CString, c_string)\n",
             "extern \"c\" { inspect: CString -> I32 }\n",

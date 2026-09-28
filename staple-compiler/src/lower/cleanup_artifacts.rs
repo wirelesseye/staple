@@ -330,6 +330,39 @@ impl<'a> OwnerArenas<'a> {
             OwnerArenas::Initializer(_) => program.coros.get(id),
         }
     }
+
+    pub(super) fn reactive_operation(
+        self,
+        program: &'a LoweredProgram,
+        id: super::LoweredReactiveOperationId,
+    ) -> Option<&'a super::LoweredReactiveOperation> {
+        match self {
+            OwnerArenas::Instance(body) => body.reactive_operation(id),
+            OwnerArenas::Initializer(_) => program.reactive_operations.get(id),
+        }
+    }
+
+    pub(super) fn reactive_callback(
+        self,
+        program: &'a LoweredProgram,
+        id: super::LoweredReactiveCallbackId,
+    ) -> Option<&'a super::LoweredReactiveCallback> {
+        match self {
+            OwnerArenas::Instance(body) => body.reactive_callback(id),
+            OwnerArenas::Initializer(_) => program.reactive_callbacks.get(id),
+        }
+    }
+
+    pub(super) fn await_record(
+        self,
+        program: &'a LoweredProgram,
+        id: super::LoweredAwaitId,
+    ) -> Option<&'a super::LoweredAwait> {
+        match self {
+            OwnerArenas::Instance(body) => body.await_record(id),
+            OwnerArenas::Initializer(_) => program.awaits.get(id),
+        }
+    }
 }
 
 /// One owned-binding draft produced by the shared walk, before its glue is
@@ -394,6 +427,17 @@ pub(super) trait LoweredOwnerVisitor {
     fn coro_creation(
         &mut self,
         _id: super::LoweredCoroId,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// One reactive-operation occurrence in this owner (`LoweredCall.reactive`,
+    /// a binding's derived creation, a name's tracked read, or an assignment's
+    /// write notification).
+    fn reactive_operation(
+        &mut self,
+        _id: super::LoweredReactiveOperationId,
         _origin: &Origin,
     ) -> Result<(), Vec<Diagnostic>> {
         Ok(())
@@ -650,6 +694,9 @@ impl<'a> LoweredWalker<'a> {
                 if binding.generic {
                     return Ok(());
                 }
+                if let Some(operation) = binding.reactive {
+                    self.visitor.reactive_operation(operation, &origin)?;
+                }
                 let symbol = binding.symbol;
                 let value_type = binding.value.and_then(|value| {
                     self.owner
@@ -700,6 +747,9 @@ impl<'a> LoweredWalker<'a> {
                         &value_type,
                         &origin,
                     )?;
+                }
+                if let Some(operation) = assignment.signal_notify {
+                    self.visitor.reactive_operation(operation, &origin)?;
                 }
             }
             LoweredItemKind::Return(item) => {
@@ -815,8 +865,12 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredExpressionKind::Deferred(_)
             | super::LoweredExpressionKind::Stage26Deferred(_) => {}
             super::LoweredExpressionKind::Block(block) => self.walk_block(block)?,
-            super::LoweredExpressionKind::Name(_)
-            | super::LoweredExpressionKind::Integer(_)
+            super::LoweredExpressionKind::Name(name) => {
+                if let Some(operation) = name.reactive {
+                    self.visitor.reactive_operation(operation, &origin)?;
+                }
+            }
+            super::LoweredExpressionKind::Integer(_)
             | super::LoweredExpressionKind::Float(_)
             | super::LoweredExpressionKind::String(_)
             | super::LoweredExpressionKind::CString(_) => {}
@@ -901,7 +955,15 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredExpressionKind::Coro(coro) => {
                 self.visitor.coro_creation(coro, &origin)?;
             }
-            super::LoweredExpressionKind::Await(_) => {}
+            super::LoweredExpressionKind::Await(await_id) => {
+                // An `await` operand is evaluated by the awaiting frame, so
+                // its creations, reactive operations, and cleanups are this
+                // owner's sites.
+                if let Some(await_) = self.owner.await_record(self.program, await_id) {
+                    let operand = await_.operand;
+                    self.walk_expression(operand)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1068,6 +1130,9 @@ impl<'a> LoweredWalker<'a> {
             | super::LoweredCallableTarget::CompilerHelper { .. } => {}
         }
 
+        if let Some(operation) = call.reactive {
+            self.visitor.reactive_operation(operation, &origin)?;
+        }
         if c_string_temporary {
             self.visitor.drop_site(
                 ArtifactUseSite::CStringTemporary(id),

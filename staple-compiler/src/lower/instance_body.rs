@@ -321,6 +321,10 @@ impl LoweredInstanceBody {
         self.coros.get(id)
     }
 
+    pub(crate) fn await_record(&self, id: LoweredAwaitId) -> Option<&LoweredAwait> {
+        self.awaits.get(id)
+    }
+
     pub(crate) fn reactive_operation(
         &self,
         id: LoweredReactiveOperationId,

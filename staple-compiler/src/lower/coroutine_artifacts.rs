@@ -1,4 +1,5 @@
-//! Stage 4.5: the coroutine-codes artifact expander and scanner.
+//! Stage 4.5: the coroutine-codes and reactive-runner artifact expanders and
+//! scanner.
 //!
 //! `expand_coroutine_codes` fills one `CoroutineCodes` plan from the body
 //! thunk's **instance-local** plan and body, never from the template plan the
@@ -8,12 +9,20 @@
 //! concrete captures, the frame-binding unwind drops, and the thunk's
 //! environment finalizer.
 //!
+//! `expand_reactive_runner` fills one `ReactionRunner`/`UntilRunner`/
+//! `DerivedRunner` plan from the owner's lowered operation and callback
+//! records: the callback's concrete closure type, the ordered resource slots
+//! with their pass modes, the `until` predicate type, and the derived
+//! evaluator's signature and output type.
+//!
 //! The scanner walks one owner in lowered evaluation order through the shared
-//! Stage 4.4 owner walker and requests one pair per `coro` creation, recording
-//! the `CoroCreation` use site. Instance owners take the body instance from
-//! their own `Coro` binding; initializer owners resolve the thunk with the
-//! Stage 3.3 recipe, and a key that was never interned is a diagnostic rather
-//! than a silent skip.
+//! Stage 4.4 owner walker. It requests one pair per `coro` creation
+//! (`CoroCreation`), the environment finalizer a thunk callback installs
+//! (`ReactiveCallbackEnvironment`/`DerivedEvaluatorEnvironment`, gap 1), and
+//! one runner per reaction, `until`, and derived operation (`ReactiveRunner`).
+//! Instance owners take their thunk instances from their own bindings;
+//! initializer owners resolve with the Stage 3.3 recipe, and a key that was
+//! never interned is a diagnostic rather than a silent skip.
 
 use staple_syntax::Diagnostic;
 
@@ -22,12 +31,17 @@ use super::cleanup_artifacts::{LoweredOwnerVisitor, OwnerArenas, walk_owner};
 use super::instance_resolution::{InstanceResolutionRequest, InstanceResolutionTarget};
 use super::{
     ArenaId, CallSubstitutions, CoroutineCodesPlan, CoroutineFrameBinding, CoroutineFramePlan,
-    CoroutineResourceSlot, FunctionInstanceId, GcFinalizerPlan, InitializerId,
+    CoroutineResourceSlot, FunctionId, FunctionInstanceId, GcFinalizerPlan, InitializerId,
     LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
     LoweredBindingSite, LoweredBoundTarget, LoweredCoroId, LoweredCoroutinePlan, LoweredProgram,
-    Origin, PlannedArtifact,
+    LoweredReactiveCallbackId, LoweredReactiveOperationId, LoweredReactiveOperationKind, Origin,
+    PlannedArtifact, ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot,
 };
-use crate::specialization::{ArtifactRequestKey, CanonicalType, CoroutineCodesKey, GcFinalizerKey};
+use crate::specialization::{
+    ArtifactRequestKey, ArtifactSite, ArtifactSiteOwner, CanonicalType, CoroutineCodesKey,
+    GcFinalizerKey, ReactiveRunnerKey,
+};
+use crate::{CheckedFunctionType, CheckedResource, CheckedType};
 
 /// Expands one coroutine pair: the frame facts and planned callees the
 /// resume/cleanup pair mirrors, read from the body thunk's own instance.
@@ -195,7 +209,318 @@ pub(super) fn expand_coroutine_codes(
     ))
 }
 
-/// Scans one materialized instance body for `coro` creations.
+/// The runner family an expansion or request belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum ReactiveRunnerFamily {
+    Reaction,
+    Until,
+    Derived,
+}
+
+/// Expands one reactive runner: the callback call shape the legacy runner
+/// embeds, read from the owner's lowered operation and callback records.
+pub(super) fn expand_reactive_runner(
+    program: &LoweredProgram,
+    artifact: LoweredArtifactRequestId,
+    plan: ReactiveRunnerPlan,
+    family: ReactiveRunnerFamily,
+) -> ExpansionResult {
+    let origin = match program.artifacts.get(artifact) {
+        Some(record) => record.origin.clone(),
+        None => {
+            return Err(vec![Diagnostic::new(
+                staple_syntax::Span::Compiler,
+                "reactive-runner expansion received a missing artifact".to_string(),
+            )]);
+        }
+    };
+    let owner = match plan.owner {
+        ArtifactSiteOwner::Initializer(initializer) => {
+            if program.initializers.get(initializer).is_none() {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    format!(
+                        "reactive runner names missing initializer {}",
+                        initializer.index()
+                    ),
+                )]);
+            }
+            OwnerArenas::Initializer(initializer)
+        }
+        ArtifactSiteOwner::Instance(ordinal) => {
+            let Some((_, instance)) = program
+                .instances
+                .iter()
+                .find(|(_, instance)| instance.ordinal == ordinal)
+            else {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    format!(
+                        "reactive runner names missing instance ordinal {}",
+                        ordinal.index()
+                    ),
+                )]);
+            };
+            let Some(body) = instance.body.as_ref() else {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    format!(
+                        "reactive runner names instance {} with no materialized body",
+                        ordinal.index()
+                    ),
+                )]);
+            };
+            OwnerArenas::Instance(body)
+        }
+        ArtifactSiteOwner::Artifact(_) => {
+            return Err(vec![Diagnostic::new(
+                origin.span.clone(),
+                "reactive runners are never owned by generated artifacts".to_string(),
+            )]);
+        }
+    };
+    let body = match family {
+        ReactiveRunnerFamily::Reaction => {
+            let ArtifactSite::Callback(callback) = plan.site else {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "a reaction runner site is not a callback".to_string(),
+                )]);
+            };
+            if !operation_references(
+                program,
+                owner,
+                |kind| matches!(kind, LoweredReactiveOperationKind::Reaction { callback: id, .. } if *id == callback),
+            ) {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "a reaction runner site has no matching reaction operation in its owner"
+                        .to_string(),
+                )]);
+            }
+            let Some(record) = owner.reactive_callback(program, callback) else {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "a reaction runner names a missing callback".to_string(),
+                )]);
+            };
+            let callback_type = record.function_type.clone();
+            let resources = callback_type
+                .effects
+                .resources
+                .iter()
+                .map(|resource| runner_resource_slot(program, resource))
+                .collect();
+            ReactiveRunnerBody::Reaction {
+                callback_type,
+                resources,
+            }
+        }
+        ReactiveRunnerFamily::Until => {
+            let ArtifactSite::Callback(predicate) = plan.site else {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "an `until` runner site is not a callback".to_string(),
+                )]);
+            };
+            if !operation_references(
+                program,
+                owner,
+                |kind| matches!(kind, LoweredReactiveOperationKind::Until { predicate: id, .. } if *id == predicate),
+            ) {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "an `until` runner site has no matching `until` operation in its owner"
+                        .to_string(),
+                )]);
+            }
+            let Some(record) = owner.reactive_callback(program, predicate) else {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "an `until` runner names a missing predicate".to_string(),
+                )]);
+            };
+            let predicate_type = record.function_type.clone();
+            // `Bool` is the sum carrying the `True` alternative; the runner
+            // branches on the result's tag, so a non-`Bool` predicate is a
+            // requester error. Names may be qualified in a module scope, so
+            // the check matches the last name component like `lower_logical`.
+            if !is_bool_type(&predicate_type.result) {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    format!(
+                        "an `until` predicate must return `Bool`, found `{}`",
+                        predicate_type.result
+                    ),
+                )]);
+            }
+            ReactiveRunnerBody::Until { predicate_type }
+        }
+        ReactiveRunnerFamily::Derived => {
+            let ArtifactSite::Operation(operation) = plan.site else {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "a derived runner site is not an operation".to_string(),
+                )]);
+            };
+            let Some(record) = owner.reactive_operation(program, operation) else {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "a derived runner names a missing operation".to_string(),
+                )]);
+            };
+            let LoweredReactiveOperationKind::DerivedCreate {
+                evaluator,
+                function_type,
+                ..
+            } = &record.kind
+            else {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "a derived runner site is not a derived creation".to_string(),
+                )]);
+            };
+            let instance = resolve_thunk_instance(
+                program,
+                owner,
+                LoweredBindingSite::DerivedEvaluator(operation),
+                *evaluator,
+                function_type.clone(),
+                &origin,
+            )?;
+            let Some(evaluator_body) = program
+                .instances
+                .get(instance)
+                .and_then(|record| record.body.as_ref())
+            else {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    format!(
+                        "the derived evaluator instance {} has no materialized body",
+                        instance.index()
+                    ),
+                )]);
+            };
+            let evaluator_type = evaluator_body.signature().clone();
+            // The legacy proof rejects an evaluator that captures resources:
+            // the runner passes only the environment to the indirect call.
+            if !evaluator_type.effects.resources.is_empty() {
+                return Err(vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "derived evaluators cannot capture resources".to_string(),
+                )]);
+            }
+            let output_type = evaluator_type.result.as_ref().clone();
+            ReactiveRunnerBody::Derived {
+                evaluator_type,
+                output_type,
+            }
+        }
+    };
+    let plan = match (family, plan) {
+        (ReactiveRunnerFamily::Reaction, ReactiveRunnerPlan { owner, site, .. }) => {
+            LoweredArtifactPlan::ReactionRunner(ReactiveRunnerPlan { owner, site, body })
+        }
+        (ReactiveRunnerFamily::Until, ReactiveRunnerPlan { owner, site, .. }) => {
+            LoweredArtifactPlan::UntilRunner(ReactiveRunnerPlan { owner, site, body })
+        }
+        (ReactiveRunnerFamily::Derived, ReactiveRunnerPlan { owner, site, .. }) => {
+            LoweredArtifactPlan::DerivedRunner(ReactiveRunnerPlan { owner, site, body })
+        }
+    };
+    Ok((plan, Vec::new()))
+}
+
+/// Whether `value_type` is the `Bool` sum, directly or through its distinct
+/// representation. Alternative names may be qualified, so the last component
+/// is compared.
+fn is_bool_type(value_type: &CheckedType) -> bool {
+    fn alternative_is_true(alternative: &CheckedType) -> bool {
+        let name = match alternative {
+            CheckedType::Distinct { name, .. }
+            | CheckedType::Opaque { name, .. }
+            | CheckedType::TypeConstructor { name, .. } => name,
+            _ => return false,
+        };
+        name == "True" || name.ends_with(".True")
+    }
+    match value_type {
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(alternative_is_true),
+        CheckedType::Distinct { representation, .. } => is_bool_type(representation),
+        _ => false,
+    }
+}
+
+/// One reaction payload slot: a pointer when `mutable || !concrete_is_copy`.
+fn runner_resource_slot(
+    program: &LoweredProgram,
+    resource: &CheckedResource,
+) -> RunnerResourceSlot {
+    RunnerResourceSlot {
+        resource: resource.clone(),
+        indirect: resource.mutable || !program.concrete_is_copy(&resource.value_type),
+    }
+}
+
+/// Whether one operation in the owner's arenas satisfies `matches`.
+fn operation_references(
+    program: &LoweredProgram,
+    owner: OwnerArenas<'_>,
+    matches: impl Fn(&LoweredReactiveOperationKind) -> bool,
+) -> bool {
+    match owner {
+        OwnerArenas::Instance(body) => body
+            .reactive_operations
+            .iter()
+            .any(|(_, operation)| matches(&operation.kind)),
+        OwnerArenas::Initializer(_) => program
+            .reactive_operations
+            .iter()
+            .any(|(_, operation)| matches(&operation.kind)),
+    }
+}
+
+/// The thunk instance for one callback or evaluator. An instance owner already
+/// binds it at the operation site; an initializer owner has no binding table,
+/// so the thunk is resolved with the Stage 3.3 recipe, and a key that was
+/// never interned is a diagnostic rather than a silent skip.
+fn resolve_thunk_instance(
+    program: &LoweredProgram,
+    owner: OwnerArenas<'_>,
+    binding: LoweredBindingSite,
+    function: FunctionId,
+    function_type: CheckedFunctionType,
+    origin: &Origin,
+) -> Result<FunctionInstanceId, Vec<Diagnostic>> {
+    if let OwnerArenas::Instance(body) = owner
+        && let Some(LoweredBoundTarget::Instance(instance)) = body.binding(binding)
+    {
+        return Ok(*instance);
+    }
+    let resolved = program
+        .resolve_instance_request(&InstanceResolutionRequest {
+            function,
+            origin: origin.clone(),
+            function_type,
+            substitutions: CallSubstitutions::default(),
+            evidence: None,
+            target: InstanceResolutionTarget::Root,
+        })
+        .map_err(|diagnostic| vec![diagnostic])?;
+    let Some(ordinal) = program.specializations.instance_ordinal(&resolved.key) else {
+        return Err(vec![Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "reactive thunk function {} was never interned for this owner",
+                function.0
+            ),
+        )]);
+    };
+    Ok(FunctionInstanceId::from_index(ordinal.index()))
+}
+
+/// Scans one materialized instance body for `coro` creations and reactive
+/// operations.
 pub(super) fn scan_instance(program: &LoweredProgram, instance: FunctionInstanceId) -> ScanResult {
     let Some(record) = program.instances.get(instance) else {
         return Ok(Vec::new());
@@ -203,36 +528,51 @@ pub(super) fn scan_instance(program: &LoweredProgram, instance: FunctionInstance
     let Some(body) = record.body.as_ref() else {
         return Ok(Vec::new());
     };
-    scan_owner(program, OwnerArenas::Instance(body))
+    scan_owner(
+        program,
+        OwnerArenas::Instance(body),
+        ArtifactSiteOwner::Instance(record.ordinal),
+    )
 }
 
-/// Scans one module initializer for `coro` creations.
+/// Scans one module initializer for `coro` creations and reactive operations.
 pub(super) fn scan_initializer(program: &LoweredProgram, initializer: InitializerId) -> ScanResult {
     if program.initializers.get(initializer).is_none() {
         return Ok(Vec::new());
     }
-    scan_owner(program, OwnerArenas::Initializer(initializer))
+    scan_owner(
+        program,
+        OwnerArenas::Initializer(initializer),
+        ArtifactSiteOwner::Initializer(initializer),
+    )
 }
 
-fn scan_owner(program: &LoweredProgram, owner: OwnerArenas<'_>) -> ScanResult {
-    let mut visitor = CoroutineScanVisitor {
+fn scan_owner(
+    program: &LoweredProgram,
+    owner: OwnerArenas<'_>,
+    site_owner: ArtifactSiteOwner,
+) -> ScanResult {
+    let mut visitor = Stage45ScanVisitor {
         program,
         owner,
+        site_owner,
         requests: Vec::new(),
     };
     walk_owner(program, owner, &mut visitor)?;
     Ok(visitor.requests)
 }
 
-/// The scanning visitor: every `coro` creation becomes a `CoroutineCodes`
-/// request with its exact use site.
-struct CoroutineScanVisitor<'a> {
+/// The scanning visitor: every `coro` creation, installed callback
+/// environment, and reactive runner becomes a closure request with its exact
+/// use site.
+struct Stage45ScanVisitor<'a> {
     program: &'a LoweredProgram,
     owner: OwnerArenas<'a>,
+    site_owner: ArtifactSiteOwner,
     requests: Vec<ClosureRequest>,
 }
 
-impl CoroutineScanVisitor<'_> {
+impl Stage45ScanVisitor<'_> {
     /// The pair's body instance. An instance owner already binds it at the
     /// creation site; an initializer owner has no binding table, so the thunk
     /// is resolved with the Stage 3.3 recipe, and a key that was never
@@ -306,11 +646,261 @@ impl CoroutineScanVisitor<'_> {
         });
         Ok(())
     }
+
+    /// Requests the closure-environment finalizer a thunk callback or evaluator
+    /// installs, gated exactly as the 4.4 closure scanner: some capture that
+    /// neither requires initialization state nor is borrowed has a droppable
+    /// concrete type.
+    fn request_environment(
+        &mut self,
+        instance: FunctionInstanceId,
+        site: ArtifactUseSite,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let Some(record) = self.program.instances.get(instance) else {
+            return Err(vec![Diagnostic::new(
+                origin.span.clone(),
+                format!("reactive thunk instance {} is missing", instance.index()),
+            )]);
+        };
+        let Some(body) = record.body.as_ref() else {
+            return Err(vec![Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "reactive thunk instance {} has no materialized body",
+                    instance.index()
+                ),
+            )]);
+        };
+        let captures = body.captures();
+        let gate = captures.iter().any(|capture| {
+            !capture.requires_initialization_state
+                && !capture.capture.borrowed
+                && self.program.concrete_needs_drop(&capture.value_type)
+        });
+        if !gate {
+            return Ok(());
+        }
+        let concrete = captures
+            .iter()
+            .map(|capture| capture.value_type.clone())
+            .collect::<Vec<_>>();
+        let canonical = concrete
+            .iter()
+            .map(|capture| CanonicalType::concrete(capture, origin))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|diagnostic| vec![diagnostic])?;
+        self.requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment {
+                closure: record.ordinal,
+                captures: canonical,
+            }),
+            plan: LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::ClosureEnvironment {
+                closure: instance,
+                captures: concrete,
+                drops: None,
+            }),
+            kind: LoweredArtifactDependencyKind::GcFinalizer,
+            origin: origin.clone(),
+            use_site: Some(site),
+        });
+        Ok(())
+    }
+
+    fn request_callback_environment(
+        &mut self,
+        callback: LoweredReactiveCallbackId,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let Some(record) = self.owner.reactive_callback(self.program, callback) else {
+            return Ok(());
+        };
+        // An explicit callback's own closure construction carries its 4.4
+        // `ClosureEnvironment` use; only thunk callbacks install theirs here.
+        let Some(thunk) = record.thunk else {
+            return Ok(());
+        };
+        let function_type = record.function_type.clone();
+        let instance = resolve_thunk_instance(
+            self.program,
+            self.owner,
+            LoweredBindingSite::ReactiveCallback(callback),
+            thunk,
+            function_type,
+            origin,
+        )?;
+        self.request_environment(
+            instance,
+            ArtifactUseSite::ReactiveCallbackEnvironment(callback),
+            origin,
+        )
+    }
+
+    fn request_runner(
+        &mut self,
+        family: ReactiveRunnerFamily,
+        site: ArtifactSite,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let key = match family {
+            ReactiveRunnerFamily::Reaction => {
+                ArtifactRequestKey::ReactionRunner(ReactiveRunnerKey {
+                    owner: self.site_owner,
+                    site,
+                })
+            }
+            ReactiveRunnerFamily::Until => ArtifactRequestKey::UntilRunner(ReactiveRunnerKey {
+                owner: self.site_owner,
+                site,
+            }),
+            ReactiveRunnerFamily::Derived => ArtifactRequestKey::DerivedRunner(ReactiveRunnerKey {
+                owner: self.site_owner,
+                site,
+            }),
+        };
+        let plan = ReactiveRunnerPlan {
+            owner: self.site_owner,
+            site,
+            body: ReactiveRunnerBody::Unexpanded,
+        };
+        let plan = match family {
+            ReactiveRunnerFamily::Reaction => LoweredArtifactPlan::ReactionRunner(plan),
+            ReactiveRunnerFamily::Until => LoweredArtifactPlan::UntilRunner(plan),
+            ReactiveRunnerFamily::Derived => LoweredArtifactPlan::DerivedRunner(plan),
+        };
+        let kind = match family {
+            ReactiveRunnerFamily::Reaction => LoweredArtifactDependencyKind::ReactionRunner,
+            ReactiveRunnerFamily::Until => LoweredArtifactDependencyKind::UntilRunner,
+            ReactiveRunnerFamily::Derived => LoweredArtifactDependencyKind::DerivedRunner,
+        };
+        self.requests.push(ClosureRequest::Artifact {
+            key,
+            plan,
+            kind,
+            origin: origin.clone(),
+            use_site: Some(ArtifactUseSite::ReactiveRunner(match site {
+                ArtifactSite::Operation(operation) => operation,
+                ArtifactSite::Callback(callback) => {
+                    // The runner use site is keyed by the operation whose
+                    // callback this is; call sites supply the operation.
+                    let Some(operation) = self.operation_for_callback(callback) else {
+                        return Err(vec![Diagnostic::new(
+                            origin.span.clone(),
+                            "a runner callback has no owning operation".to_string(),
+                        )]);
+                    };
+                    operation
+                }
+                ArtifactSite::PlanLocal(_) => {
+                    return Err(vec![Diagnostic::new(
+                        origin.span.clone(),
+                        "plan-local sites never request runners".to_string(),
+                    )]);
+                }
+            })),
+        });
+        Ok(())
+    }
+
+    /// The operation whose callback or predicate is `callback`.
+    fn operation_for_callback(
+        &self,
+        callback: LoweredReactiveCallbackId,
+    ) -> Option<LoweredReactiveOperationId> {
+        let matches = |operation: &super::LoweredReactiveOperation| match &operation.kind {
+            LoweredReactiveOperationKind::Reaction {
+                callback: candidate,
+                ..
+            }
+            | LoweredReactiveOperationKind::Batch {
+                callback: candidate,
+            } => *candidate == callback,
+            LoweredReactiveOperationKind::Until {
+                predicate: candidate,
+                ..
+            } => *candidate == callback,
+            _ => false,
+        };
+        match self.owner {
+            OwnerArenas::Instance(body) => body
+                .reactive_operations
+                .iter()
+                .find_map(|(id, operation)| matches(operation).then_some(id)),
+            OwnerArenas::Initializer(_) => self
+                .program
+                .reactive_operations
+                .iter()
+                .find_map(|(id, operation)| matches(operation).then_some(id)),
+        }
+    }
 }
 
-impl LoweredOwnerVisitor for CoroutineScanVisitor<'_> {
+impl LoweredOwnerVisitor for Stage45ScanVisitor<'_> {
     fn coro_creation(&mut self, id: LoweredCoroId, origin: &Origin) -> Result<(), Vec<Diagnostic>> {
         self.request_pair(id, origin)
+    }
+
+    fn reactive_operation(
+        &mut self,
+        id: LoweredReactiveOperationId,
+        origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let Some(operation) = self.owner.reactive_operation(self.program, id) else {
+            return Ok(());
+        };
+        match &operation.kind {
+            LoweredReactiveOperationKind::Reaction { callback, .. } => {
+                let callback = *callback;
+                self.request_callback_environment(callback, origin)?;
+                self.request_runner(
+                    ReactiveRunnerFamily::Reaction,
+                    ArtifactSite::Callback(callback),
+                    origin,
+                )
+            }
+            LoweredReactiveOperationKind::Until { predicate, .. } => {
+                let predicate = *predicate;
+                self.request_callback_environment(predicate, origin)?;
+                self.request_runner(
+                    ReactiveRunnerFamily::Until,
+                    ArtifactSite::Callback(predicate),
+                    origin,
+                )
+            }
+            LoweredReactiveOperationKind::Batch { callback } => {
+                self.request_callback_environment(*callback, origin)
+            }
+            LoweredReactiveOperationKind::DerivedCreate {
+                evaluator,
+                function_type,
+                ..
+            } => {
+                let instance = resolve_thunk_instance(
+                    self.program,
+                    self.owner,
+                    LoweredBindingSite::DerivedEvaluator(id),
+                    *evaluator,
+                    function_type.clone(),
+                    origin,
+                )?;
+                self.request_environment(
+                    instance,
+                    ArtifactUseSite::DerivedEvaluatorEnvironment(id),
+                    origin,
+                )?;
+                self.request_runner(
+                    ReactiveRunnerFamily::Derived,
+                    ArtifactSite::Operation(id),
+                    origin,
+                )
+            }
+            LoweredReactiveOperationKind::SignalCreate { .. }
+            | LoweredReactiveOperationKind::SignalRead { .. }
+            | LoweredReactiveOperationKind::SignalNotify { .. }
+            | LoweredReactiveOperationKind::DerivedRead { .. }
+            | LoweredReactiveOperationKind::Scope
+            | LoweredReactiveOperationKind::Snapshot => Ok(()),
+        }
     }
 }
 
@@ -958,5 +1548,501 @@ mod tests {
             "coroutine plans converge quickly: {} rounds",
             stats.rounds
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Stage 4.5 reactive runners.
+    // ------------------------------------------------------------------
+
+    /// The human-readable owner of one runner plan: the initializer or the
+    /// owning instance's template name.
+    fn owner_name(program: &LoweredProgram, owner: ArtifactSiteOwner) -> String {
+        match owner {
+            ArtifactSiteOwner::Initializer(initializer) => {
+                format!("<initializer {}>", initializer.index())
+            }
+            ArtifactSiteOwner::Instance(ordinal) => program
+                .instances
+                .iter()
+                .find(|(_, instance)| instance.ordinal == ordinal)
+                .and_then(|(_, instance)| program.functions.get(instance.template))
+                .map(|function| function.name.clone())
+                .unwrap_or_else(|| format!("<instance {}>", ordinal.index())),
+            ArtifactSiteOwner::Artifact(ordinal) => format!("<artifact {}>", ordinal.index()),
+        }
+    }
+
+    /// Every expanded runner plan of one family, with its owner name.
+    fn runner_plans<'a>(
+        program: &'a LoweredProgram,
+        family: ReactiveRunnerFamily,
+    ) -> Vec<(String, &'a ReactiveRunnerPlan)> {
+        let mut plans = Vec::new();
+        for (_, artifact) in program.artifacts.iter() {
+            let Some(plan) = artifact.plan.as_ref() else {
+                continue;
+            };
+            let plan = match (family, plan) {
+                (ReactiveRunnerFamily::Reaction, LoweredArtifactPlan::ReactionRunner(plan))
+                | (ReactiveRunnerFamily::Until, LoweredArtifactPlan::UntilRunner(plan))
+                | (ReactiveRunnerFamily::Derived, LoweredArtifactPlan::DerivedRunner(plan)) => plan,
+                _ => continue,
+            };
+            let owner = owner_name(program, plan.owner);
+            plans.push((owner, plan));
+        }
+        plans
+    }
+
+    fn runner_body(plan: &ReactiveRunnerPlan) -> &ReactiveRunnerBody {
+        assert!(
+            !matches!(plan.body, ReactiveRunnerBody::Unexpanded),
+            "the runner is expanded: {plan:?}"
+        );
+        &plan.body
+    }
+
+    /// The `GcFinalizer::ClosureEnvironment` plans requested from reactive
+    /// callback/evaluator sites, as `(site, captures)`.
+    fn reactive_environment_plans(
+        program: &LoweredProgram,
+    ) -> Vec<(ArtifactUseSite, Vec<CheckedType>)> {
+        let mut found = Vec::new();
+        let mut collect = |uses: &[super::super::LoweredArtifactUse]| {
+            for use_ in uses {
+                match use_.site {
+                    ArtifactUseSite::ReactiveCallbackEnvironment(_)
+                    | ArtifactUseSite::DerivedEvaluatorEnvironment(_) => {
+                        let plan = program
+                            .artifacts
+                            .iter()
+                            .find(|(_, artifact)| artifact.ordinal == use_.artifact)
+                            .and_then(|(_, artifact)| artifact.plan.as_ref());
+                        let Some(LoweredArtifactPlan::GcFinalizer(
+                            GcFinalizerPlan::ClosureEnvironment { captures, .. },
+                        )) = plan
+                        else {
+                            panic!(
+                                "a reactive environment use names a closure finalizer: {use_:?}"
+                            );
+                        };
+                        found.push((use_.site, captures.clone()));
+                    }
+                    _ => {}
+                }
+            }
+        };
+        for (_, instance) in program.instances.iter() {
+            if let Some(body) = &instance.body {
+                collect(&body.artifact_uses);
+            }
+        }
+        for uses in &program.initializer_artifact_uses {
+            collect(uses);
+        }
+        found
+    }
+
+    #[test]
+    fn reaction_runners_record_callback_types_and_resource_slots() {
+        let source = concat!(
+            "use std.cinterop.(CString, c_string)\n",
+            "extern \"c\" { inspect: CString -> I32 }\n",
+            "type Counter = ctor (value: I32)\n",
+            "def read_counter: () ->{Counter} I32 = () => (resource Counter).value\n",
+            "def increment: () ->{mut Counter} () = () => {\n",
+            "  (resource Counter).value = (resource Counter).value + 1\n",
+            "}\n",
+            "def subscribe_plain: () ->{Reactive} () = () => reaction { () }\n",
+            "def subscribe_value: () ->{Reactive, Counter} () = () => reaction { read_counter (); () }\n",
+            "def subscribe_mut: () ->{Reactive, mut Counter} () = () => reaction { increment (); () }\n",
+            "def poke: () -> () = () => ()\n",
+            "def subscribe_explicit: () ->{Reactive} () = () => reaction poke\n",
+            "def subscribe_owned: move CString ->{Reactive} () = move value => reaction { inspect value; () }\n",
+            "let a = with Reactive = reactive_scope () { subscribe_plain () }\n",
+            "let b = with Counter = Counter (value: 1) { with Reactive = reactive_scope () { subscribe_value () } }\n",
+            "let c = with mut Counter = Counter (value: 2) { with Reactive = reactive_scope () { subscribe_mut () } }\n",
+            "let d = with Reactive = reactive_scope () { subscribe_explicit () }\n",
+            "let e = with Reactive = reactive_scope () { subscribe_owned (c_string \"x\") }\n",
+        );
+        let (_module, lowered) = lower(source);
+        let program = &lowered.program;
+        record_stats(program, "reaction runners");
+
+        // Borrowed captures are unreachable for reactive callbacks: a thunk
+        // cannot capture a borrowed view, and a locally built borrowed closure
+        // cannot be passed as an argument. The droppable and explicit cases
+        // below cover the reachable shapes.
+        let plans = runner_plans(program, ReactiveRunnerFamily::Reaction);
+        assert_eq!(plans.len(), 5, "one runner per reaction: {plans:?}");
+
+        let body_for = |name: &str| {
+            plans
+                .iter()
+                .find(|(owner, _)| owner.ends_with(name))
+                .map(|(_, plan)| runner_body(plan))
+                .unwrap_or_else(|| panic!("no reaction runner owned by {name}"))
+        };
+
+        let ReactiveRunnerBody::Reaction {
+            callback_type,
+            resources,
+        } = body_for("subscribe_plain")
+        else {
+            panic!("a reaction runner carries a reaction body")
+        };
+        assert!(
+            callback_type.effects.resources.is_empty(),
+            "the plain callback needs no resources"
+        );
+        assert!(resources.is_empty());
+
+        let ReactiveRunnerBody::Reaction { resources, .. } = body_for("subscribe_value") else {
+            panic!("a reaction runner carries a reaction body")
+        };
+        assert_eq!(resources.len(), 1);
+        assert!(!resources[0].resource.mutable);
+        assert!(!resources[0].indirect, "a `Copy` resource slot is a value");
+
+        let ReactiveRunnerBody::Reaction { resources, .. } = body_for("subscribe_mut") else {
+            panic!("a reaction runner carries a reaction body")
+        };
+        assert_eq!(resources.len(), 1);
+        assert!(resources[0].resource.mutable);
+        assert!(resources[0].indirect, "a mutable resource slot is indirect");
+
+        // The explicit callback has a runner but no thunk environment use.
+        let ReactiveRunnerBody::Reaction { callback_type, .. } = body_for("subscribe_explicit")
+        else {
+            panic!("a reaction runner carries a reaction body")
+        };
+        assert!(
+            callback_type.effects.resources.is_empty(),
+            "the explicit callback needs no resources"
+        );
+
+        // A droppable thunk capture installs a finalizer; a borrowed capture
+        // does not fire the install gate.
+        let environments = reactive_environment_plans(program);
+        let owned = environments
+            .iter()
+            .find(|(site, captures)| {
+                matches!(site, ArtifactUseSite::ReactiveCallbackEnvironment(_))
+                    && captures.contains(&CheckedType::CString)
+            })
+            .unwrap_or_else(|| panic!("the owned capture installs a finalizer: {environments:?}"));
+        assert!(
+            owned.1.len() >= 1,
+            "the owned callback's concrete captures are listed"
+        );
+        assert!(
+            environments
+                .iter()
+                .all(|(_, captures)| captures.contains(&CheckedType::CString)),
+            "only the droppable capture installs a finalizer: {environments:?}"
+        );
+    }
+
+    #[test]
+    fn until_and_derived_runners_record_their_call_shapes() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "let signal flag = 0\n",
+            "let signal count = 0\n",
+            "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+            "  let _ = await (until { flag >= 1 })\n",
+            "  ()\n",
+            "}\n",
+            "let doubled = count + count\n",
+            "def make: () ->{state.read} I32 = () => {\n",
+            "  let local = count + count\n",
+            "  local\n",
+            "}\n",
+            "let waiting_task = with Reactive = reactive_scope () { waiting () }\n",
+            "let made = make ()\n",
+            "let observed = doubled\n",
+        );
+        let (_module, lowered) = lower(source);
+        let program = &lowered.program;
+        record_stats(program, "until and derived runners");
+
+        let until = runner_plans(program, ReactiveRunnerFamily::Until);
+        assert_eq!(until.len(), 1, "one runner per `until`: {until:?}");
+        let ReactiveRunnerBody::Until { predicate_type } = runner_body(until[0].1) else {
+            panic!("an `until` runner carries an until body")
+        };
+        assert!(
+            matches!(
+                predicate_type.result.as_ref(),
+                CheckedType::Sum(sum)
+                    if sum.alternatives.iter().any(|alternative| {
+                        matches!(alternative, CheckedType::Distinct { name, .. } if name == "True")
+                    })
+            ),
+            "the predicate returns `Bool`: {predicate_type:?}"
+        );
+
+        // `doubled` is an initializer derived binding; `observed = doubled` is
+        // a second derived binding whose evaluator captures the first
+        // (capturing a derived value); `make`'s local is instance-owned.
+        let derived = runner_plans(program, ReactiveRunnerFamily::Derived);
+        assert_eq!(
+            derived.len(),
+            3,
+            "one runner per derived binding: {derived:?}"
+        );
+        let mut reads_state = 0;
+        let mut pure = 0;
+        for (owner, plan) in &derived {
+            let ReactiveRunnerBody::Derived {
+                evaluator_type,
+                output_type,
+            } = runner_body(plan)
+            else {
+                panic!("a derived runner carries a derived body")
+            };
+            assert!(
+                evaluator_type.effects.resources.is_empty(),
+                "a derived evaluator has no resources"
+            );
+            assert_eq!(
+                canonical(output_type),
+                canonical(&evaluator_type.result),
+                "the output type is the evaluator's result"
+            );
+            if evaluator_type.effects.state.is_some() {
+                reads_state += 1;
+            } else {
+                pure += 1;
+            }
+            assert!(
+                owner.contains("make") || owner.contains("initializer"),
+                "the derived runners belong to the initializer and the instance: {owner}"
+            );
+        }
+        assert!(
+            derived.iter().any(|(owner, _)| owner.contains("make")),
+            "an instance-owned derived runner exists"
+        );
+        assert!(
+            reads_state >= 1 && pure >= 1,
+            "both a signal-reading evaluator and a derived-capturing evaluator are covered: {derived:?}"
+        );
+    }
+
+    #[test]
+    fn runner_sites_match_reactive_operations_and_environments() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "let signal count = 0\n",
+            "def subscribe: () ->{Reactive} () = () => reaction { () }\n",
+            "def wait: () -> Coroutine{Reactive} () = () => coro {\n",
+            "  let _ = await (until { count >= 5 })\n",
+            "  ()\n",
+            "}\n",
+            "def evaluate: () ->{state.read} I32 = () => {\n",
+            "  let local = count + 1\n",
+            "  local\n",
+            "}\n",
+            "let a = with Reactive = reactive_scope () { subscribe () }\n",
+            "let b = with Reactive = reactive_scope () { wait () }\n",
+            "let c = evaluate ()\n",
+            "let d = batch { count = 1 }\n",
+            "let e = snapshot count\n",
+        );
+        let (_module, lowered) = lower(source);
+        let program = &lowered.program;
+        record_stats(program, "runner site agreement");
+
+        // Every runner plan is expanded; every family appears.
+        let mut families = std::collections::HashSet::new();
+        for (_, artifact) in program.artifacts.iter() {
+            let Some(plan) = artifact.plan.as_ref() else {
+                continue;
+            };
+            let family = match plan {
+                LoweredArtifactPlan::ReactionRunner(_) => Some(ReactiveRunnerFamily::Reaction),
+                LoweredArtifactPlan::UntilRunner(_) => Some(ReactiveRunnerFamily::Until),
+                LoweredArtifactPlan::DerivedRunner(_) => Some(ReactiveRunnerFamily::Derived),
+                _ => None,
+            };
+            if let Some(family) = family {
+                assert!(plan.is_expanded(), "every runner is expanded: {plan:?}");
+                families.insert(family);
+            }
+        }
+        assert_eq!(
+            families.len(),
+            3,
+            "the fixture covers all three runner families: {families:?}"
+        );
+
+        // Per owner: the runner uses equal the runner-bearing operations, and
+        // each use resolves to an operation of the matching family kind.
+        let mut owners: Vec<(String, usize, Vec<super::super::LoweredArtifactUse>)> = Vec::new();
+        for (_, instance) in program.instances.iter() {
+            let Some(body) = &instance.body else {
+                continue;
+            };
+            let expected = body
+                .reactive_operations
+                .iter()
+                .filter(|(_, operation)| operation_has_runner(&operation.kind))
+                .count();
+            owners.push((instance.name.clone(), expected, body.artifact_uses.clone()));
+        }
+        for (index, _) in program.initializers.iter() {
+            // The initializer owner's operations share the program arenas with
+            // every declared function's template operations, so the expected
+            // count is not derivable from the arena alone; the fixture's
+            // initializer only has scope/batch/snapshot operations, which
+            // request no runner.
+            owners.push((
+                format!("<initializer {}>", index.index()),
+                0,
+                program.initializer_artifact_uses[index.index()].clone(),
+            ));
+        }
+        let mut runner_uses = 0;
+        let mut environment_uses = 0;
+        for (owner, expected, uses) in &owners {
+            let found = uses
+                .iter()
+                .filter(|use_| matches!(use_.site, ArtifactUseSite::ReactiveRunner(_)))
+                .count();
+            assert_eq!(
+                found, *expected,
+                "{owner} has one runner use per runner-bearing operation"
+            );
+            runner_uses += found;
+            for use_ in uses {
+                match use_.site {
+                    ArtifactUseSite::ReactiveRunner(operation) => {
+                        let Some(record) = program
+                            .instances
+                            .iter()
+                            .find(|(_, instance)| instance.name == *owner)
+                            .and_then(|(_, instance)| instance.body.as_ref())
+                            .and_then(|body| body.reactive_operation(operation))
+                            .or_else(|| program.reactive_operations.get(operation))
+                        else {
+                            panic!("{owner} runner use site resolves to an operation");
+                        };
+                        let expected_family = match &record.kind {
+                            LoweredReactiveOperationKind::Reaction { .. } => {
+                                ReactiveRunnerFamily::Reaction
+                            }
+                            LoweredReactiveOperationKind::Until { .. } => {
+                                ReactiveRunnerFamily::Until
+                            }
+                            LoweredReactiveOperationKind::DerivedCreate { .. } => {
+                                ReactiveRunnerFamily::Derived
+                            }
+                            other => {
+                                panic!("a runner use names a runner-bearing operation: {other:?}")
+                            }
+                        };
+                        let actual_family = match program.specializations.artifact(use_.artifact) {
+                            Some(ArtifactRequestKey::ReactionRunner(_)) => {
+                                ReactiveRunnerFamily::Reaction
+                            }
+                            Some(ArtifactRequestKey::UntilRunner(_)) => ReactiveRunnerFamily::Until,
+                            Some(ArtifactRequestKey::DerivedRunner(_)) => {
+                                ReactiveRunnerFamily::Derived
+                            }
+                            other => panic!("a runner use names a runner key: {other:?}"),
+                        };
+                        assert_eq!(
+                            expected_family, actual_family,
+                            "{owner} runner family matches its operation"
+                        );
+                    }
+                    ArtifactUseSite::ReactiveCallbackEnvironment(_)
+                    | ArtifactUseSite::DerivedEvaluatorEnvironment(_) => {
+                        environment_uses += 1;
+                        let plan = program
+                            .artifacts
+                            .iter()
+                            .find(|(_, artifact)| artifact.ordinal == use_.artifact)
+                            .and_then(|(_, artifact)| artifact.plan.as_ref());
+                        assert!(
+                            matches!(
+                                plan,
+                                Some(LoweredArtifactPlan::GcFinalizer(
+                                    GcFinalizerPlan::ClosureEnvironment { .. }
+                                ))
+                            ),
+                            "every installed callback environment has a closure finalizer plan: {plan:?}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(runner_uses, 3, "one reaction, one until, one derived");
+        // The fixture's callbacks capture nothing droppable, so no environment
+        // finalizer is installed; the droppable case is asserted in
+        // `reaction_runners_record_callback_types_and_resource_slots`.
+        assert_eq!(environment_uses, 0);
+    }
+
+    fn operation_has_runner(kind: &LoweredReactiveOperationKind) -> bool {
+        matches!(
+            kind,
+            LoweredReactiveOperationKind::Reaction { .. }
+                | LoweredReactiveOperationKind::Until { .. }
+                | LoweredReactiveOperationKind::DerivedCreate { .. }
+        )
+    }
+
+    #[test]
+    fn generic_reactive_sites_get_one_runner_per_instantiation() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "let signal count = 0\n",
+            "def peek: <T> T -> I32 = _ => 0\n",
+            "def generic_reaction: <T where Copy T> T ->{Reactive} () = value => reaction { peek value; () }\n",
+            "def generic_until: <T where Copy T> T -> Coroutine{Reactive} () = value => coro {\n",
+            "  let _ = await (until { count + peek value > 0 })\n",
+            "  ()\n",
+            "}\n",
+            "def generic_derived: <T where Copy T> T ->{state.read} I32 = value => {\n",
+            "  let local = count + peek value\n",
+            "  local\n",
+            "}\n",
+            "let r1 = with Reactive = reactive_scope () { generic_reaction 1 }\n",
+            "let r2 = with Reactive = reactive_scope () { generic_reaction (1 satisfies U8) }\n",
+            "let u1 = with Reactive = reactive_scope () { generic_until 1 }\n",
+            "let u2 = with Reactive = reactive_scope () { generic_until (1 satisfies U8) }\n",
+            "let d1 = generic_derived 1\n",
+            "let d2 = generic_derived (1 satisfies U8)\n",
+        );
+        let (_module, lowered) = lower(source);
+        let program = &lowered.program;
+        record_stats(program, "generic reactive sites");
+
+        for (family, name) in [
+            (ReactiveRunnerFamily::Reaction, "reaction"),
+            (ReactiveRunnerFamily::Until, "until"),
+            (ReactiveRunnerFamily::Derived, "derived"),
+        ] {
+            let plans = runner_plans(program, family);
+            assert_eq!(
+                plans.len(),
+                2,
+                "two instantiations give two {name} runners: {plans:?}"
+            );
+            let ordinals = plans
+                .iter()
+                .map(|(_, plan)| match plan.owner {
+                    ArtifactSiteOwner::Instance(ordinal) => ordinal.index(),
+                    other => panic!("a generic runner is instance-owned: {other:?}"),
+                })
+                .collect::<Vec<_>>();
+            assert_ne!(
+                ordinals[0], ordinals[1],
+                "the two {name} runners have distinct owners"
+            );
+        }
     }
 }

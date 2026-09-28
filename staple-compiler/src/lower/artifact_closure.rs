@@ -306,10 +306,49 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 };
                 super::coroutine_artifacts::expand_coroutine_codes(program, artifact, plan)
             }
-            ArtifactRequestKey::ReactionRunner(_)
-            | ArtifactRequestKey::UntilRunner(_)
-            | ArtifactRequestKey::DerivedRunner(_)
-            | ArtifactRequestKey::ExternAdapter(_) => Ok((plan, Vec::new())),
+            ArtifactRequestKey::ReactionRunner(_) => {
+                let LoweredArtifactPlan::ReactionRunner(plan) = plan else {
+                    return Err(vec![Diagnostic::new(
+                        record.origin.span.clone(),
+                        "reaction-runner artifact carries a mismatched plan".to_string(),
+                    )]);
+                };
+                super::coroutine_artifacts::expand_reactive_runner(
+                    program,
+                    artifact,
+                    plan,
+                    super::coroutine_artifacts::ReactiveRunnerFamily::Reaction,
+                )
+            }
+            ArtifactRequestKey::UntilRunner(_) => {
+                let LoweredArtifactPlan::UntilRunner(plan) = plan else {
+                    return Err(vec![Diagnostic::new(
+                        record.origin.span.clone(),
+                        "until-runner artifact carries a mismatched plan".to_string(),
+                    )]);
+                };
+                super::coroutine_artifacts::expand_reactive_runner(
+                    program,
+                    artifact,
+                    plan,
+                    super::coroutine_artifacts::ReactiveRunnerFamily::Until,
+                )
+            }
+            ArtifactRequestKey::DerivedRunner(_) => {
+                let LoweredArtifactPlan::DerivedRunner(plan) = plan else {
+                    return Err(vec![Diagnostic::new(
+                        record.origin.span.clone(),
+                        "derived-runner artifact carries a mismatched plan".to_string(),
+                    )]);
+                };
+                super::coroutine_artifacts::expand_reactive_runner(
+                    program,
+                    artifact,
+                    plan,
+                    super::coroutine_artifacts::ReactiveRunnerFamily::Derived,
+                )
+            }
+            ArtifactRequestKey::ExternAdapter(_) => Ok((plan, Vec::new())),
         }
     }
 
@@ -321,6 +360,9 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::DropGlue(_)
                 | ArtifactRequestKey::GcFinalizer(_)
                 | ArtifactRequestKey::CoroutineCodes(_)
+                | ArtifactRequestKey::ReactionRunner(_)
+                | ArtifactRequestKey::UntilRunner(_)
+                | ArtifactRequestKey::DerivedRunner(_)
         )
     }
 }
