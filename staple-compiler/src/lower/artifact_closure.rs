@@ -203,12 +203,22 @@ pub(super) struct ProductionHooks;
 impl ArtifactFamilyHooks for ProductionHooks {
     fn scan_initializer(&self, program: &LoweredProgram, initializer: InitializerId) -> ScanResult {
         // Family scanners are composed in the fixed order 4.3 -> 4.4 -> 4.5 ->
-        // 4.6. Stage 4.4 owns the ownership-cleanup scanner.
-        super::cleanup_artifacts::scan_initializer(program, initializer)
+        // 4.6. Stage 4.4 owns the ownership-cleanup scanner; Stage 4.5 appends
+        // the coroutine and reactive sites.
+        let mut requests = super::cleanup_artifacts::scan_initializer(program, initializer)?;
+        requests.extend(super::coroutine_artifacts::scan_initializer(
+            program,
+            initializer,
+        )?);
+        Ok(requests)
     }
 
     fn scan_instance(&self, program: &LoweredProgram, instance: FunctionInstanceId) -> ScanResult {
-        super::cleanup_artifacts::scan_instance(program, instance)
+        let mut requests = super::cleanup_artifacts::scan_instance(program, instance)?;
+        requests.extend(super::coroutine_artifacts::scan_instance(
+            program, instance,
+        )?);
+        Ok(requests)
     }
 
     fn expand(
@@ -287,8 +297,16 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 };
                 super::cleanup_artifacts::expand_gc_finalizer(program, artifact, plan)
             }
-            ArtifactRequestKey::CoroutineCodes(_)
-            | ArtifactRequestKey::ReactionRunner(_)
+            ArtifactRequestKey::CoroutineCodes(_) => {
+                let LoweredArtifactPlan::CoroutineCodes(plan) = plan else {
+                    return Err(vec![Diagnostic::new(
+                        record.origin.span.clone(),
+                        "coroutine-codes artifact carries a mismatched plan".to_string(),
+                    )]);
+                };
+                super::coroutine_artifacts::expand_coroutine_codes(program, artifact, plan)
+            }
+            ArtifactRequestKey::ReactionRunner(_)
             | ArtifactRequestKey::UntilRunner(_)
             | ArtifactRequestKey::DerivedRunner(_)
             | ArtifactRequestKey::ExternAdapter(_) => Ok((plan, Vec::new())),
@@ -302,6 +320,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::StructuralMethod(_)
                 | ArtifactRequestKey::DropGlue(_)
                 | ArtifactRequestKey::GcFinalizer(_)
+                | ArtifactRequestKey::CoroutineCodes(_)
         )
     }
 }

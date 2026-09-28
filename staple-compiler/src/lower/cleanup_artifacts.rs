@@ -226,27 +226,35 @@ fn closure_environment_drops(
 /// a module initializer. Instance bodies own private arenas; initializer sites
 /// index the program's template arenas.
 #[derive(Clone, Copy)]
-enum OwnerArenas<'a> {
+pub(super) enum OwnerArenas<'a> {
     Instance(&'a LoweredInstanceBody),
     Initializer(InitializerId),
 }
 
 impl<'a> OwnerArenas<'a> {
-    fn block(self, program: &'a LoweredProgram, id: BlockId) -> Option<&'a super::LoweredBlock> {
+    pub(super) fn block(
+        self,
+        program: &'a LoweredProgram,
+        id: BlockId,
+    ) -> Option<&'a super::LoweredBlock> {
         match self {
             OwnerArenas::Instance(body) => body.block(id),
             OwnerArenas::Initializer(_) => program.blocks.get(id),
         }
     }
 
-    fn item(self, program: &'a LoweredProgram, id: ItemId) -> Option<&'a super::LoweredItem> {
+    pub(super) fn item(
+        self,
+        program: &'a LoweredProgram,
+        id: ItemId,
+    ) -> Option<&'a super::LoweredItem> {
         match self {
             OwnerArenas::Instance(body) => body.item(id),
             OwnerArenas::Initializer(_) => program.items.get(id),
         }
     }
 
-    fn expression(
+    pub(super) fn expression(
         self,
         program: &'a LoweredProgram,
         id: ExpressionId,
@@ -257,7 +265,7 @@ impl<'a> OwnerArenas<'a> {
         }
     }
 
-    fn pattern(
+    pub(super) fn pattern(
         self,
         program: &'a LoweredProgram,
         id: PatternId,
@@ -268,14 +276,18 @@ impl<'a> OwnerArenas<'a> {
         }
     }
 
-    fn place(self, program: &'a LoweredProgram, id: PlaceId) -> Option<&'a super::LoweredPlace> {
+    pub(super) fn place(
+        self,
+        program: &'a LoweredProgram,
+        id: PlaceId,
+    ) -> Option<&'a super::LoweredPlace> {
         match self {
             OwnerArenas::Instance(body) => body.place(id),
             OwnerArenas::Initializer(_) => program.places.get(id),
         }
     }
 
-    fn call(
+    pub(super) fn call(
         self,
         program: &'a LoweredProgram,
         id: super::LoweredCallId,
@@ -286,7 +298,7 @@ impl<'a> OwnerArenas<'a> {
         }
     }
 
-    fn callable_value(
+    pub(super) fn callable_value(
         self,
         program: &'a LoweredProgram,
         id: super::LoweredCallableValueId,
@@ -297,7 +309,7 @@ impl<'a> OwnerArenas<'a> {
         }
     }
 
-    fn with(
+    pub(super) fn with(
         self,
         program: &'a LoweredProgram,
         id: super::LoweredWithId,
@@ -307,11 +319,23 @@ impl<'a> OwnerArenas<'a> {
             OwnerArenas::Initializer(_) => program.withs.get(id),
         }
     }
+
+    pub(super) fn coro(
+        self,
+        program: &'a LoweredProgram,
+        id: super::LoweredCoroId,
+    ) -> Option<&'a super::LoweredCoro> {
+        match self {
+            OwnerArenas::Instance(body) => body.coro(id),
+            OwnerArenas::Initializer(_) => program.coros.get(id),
+        }
+    }
 }
 
 /// One owned-binding draft produced by the shared walk, before its glue is
-/// bound through the owner's use records.
-struct OwnedBindingDraft {
+/// bound through the owner's use records. Visible to sibling scanners that
+/// implement the family-neutral visitor.
+pub(super) struct OwnedBindingDraft {
     symbol: SymbolId,
     pattern: Option<PatternId>,
     storage: OwnedStorage,
@@ -319,39 +343,61 @@ struct OwnedBindingDraft {
     origin: Origin,
 }
 
-/// The cleanup decisions one walk reports.
-trait CleanupVisitor {
+/// The sites one owner walk reports. The walker itself is family-neutral: the
+/// Stage 4.4 cleanup scanner and the Stage 4.5 coroutine/reactive scanners each
+/// override only the hooks they own (every hook defaults to ignoring the
+/// site), so the traversal exists once.
+pub(super) trait LoweredOwnerVisitor {
     fn drop_site(
         &mut self,
-        site: ArtifactUseSite,
-        value_type: &CheckedType,
-        origin: &Origin,
-    ) -> Result<(), Vec<Diagnostic>>;
+        _site: ArtifactUseSite,
+        _value_type: &CheckedType,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
 
     fn finalizer_site(
         &mut self,
-        site: ArtifactUseSite,
-        key: GcFinalizerKey,
-        plan: GcFinalizerPlan,
-        origin: &Origin,
-    ) -> Result<(), Vec<Diagnostic>>;
+        _site: ArtifactUseSite,
+        _key: GcFinalizerKey,
+        _plan: GcFinalizerPlan,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
 
-    fn owned_binding(&mut self, draft: OwnedBindingDraft) -> Result<(), Vec<Diagnostic>>;
+    fn owned_binding(&mut self, _draft: OwnedBindingDraft) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
 
     fn cell_finalizer(
         &mut self,
-        symbol: SymbolId,
-        value_type: &CheckedType,
-        origin: &Origin,
-    ) -> Result<(), Vec<Diagnostic>>;
+        _symbol: SymbolId,
+        _value_type: &CheckedType,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
 
     fn instance_use(
         &mut self,
-        site: ArtifactUseSite,
-        resolved: super::instance_resolution::ResolvedInstanceRequest,
-        kind: LoweredInstanceDependencyKind,
-        origin: &Origin,
-    ) -> Result<(), Vec<Diagnostic>>;
+        _site: ArtifactUseSite,
+        _resolved: super::instance_resolution::ResolvedInstanceRequest,
+        _kind: LoweredInstanceDependencyKind,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// A `coro` creation in this owner.
+    fn coro_creation(
+        &mut self,
+        _id: super::LoweredCoroId,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
 }
 
 /// The scanning visitor: every site becomes a closure request with its exact
@@ -387,7 +433,7 @@ impl ScanVisitor<'_> {
     }
 }
 
-impl CleanupVisitor for ScanVisitor<'_> {
+impl LoweredOwnerVisitor for ScanVisitor<'_> {
     fn drop_site(
         &mut self,
         site: ArtifactUseSite,
@@ -461,6 +507,15 @@ impl CleanupVisitor for ScanVisitor<'_> {
         });
         Ok(())
     }
+
+    fn coro_creation(
+        &mut self,
+        _id: super::LoweredCoroId,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        // The Stage 4.5 coroutine scanner owns `CoroCreation` requests.
+        Ok(())
+    }
 }
 
 /// The collecting visitor: records owned bindings for the post-closure pass.
@@ -468,7 +523,7 @@ struct CollectVisitor {
     drafts: Vec<OwnedBindingDraft>,
 }
 
-impl CleanupVisitor for CollectVisitor {
+impl LoweredOwnerVisitor for CollectVisitor {
     fn drop_site(
         &mut self,
         _site: ArtifactUseSite,
@@ -511,16 +566,25 @@ impl CleanupVisitor for CollectVisitor {
     ) -> Result<(), Vec<Diagnostic>> {
         Ok(())
     }
+
+    fn coro_creation(
+        &mut self,
+        _id: super::LoweredCoroId,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
 }
 
-/// Walks one owner in lowered evaluation order, reporting every cleanup
-/// decision. The traversal mirrors the Stage 3.3 first-visit order: parameters
-/// first, then block items in order, then the block result, with each
-/// expression's operands in evaluation order.
-struct CleanupWalker<'a> {
+/// Walks one owner in lowered evaluation order, reporting every site through
+/// its visitor. The traversal mirrors the Stage 3.3 first-visit order:
+/// parameters first, then block items in order, then the block result, with
+/// each expression's operands in evaluation order. Stage 4.4 first used it for
+/// cleanup decisions; Stage 4.5 reuses it for coroutine and reactive sites.
+struct LoweredWalker<'a> {
     program: &'a LoweredProgram,
     owner: OwnerArenas<'a>,
-    visitor: &'a mut dyn CleanupVisitor,
+    visitor: &'a mut dyn LoweredOwnerVisitor,
     visited_blocks: HashSet<BlockId>,
     visited_items: HashSet<ItemId>,
     visited_expressions: HashSet<ExpressionId>,
@@ -532,9 +596,9 @@ struct CleanupWalker<'a> {
 }
 
 /// A scan error that cannot be attributed to one site.
-type WalkResult = Result<(), Vec<Diagnostic>>;
+pub(super) type WalkResult = Result<(), Vec<Diagnostic>>;
 
-impl<'a> CleanupWalker<'a> {
+impl<'a> LoweredWalker<'a> {
     fn run(mut self) -> WalkResult {
         if let OwnerArenas::Instance(body) = self.owner {
             let parameter_pattern = body.parameter_pattern;
@@ -834,7 +898,10 @@ impl<'a> CleanupWalker<'a> {
                     self.walk_block(body)?;
                 }
             }
-            super::LoweredExpressionKind::Coro(_) | super::LoweredExpressionKind::Await(_) => {}
+            super::LoweredExpressionKind::Coro(coro) => {
+                self.visitor.coro_creation(coro, &origin)?;
+            }
+            super::LoweredExpressionKind::Await(_) => {}
         }
         Ok(())
     }
@@ -1083,7 +1150,13 @@ impl<'a> CleanupWalker<'a> {
                     .map_err(|diagnostic| vec![diagnostic])?;
                 let Some(ordinal) = self.program.specializations.instance_ordinal(&resolved.key)
                 else {
-                    return Ok(());
+                    // Stage 3.3 interns every initializer closure instance
+                    // before the closure runs, so a missing key is a bug, not
+                    // an unrequested closure.
+                    return Err(vec![Diagnostic::new(
+                        origin.span.clone(),
+                        "initializer closure instance was never interned".to_string(),
+                    )]);
                 };
                 super::FunctionInstanceId::from_index(ordinal.index())
             }
@@ -1094,13 +1167,16 @@ impl<'a> CleanupWalker<'a> {
             .map(|capture| CanonicalType::concrete(&capture.value_type, &origin))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|diagnostic| vec![diagnostic])?;
-        let ordinal = self
+        let Some(ordinal) = self
             .program
             .instances
             .get(closure_instance)
-            .map(|instance| instance.ordinal);
-        let Some(ordinal) = ordinal else {
-            return Ok(());
+            .map(|instance| instance.ordinal)
+        else {
+            return Err(vec![Diagnostic::new(
+                origin.span.clone(),
+                "closure environment instance has no catalog record".to_string(),
+            )]);
         };
         self.visitor.finalizer_site(
             ArtifactUseSite::ClosureEnvironment(id),
@@ -1211,12 +1287,12 @@ pub(super) fn scan_initializer(program: &LoweredProgram, initializer: Initialize
     Ok(visitor.requests)
 }
 
-fn walk_owner(
+pub(super) fn walk_owner(
     program: &LoweredProgram,
     owner: OwnerArenas<'_>,
-    visitor: &mut dyn CleanupVisitor,
+    visitor: &mut dyn LoweredOwnerVisitor,
 ) -> WalkResult {
-    CleanupWalker {
+    LoweredWalker {
         program,
         owner,
         visitor,
@@ -1586,7 +1662,7 @@ fn function_signature(
 }
 
 /// Requests one nested `DropGlue` artifact and returns its planned callee.
-fn request_drop_glue(
+pub(super) fn request_drop_glue(
     program: &LoweredProgram,
     value_type: &CheckedType,
     origin: &Origin,

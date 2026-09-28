@@ -341,6 +341,33 @@ impl LoweredInstanceBody {
         &self.captures
     }
 
+    /// The concrete type of one body-local binding symbol, from its binding
+    /// item or binding pattern, mirroring the legacy `type_of_symbol` lookup
+    /// under the instance's own substitutions. The Stage 4.5 coroutine
+    /// expander uses this for the plan's frame bindings.
+    pub(crate) fn binding_symbol_type(&self, symbol: SymbolId) -> Option<&CheckedType> {
+        for (_, item) in self.items.iter() {
+            if let LoweredItemKind::Binding(binding) = &item.kind
+                && binding.symbol == Some(symbol)
+                && let Some(value) = binding.value
+                && let Some(expression) = self.expressions.get(value)
+            {
+                return Some(&expression.value_type);
+            }
+        }
+        for (_, pattern) in self.patterns.iter() {
+            if let LoweredPatternKind::Binding {
+                symbol: Some(bound),
+                ..
+            } = &pattern.kind
+                && *bound == symbol
+            {
+                return Some(&pattern.value_type);
+            }
+        }
+        None
+    }
+
     /// The concrete binding at a site, when the body has one.
     pub(crate) fn binding(&self, site: LoweredBindingSite) -> Option<&LoweredBoundTarget> {
         self.bindings.get(&site)
