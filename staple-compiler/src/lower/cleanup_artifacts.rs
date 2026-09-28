@@ -1283,6 +1283,16 @@ impl<'a> LoweredWalker<'a> {
         if !self.seen_symbols.insert(symbol) {
             return Ok(());
         }
+        // A coroutine body's frame binding is a pre-seeded frame cell: legacy
+        // neither registers it as owned nor drops it at completion. Its drop
+        // is the pair plan's `unwind_drop`, emitted only on the cancel unwind.
+        if let OwnerArenas::Instance(body) = self.owner
+            && let Some(plan_id) = body.plan_template
+            && let Some(plan) = body.plan(plan_id)
+            && plan.frame_bindings.contains(&symbol)
+        {
+            return Ok(());
+        }
         if !self.program.concrete_needs_drop(value_type) {
             return Ok(());
         }

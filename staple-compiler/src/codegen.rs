@@ -81,6 +81,12 @@ struct ModuleEmitter<'module, 'context> {
         CheckedFunctionType,
         HashMap<TypeParameterId, CheckedType>,
     )>,
+    /// Test-only: the body thunk a coroutine `resume` is currently compiling,
+    /// so registrations inside state 0 attribute to the thunk instead of the
+    /// no-function-id resume environment. `environment.function_id` still wins
+    /// for nested function emission.
+    #[cfg(test)]
+    legacy_owned_function: Option<FunctionId>,
     #[cfg(test)]
     legacy_buffer_clones: Vec<LegacyBufferClone>,
     /// Test-only: whether the most recent `set_gc_finalizer` call happened, so
@@ -352,6 +358,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             legacy_owned: Vec::new(),
             #[cfg(test)]
             legacy_function_key: None,
+            #[cfg(test)]
+            legacy_owned_function: None,
             #[cfg(test)]
             legacy_buffer_clones: Vec::new(),
             #[cfg(test)]
@@ -1103,7 +1111,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         symbol: SymbolId,
         cell: bool,
     ) {
-        let Some(function_id) = environment.function_id else {
+        // A coroutine `resume` compiles state 0 with no function id in its
+        // environment, but its registrations belong to the body thunk. A
+        // nested emission inside state 0 supplies its own function id and
+        // therefore wins.
+        let Some(function_id) = environment.function_id.or(self.legacy_owned_function) else {
             return;
         };
         let Some((function, function_type, substitutions)) = &self.legacy_function_key else {
@@ -10176,6 +10188,36 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .build_unreachable()
                 .map_err(compiler_diagnostic)?;
 
+            // Test-only: state 0 is the body thunk's own code, so ownership
+            // registrations attribute to the thunk. Production emission never
+            // reads either key.
+            #[cfg(test)]
+            let previous_key = self.legacy_function_key.take();
+            #[cfg(test)]
+            let previous_owned_function = self.legacy_owned_function.replace(thunk.id);
+            #[cfg(test)]
+            {
+                let template = self
+                    .typed_module
+                    .type_of_function(thunk.id)
+                    .cloned()
+                    .expect("coroutine body thunks are freshly checked");
+                let mut function_type = match substitute_type(
+                    CheckedType::Function(template),
+                    &self.active_type_substitutions,
+                ) {
+                    CheckedType::Function(function_type) => function_type,
+                    other => {
+                        panic!("substituted coroutine thunk type is not a function: {other:?}")
+                    }
+                };
+                function_type.effects = plan.deferred_effects.clone();
+                self.legacy_function_key = Some((
+                    thunk.id,
+                    function_type,
+                    self.active_type_substitutions.clone(),
+                ));
+            }
             self.builder.position_at_end(dispatch[0]);
             let value = self.compile_expression(&mut environment, &thunk.body)?;
             if !environment.did_return {
@@ -10201,6 +10243,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.builder
                     .build_return(Some(&status))
                     .map_err(compiler_diagnostic)?;
+            }
+            #[cfg(test)]
+            {
+                self.legacy_function_key = previous_key;
+                self.legacy_owned_function = previous_owned_function;
             }
         }
 

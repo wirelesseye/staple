@@ -2517,14 +2517,16 @@ mod tests {
         );
     }
 
-    /// Gap 2: coroutine-body ownership was never compared. `resume` emits with
-    /// no `function_id`, so no registration inside a coroutine body is
-    /// recorded, while the 4.4 collector registers the body's frame binding.
-    /// Step 4 reconciles both; this test fails until then, and is ignored
-    /// until Step 4 lands.
+    /// Gap 2 (closed by Step 4): coroutine-body ownership parity. `resume`
+    /// emits with no `function_id`; the recorder now attributes state-0
+    /// registrations to the body thunk, and the collector excludes frame
+    /// cells. A completed coroutine never drops its droppable frame bindings:
+    /// legacy drops them only through the cancel unwind's conditional cell
+    /// drop, which the pair plan carries as `unwind_drop`. The fixture asserts
+    /// both the empty ownership records and the planned unwind drop, so the
+    /// legacy leak is mirrored and recorded rather than fixed.
     #[test]
-    #[ignore = "Stage 4.5 gap 2: coroutine-body ownership parity lands in Step 4"]
-    fn stage_4_5_gap_coroutine_body_ownership_is_compared() {
+    fn stage_4_5_coroutine_body_ownership_matches_legacy() {
         let source = concat!(
             "use std.coroutine.*\n",
             "use std.cinterop.(CString, c_string)\n",
@@ -2596,6 +2598,52 @@ mod tests {
         assert_eq!(
             actual, expected,
             "coroutine body owned registrations and storage kinds match legacy emission"
+        );
+        assert!(
+            body.owned_bindings.is_empty(),
+            "a coroutine body owns no scope-exit bindings: every local is a frame cell"
+        );
+
+        // The completed-body frame-binding leak, mirrored: the pair plan still
+        // carries the cancel unwind's conditional cell drop for the frame
+        // binding, and legacy emits it through the unwind path, but no
+        // completion path drops it.
+        let plan_id = body.plan_template.expect("the body owns its plan");
+        let plan = body.plan(plan_id).expect("the local plan");
+        let frame_binding = plan
+            .frame_bindings
+            .iter()
+            .find(|symbol| {
+                body.binding_symbol_type(**symbol)
+                    .is_some_and(|value_type| *value_type == CheckedType::CString)
+            })
+            .copied()
+            .expect("the fixture's CString frame binding");
+        let pair = program
+            .artifacts
+            .iter()
+            .filter_map(|(_, artifact)| match artifact.plan.as_ref() {
+                Some(crate::LoweredArtifactPlan::CoroutineCodes(plan))
+                    if plan.body.index() == body_instance.index() =>
+                {
+                    plan.frame.as_ref()
+                }
+                _ => None,
+            })
+            .next()
+            .expect("the body thunk's expanded pair");
+        let unwind = pair
+            .frame_bindings
+            .iter()
+            .find(|binding| binding.symbol == frame_binding)
+            .and_then(|binding| binding.unwind_drop.as_ref())
+            .expect("the frame binding plans its unwind drop");
+        assert!(unwind.artifact.is_some(), "the unwind drop glue is bound");
+        assert!(
+            legacy.drop_calls.iter().any(|call| {
+                matches!(call.branch, crate::codegen::LegacyDropBranch::CStringFree)
+            }),
+            "legacy emits the frame cell's unwind drop"
         );
     }
 
