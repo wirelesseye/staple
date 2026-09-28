@@ -525,7 +525,8 @@ mod tests {
     use inkwell::context::Context;
 
     use crate::specialization::{
-        ArtifactRequestKey, CanonicalFunctionType, CanonicalType, GcFinalizerKey,
+        ArtifactRequestKey, ArtifactSite, ArtifactSiteOwner, CanonicalFunctionType, CanonicalType,
+        GcFinalizerKey,
     };
     use crate::{
         CallTypeSubstitution, CheckedFunctionType, CheckedType, ConstructorConstruction, DebugStep,
@@ -2645,6 +2646,775 @@ mod tests {
             }),
             "legacy emits the frame cell's unwind drop"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Stage 4.5 coroutine and runner transition comparison.
+    // ------------------------------------------------------------------
+
+    /// The observed Stage 4.5 transition coverage of one fixture.
+    #[derive(Debug, Default)]
+    struct Stage45Coverage {
+        pairs: usize,
+        pairs_with_finalizer: usize,
+        pairs_without_finalizer: usize,
+        unwind_drop_pairs: usize,
+        alias_explained_plans: usize,
+        runners: std::collections::HashSet<&'static str>,
+        until_reuse: usize,
+        use_sites: std::collections::HashSet<&'static str>,
+    }
+
+    impl Stage45Coverage {
+        fn merge(&mut self, other: Stage45Coverage) {
+            self.pairs += other.pairs;
+            self.pairs_with_finalizer += other.pairs_with_finalizer;
+            self.pairs_without_finalizer += other.pairs_without_finalizer;
+            self.unwind_drop_pairs += other.unwind_drop_pairs;
+            self.alias_explained_plans += other.alias_explained_plans;
+            self.runners.extend(other.runners);
+            self.until_reuse += other.until_reuse;
+            self.use_sites.extend(other.use_sites);
+        }
+    }
+
+    fn canonical_eq(left: &crate::CheckedType, right: &crate::CheckedType) -> bool {
+        canonical(left) == canonical(right)
+    }
+
+    /// Whether one instance's concrete environment reproduces the legacy
+    /// recorded substitutions.
+    fn instance_substitutions_match(
+        program: &LoweredProgram,
+        instance: FunctionInstanceId,
+        substitutions: &std::collections::HashMap<TypeParameterId, crate::CheckedType>,
+    ) -> bool {
+        let Some(instance) = program.instances.get(instance) else {
+            return false;
+        };
+        let types_match = instance.relevant.type_parameters().all(|parameter| {
+            matches!(
+                (
+                    instance.environment.type_value(parameter),
+                    substitutions.get(&parameter),
+                ),
+                (Some(instance_value), Some(legacy)) if instance_value == legacy
+            )
+        });
+        let effects_match = instance.relevant.effect_parameters().all(|parameter| {
+            match (
+                instance.environment.effect_value(parameter),
+                substitutions
+                    .get(&parameter)
+                    .and_then(crate::effect_substitution_value),
+            ) {
+                (Some(instance_value), Some(legacy)) => instance_value == legacy,
+                _ => false,
+            }
+        });
+        types_match && effects_match
+    }
+
+    /// Every body thunk instance whose plan is a `CoroutineCodes` plan, keyed
+    /// by the `coro` body syntax the legacy cache uses.
+    fn pair_plans_by_syntax(
+        program: &LoweredProgram,
+    ) -> std::collections::HashMap<
+        staple_syntax::SyntaxId,
+        Vec<(FunctionInstanceId, &crate::CoroutineCodesPlan)>,
+    > {
+        let mut by_syntax = std::collections::HashMap::new();
+        for (id, instance) in program.instances.iter() {
+            let Some(template) = program.functions.get(instance.template) else {
+                continue;
+            };
+            if !template.class.coroutine_body {
+                continue;
+            }
+            for (_, artifact) in program.artifacts.iter() {
+                if let Some(crate::LoweredArtifactPlan::CoroutineCodes(plan)) = &artifact.plan
+                    && plan.body == id
+                {
+                    by_syntax
+                        .entry(template.body_syntax)
+                        .or_insert_with(Vec::new)
+                        .push((id, plan));
+                }
+            }
+        }
+        by_syntax
+    }
+
+    /// The owner's reactive operation arena for one runner owner.
+    fn runner_owner_operations<'a>(
+        program: &'a LoweredProgram,
+        owner: ArtifactSiteOwner,
+    ) -> Vec<(
+        crate::LoweredReactiveOperationId,
+        &'a crate::LoweredReactiveOperation,
+    )> {
+        match owner {
+            ArtifactSiteOwner::Initializer(_) => program.reactive_operations.iter().collect(),
+            ArtifactSiteOwner::Instance(ordinal) => program
+                .instances
+                .iter()
+                .find(|(_, instance)| instance.ordinal == ordinal)
+                .and_then(|(_, instance)| instance.body.as_ref())
+                .map(|body| body.reactive_operations.iter().collect())
+                .unwrap_or_default(),
+            ArtifactSiteOwner::Artifact(_) => Vec::new(),
+        }
+    }
+
+    /// The artifact plan matching one legacy runner creation, if any.
+    fn runner_plan_for<'a>(
+        program: &'a LoweredProgram,
+        family: crate::codegen::LegacyRunnerFamily,
+        owner: ArtifactSiteOwner,
+        site: ArtifactSite,
+    ) -> Option<&'a crate::ReactiveRunnerPlan> {
+        use crate::codegen::LegacyRunnerFamily;
+        program.artifacts.iter().find_map(|(_, artifact)| {
+            let plan = match artifact.plan.as_ref()? {
+                crate::LoweredArtifactPlan::ReactionRunner(plan)
+                    if family == LegacyRunnerFamily::Reaction =>
+                {
+                    plan
+                }
+                crate::LoweredArtifactPlan::UntilRunner(plan)
+                    if family == LegacyRunnerFamily::Until =>
+                {
+                    plan
+                }
+                crate::LoweredArtifactPlan::DerivedRunner(plan)
+                    if family == LegacyRunnerFamily::Derived =>
+                {
+                    plan
+                }
+                _ => return None,
+            };
+            (plan.owner == owner && plan.site == site).then_some(plan)
+        })
+    }
+
+    /// The Stage 4.5 transition comparison for one fixture: every legacy pair
+    /// creation matches exactly one plan on all recorded facts (unwind drops
+    /// as a set), every plan whose template has a legacy pair is matched or
+    /// explained as a request-aliased instantiation, every legacy runner
+    /// creation matches exactly one plan, and every runner plan is matched.
+    fn assert_stage_4_5_transition(source: &str) -> Stage45Coverage {
+        use crate::codegen::LegacyRunnerFamily;
+        use crate::{LoweredArtifactPlan, ReactiveRunnerBody};
+
+        let module = checked_program(source);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}\n{source}"));
+        let context = Context::create();
+        let legacy =
+            crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(|diagnostics| {
+                panic!("the legacy backend should compile: {diagnostics:?}\n{source}")
+            });
+        let program = &lowered.program;
+        let mut coverage = Stage45Coverage::default();
+
+        // ---- coroutine pairs ----
+        let plans_by_syntax = pair_plans_by_syntax(program);
+        let mut matched_plans = std::collections::HashSet::new();
+        for pair in &legacy.coroutine_pairs {
+            let candidates = plans_by_syntax.get(&pair.body_syntax).unwrap_or_else(|| {
+                panic!(
+                    "no plan exists for the legacy pair's body syntax {:?}",
+                    pair.body_syntax
+                )
+            });
+            let matched = candidates
+                .iter()
+                .find(|(id, _)| instance_substitutions_match(program, *id, &pair.substitutions))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no plan matches the legacy pair's substitutions for body syntax {:?}",
+                        pair.body_syntax
+                    )
+                });
+            let (_, plan) = matched;
+            matched_plans.insert(plan.body.index());
+            coverage.pairs += 1;
+
+            let frame = plan
+                .frame
+                .as_ref()
+                .unwrap_or_else(|| panic!("the fixture's pair is expanded: {plan:?}"));
+            assert_eq!(
+                pair.resume_points, frame.resume_points,
+                "the pair's resume points"
+            );
+            assert_eq!(
+                pair.wait_await_states, frame.wait_await_states,
+                "the pair's `Wait` cancellation states"
+            );
+            assert_eq!(
+                pair.until_await_states, frame.until_await_states,
+                "the pair's `until` cancellation states"
+            );
+            assert!(
+                canonical_eq(&pair.result_type, &frame.result_type),
+                "the pair's result type: legacy {} vs plan {}",
+                pair.result_type,
+                frame.result_type
+            );
+            assert_eq!(
+                pair.await_result_types.len(),
+                frame.await_result_types.len(),
+                "the pair's await result types"
+            );
+            for (legacy_type, planned) in pair
+                .await_result_types
+                .iter()
+                .zip(&frame.await_result_types)
+            {
+                assert!(
+                    canonical_eq(legacy_type, planned),
+                    "an await result type: legacy {legacy_type} vs plan {planned}"
+                );
+            }
+            assert_eq!(
+                pair.frame_binding_types.len(),
+                frame.frame_bindings.len(),
+                "the pair's frame bindings"
+            );
+            for (binding, legacy_type) in frame.frame_bindings.iter().zip(&pair.frame_binding_types)
+            {
+                assert!(
+                    canonical_eq(legacy_type, &binding.value_type),
+                    "a frame binding's type: legacy {legacy_type} vs plan {}",
+                    binding.value_type
+                );
+            }
+            assert_eq!(
+                pair.resource_slots.len(),
+                frame.resources.len(),
+                "the pair's resource slots"
+            );
+            for (legacy_indirect, slot) in pair.resource_slots.iter().zip(&frame.resources) {
+                assert_eq!(
+                    *legacy_indirect, slot.indirect,
+                    "a resource slot's pass mode for `{}`",
+                    slot.resource.value_type
+                );
+            }
+            assert_eq!(
+                pair.capture_finalizer,
+                frame.capture_finalizer.is_some(),
+                "the pair's capture finalizer presence"
+            );
+            if frame.capture_finalizer.is_some() {
+                coverage.pairs_with_finalizer += 1;
+            } else {
+                coverage.pairs_without_finalizer += 1;
+            }
+
+            // Unwind drops are compared as a set: legacy iterates a `HashMap`.
+            let planned_drops = frame
+                .frame_bindings
+                .iter()
+                .filter_map(|binding| {
+                    binding
+                        .unwind_drop
+                        .as_ref()
+                        .map(|_| (binding.symbol, canonical(&binding.value_type)))
+                })
+                .collect::<std::collections::HashSet<_>>();
+            let legacy_drops = pair
+                .unwind_drops
+                .iter()
+                .map(|(symbol, value_type)| (*symbol, canonical(value_type)))
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(
+                legacy_drops, planned_drops,
+                "the pair's unwind drop set for body syntax {:?}",
+                pair.body_syntax
+            );
+            if !planned_drops.is_empty() {
+                coverage.unwind_drop_pairs += 1;
+            }
+        }
+
+        // Unmatched plans are explained as aliased instantiations: the same
+        // body syntax was requested more than once with different
+        // substitutions, but the syntax-keyed cache created one pair.
+        for (syntax, candidates) in &plans_by_syntax {
+            let pair_count = legacy
+                .coroutine_pairs
+                .iter()
+                .filter(|pair| pair.body_syntax == *syntax)
+                .count();
+            let requests = legacy
+                .coroutine_requests
+                .iter()
+                .filter(|request| request.body_syntax == *syntax)
+                .collect::<Vec<_>>();
+            for (id, _) in candidates {
+                if matched_plans.contains(&id.index()) {
+                    continue;
+                }
+                assert!(
+                    pair_count >= 1,
+                    "an unmatched plan's body syntax has a legacy pair"
+                );
+                assert!(
+                    requests.len() > pair_count,
+                    "an unmatched plan is only explained when the syntax was requested more than once"
+                );
+                let matched_request = requests.iter().any(|request| {
+                    instance_substitutions_match(program, *id, &request.substitutions)
+                });
+                assert!(
+                    matched_request,
+                    "the aliased plan's instantiation was requested at least once"
+                );
+                coverage.alias_explained_plans += 1;
+            }
+        }
+
+        // ---- runners ----
+        let mut matched_runner_plans = std::collections::HashSet::new();
+        for runner in &legacy.runners {
+            let expected_owner =
+                runner
+                    .owner
+                    .as_ref()
+                    .map(|(function, function_type, substitutions)| {
+                        let instance = program
+                            .instance_for_legacy_specialization(
+                                *function,
+                                function_type,
+                                substitutions,
+                            )
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "no instance matches the legacy runner's owner function {:?}",
+                                    function
+                                )
+                            });
+                        program
+                            .instances
+                            .get(instance)
+                            .expect("the owner instance")
+                            .ordinal
+                    });
+            let syntax = runner.call_syntax;
+            let evaluator = runner.evaluator;
+            let matching = program
+                .artifacts
+                .iter()
+                .filter_map(|(_, artifact)| {
+                    let plan = match artifact.plan.as_ref()? {
+                        LoweredArtifactPlan::ReactionRunner(plan)
+                            if runner.family == LegacyRunnerFamily::Reaction =>
+                        {
+                            plan
+                        }
+                        LoweredArtifactPlan::UntilRunner(plan)
+                            if runner.family == LegacyRunnerFamily::Until =>
+                        {
+                            plan
+                        }
+                        LoweredArtifactPlan::DerivedRunner(plan)
+                            if runner.family == LegacyRunnerFamily::Derived =>
+                        {
+                            plan
+                        }
+                        _ => return None,
+                    };
+                    let owner_ok = match (expected_owner, plan.owner) {
+                        (Some(ordinal), ArtifactSiteOwner::Instance(owner)) => owner == ordinal,
+                        (None, ArtifactSiteOwner::Initializer(_)) => true,
+                        _ => false,
+                    };
+                    if !owner_ok {
+                        return None;
+                    }
+                    let operations = runner_owner_operations(program, plan.owner);
+                    let site_ok = match (runner.family, plan.site) {
+                        (LegacyRunnerFamily::Reaction, ArtifactSite::Callback(callback)) => {
+                            operations.iter().any(|(_, operation)| {
+                                matches!(
+                                    &operation.kind,
+                                    crate::LoweredReactiveOperationKind::Reaction {
+                                        callback: recorded,
+                                        ..
+                                    } if *recorded == callback && operation.origin.syntax == syntax.unwrap_or(staple_syntax::SyntaxId(usize::MAX))
+                                )
+                            })
+                        }
+                        (LegacyRunnerFamily::Until, ArtifactSite::Callback(predicate)) => {
+                            operations.iter().any(|(_, operation)| {
+                                matches!(
+                                    &operation.kind,
+                                    crate::LoweredReactiveOperationKind::Until {
+                                        predicate: recorded,
+                                        ..
+                                    } if *recorded == predicate && operation.origin.syntax == syntax.unwrap_or(staple_syntax::SyntaxId(usize::MAX))
+                                )
+                            })
+                        }
+                        (LegacyRunnerFamily::Derived, ArtifactSite::Operation(operation)) => {
+                            operations.iter().find(|(id, _)| *id == operation).is_some_and(
+                                |(_, operation)| {
+                                    matches!(
+                                        &operation.kind,
+                                        crate::LoweredReactiveOperationKind::DerivedCreate {
+                                            evaluator: recorded,
+                                            ..
+                                        } if *recorded == evaluator.unwrap_or(crate::FunctionId(usize::MAX))
+                                    )
+                                },
+                            )
+                        }
+                        _ => false,
+                    };
+                    site_ok.then_some(plan)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "exactly one runner plan matches the legacy creation {runner:?}: {matching:?}"
+            );
+            let plan = matching[0];
+            matched_runner_plans.insert((plan.owner, plan.site));
+
+            // Substitutions for the recorded legacy callback type.
+            let function_type = match &runner.owner {
+                Some((_, _, substitutions)) => match crate::substitute_type(
+                    crate::CheckedType::Function(runner.callback_type.clone()),
+                    substitutions,
+                ) {
+                    crate::CheckedType::Function(function_type) => function_type,
+                    other => panic!("a substituted callback type is a function: {other:?}"),
+                },
+                None => runner.callback_type.clone(),
+            };
+            match (runner.family, &plan.body) {
+                (
+                    LegacyRunnerFamily::Reaction,
+                    ReactiveRunnerBody::Reaction {
+                        callback_type,
+                        resources,
+                    },
+                ) => {
+                    assert!(
+                        canonical_eq(
+                            &crate::CheckedType::Function(function_type.clone()),
+                            &crate::CheckedType::Function(callback_type.clone())
+                        ),
+                        "the reaction callback type"
+                    );
+                    assert_eq!(
+                        runner.resource_slots.len(),
+                        resources.len(),
+                        "the reaction resource slots"
+                    );
+                    for (legacy_indirect, slot) in runner.resource_slots.iter().zip(resources) {
+                        assert_eq!(
+                            *legacy_indirect, slot.indirect,
+                            "a reaction resource slot's pass mode"
+                        );
+                    }
+                    coverage.runners.insert("reaction");
+                }
+                (LegacyRunnerFamily::Until, ReactiveRunnerBody::Until { predicate_type }) => {
+                    assert!(
+                        canonical_eq(
+                            &crate::CheckedType::Function(function_type.clone()),
+                            &crate::CheckedType::Function(predicate_type.clone())
+                        ),
+                        "the `until` predicate type"
+                    );
+                    coverage.runners.insert("until");
+                    if runner.name_reused {
+                        let earlier = legacy.runners.iter().any(|other| {
+                            other.family == LegacyRunnerFamily::Until
+                                && other.call_syntax == runner.call_syntax
+                                && !std::ptr::eq(other, runner)
+                        });
+                        assert!(
+                            earlier,
+                            "a reused `until` name has an earlier creation for the same call"
+                        );
+                        coverage.until_reuse += 1;
+                    }
+                }
+                (
+                    LegacyRunnerFamily::Derived,
+                    ReactiveRunnerBody::Derived { evaluator_type, .. },
+                ) => {
+                    assert!(
+                        canonical_eq(
+                            &crate::CheckedType::Function(function_type.clone()),
+                            &crate::CheckedType::Function(evaluator_type.clone())
+                        ),
+                        "the derived evaluator type"
+                    );
+                    coverage.runners.insert("derived");
+                }
+                (family, body) => panic!("runner family/body mismatch: {family:?} vs {body:?}"),
+            }
+        }
+
+        // Vice versa: every runner plan matches a legacy creation.
+        for (_, artifact) in program.artifacts.iter() {
+            let Some(plan) = artifact.plan.as_ref() else {
+                continue;
+            };
+            let runner = match plan {
+                LoweredArtifactPlan::ReactionRunner(plan)
+                | LoweredArtifactPlan::UntilRunner(plan)
+                | LoweredArtifactPlan::DerivedRunner(plan) => plan,
+                _ => continue,
+            };
+            assert!(
+                matched_runner_plans.contains(&(runner.owner, runner.site)),
+                "every runner plan matches a legacy creation: {plan:?}"
+            );
+        }
+
+        // Use-site coverage for the new site kinds.
+        let mut collect = |uses: &[crate::LoweredArtifactUse]| {
+            for use_ in uses {
+                coverage.use_sites.insert(use_site_name(use_.site));
+            }
+        };
+        for (_, instance) in program.instances.iter() {
+            if let Some(body) = &instance.body {
+                collect(&body.artifact_uses);
+            }
+        }
+        for uses in &program.initializer_artifact_uses {
+            collect(uses);
+        }
+        coverage
+    }
+
+    #[test]
+    fn stage_4_5_coroutine_and_runner_transition_matches_legacy_emission() {
+        let mut coverage = Stage45Coverage::default();
+        for source in [
+            // Frame bindings, captures, and finalizer presence.
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "def plain: () -> Coroutine{} I32 = () => coro { 1 }\n",
+                "def framed: () -> Coroutine{} I32 = () => coro {\n",
+                "  let owned = c_string \"a\"\n",
+                "  let plain_value = 1\n",
+                "  inspect owned + plain_value\n",
+                "}\n",
+                "def owning: move CString -> Coroutine{} I32 = move value => coro { inspect value; 1 }\n",
+                "def copying: I32 -> Coroutine{} I32 = value => coro { value }\n",
+                "let a = plain ()\n",
+                "let b = framed ()\n",
+                "let c = owning (c_string \"b\")\n",
+                "let d = copying 2\n",
+            ),
+            // Resume points, `Wait`/`until` states, and resources.
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.cinterop.(CString, c_string)\n",
+                "let signal flag = 0\n",
+                "type Counter = ctor (value: I32)\n",
+                "def read_counter: () ->{Counter} I32 = () => (resource Counter).value\n",
+                "def use_counter: () -> Coroutine{Counter} I32 = () => coro { read_counter () }\n",
+                "def chained: () -> Coroutine{} (I32, CString) = () => coro {\n",
+                "  let number = await (coro { 1 })\n",
+                "  let text = await (coro { c_string \"x\" })\n",
+                "  (number, text)\n",
+                "}\n",
+                "def waiter: move Wait I32 -> Coroutine{} I32 = move pending => coro {\n",
+                "  let _ = await pending\n",
+                "  0\n",
+                "}\n",
+                "def make_completion: () -> (wait: Wait I32, resolver: Resolver I32) = () => completion (scheduler ())\n",
+                "def drive_wait: () -> Coroutine{} I32 = () => {\n",
+                "  let (wait, resolver) = make_completion ()\n",
+                "  let _ = resolver\n",
+                "  waiter wait\n",
+                "}\n",
+                "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+                "  let _ = await (until { flag >= 1 })\n",
+                "  ()\n",
+                "}\n",
+                "let a = with Counter = Counter (value: 1) { use_counter () }\n",
+                "let b = chained ()\n",
+                "let c = drive_wait ()\n",
+                "with Reactive = reactive_scope () { waiting () }\n",
+            ),
+            // A generic `coro` at two types: the legacy syntax key aliases.
+            // The result type is concrete so legacy can emit the pair; the
+            // captures carry `T`, so the two owned plans differ.
+            concat!(
+                "use std.coroutine.*\n",
+                "def peek: <T> T -> I32 = _ => 1\n",
+                "def generic: <T where Copy T> T -> Coroutine{} I32 = value => coro { peek value; 1 }\n",
+                "let a: Coroutine{} I32 = generic 1\n",
+                "let b: Coroutine{} I32 = generic (1 satisfies U8)\n",
+            ),
+            // Reaction resources, an explicit callback, and a droppable capture.
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "type Counter = ctor (value: I32)\n",
+                "def read_counter: () ->{Counter} I32 = () => (resource Counter).value\n",
+                "def increment: () ->{mut Counter} () = () => {\n",
+                "  (resource Counter).value = (resource Counter).value + 1\n",
+                "}\n",
+                "def subscribe_plain: () ->{Reactive} () = () => reaction { () }\n",
+                "def subscribe_value: () ->{Reactive, Counter} () = () => reaction { read_counter (); () }\n",
+                "def subscribe_mut: () ->{Reactive, mut Counter} () = () => reaction { increment (); () }\n",
+                "def poke: () -> () = () => ()\n",
+                "def subscribe_explicit: () ->{Reactive} () = () => reaction poke\n",
+                "def subscribe_owned: move CString ->{Reactive} () = move value => reaction { inspect value; () }\n",
+                "let a = with Reactive = reactive_scope () { subscribe_plain () }\n",
+                "let b = with Counter = Counter (value: 1) { with Reactive = reactive_scope () { subscribe_value () } }\n",
+                "let c = with mut Counter = Counter (value: 2) { with Reactive = reactive_scope () { subscribe_mut () } }\n",
+                "let d = with Reactive = reactive_scope () { subscribe_explicit () }\n",
+                "let e = with Reactive = reactive_scope () { subscribe_owned (c_string \"x\") }\n",
+            ),
+            // `until` inside a coroutine and derived bindings in an
+            // initializer and an instance.
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "let signal count = 0\n",
+                "def wait: () -> Coroutine{Reactive} () = () => coro {\n",
+                "  let _ = await (until { count >= 5 })\n",
+                "  ()\n",
+                "}\n",
+                "let doubled = count + count\n",
+                "def make: () ->{state.read} I32 = () => {\n",
+                "  let local = count + count\n",
+                "  local\n",
+                "}\n",
+                "// A derived evaluator capturing a droppable value.\n",
+                "def make_derived: move CString ->{state.read} I32 = move value => {\n",
+                "  let local = count + inspect value\n",
+                "  local\n",
+                "}\n",
+                "let a = with Reactive = reactive_scope () { wait () }\n",
+                "let b = make ()\n",
+                "let c = doubled\n",
+                "let d = make_derived (c_string \"x\")\n",
+            ),
+        ] {
+            coverage.merge(assert_stage_4_5_transition(source));
+        }
+
+        assert!(
+            coverage.pairs >= 6,
+            "the fixtures cover several pairs: {coverage:?}"
+        );
+        assert!(
+            coverage.pairs_with_finalizer >= 1 && coverage.pairs_without_finalizer >= 1,
+            "the fixtures cover pairs with and without a capture finalizer: {coverage:?}"
+        );
+        assert!(
+            coverage.unwind_drop_pairs >= 1,
+            "the fixtures cover a pair with unwind drops: {coverage:?}"
+        );
+        assert!(
+            coverage.alias_explained_plans >= 1,
+            "the generic `coro` fixture explains its aliased instantiation: {coverage:?}"
+        );
+        for family in ["reaction", "until", "derived"] {
+            assert!(
+                coverage.runners.contains(family),
+                "the fixtures cover the `{family}` runner family: {coverage:?}"
+            );
+        }
+        // The legacy `until` name is syntax-keyed, so reuse would only be
+        // observable through a generic enclosing function. Legacy cannot emit
+        // one (`until`'s predicate/parameter paths hit unspecialized `T` or a
+        // missing ambient `Reactive`), so every reachable creation is the
+        // first for its call and reuse stays zero. The owned catalog gives
+        // each instantiation its own key by construction; Step 3's generic
+        // fixture proves the two keys.
+        assert_eq!(
+            coverage.until_reuse, 0,
+            "no reachable fixture reuses a syntax-keyed `until` name: {coverage:?}"
+        );
+        for site in [
+            "coro-creation",
+            "reactive-callback-environment",
+            "derived-evaluator-environment",
+            "reactive-runner",
+        ] {
+            assert!(
+                coverage.use_sites.contains(site),
+                "the fixtures cover the `{site}` use site: {coverage:?}"
+            );
+        }
+        eprintln!("stage 4.5 transition coverage: {coverage:?}");
+    }
+
+    #[test]
+    fn stage_4_5_transition_matches_legacy_on_standard_library_values() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "use std.cinterop.(CString, c_string)\n",
+            "extern \"c\" { inspect: CString -> I32 }\n",
+            "let signal count = 0\n",
+            "def waiter: move Wait I32 -> Coroutine{} I32 = move pending => coro {\n",
+            "  let _ = await pending\n",
+            "  0\n",
+            "}\n",
+            "def make_completion: () -> (wait: Wait I32, resolver: Resolver I32) = () => completion (scheduler ())\n",
+            "def drive_wait: () -> Coroutine{} I32 = () => {\n",
+            "  let (wait, resolver) = make_completion ()\n",
+            "  let _ = resolver\n",
+            "  waiter wait\n",
+            "}\n",
+            "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+            "  let _ = await (until { count >= 3 })\n",
+            "  ()\n",
+            "}\n",
+            "def driver: () -> Coroutine{} I32 = () => coro { let v = await (coro { 7 }); v + 1 }\n",
+            "def subscribe: () ->{Reactive} () = () => reaction { () }\n",
+            "// A coroutine and a reaction callback with droppable captures install\n",
+            "// closure-environment finalizers the 4.4 comparison must include.\n",
+            "def owning_task: move CString -> Coroutine{} I32 = move value => coro { inspect value; 1 }\n",
+            "def subscribe_owned: move CString ->{Reactive} () = move value => reaction { inspect value; () }\n",
+            "let a = drive_wait ()\n",
+            "with Reactive = reactive_scope () { waiting (); subscribe (); subscribe_owned (c_string \"y\") }\n",
+            "let owned = owning_task (c_string \"x\")\n",
+            "let sched = scheduler ()\n",
+            "with Tasks = task_scope (sched) {\n",
+            "  let _ = spawn (driver ())\n",
+            "  let _ = pump (sched, 4)\n",
+            "}\n",
+        );
+        let coverage = assert_stage_4_5_transition(source);
+        assert!(
+            coverage.runners.contains("reaction") && coverage.runners.contains("until"),
+            "the standard-library program covers reaction and `until`: {coverage:?}"
+        );
+        assert!(
+            coverage.use_sites.contains("coro-creation")
+                && coverage.use_sites.contains("reactive-runner")
+                && coverage.use_sites.contains("reactive-callback-environment"),
+            "the standard-library program records the new use sites: {coverage:?}"
+        );
+        // The 4.4 cleanup comparison now runs over the same program with
+        // coroutine thunk and reactive callback environments included and no
+        // exclusions.
+        let cleanup = assert_cleanup_matches_legacy(source);
+        assert!(
+            cleanup.finalizer_kinds.contains("closure"),
+            "coroutine and reactive environment finalizers flow through the 4.4 comparison: {cleanup:?}"
+        );
+        eprintln!("stage 4.5 stdlib transition coverage: {coverage:?}");
     }
 
     // ------------------------------------------------------------------

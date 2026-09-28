@@ -89,6 +89,17 @@ struct ModuleEmitter<'module, 'context> {
     legacy_owned_function: Option<FunctionId>,
     #[cfg(test)]
     legacy_buffer_clones: Vec<LegacyBufferClone>,
+    /// Test-only: every `ensure_coroutine_codes` pair creation, in creation
+    /// order.
+    #[cfg(test)]
+    legacy_coroutine_pairs: Vec<LegacyCoroutinePair>,
+    /// Test-only: every `compile_coro_expression` request for a pair, in
+    /// emission order.
+    #[cfg(test)]
+    legacy_coroutine_requests: Vec<LegacyCoroutineRequest>,
+    /// Test-only: every reactive runner creation, in creation order.
+    #[cfg(test)]
+    legacy_runners: Vec<LegacyReactiveRunner>,
     /// Test-only: whether the most recent `set_gc_finalizer` call happened, so
     /// the constructor-adapter record observes the real call.
     #[cfg(test)]
@@ -363,6 +374,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             #[cfg(test)]
             legacy_buffer_clones: Vec::new(),
             #[cfg(test)]
+            legacy_coroutine_pairs: Vec::new(),
+            #[cfg(test)]
+            legacy_coroutine_requests: Vec::new(),
+            #[cfg(test)]
+            legacy_runners: Vec::new(),
+            #[cfg(test)]
             legacy_finalizer_set: false,
             active_type_substitutions: HashMap::new(),
             expression_type_overrides: HashMap::new(),
@@ -546,6 +563,73 @@ pub(crate) struct LegacyBufferClone {
     pub(crate) function: FunctionId,
 }
 
+/// Test-only: one `ensure_coroutine_codes` pair *creation*, with the facts the
+/// plan comparison records. Legacy's unwind drops follow `HashMap` order, so
+/// the test compares them as a set.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyCoroutinePair {
+    /// The `coro` body syntax the legacy cache key uses.
+    pub(crate) body_syntax: staple_syntax::SyntaxId,
+    /// The active substitutions at creation.
+    pub(crate) substitutions: HashMap<TypeParameterId, CheckedType>,
+    /// The substituted frame-binding types in plan order.
+    pub(crate) frame_binding_types: Vec<CheckedType>,
+    pub(crate) result_type: CheckedType,
+    pub(crate) await_result_types: Vec<CheckedType>,
+    pub(crate) resume_points: usize,
+    pub(crate) wait_await_states: Vec<usize>,
+    pub(crate) until_await_states: Vec<usize>,
+    /// Each deferred resource's pass mode (`true` = loaded through a pointer).
+    pub(crate) resource_slots: Vec<bool>,
+    /// Whether the cancel/cleanup path calls the capture-environment
+    /// finalizer; legacy gates it on non-empty captures.
+    pub(crate) capture_finalizer: bool,
+    /// The frame bindings the cancel unwind conditionally drops, as a set.
+    pub(crate) unwind_drops: Vec<(SymbolId, CheckedType)>,
+}
+
+/// Test-only: one `compile_coro_expression` *request* for a pair, so the test
+/// can show where the syntax-keyed cache aliased two instantiations.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyCoroutineRequest {
+    pub(crate) body_syntax: staple_syntax::SyntaxId,
+    pub(crate) substitutions: HashMap<TypeParameterId, CheckedType>,
+}
+
+/// Test-only: the three reactive runner families.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LegacyRunnerFamily {
+    Reaction,
+    Until,
+    Derived,
+}
+
+/// Test-only: one legacy runner creation with its legacy key and call facts.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyReactiveRunner {
+    pub(crate) family: LegacyRunnerFamily,
+    /// The call `SyntaxId` for reaction and `until`.
+    pub(crate) call_syntax: Option<staple_syntax::SyntaxId>,
+    /// The evaluator `FunctionId` for derived.
+    pub(crate) evaluator: Option<FunctionId>,
+    /// The specialization being emitted, or `None` for module initializers.
+    pub(crate) owner: Option<(
+        FunctionId,
+        CheckedFunctionType,
+        HashMap<TypeParameterId, CheckedType>,
+    )>,
+    pub(crate) callback_type: CheckedFunctionType,
+    /// Reaction resource pass modes (`true` = pointer).
+    pub(crate) resource_slots: Vec<bool>,
+    /// `until` only: the syntax-keyed name already existed, so the runner was
+    /// reused across two instantiations.
+    pub(crate) name_reused: bool,
+}
+
 #[cfg(test)]
 pub(crate) struct LegacyEmissions {
     pub(crate) specializations: Vec<(
@@ -559,6 +643,9 @@ pub(crate) struct LegacyEmissions {
     pub(crate) finalizers: Vec<LegacyFinalizer>,
     pub(crate) owned: Vec<LegacyOwned>,
     pub(crate) buffer_clones: Vec<LegacyBufferClone>,
+    pub(crate) coroutine_pairs: Vec<LegacyCoroutinePair>,
+    pub(crate) coroutine_requests: Vec<LegacyCoroutineRequest>,
+    pub(crate) runners: Vec<LegacyReactiveRunner>,
 }
 
 /// Compiles one lowered module with the legacy backend and returns its typed
@@ -581,6 +668,9 @@ pub(crate) fn legacy_emissions(
         finalizers: emitter.legacy_finalizers.clone(),
         owned: emitter.legacy_owned.clone(),
         buffer_clones: emitter.legacy_buffer_clones.clone(),
+        coroutine_pairs: emitter.legacy_coroutine_pairs.clone(),
+        coroutine_requests: emitter.legacy_coroutine_requests.clone(),
+        runners: emitter.legacy_runners.clone(),
     })
 }
 
@@ -8081,6 +8171,31 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 )
             })?;
 
+        // Test-only: record the runner creation and its payload pass modes.
+        #[cfg(test)]
+        {
+            let resource_slots = callback_type
+                .effects
+                .resources
+                .iter()
+                .map(|resource| {
+                    resource.mutable
+                        || !self
+                            .typed_module
+                            .is_copy_in_function(&resource.value_type, environment.function_id)
+                })
+                .collect();
+            self.legacy_runners.push(LegacyReactiveRunner {
+                family: LegacyRunnerFamily::Reaction,
+                call_syntax: Some(call.syntax.id),
+                evaluator: None,
+                owner: self.legacy_function_key.clone(),
+                callback_type: callback_type.clone(),
+                resource_slots,
+                name_reused: false,
+            });
+        }
+
         let mut payload_fields = vec![callback.get_type().into()];
         for resource in &callback_type.effects.resources {
             if resource.mutable
@@ -8460,6 +8575,21 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         predicate_type: &CheckedFunctionType,
     ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {
         let name = format!("__staple_until_runner_{}", call_id.0);
+        // Test-only: record the creation and whether the syntax-keyed name was
+        // reused across instantiations.
+        #[cfg(test)]
+        {
+            let name_reused = self.llvm_module.get_function(&name).is_some();
+            self.legacy_runners.push(LegacyReactiveRunner {
+                family: LegacyRunnerFamily::Until,
+                call_syntax: Some(call_id),
+                evaluator: None,
+                owner: self.legacy_function_key.clone(),
+                callback_type: predicate_type.clone(),
+                resource_slots: Vec::new(),
+                name_reused,
+            });
+        }
         if let Some(existing) = self.llvm_module.get_function(&name) {
             return Ok(existing);
         }
@@ -8605,6 +8735,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "derived evaluators cannot capture resources",
             ));
         }
+
+        // Test-only: record the runner creation keyed by the evaluator.
+        #[cfg(test)]
+        self.legacy_runners.push(LegacyReactiveRunner {
+            family: LegacyRunnerFamily::Derived,
+            call_syntax: None,
+            evaluator: Some(evaluator.id),
+            owner: self.legacy_function_key.clone(),
+            callback_type: callback_type.clone(),
+            resource_slots: Vec::new(),
+            name_reused: false,
+        });
 
         let pointer_type = self.context.ptr_type(AddressSpace::default());
         let payload_type = self
@@ -9827,6 +9969,67 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.coroutine_codes
             .insert(body_syntax, (resume_fn, cleanup_fn));
 
+        // Test-only: record the pair's creation facts. The plan comparison
+        // reads these; production emission ignores them.
+        #[cfg(test)]
+        {
+            let substituted = |value_type: &CheckedType| {
+                substitute_type(value_type.clone(), &self.active_type_substitutions)
+            };
+            let frame_binding_types = plan
+                .frame_bindings
+                .iter()
+                .map(|symbol| {
+                    self.typed_module
+                        .type_of_symbol(*symbol)
+                        .cloned()
+                        .map(|ty| substituted(&ty))
+                        .unwrap_or(CheckedType::Error)
+                })
+                .collect();
+            let mut unwind_drops = Vec::new();
+            for symbol in layout.cell_fields.keys() {
+                let value_type = self
+                    .typed_module
+                    .type_of_symbol(*symbol)
+                    .cloned()
+                    .map(|ty| substituted(&ty));
+                if let Some(value_type) = value_type
+                    && self.typed_module.type_needs_drop(&value_type)
+                {
+                    unwind_drops.push((*symbol, value_type));
+                }
+            }
+            let resource_slots = plan
+                .deferred_effects
+                .resources
+                .iter()
+                .map(|resource| {
+                    resource.mutable
+                        || !self
+                            .typed_module
+                            .is_copy_in_function(&resource.value_type, None)
+                })
+                .collect();
+            self.legacy_coroutine_pairs.push(LegacyCoroutinePair {
+                body_syntax,
+                substitutions: self.active_type_substitutions.clone(),
+                frame_binding_types,
+                result_type: substituted(&plan.result_type),
+                await_result_types: plan
+                    .await_result_types
+                    .iter()
+                    .map(|ty| substituted(&ty))
+                    .collect(),
+                resume_points: plan.resume_points,
+                wait_await_states: plan.wait_await_states.clone(),
+                until_await_states: plan.until_await_states.clone(),
+                resource_slots,
+                capture_finalizer: !thunk.captures.is_empty(),
+                unwind_drops,
+            });
+        }
+
         let previous_block = self.builder.get_insert_block();
 
         // ---- resume ----
@@ -10363,6 +10566,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let span = coro.syntax.span.clone();
         let body_syntax = coro.body.syntax.id;
         let (resume_fn, cleanup_fn) = self.ensure_coroutine_codes(body_syntax)?;
+        // Test-only: one request per creation site, so the comparison can show
+        // where the syntax-keyed pair cache aliased two instantiations.
+        #[cfg(test)]
+        self.legacy_coroutine_requests.push(LegacyCoroutineRequest {
+            body_syntax,
+            substitutions: self.active_type_substitutions.clone(),
+        });
         let thunk = self
             .typed_module
             .implicit_thunk_for(body_syntax)
