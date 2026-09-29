@@ -77,6 +77,19 @@ pub(crate) struct LoweredFunctionInstance {
     pub traversed: bool,
 }
 
+impl LoweredFunctionInstance {
+    /// Stage 5.3 (F2): whether legacy declares this instance on demand with
+    /// `Internal` linkage. It is exactly the D2 ordinal-name set: an instance
+    /// with a relevant substitution or selected evidence. The environment is
+    /// the pruned relevant environment the instance key is built from, so an
+    /// empty environment and no evidence is the same "non-generic template"
+    /// condition the D2 declared-name rule uses. Instances of non-generic
+    /// templates keep the eager declaration's default linkage.
+    pub(crate) fn is_generic(&self) -> bool {
+        !self.environment.is_empty() || self.evidence.is_some()
+    }
+}
+
 /// How one function instance entered the graph.
 #[derive(Debug, Clone)]
 pub(crate) enum LoweredInstanceRequest {
@@ -2111,6 +2124,23 @@ impl LoweredProgram {
         self.artifacts
             .get(LoweredArtifactRequestId::from_index(ordinal.index()))
             .map(|record| record.name.as_str())
+    }
+
+    /// Stage 5.3 (F3/D2): the two planned names of a coroutine pair, derived
+    /// from the pair artifact's planned name. `planned_names_with` includes
+    /// both in its collision check (with every instance and artifact name), so
+    /// the backend reads them instead of building unchecked names. `None` for
+    /// a non-coroutine artifact or an unreserved ordinal.
+    pub(crate) fn planned_coroutine_pair_names(
+        &self,
+        ordinal: ArtifactOrdinal,
+    ) -> Option<(String, String)> {
+        let name = self.planned_artifact_name(ordinal)?;
+        matches!(
+            self.specializations.artifact(ordinal),
+            Some(ArtifactRequestKey::CoroutineCodes(_))
+        )
+        .then(|| (format!("{name}_resume"), format!("{name}_cleanup")))
     }
 
     /// Validates the installed worklist against its own catalog: dense

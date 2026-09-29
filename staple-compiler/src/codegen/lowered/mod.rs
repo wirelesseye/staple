@@ -16,10 +16,10 @@ use crate::{
     BlockId, CheckedMutation, CheckedResource, CheckedType, EmissionView, ExpressionId,
     FunctionInstanceId, InitializerId, IntegerBinaryOperation, IntrinsicFunction,
     LoweredArgumentPassMode, LoweredArtifactPlan, LoweredBindingSite, LoweredBoundTarget,
-    LoweredCallEnvironment, LoweredCallId, LoweredCallStep, LoweredCallableAdapter,
-    LoweredCallableTarget, LoweredCallableValueId, LoweredClosureEnvironment,
-    LoweredEntryResourceKind, LoweredExpressionKind, LoweredItemKind, LoweredPatternKind, ModuleId,
-    RuntimeRequirement, SymbolId,
+    LoweredCallArgument, LoweredCallEnvironment, LoweredCallId, LoweredCallStep,
+    LoweredCallableAdapter, LoweredCallableTarget, LoweredCallableValueId,
+    LoweredClosureEnvironment, LoweredEntryResourceKind, LoweredExpressionKind, LoweredItemKind,
+    LoweredPatternKind, ModuleId, RuntimeRequirement, SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -122,7 +122,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     pub(super) fn declared_catalog_types(
         mut self,
         target_machine: &TargetMachine,
-    ) -> CodeGenerationResult<HashMap<String, String>> {
+    ) -> CodeGenerationResult<HashMap<String, (String, bool)>> {
         self.declare_program(target_machine)?;
         let mut types = HashMap::new();
         for function in self
@@ -136,7 +136,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .expect("planned names are UTF-8");
             types.insert(
                 name.to_owned(),
-                function.get_type().print_to_string().to_string(),
+                (
+                    function.get_type().print_to_string().to_string(),
+                    function.get_linkage() == Linkage::Internal,
+                ),
             );
         }
         for function in self.initializers.values() {
@@ -146,13 +149,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .expect("initializer names are UTF-8");
             types.insert(
                 name.to_owned(),
-                function.get_type().print_to_string().to_string(),
+                (
+                    function.get_type().print_to_string().to_string(),
+                    function.get_linkage() == Linkage::Internal,
+                ),
             );
         }
         Ok(types)
     }
 
     fn declare_instances(&mut self) -> CodeGenerationResult<()> {
+        // Linkage rule per family (F2, matching legacy): an instance of a
+        // generic template (or one selected by evidence, `is_generic`) is
+        // declared on demand by legacy `ensure_function_specialization` with
+        // `Internal` linkage; an instance of a non-generic template keeps the
+        // eager declaration's default (external) linkage. Names always come
+        // from the catalog, never from the backend (D2).
         for (id, instance) in self.view.instances() {
             let Some(signature) = self.view.instance_signature(id) else {
                 continue;
@@ -171,10 +183,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )
             })?;
             let function_type = self.backend.compile_closure_function_type(signature)?;
+            let linkage = instance.is_generic().then_some(Linkage::Internal);
             let function = self
                 .backend
                 .llvm_module
-                .add_function(name, function_type, None);
+                .add_function(name, function_type, linkage);
             self.instances.insert(id, function);
         }
         Ok(())
@@ -292,6 +305,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     fn declare_artifacts(&mut self) -> CodeGenerationResult<()> {
+        // Linkage rule per family (F2, matching legacy): constructor adapters,
+        // extern adapters, runners, and the coroutine `resume`/`cleanup` pair
+        // are `Internal`; structural methods and GC finalizers keep the
+        // default (external) linkage; drop glue emits no function (D3).
+        // Coroutine pair names come from the catalog (F3), where
+        // `planned_names_with` collision-checks them with every other planned
+        // name. The remaining names are the artifact's planned name.
         let pointer = self.backend.context.ptr_type(AddressSpace::default());
         for (_, artifact) in self.view.artifacts() {
             let plan = artifact.plan.as_ref().ok_or_else(|| {
@@ -321,11 +341,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let ty = self
                         .backend
                         .compile_closure_function_type(&plan.callable_type)?;
-                    vec![
-                        self.backend
-                            .llvm_module
-                            .add_function(name, ty, Some(Linkage::Internal)),
-                    ]
+                    vec![self.backend.llvm_module.add_function(name, ty, None)]
                 }
                 LoweredArtifactPlan::DropGlue(_) => Vec::new(),
                 LoweredArtifactPlan::GcFinalizer(_) => {
@@ -337,17 +353,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     vec![self.backend.llvm_module.add_function(name, ty, None)]
                 }
                 LoweredArtifactPlan::CoroutineCodes(_) => {
+                    let (resume_name, cleanup_name) = self
+                        .view
+                        .planned_coroutine_pair_names(artifact.ordinal)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                artifact.origin.span.clone(),
+                                "missing planned coroutine pair names",
+                            )
+                        })?;
                     let status = self.backend.context.struct_type(
                         &[self.backend.context.i8_type().into(), pointer.into()],
                         false,
                     );
                     let resume = self.backend.llvm_module.add_function(
-                        &format!("{name}_resume"),
+                        &resume_name,
                         status.fn_type(&[pointer.into()], false),
                         Some(Linkage::Internal),
                     );
                     let cleanup = self.backend.llvm_module.add_function(
-                        &format!("{name}_cleanup"),
+                        &cleanup_name,
                         self.backend
                             .context
                             .void_type()
@@ -1251,7 +1276,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let native_extern = matches!(call.target, LoweredCallableTarget::ExternalFunction { .. });
         let string_constructor = matches!(call.target, LoweredCallableTarget::Constructor { .. })
             && call.result_type == CheckedType::String;
-        let direct_value_route = c_string_conversion || native_extern || string_constructor;
         if !call.resource_bindings.is_empty()
             || !call.initialization_checks.is_empty()
             || (call.c_string_temporary && !native_extern)
@@ -1260,6 +1284,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             || (!c_string_conversion && !string_constructor && !call.moves.is_empty())
         {
             return Err(unsupported("call resources, mutation, or cleanup"));
+        }
+        if native_extern
+            && matches!(
+                call.function_type.parameter.as_ref(),
+                CheckedType::Product(product) if product.variadic
+            )
+        {
+            // Legacy routes variadic extern arguments through
+            // `compile_arguments(.., is_var_arg)`; 5.4 ports that handling.
+            return Err(unsupported("variadic extern call"));
         }
         let mut parameter_count = flattened_parameter_types(&call.function_type.parameter).len();
         if matches!(call.function_type.parameter.as_ref(), CheckedType::Product(product) if product.variadic)
@@ -1299,13 +1333,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let expression = record
                         .expression
                         .ok_or_else(|| unsupported("implicit thunk"))?;
-                    if !direct_value_route
-                        && (record.pass_mode != LoweredArgumentPassMode::Value
-                            || record.temporary
-                            || record.writeback
-                            || record.drops_after_call)
-                    {
-                        return Err(unsupported("indirect argument"));
+                    if let Some(family) = call_argument_diagnostic(record, c_string_conversion) {
+                        return Err(unsupported(family));
                     }
                     (slot, expression)
                 }
@@ -1318,13 +1347,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .arguments
                         .get(*argument)
                         .ok_or_else(|| unsupported("product argument"))?;
-                    if !direct_value_route
-                        && (record.pass_mode != LoweredArgumentPassMode::Value
-                            || record.temporary
-                            || record.writeback
-                            || record.drops_after_call)
-                    {
-                        return Err(unsupported("indirect product argument"));
+                    if let Some(family) = call_argument_diagnostic(record, c_string_conversion) {
+                        return Err(unsupported(family));
                     }
                     (*slot, *expression)
                 }
@@ -1757,4 +1781,30 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)?;
         Ok(result.as_any_value_enum())
     }
+}
+
+/// Stage 5.3 F5: the argument-record facts the supported call routes can
+/// compile. Legacy's intrinsic conversions (`StringFromCString`/
+/// `StringToCString`) evaluate their argument expression directly, so the
+/// recorded pass mode is unused there; every other supported route passes each
+/// argument by value in its ABI slot. A materialized argument, a writeback, or
+/// a post-call cleanup has no legacy treatment on these routes and stays a
+/// diagnostic instead of being silently skipped (Contract 2).
+fn call_argument_diagnostic(
+    record: &LoweredCallArgument,
+    c_string_conversion: bool,
+) -> Option<&'static str> {
+    if record.writeback {
+        return Some("call argument writeback");
+    }
+    if record.drops_after_call {
+        return Some("call argument cleanup");
+    }
+    if record.temporary {
+        return Some("materialized call argument");
+    }
+    if !c_string_conversion && record.pass_mode != LoweredArgumentPassMode::Value {
+        return Some("call argument pass mode");
+    }
+    None
 }

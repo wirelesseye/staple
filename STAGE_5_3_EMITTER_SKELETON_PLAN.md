@@ -4,6 +4,8 @@ This plan covers what remains of Stage 5.3 as of `2b20b12`. It supersedes the St
 
 Line references are against `2b20b12` and will drift; re-locate code by function name.
 
+**Status:** Step 1 (the review fixes) is complete: F2 linkage, F3 coroutine pair names, F5 argument validation, and F9 progress notes. Steps 2–7 remain.
+
 ## Where Stage 5.3 Stands
 
 Landed in `e29770a`, `9f8b989`, `535291e`, `2b20b12`, and verified in review:

@@ -1535,6 +1535,17 @@ impl SpecializationCatalog {
             if !seen.insert(name.clone()) {
                 return Err(SpecializationNameCollision { name });
             }
+            // A coroutine pair is emitted as two functions, `{name}_resume` and
+            // `{name}_cleanup` (Stage 5.3 F3). Both are planned names: reserve
+            // them here so they collide with any instance or artifact name and
+            // the backend can read them instead of building unchecked names.
+            if matches!(key, ArtifactRequestKey::CoroutineCodes(_)) {
+                for pair in [format!("{name}_resume"), format!("{name}_cleanup")] {
+                    if !seen.insert(pair.clone()) {
+                        return Err(SpecializationNameCollision { name: pair });
+                    }
+                }
+            }
             names.push(name);
         }
         Ok(names)

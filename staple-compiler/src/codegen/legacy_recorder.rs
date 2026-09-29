@@ -266,4 +266,7 @@ pub(crate) struct LegacyEmissions {
     /// LLVM function types keyed by final legacy symbol name, for the Stage
     /// 5.3 catalog declaration comparison.
     pub(crate) function_types: HashMap<String, String>,
+    /// LLVM linkage keyed by final legacy symbol name (`true` for `Internal`),
+    /// for the Stage 5.3 F2 declaration comparison.
+    pub(crate) function_linkages: HashMap<String, bool>,
 }

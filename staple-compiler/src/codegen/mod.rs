@@ -536,6 +536,18 @@ pub(crate) fn legacy_emissions(
                 })
             })
             .collect(),
+        function_linkages: emitter
+            .llvm_module
+            .get_functions()
+            .filter_map(|function| {
+                function.get_name().to_str().ok().map(|name| {
+                    (
+                        name.to_owned(),
+                        function.get_linkage() == inkwell::module::Linkage::Internal,
+                    )
+                })
+            })
+            .collect(),
         runtime_surfaces: {
             let mut surfaces: Vec<String> = Vec::new();
             for (symbol, _) in referenced_runtime_symbols(&emitter) {
@@ -558,11 +570,13 @@ pub(crate) fn legacy_emissions(
 
 /// Test-only Stage 5.3 declaration snapshot. This stops before body emission
 /// so unported expression families do not hide catalog signature regressions.
+/// Each entry is the LLVM type and whether the declaration is internal, so the
+/// comparison covers linkage as well as the ABI (F2).
 #[cfg(test)]
 pub(crate) fn lowered_catalog_types(
     context: &inkwell::context::Context,
     module: &LoweredModule,
-) -> Result<HashMap<String, String>, Vec<Diagnostic>> {
+) -> Result<HashMap<String, (String, bool)>, Vec<Diagnostic>> {
     let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
     lowered::LoweredEmitter::new(context, module.program(), &target_machine)
         .declared_catalog_types(&target_machine)

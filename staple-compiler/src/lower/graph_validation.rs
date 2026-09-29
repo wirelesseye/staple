@@ -5473,7 +5473,9 @@ mod tests {
 
         let lowered = lower(concat!(
             "def passthrough: I32 -> I32 = value => value\n",
+            "def identity: <T where Copy T> T -> T = value => value\n",
             "let answer = passthrough 42\n",
+            "let generic = identity 7\n",
             "type Point = ctor (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
         ));
@@ -5534,10 +5536,20 @@ mod tests {
                     .expect("module metadata")
                     .symbol_prefix;
                 let planned = format!("__staple_init_m{prefix}");
+                let lowered_declaration = lowered_types.get(&planned).unwrap_or_else(|| {
+                    panic!("catalog did not declare `{planned}` for legacy `{name}`")
+                });
                 assert_eq!(
-                    lowered_types.get(&planned),
-                    legacy.function_types.get(name),
+                    lowered_declaration.0,
+                    *legacy
+                        .function_types
+                        .get(name)
+                        .expect("legacy function type"),
                     "initializer ABI changed for `{name}`",
+                );
+                assert_eq!(
+                    lowered_declaration.1, legacy.function_linkages[name],
+                    "initializer linkage changed for `{name}`",
                 );
                 compared_initializers += 1;
                 continue;
@@ -5562,10 +5574,20 @@ mod tests {
                     .program
                     .planned_artifact_name(ordinal)
                     .expect("planned constructor adapter name");
+                let lowered_declaration = lowered_types.get(planned).unwrap_or_else(|| {
+                    panic!("catalog did not declare `{planned}` for legacy `{name}`")
+                });
                 assert_eq!(
-                    lowered_types.get(planned),
-                    legacy.function_types.get(name),
+                    lowered_declaration.0,
+                    *legacy
+                        .function_types
+                        .get(name)
+                        .expect("legacy function type"),
                     "constructor adapter ABI changed for `{name}`",
+                );
+                assert_eq!(
+                    lowered_declaration.1, legacy.function_linkages[name],
+                    "constructor adapter linkage changed for `{name}`",
                 );
                 compared_artifacts += 1;
                 continue;
@@ -5590,10 +5612,20 @@ mod tests {
                     .program
                     .planned_artifact_name(ordinal)
                     .expect("planned structural method name");
+                let lowered_declaration = lowered_types.get(planned).unwrap_or_else(|| {
+                    panic!("catalog did not declare `{planned}` for legacy `{name}`")
+                });
                 assert_eq!(
-                    lowered_types.get(planned),
-                    legacy.function_types.get(name),
+                    lowered_declaration.0,
+                    *legacy
+                        .function_types
+                        .get(name)
+                        .expect("legacy function type"),
                     "structural method ABI changed for `{name}`",
+                );
+                assert_eq!(
+                    lowered_declaration.1, legacy.function_linkages[name],
+                    "structural method linkage changed for `{name}`",
                 );
                 compared_artifacts += 1;
                 continue;
@@ -5633,10 +5665,18 @@ mod tests {
                 .function_types
                 .get(name)
                 .expect("legacy function type");
-            let lowered_type = lowered_types.get(planned).unwrap_or_else(|| {
+            let lowered_declaration = lowered_types.get(planned).unwrap_or_else(|| {
                 panic!("catalog did not declare `{planned}` for legacy `{name}`")
             });
-            assert_eq!(lowered_type, legacy_type, "ABI changed for `{name}`");
+            assert_eq!(
+                lowered_declaration.0, *legacy_type,
+                "ABI changed for `{name}`"
+            );
+            assert_eq!(
+                lowered_declaration.1, legacy.function_linkages[name],
+                "linkage changed for `{name}` ({} vs {})",
+                planned, name
+            );
             compared += 1;
         }
         assert!(

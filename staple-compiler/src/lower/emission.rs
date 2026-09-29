@@ -258,6 +258,16 @@ impl<'a> EmissionView<'a> {
         self.program.planned_artifact_name(ordinal)
     }
 
+    /// The two planned names of a coroutine pair (Stage 5.3 F3): derived by the
+    /// catalog from the pair artifact's planned name, which collision-checks
+    /// both against every other planned name.
+    pub(crate) fn planned_coroutine_pair_names(
+        &self,
+        ordinal: ArtifactOrdinal,
+    ) -> Option<(String, String)> {
+        self.program.planned_coroutine_pair_names(ordinal)
+    }
+
     /// The concrete dispatch bindings of one instance body.
     pub(crate) fn instance_bindings(
         &self,
