@@ -151,7 +151,9 @@ Progress:
 
 ### Stage 5 - Migrate LLVM Generation to Lowered IR (In Progress)
 
-Stage 5.3 is in progress: the parallel emitter has catalog declarations for instances, artifacts, externs, globals, and initializers, plus owner-local dispatch and a lowered entry harness. The standard library's eager bodies still reach unported-family diagnostics; entry resources, complete parameter/pattern handling, artifact bodies, and the differential gate remain. Details are in [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md).
+Stage 5.3 is in progress: the parallel emitter has catalog declarations for instances, artifacts, externs, globals, and initializers, plus owner-local dispatch and a lowered entry harness. The standard library's eager bodies still reach unported-family diagnostics; complete parameter/pattern handling, artifact bodies, and the differential gate remain. Details are in [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md).
+
+The lowered initializer now sets up the entry IO/reactive resources and disposes its reactive scope. A declaration-only comparison checks catalog function count and LLVM type parity for eager instances, initializers, and constructor adapters against the legacy emitter. Stage 5.3 remains incomplete because the runnable differential corpus and the remaining family comparisons do not pass yet.
 
 **Stage 5.1 (inventory, decisions, and lowering-side prerequisites) is complete**, as recorded above and in [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md): the query replacement matrix is frozen with no row lacking a lowered source, initializer dispatch sites have binding/evidence tables, planned names follow the D2 declared-name rule with duplicate fallback, the read-only emission view exists, and the symbol/global facts the harness needs are recorded.
 

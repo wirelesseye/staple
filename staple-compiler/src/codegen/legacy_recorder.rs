@@ -263,4 +263,7 @@ pub(crate) struct LegacyEmissions {
     /// Every function the emitter created, with the legacy record it belongs
     /// to, in creation order.
     pub(crate) defined_functions: Vec<(String, LegacyFunctionOrigin)>,
+    /// LLVM function types keyed by final legacy symbol name, for the Stage
+    /// 5.3 catalog declaration comparison.
+    pub(crate) function_types: HashMap<String, String>,
 }

@@ -524,6 +524,18 @@ pub(crate) fn legacy_emissions(
         runners: emitter.legacy_runners.clone(),
         extern_adapters: emitter.legacy_extern_adapters.clone(),
         defined_functions: emitter.legacy_defined_functions.clone(),
+        function_types: emitter
+            .llvm_module
+            .get_functions()
+            .filter_map(|function| {
+                function.get_name().to_str().ok().map(|name| {
+                    (
+                        name.to_owned(),
+                        function.get_type().print_to_string().to_string(),
+                    )
+                })
+            })
+            .collect(),
         runtime_surfaces: {
             let mut surfaces: Vec<String> = Vec::new();
             for (symbol, _) in referenced_runtime_symbols(&emitter) {
@@ -542,6 +554,19 @@ pub(crate) fn legacy_emissions(
             .filter(|name| name != "main" && !emitter.legacy_runtime_internal.contains(name))
             .collect(),
     })
+}
+
+/// Test-only Stage 5.3 declaration snapshot. This stops before body emission
+/// so unported expression families do not hide catalog signature regressions.
+#[cfg(test)]
+pub(crate) fn lowered_catalog_types(
+    context: &inkwell::context::Context,
+    module: &LoweredModule,
+) -> Result<HashMap<String, String>, Vec<Diagnostic>> {
+    let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
+    lowered::LoweredEmitter::new(context, module.program(), &target_machine)
+        .declared_catalog_types(&target_machine)
+        .map_err(|diagnostic| vec![diagnostic])
 }
 
 /// Test-only ground truth for the runtime surfaces: every `(runtime symbol,

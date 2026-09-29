@@ -11,9 +11,9 @@ use inkwell::{
 
 use crate::specialization::ArtifactOrdinal;
 use crate::{
-    BlockId, CheckedMutation, CheckedType, EmissionView, ExpressionId, FunctionInstanceId,
-    InitializerId, LoweredArtifactPlan, LoweredExpressionKind, LoweredItemKind, ModuleId,
-    RuntimeRequirement, SymbolId,
+    BlockId, CheckedMutation, CheckedResource, CheckedType, EmissionView, ExpressionId,
+    FunctionInstanceId, InitializerId, LoweredArtifactPlan, LoweredEntryResourceKind,
+    LoweredExpressionKind, LoweredItemKind, ModuleId, RuntimeRequirement, SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -28,6 +28,8 @@ struct FunctionEnvironment<'context> {
     locals: HashMap<SymbolId, AnyValueEnum<'context>>,
     binding_cells: HashMap<SymbolId, PointerValue<'context>>,
     parameter_pointers: HashMap<SymbolId, PointerValue<'context>>,
+    resources: Vec<(CheckedResource, AnyValueEnum<'context>, bool)>,
+    reactive_scopes: Vec<PointerValue<'context>>,
     returned: bool,
 }
 
@@ -68,6 +70,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         mut self,
         target_machine: &TargetMachine,
     ) -> CodeGenerationResult<LlvmModule<'context>> {
+        self.declare_program(target_machine)?;
+        self.emit_instance_bodies()?;
+        self.emit_initializers()?;
+        self.emit_main()?;
+        self.backend.llvm_module.verify().map_err(|message| {
+            Diagnostic::new(
+                staple_syntax::Span::Compiler,
+                format!("invalid LLVM module: {message}"),
+            )
+        })?;
+        Ok(self.backend.llvm_module)
+    }
+
+    fn declare_program(&mut self, target_machine: &TargetMachine) -> CodeGenerationResult<()> {
         self.backend
             .llvm_module
             .set_triple(&target_machine.get_triple());
@@ -91,16 +107,41 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.declare_artifacts()?;
         self.declare_storage()?;
         self.declare_initializers()?;
-        self.emit_instance_bodies()?;
-        self.emit_initializers()?;
-        self.emit_main()?;
-        self.backend.llvm_module.verify().map_err(|message| {
-            Diagnostic::new(
-                staple_syntax::Span::Compiler,
-                format!("invalid LLVM module: {message}"),
-            )
-        })?;
-        Ok(self.backend.llvm_module)
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn declared_catalog_types(
+        mut self,
+        target_machine: &TargetMachine,
+    ) -> CodeGenerationResult<HashMap<String, String>> {
+        self.declare_program(target_machine)?;
+        let mut types = HashMap::new();
+        for function in self
+            .instances
+            .values()
+            .chain(self.artifacts.values().flatten())
+        {
+            let name = function
+                .get_name()
+                .to_str()
+                .expect("planned names are UTF-8");
+            types.insert(
+                name.to_owned(),
+                function.get_type().print_to_string().to_string(),
+            );
+        }
+        for function in self.initializers.values() {
+            let name = function
+                .get_name()
+                .to_str()
+                .expect("initializer names are UTF-8");
+            types.insert(
+                name.to_owned(),
+                function.get_type().print_to_string().to_string(),
+            );
+        }
+        Ok(types)
     }
 
     fn declare_instances(&mut self) -> CodeGenerationResult<()> {
@@ -588,22 +629,75 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     fn emit_initializers(&mut self) -> CodeGenerationResult<()> {
         for (id, initializer) in self.view.initializers() {
-            if !initializer.resources.is_empty() {
-                return Err(Diagnostic::new(
-                    initializer.origin.span.clone(),
-                    "lowered emitter: entry resources are not implemented yet",
-                ));
-            }
             let function = self.initializers[&id];
             let entry = self.backend.context.append_basic_block(function, "entry");
             self.backend.builder.position_at_end(entry);
             let mut environment = FunctionEnvironment::default();
+            for resource in &initializer.resources {
+                match resource.kind {
+                    LoweredEntryResourceKind::Io => {
+                        let ty = self.backend.compile_type(&resource.resource.value_type)?;
+                        let slot = self
+                            .backend
+                            .builder
+                            .build_alloca(ty, "io.resource")
+                            .map_err(compiler_diagnostic)?;
+                        self.backend
+                            .builder
+                            .build_store(slot, ty.const_zero())
+                            .map_err(compiler_diagnostic)?;
+                        environment.resources.push((
+                            resource.resource.clone(),
+                            slot.as_any_value_enum(),
+                            true,
+                        ));
+                    }
+                    LoweredEntryResourceKind::Reactive => {
+                        let scope = self
+                            .backend
+                            .build_reactive_runtime_call(
+                                "__staple_reactive_scope_create",
+                                &[],
+                                Some(
+                                    self.backend
+                                        .context
+                                        .ptr_type(AddressSpace::default())
+                                        .into(),
+                                ),
+                                "reactive.scope",
+                                initializer.origin.span.clone(),
+                            )?
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    initializer.origin.span.clone(),
+                                    "reactive scope creation returned no value",
+                                )
+                            })?
+                            .into_pointer_value();
+                        environment.resources.push((
+                            resource.resource.clone(),
+                            scope.as_any_value_enum(),
+                            false,
+                        ));
+                        environment.reactive_scopes.push(scope);
+                    }
+                }
+            }
             self.emit_block(
                 EmissionOwner::Initializer(id),
                 initializer.body,
                 &mut environment,
             )?;
             if !environment.returned {
+                for scope in environment.reactive_scopes.iter().rev() {
+                    self.backend.build_reactive_runtime_call(
+                        "__staple_reactive_scope_dispose",
+                        &[(*scope).into()],
+                        None,
+                        "reactive.dispose",
+                        initializer.origin.span.clone(),
+                    )?;
+                }
                 self.backend
                     .builder
                     .build_return(None)
@@ -770,6 +864,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredItemKind::Return(item) => {
+                if matches!(owner, EmissionOwner::Initializer(_)) {
+                    return Err(unimplemented("initializer return"));
+                }
                 let value = self.emit_expression(owner, item.value, environment)?;
                 let value = value_as_basic(value).ok_or_else(|| unimplemented("return value"))?;
                 self.backend

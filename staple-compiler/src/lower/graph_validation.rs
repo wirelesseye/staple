@@ -1144,6 +1144,21 @@ mod tests {
         let lowered = lower(concat!(
             "type Point = ctor (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+            "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
+            "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (1 satisfies U8) }\n",
+            "def show_sum: (I32 | U8) -> String = value => \"${value:?}\"\n",
+            "def index_mixed: (U8, I32) -> (I32 | U8) = pair => pair[0]\n",
+            "def count_pair: (U8, I32) -> I32 = pair => {\n",
+            "  let mut count = 0\n",
+            "  for item in pair { count = count + 1 }\n",
+            "  count\n",
+            "}\n",
+            "def deref_mixed: (Ref (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
+            "let shown = show_pair (1, 2)\n",
+            "let sum = show_sum (pick True)\n",
+            "let picked = index_mixed ((1 satisfies U8), 2)\n",
+            "let counted = count_pair ((1 satisfies U8), 2)\n",
+            "let dereferenced = deref_mixed (Ref ((1 satisfies U8), 2))\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
         ));
@@ -5452,6 +5467,189 @@ mod tests {
     /// name is already taken (by a runtime-module symbol such as libc
     /// `write`, an extern, or an earlier duplicate); the catalog gives that
     /// instance its ordinal name instead.
+    #[test]
+    fn stage_5_3_catalog_instance_declarations_keep_legacy_llvm_types() {
+        use crate::codegen::LegacyFunctionOrigin;
+
+        let lowered = lower(concat!(
+            "def passthrough: I32 -> I32 = value => value\n",
+            "let answer = passthrough 42\n",
+            "type Point = ctor (I32, I32)\n",
+            "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+        ));
+        let context = Context::create();
+        let legacy = crate::codegen::legacy_emissions(&context, &lowered)
+            .expect("legacy should emit the fixture");
+        let lowered_types = crate::codegen::lowered_catalog_types(&context, &lowered)
+            .expect("lowered catalog declarations should build");
+        let expected_instances = lowered
+            .program
+            .instances
+            .iter()
+            .filter(|(_, instance)| {
+                instance.body.is_some()
+                    && lowered
+                        .program
+                        .functions
+                        .get(instance.template)
+                        .is_some_and(|function| !function.class.coroutine_body)
+            })
+            .count();
+        let expected_artifact_functions = lowered
+            .program
+            .artifacts
+            .iter()
+            .map(
+                |(_, artifact)| match artifact.plan.as_ref().expect("closed artifact plan") {
+                    LoweredArtifactPlan::DropGlue(_) => 0,
+                    LoweredArtifactPlan::CoroutineCodes(_) => 2,
+                    LoweredArtifactPlan::ConstructorAdapter(_)
+                    | LoweredArtifactPlan::StructuralMethod(_)
+                    | LoweredArtifactPlan::GcFinalizer(_)
+                    | LoweredArtifactPlan::ReactionRunner(_)
+                    | LoweredArtifactPlan::UntilRunner(_)
+                    | LoweredArtifactPlan::DerivedRunner(_)
+                    | LoweredArtifactPlan::ExternAdapter(_) => 1,
+                },
+            )
+            .sum::<usize>();
+        assert_eq!(
+            lowered_types.len(),
+            expected_instances + expected_artifact_functions + lowered.program.initializers.len(),
+            "every catalog function and initializer has one unique LLVM declaration",
+        );
+        assert!(
+            expected_artifact_functions > 0,
+            "fixture must cover generated functions"
+        );
+        let mut compared = 0;
+        let mut compared_artifacts = 0;
+        let mut compared_initializers = 0;
+        for (name, origin) in &legacy.defined_functions {
+            if let LegacyFunctionOrigin::Initializer(module) = origin {
+                let prefix = &lowered
+                    .program
+                    .modules
+                    .get(*module)
+                    .expect("module metadata")
+                    .symbol_prefix;
+                let planned = format!("__staple_init_m{prefix}");
+                assert_eq!(
+                    lowered_types.get(&planned),
+                    legacy.function_types.get(name),
+                    "initializer ABI changed for `{name}`",
+                );
+                compared_initializers += 1;
+                continue;
+            }
+            if let LegacyFunctionOrigin::ConstructorAdapter(index) = origin {
+                let adapter = &legacy.constructor_adapters[*index];
+                let ordinal = lowered
+                    .program
+                    .artifacts
+                    .iter()
+                    .find_map(|(_, artifact)| match artifact.plan.as_ref() {
+                        Some(LoweredArtifactPlan::ConstructorAdapter(plan))
+                            if plan.symbol == adapter.symbol
+                                && plan.callable_type == adapter.callable_type =>
+                        {
+                            Some(artifact.ordinal)
+                        }
+                        _ => None,
+                    })
+                    .expect("constructor adapter has a catalog artifact");
+                let planned = lowered
+                    .program
+                    .planned_artifact_name(ordinal)
+                    .expect("planned constructor adapter name");
+                assert_eq!(
+                    lowered_types.get(planned),
+                    legacy.function_types.get(name),
+                    "constructor adapter ABI changed for `{name}`",
+                );
+                compared_artifacts += 1;
+                continue;
+            }
+            if let LegacyFunctionOrigin::StructuralMethod(index) = origin {
+                let method = &legacy.structural_methods[*index];
+                let ordinal = lowered
+                    .program
+                    .artifacts
+                    .iter()
+                    .find_map(|(_, artifact)| match artifact.plan.as_ref() {
+                        Some(LoweredArtifactPlan::StructuralMethod(plan))
+                            if plan.structural == method.structural
+                                && plan.callable_type == method.function_type =>
+                        {
+                            Some(artifact.ordinal)
+                        }
+                        _ => None,
+                    })
+                    .expect("structural method has a catalog artifact");
+                let planned = lowered
+                    .program
+                    .planned_artifact_name(ordinal)
+                    .expect("planned structural method name");
+                assert_eq!(
+                    lowered_types.get(planned),
+                    legacy.function_types.get(name),
+                    "structural method ABI changed for `{name}`",
+                );
+                compared_artifacts += 1;
+                continue;
+            }
+            let (function, function_type, substitutions) = match origin {
+                LegacyFunctionOrigin::Declared {
+                    function,
+                    function_type,
+                } => (*function, function_type, None),
+                LegacyFunctionOrigin::Specialization {
+                    function,
+                    function_type,
+                    substitutions,
+                } => (*function, function_type, Some(substitutions)),
+                _ => continue,
+            };
+            let Some(instance) = lowered.program.instance_for_legacy_specialization(
+                function,
+                function_type,
+                substitutions.unwrap_or(&std::collections::HashMap::new()),
+            ) else {
+                panic!("legacy function `{name}` has no catalog instance");
+            };
+            if lowered
+                .program
+                .functions
+                .get(function)
+                .is_some_and(|f| f.class.coroutine_body)
+            {
+                continue;
+            }
+            let planned = lowered
+                .program
+                .planned_name(instance)
+                .expect("planned instance name");
+            let legacy_type = legacy
+                .function_types
+                .get(name)
+                .expect("legacy function type");
+            let lowered_type = lowered_types.get(planned).unwrap_or_else(|| {
+                panic!("catalog did not declare `{planned}` for legacy `{name}`")
+            });
+            assert_eq!(lowered_type, legacy_type, "ABI changed for `{name}`");
+            compared += 1;
+        }
+        assert!(
+            compared > 20,
+            "expected the eager standard-library declarations"
+        );
+        assert!(
+            compared_artifacts > 0,
+            "expected a constructor adapter comparison"
+        );
+        assert_eq!(compared_initializers, lowered.program.initializers.len());
+    }
+
     #[test]
     fn stage_5_1_planned_names_match_legacy_declared_names() {
         let source = concat!(
