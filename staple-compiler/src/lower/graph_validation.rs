@@ -3308,6 +3308,23 @@ mod tests {
                 "let c = doubled\n",
                 "let d = make_derived (c_string \"x\")\n",
             ),
+            // `coroutine_lower` collects bindings inside implicit-thunk
+            // arguments as frame bindings, so these droppable locals get
+            // frame cells and unwind drops even though each is bound in its
+            // reaction, batch, or `until` thunk's own instance.
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "let signal flag = 0\n",
+                "def nested_blocks: () -> Coroutine{Reactive} () = () => coro {\n",
+                "  reaction { let seen = c_string \"r\"; inspect seen; () }\n",
+                "  batch { let staged = c_string \"b\"; inspect staged; () }\n",
+                "  let _ = await (until { let limit = 1; flag >= limit })\n",
+                "  ()\n",
+                "}\n",
+                "with Reactive = reactive_scope () { nested_blocks () }\n",
+            ),
         ] {
             coverage.merge(assert_stage_4_5_transition(source));
         }

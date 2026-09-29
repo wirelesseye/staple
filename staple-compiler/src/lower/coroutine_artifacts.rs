@@ -153,7 +153,7 @@ pub(super) fn expand_coroutine_codes(
     // the deterministic choice the transition test compares as a set.
     let mut frame_bindings = Vec::new();
     for symbol in &local.frame_bindings {
-        let Some(value_type) = body.binding_symbol_type(*symbol).cloned() else {
+        let Some(value_type) = frame_binding_type(program, body, *symbol) else {
             return Err(vec![Diagnostic::new(
                 origin.span.clone(),
                 format!(
@@ -207,6 +207,60 @@ pub(super) fn expand_coroutine_codes(
         }),
         requests,
     ))
+}
+
+/// The concrete type of one frame-binding symbol.
+///
+/// `coroutine_lower` collects frame bindings through call arguments, so a
+/// binding inside an implicit-thunk argument (a reaction, batch, or `until`
+/// block, a derived initializer, or a block argument) is a frame binding too:
+/// legacy lays out a frame cell for it and conditionally drops that
+/// never-initialized cell on the cancel unwind. The symbol is bound in the
+/// nested thunk's own instance, not in the coroutine body, so the search
+/// descends through the bound implicit-thunk instances, the same nesting
+/// `coroutine_lower` recurses through, and stops at nested coroutine bodies.
+fn frame_binding_type(
+    program: &LoweredProgram,
+    body: &super::LoweredInstanceBody,
+    symbol: super::SymbolId,
+) -> Option<CheckedType> {
+    if let Some(value_type) = body.binding_symbol_type(symbol) {
+        return Some(value_type.clone());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![body];
+    while let Some(current) = pending.pop() {
+        for target in current.bindings.values() {
+            let LoweredBoundTarget::Instance(instance) = target else {
+                continue;
+            };
+            if !seen.insert(*instance) {
+                continue;
+            }
+            let Some(record) = program.instances.get(*instance) else {
+                continue;
+            };
+            let nested_thunk = program
+                .functions
+                .get(record.template)
+                .is_some_and(|function| {
+                    function.class.implicit_thunk && !function.class.coroutine_body
+                });
+            if !nested_thunk {
+                continue;
+            }
+            let Some(nested) = record.body.as_ref() else {
+                continue;
+            };
+            // A symbol is bound by exactly one template, so the first nested
+            // thunk that binds it is its owner.
+            if let Some(value_type) = nested.binding_symbol_type(symbol) {
+                return Some(value_type.clone());
+            }
+            pending.push(nested);
+        }
+    }
+    None
 }
 
 /// The runner family an expansion or request belongs to.
