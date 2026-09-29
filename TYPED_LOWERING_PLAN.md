@@ -162,6 +162,8 @@ Progress:
   - debug-string specialization keys.
 - Keep target-specific LLVM type layout, calling-convention construction, and instruction emission in the backend.
 - Do not merge until every backend path uses lowered IR; no mixed AST/IR fallback may remain.
+- After the cutover, fix the two latent defects the migration mirrors for parity: completed coroutines never drop their frame bindings, and generic `Drop` implementations are never selected. These are the only intended behavior changes in Stage 5.
+- Follow the detailed sequence and gates in [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md).
 
 > **Complex stage:** This is the largest mechanical migration and touches most of the backend. It may require breakdown plans organized around functions/closures, aggregates/control flow, ownership, traits/effects, reactive code, and coroutines.
 
@@ -241,4 +243,4 @@ Progress:
 - `LoweredModule` is compiler-facing and has no stable serialization or binary-compatibility promise.
 - Emitted function instances are fully concrete; generic templates exist only inside lowering.
 - Scheme abstraction, stored polymorphic values, erased calls, dictionaries, descriptors, runtime-sized layouts, and related tooling remain for the later feature update.
-- Existing language behavior and concrete ABI are unchanged by this preparatory update.
+- Existing language behavior and concrete ABI are unchanged by this preparatory update. The one exception is Stage 5.11's two fixes for mirrored drop defects.
