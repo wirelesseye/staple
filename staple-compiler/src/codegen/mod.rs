@@ -36,6 +36,7 @@ mod ir;
 mod layout;
 #[cfg(test)]
 mod legacy_recorder;
+mod lowered;
 mod runtime;
 
 use abi::{flattened_parameter_types, mutation_parameter_mask};
@@ -83,6 +84,14 @@ impl<'program, 'context> Backend<'program, 'context> {
 
 pub struct CodeGenerator<'context> {
     context: &'context inkwell::context::Context,
+    emitter: Emitter,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Emitter {
+    Legacy,
+    Lowered,
 }
 
 struct ModuleEmitter<'module, 'context> {
@@ -415,7 +424,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
 impl<'context> CodeGenerator<'context> {
     pub fn new(context: &'context inkwell::context::Context) -> Self {
-        Self { context }
+        Self::with_emitter(
+            context,
+            if cfg!(feature = "lowered-emitter") {
+                Emitter::Lowered
+            } else {
+                Emitter::Legacy
+            },
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn with_emitter(context: &'context inkwell::context::Context, emitter: Emitter) -> Self {
+        Self { context, emitter }
     }
 
     pub fn compile_module(&self, module: &LoweredModule) -> Result<String, Vec<Diagnostic>> {
@@ -429,9 +450,7 @@ impl<'context> CodeGenerator<'context> {
     ) -> Result<String, Vec<Diagnostic>> {
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        let emitter = ModuleEmitter::new(self.context, module, &target_machine);
-        emitter
-            .compile(&target_machine)
+        self.compile_selected(module, &target_machine)
             .map(|module| module.print_to_string().to_string())
             .map_err(|diagnostic| vec![diagnostic])
     }
@@ -450,9 +469,8 @@ impl<'context> CodeGenerator<'context> {
         }
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        let emitter = ModuleEmitter::new(self.context, module, &target_machine);
-        let llvm_module = emitter
-            .compile(&target_machine)
+        let llvm_module = self
+            .compile_selected(module, &target_machine)
             .map_err(|diagnostic| vec![diagnostic])?;
         target_machine
             .write_to_file(&llvm_module, FileType::Object, path)
@@ -462,6 +480,22 @@ impl<'context> CodeGenerator<'context> {
                     format!("could not emit `{}`: {error}", path.display()),
                 )]
             })
+    }
+
+    fn compile_selected(
+        &self,
+        module: &LoweredModule,
+        target_machine: &TargetMachine,
+    ) -> CodeGenerationResult<LlvmModule<'context>> {
+        match self.emitter {
+            Emitter::Legacy => {
+                ModuleEmitter::new(self.context, module, target_machine).compile(target_machine)
+            }
+            Emitter::Lowered => {
+                lowered::LoweredEmitter::new(self.context, module.program(), target_machine)
+                    .compile(target_machine)
+            }
+        }
     }
 }
 

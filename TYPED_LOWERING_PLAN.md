@@ -151,6 +151,8 @@ Progress:
 
 ### Stage 5 - Migrate LLVM Generation to Lowered IR (In Progress)
 
+Stage 5.3 is in progress: the parallel lowered emitter selector and instance predeclarations are implemented. The new path still diagnoses unported bodies; the remaining declarations, entry harness, and differential gate are outstanding. Details are in [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md).
+
 **Stage 5.1 (inventory, decisions, and lowering-side prerequisites) is complete**, as recorded above and in [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md): the query replacement matrix is frozen with no row lacking a lowered source, initializer dispatch sites have binding/evidence tables, planned names follow the D2 declared-name rule with duplicate fallback, the read-only emission view exists, and the symbol/global facts the harness needs are recorded.
 
 **Stage 5.2 (extract the backend-local layer) is complete**, as recorded above and in [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md): `codegen.rs` became `codegen/{mod,layout,abi,runtime,ir,legacy_recorder}.rs`, the shared `Backend` owns the LLVM context/module/builder/target data/pointer-sized integer type plus a lowered `LayoutContext`, and the type layout, ABI, runtime install, and pure-IR helpers are TypedModule-free and shared with the Stage 5.3 emitter. The legacy IR is unchanged by the extraction (the 16-program normalized function-by-function comparison, including the pre-existing coroutine-frame `HashMap` permutations). Stage 5.3 (the emitter skeleton, catalog declarations, regenerated `main` harness, and the differential harness) is next.
