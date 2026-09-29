@@ -1859,7 +1859,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     "__staple_completion_resolver_drop"
                 },
             ));
-            let drop_fn = self.coroutine_runtime_fn(
+            let drop_fn = self.declare_named_function(
                 name,
                 self.context.void_type().fn_type(&[ptr_type.into()], false),
             );
@@ -1883,7 +1883,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     &[self.context.ptr_type(AddressSpace::default()).into()],
                     false,
                 );
-                let free = self.lazy_libc_function("free", free_type);
+                let free = self.declare_named_function("free", free_type);
                 self.builder
                     .build_direct_call(free, &[pointer.into()], "c_string.drop")
                     .map_err(|error| Diagnostic::new(span, error.to_string()))?;
@@ -5928,7 +5928,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             false,
         );
-        let memcmp = self.lazy_libc_function("memcmp", memcmp_type);
+        let memcmp = self.declare_named_function("memcmp", memcmp_type);
         let comparison = self
             .builder
             .build_direct_call(
@@ -6886,7 +6886,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             return Ok(());
         }
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let close = self.coroutine_runtime_fn(
+        let close = self.declare_named_function(
             "__staple_task_scope_close",
             self.context.void_type().fn_type(&[ptr_type.into()], false),
         );
@@ -8279,13 +8279,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
         let runner = self.emit_until_runner(call.syntax.id, &predicate_type)?;
 
-        let resume = self.coroutine_runtime_fn(
+        let resume = self.declare_named_function(
             "__staple_until_resume",
             self.context
                 .struct_type(&[i8_type.into(), ptr_type.into()], false)
                 .fn_type(&[ptr_type.into()], false),
         );
-        let cleanup = self.coroutine_runtime_fn(
+        let cleanup = self.declare_named_function(
             "__staple_until_cleanup",
             self.context.void_type().fn_type(&[ptr_type.into()], false),
         );
@@ -8450,7 +8450,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map_err(compiler_diagnostic)?;
 
         self.builder.position_at_end(resolve);
-        let complete = self.coroutine_runtime_fn(
+        let complete = self.declare_named_function(
             "__staple_completion_complete",
             i8_type.fn_type(&[ptr_type.into(), ptr_type.into(), size_type.into()], false),
         );
@@ -8712,7 +8712,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             true,
         );
-        let snprintf = self.lazy_libc_function("snprintf", snprintf_type);
+        let snprintf = self.declare_named_function("snprintf", snprintf_type);
         let length = self
             .builder
             .build_direct_call(
@@ -8873,7 +8873,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             &[self.context.ptr_type(AddressSpace::default()).into()],
             false,
         );
-        let strlen = self.lazy_libc_function("strlen", strlen_type);
+        let strlen = self.declare_named_function("strlen", strlen_type);
         let length = self
             .builder
             .build_direct_call(strlen, &[source.into()], "c_string.length")
@@ -8948,7 +8948,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             false,
         );
-        let memchr = self.lazy_libc_function("memchr", memchr_type);
+        let memchr = self.declare_named_function("memchr", memchr_type);
         let nul = self
             .builder
             .build_direct_call(
@@ -9532,7 +9532,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .builder
                     .build_load(ptr_type, child_slot, "cancel.wait.record")
                     .map_err(compiler_diagnostic)?;
-                let abandon_fn = self.coroutine_runtime_fn(
+                let abandon_fn = self.declare_named_function(
                     "__staple_completion_abandon",
                     self.context.void_type().fn_type(&[ptr_type.into()], false),
                 );
@@ -10158,7 +10158,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         // without losing a wakeup.
         let should_suspend = match kind {
             ExternalAwaitKind::Task => {
-                let register = self.coroutine_runtime_fn(
+                let register = self.declare_named_function(
                     "__staple_task_await_register",
                     i8_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
                 );
@@ -10228,7 +10228,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     (&ptr_type.const_null(), entry_block),
                     (&sched_value, sched_from_record),
                 ]);
-                let register = self.coroutine_runtime_fn(
+                let register = self.declare_named_function(
                     "__staple_completion_register",
                     i8_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
                 );
@@ -10476,7 +10476,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             IntrinsicFunction::SchedulerCreate => {
                 self.compile_expression(environment, &call.argument)?;
                 let create = self
-                    .coroutine_runtime_fn("__staple_sched_create", ptr_type.fn_type(&[], false));
+                    .declare_named_function("__staple_sched_create", ptr_type.fn_type(&[], false));
                 let sched = self
                     .builder
                     .build_direct_call(create, &[], "scheduler")
@@ -10489,7 +10489,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let sched = self.compile_expression(environment, &call.argument)?;
                 let sched = value_as_basic(sched)
                     .ok_or_else(|| Diagnostic::new(span.clone(), "scheduler is not first-class"))?;
-                let open = self.coroutine_runtime_fn(
+                let open = self.declare_named_function(
                     "__staple_task_scope_open",
                     ptr_type.fn_type(&[ptr_type.into()], false),
                 );
@@ -10513,13 +10513,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.builder
                     .build_store(frame, header_type.const_zero())
                     .map_err(compiler_diagnostic)?;
-                let resume = self.coroutine_runtime_fn(
+                let resume = self.declare_named_function(
                     "__staple_coro_yield_resume",
                     self.context
                         .struct_type(&[i8_type.into(), ptr_type.into()], false)
                         .fn_type(&[ptr_type.into()], false),
                 );
-                let cleanup = self.coroutine_runtime_fn(
+                let cleanup = self.declare_named_function(
                     "__staple_coro_yield_cleanup",
                     self.context.void_type().fn_type(&[ptr_type.into()], false),
                 );
@@ -10620,7 +10620,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
                 // Link the record into its scope's task list (LIFO) so scope
                 // teardown cancels the youngest task first.
-                let track = self.coroutine_runtime_fn(
+                let track = self.declare_named_function(
                     "__staple_task_scope_track",
                     self.context
                         .void_type()
@@ -10630,7 +10630,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .build_direct_call(track, &[scope.into(), record.into()], "")
                     .map_err(compiler_diagnostic)?;
 
-                let enqueue = self.coroutine_runtime_fn(
+                let enqueue = self.declare_named_function(
                     "__staple_sched_enqueue",
                     self.context
                         .void_type()
@@ -10659,7 +10659,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let counts_type = self
                     .context
                     .struct_type(&[self.size_type.into(), self.size_type.into()], false);
-                let pump = self.coroutine_runtime_fn(
+                let pump = self.declare_named_function(
                     "__staple_sched_pump",
                     counts_type.fn_type(&[ptr_type.into(), self.size_type.into()], false),
                 );
@@ -10699,7 +10699,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let record = value_as_basic(record)
                     .ok_or_else(|| Diagnostic::new(span.clone(), "task handle is not first-class"))?
                     .into_pointer_value();
-                let cancel = self.coroutine_runtime_fn(
+                let cancel = self.declare_named_function(
                     "__staple_task_cancel",
                     self.context.void_type().fn_type(&[ptr_type.into()], false),
                 );
@@ -10905,7 +10905,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .size_type
                     .const_int(self.target_data.get_store_size(&value_llvm), false);
 
-                let complete = self.coroutine_runtime_fn(
+                let complete = self.declare_named_function(
                     "__staple_completion_complete",
                     i8_type.fn_type(
                         &[ptr_type.into(), ptr_type.into(), self.size_type.into()],
@@ -10973,7 +10973,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     IntrinsicFunction::CompletionTokenCancel => "__staple_completion_token_cancel",
                     _ => "__staple_completion_cancel",
                 };
-                let function = self.coroutine_runtime_fn(
+                let function = self.declare_named_function(
                     runtime,
                     self.context.void_type().fn_type(&[ptr_type.into()], false),
                 );

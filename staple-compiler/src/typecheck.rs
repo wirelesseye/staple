@@ -1531,8 +1531,8 @@ impl TypedModule {
     }
 
     // Stage 5.2 moved layout's opaque-type selection to the lowered
-    // `LayoutContext`; Stage 5.10 removes this accessor with the backend.
-    #[allow(dead_code)]
+    // `LayoutContext`; only its agreement test still reads this accessor.
+    #[cfg(test)]
     pub(crate) fn is_io_type(&self, value_type: &CheckedType) -> bool {
         matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.io_type)
     }
@@ -1546,8 +1546,8 @@ impl TypedModule {
     }
 
     // Stage 5.2 moved layout's opaque-type selection to the lowered
-    // `LayoutContext`; Stage 5.10 removes this accessor with the backend.
-    #[allow(dead_code)]
+    // `LayoutContext`; only its agreement test still reads this accessor.
+    #[cfg(test)]
     pub(crate) fn is_task_type(&self, value_type: &CheckedType) -> bool {
         matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.task_type)
     }

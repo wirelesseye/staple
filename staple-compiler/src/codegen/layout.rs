@@ -125,23 +125,16 @@ impl<'program> LayoutContext<'program> {
         self.view.concrete_is_copy(value_type)
     }
 
-    fn opaque_id(&self, value_type: &CheckedType) -> Option<TypeId> {
-        match value_type {
-            CheckedType::Opaque { id, .. } => Some(*id),
-            _ => None,
-        }
-    }
-
     /// Whether the type is the standard library `IO` resource type, which is
     /// represented as an empty struct (the resource is pass-through).
     pub(crate) fn is_io(&self, value_type: &CheckedType) -> bool {
-        self.opaque_id(value_type) == self.view.semantic_ids().io_type
+        opaque_is(value_type, self.view.semantic_ids().io_type)
     }
 
     /// Whether the type is the standard library `Reactive` scope handle,
     /// represented as a pointer to its runtime record.
     pub(crate) fn is_reactive(&self, value_type: &CheckedType) -> bool {
-        self.opaque_id(value_type) == self.view.semantic_ids().reactive_type
+        opaque_is(value_type, self.view.semantic_ids().reactive_type)
     }
 
     /// Whether the type is one of the runtime handles represented as a pointer:
@@ -152,12 +145,19 @@ impl<'program> LayoutContext<'program> {
         if self.view.runtime_opaque_kind(value_type).is_some() {
             return true;
         }
-        let Some(id) = self.opaque_id(value_type) else {
-            return false;
-        };
         let ids = self.view.semantic_ids();
-        Some(id) == ids.task_type || Some(id) == ids.tasks_type
+        opaque_is(value_type, ids.task_type) || opaque_is(value_type, ids.tasks_type)
     }
+}
+
+/// Whether the type is the opaque type `expected` names. A program without
+/// that semantic ID (no standard library) has no such type, so an absent ID
+/// never matches, whatever the type.
+fn opaque_is(value_type: &CheckedType, expected: Option<TypeId>) -> bool {
+    matches!(
+        (value_type, expected),
+        (CheckedType::Opaque { id, .. }, Some(expected)) if *id == expected
+    )
 }
 
 impl<'program, 'context> Backend<'program, 'context> {
@@ -455,9 +455,11 @@ impl<'program, 'context> Backend<'program, 'context> {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use crate::{CheckedType, LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker};
+    use crate::{
+        CheckedType, LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker, TypeId,
+    };
 
-    use super::LayoutContext;
+    use super::{LayoutContext, opaque_is};
 
     fn standard_library_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -485,6 +487,22 @@ mod tests {
 
     /// Every concrete type an instance body's signature and bindings name:
     /// result, parameters, resources, captures, and parameters.
+    /// An absent semantic ID never matches: without it, `None == None` would
+    /// classify every non-opaque type as `IO`/`Reactive`/a task handle.
+    #[test]
+    fn an_absent_semantic_id_matches_no_type() {
+        let opaque = CheckedType::Opaque {
+            id: TypeId(7),
+            name: "Handle".to_owned(),
+            arguments: Vec::new(),
+        };
+        assert!(!opaque_is(&CheckedType::I32, None));
+        assert!(!opaque_is(&opaque, None));
+        assert!(!opaque_is(&CheckedType::I32, Some(TypeId(7))));
+        assert!(!opaque_is(&opaque, Some(TypeId(8))));
+        assert!(opaque_is(&opaque, Some(TypeId(7))));
+    }
+
     fn signature_types(module: &LoweredModule) -> Vec<CheckedType> {
         let view = module.program();
         let mut types = Vec::new();

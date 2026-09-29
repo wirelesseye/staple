@@ -133,21 +133,11 @@ impl<'program, 'context> Backend<'program, 'context> {
         })
     }
 
-    /// Declares (once) a libc symbol the emitted code calls directly, for
-    /// example `free`, `memcmp`, `snprintf`, `strlen`, or `memchr`. The runtime
+    /// Declares (once) an external symbol the emitted code calls by name: a
+    /// runtime-module helper (for example `__staple_sched_create`) or a libc
+    /// function (`free`, `memcmp`, `snprintf`, `strlen`, `memchr`). The runtime
     /// modules are linked first, so a declaration that already exists wins.
-    pub(crate) fn lazy_libc_function(
-        &self,
-        name: &str,
-        signature: inkwell::types::FunctionType<'context>,
-    ) -> inkwell::values::FunctionValue<'context> {
-        self.llvm_module
-            .get_function(name)
-            .unwrap_or_else(|| self.llvm_module.add_function(name, signature, None))
-    }
-
-    /// Declares a runtime helper from `coroutine.ll` with the given signature.
-    pub(crate) fn coroutine_runtime_fn(
+    pub(crate) fn declare_named_function(
         &self,
         name: &str,
         signature: inkwell::types::FunctionType<'context>,
