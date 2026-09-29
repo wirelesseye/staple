@@ -171,6 +171,22 @@ impl<'a> EmissionView<'a> {
         &self.program.semantic_ids
     }
 
+    /// The catalog's concrete `Copy` decision: the shared layout/ABI layer's
+    /// `is_copy` predicate for fully substituted types (Stage 5.2).
+    pub(crate) fn concrete_is_copy(&self, value_type: &crate::CheckedType) -> bool {
+        self.program.concrete_is_copy(value_type)
+    }
+
+    /// The opaque runtime type identity of a fully substituted type, the same
+    /// selection `LoweredProgram::runtime_opaque_kind` makes (Stage 5.2 layout
+    /// context).
+    pub(crate) fn runtime_opaque_kind(
+        &self,
+        value_type: &crate::CheckedType,
+    ) -> Option<super::instance_resolution::RuntimeOpaqueKind> {
+        self.program.runtime_opaque_kind(value_type)
+    }
+
     pub(crate) fn string_formatting(&self) -> &'a LoweredStringFormatting {
         &self.program.string_formatting
     }

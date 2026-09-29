@@ -39,6 +39,12 @@ mod runtime_requirements;
 mod structural_artifacts;
 mod worklist;
 
+// Stage 5.1/5.2 backend read view. `LoweredModule::program` returns this
+// type; Stage 5.2's `codegen::layout::LayoutContext` stores it so the shared
+// layout layer can read semantic IDs and the concrete `Copy` decision without
+// naming the lowered arenas.
+pub(crate) use emission::EmissionView;
+
 // Stage 3.2 resolver API consumed by Stage 3.3. The implementation stays in a
 // lowering child module so it can read the owned `LoweredProgram` directly;
 // these re-exports name the handoff types for the rest of the crate.

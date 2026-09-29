@@ -1,17 +1,17 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 
 use inkwell::{
     AddressSpace, OptimizationLevel,
-    memory_buffer::MemoryBuffer,
     module::Module as LlvmModule,
     targets::TargetData,
     targets::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
     },
-    types::{BasicType, BasicTypeEnum},
+    types::BasicTypeEnum,
     values::{AnyValue, AnyValueEnum, BasicValue, BasicValueEnum},
 };
 
@@ -31,15 +31,66 @@ use staple_syntax::{
     RepeatedProductExpression, Span,
 };
 
+mod abi;
+mod ir;
+mod layout;
+#[cfg(test)]
+mod legacy_recorder;
+mod runtime;
+
+use abi::{flattened_parameter_types, mutation_parameter_mask};
+use ir::value_as_basic;
+use layout::LayoutContext;
+use layout::{
+    COMPLETION_CANCEL_ENV, COMPLETION_CANCEL_FN, COMPLETION_FLAGS, COMPLETION_SCHEDULER,
+    COMPLETION_STATE_COMPLETED, COMPLETION_VALUE, CORO_CAPTURE_ENV, CORO_CHILD, CORO_CLEANUP_FN,
+    CORO_HEADER_FIELDS, CORO_PARENT, CORO_PENDING_PTR, CORO_RECORD, CORO_RESOURCES,
+    CORO_RESULT_PTR, CORO_RESUME_FN, CORO_STATE, CORO_STATE_DONE, CORO_STATE_FREED,
+    CORO_STATUS_CANCELLED, CORO_STATUS_DONE, CORO_STATUS_RESUME_CHILD, CORO_STATUS_WAIT_EXTERNAL,
+    SumStorage, TASK_RECORD_CANCEL, TASK_RECORD_FRAME, TASK_RECORD_RESULT, TASK_RECORD_SCHEDULER,
+};
+#[cfg(test)]
+pub(crate) use legacy_recorder::*;
+
+/// Stage 5.2: the backend-local layout/ABI/runtime/IR layer both emitters
+/// share. It owns the LLVM module, builder, target data, pointer-sized integer
+/// type, and the lowered [`LayoutContext`]; it never reads the `TypedModule`.
+pub(crate) struct Backend<'program, 'context> {
+    context: &'context inkwell::context::Context,
+    llvm_module: inkwell::module::Module<'context>,
+    builder: inkwell::builder::Builder<'context>,
+    size_type: inkwell::types::IntType<'context>,
+    target_data: TargetData,
+    layout: LayoutContext<'program>,
+}
+
+impl<'program, 'context> Backend<'program, 'context> {
+    fn new(
+        context: &'context inkwell::context::Context,
+        target_machine: &TargetMachine,
+        layout: LayoutContext<'program>,
+    ) -> Self {
+        Self {
+            context,
+            llvm_module: context.create_module("staple"),
+            builder: context.create_builder(),
+            size_type: context.ptr_sized_int_type(&target_machine.get_target_data(), None),
+            target_data: target_machine.get_target_data(),
+            layout,
+        }
+    }
+}
+
 pub struct CodeGenerator<'context> {
     context: &'context inkwell::context::Context,
 }
 
 struct ModuleEmitter<'module, 'context> {
-    context: &'context inkwell::context::Context,
     typed_module: &'module TypedModule,
-    llvm_module: inkwell::module::Module<'context>,
-    builder: inkwell::builder::Builder<'context>,
+    /// The Stage 5.2 shared layout/ABI/runtime/IR layer. Field and method
+    /// access goes through `Deref`, so `self.context` and `self.builder` keep
+    /// meaning what they always did.
+    backend: Backend<'module, 'context>,
     functions: HashMap<FunctionId, inkwell::values::FunctionValue<'context>>,
     specialized_functions: HashMap<(FunctionId, String), inkwell::values::FunctionValue<'context>>,
     constructor_codes: HashMap<(SymbolId, String), inkwell::values::FunctionValue<'context>>,
@@ -140,15 +191,20 @@ struct ModuleEmitter<'module, 'context> {
     signal_metadata: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     derived_metadata: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initializers: HashMap<ModuleId, inkwell::values::FunctionValue<'context>>,
-    size_type: inkwell::types::IntType<'context>,
-    target_data: TargetData,
 }
 
-#[derive(Clone)]
-struct SumStorage<'context> {
-    tag: inkwell::values::PointerValue<'context>,
-    payload: inkwell::values::PointerValue<'context>,
-    alignment: u32,
+impl<'module, 'context> Deref for ModuleEmitter<'module, 'context> {
+    type Target = Backend<'module, 'context>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.backend
+    }
+}
+
+impl<'module, 'context> DerefMut for ModuleEmitter<'module, 'context> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.backend
+    }
 }
 
 struct CompiledCallArguments<'context> {
@@ -200,79 +256,6 @@ impl<'context> FunctionEnvironment<'context> {
         self.parameter_pointers = snapshot.parameter_pointers.clone();
     }
 }
-
-/// Fixed coroutine frame header field indices (see `coroutine.ll`).
-const CORO_STATE: u32 = 0;
-const CORO_RESUME_FN: u32 = 1;
-const CORO_CLEANUP_FN: u32 = 2;
-const CORO_CAPTURE_ENV: u32 = 3;
-const CORO_CHILD: u32 = 4;
-const CORO_RESULT_PTR: u32 = 5;
-const CORO_PENDING_PTR: u32 = 6;
-#[allow(dead_code)] // read only by `coroutine.ll`'s driver
-const CORO_PARENT: u32 = 7;
-/// Pointer to a GC-allocated bundle of the coroutine's deferred-effect resource
-/// values, packed by whoever drives the frame and unpacked by `resume`.
-const CORO_RESOURCES: u32 = 8;
-/// Pointer to this task's `%TaskRecord` when it was `spawn`ed (else null); the
-/// driver marks it complete when the root frame finishes.
-const CORO_RECORD: u32 = 9;
-const CORO_HEADER_FIELDS: u32 = 10;
-
-/// `frame->state`: `0..=resume_points` are live resume states (`0` also means
-/// "created, never resumed"); these two markers are terminal.
-const CORO_STATE_DONE: u64 = 254;
-const CORO_STATE_FREED: u64 = 255;
-/// `%CoroStatus` status codes returned by `resume` (see `coroutine.ll`).
-const CORO_STATUS_DONE: u64 = 0;
-const CORO_STATUS_RESUME_CHILD: u64 = 1;
-/// The body unwound after a cancellation request; the frame is spent.
-const CORO_STATUS_CANCELLED: u64 = 3;
-/// The body is `await`-ing a spawned `Task`; it has registered itself as that
-/// task's waiter and parks until the task completes.
-const CORO_STATUS_WAIT_TASK: u64 = 4;
-/// The body is `await`-ing an external `Wait` / `Task`: it has registered a
-/// waiter and parks until woken. Driver behaviour is identical to `WAIT_TASK`;
-/// the two names distinguish the record kind at the lowering site.
-const CORO_STATUS_WAIT_EXTERNAL: u64 = CORO_STATUS_WAIT_TASK;
-
-/// `%Completion` field indices (see `coroutine.ll`). The record is
-/// `{ i8 state, i8 flags, {{SIZE}} generation, ptr scheduler, ptr waiter,
-/// ptr cancel_env, ptr cancel_fn, T value }`; the runtime only touches the
-/// header, and 4a leaves the cancel-callback fields zero.
-#[allow(dead_code)] // field 0; loaded directly through the record pointer
-const COMPLETION_STATE: u32 = 0;
-const COMPLETION_FLAGS: u32 = 1;
-#[allow(dead_code)] // bumped only by `coroutine.ll`
-const COMPLETION_GENERATION: u32 = 2;
-const COMPLETION_SCHEDULER: u32 = 3;
-#[allow(dead_code)] // written only by `coroutine.ll`
-const COMPLETION_WAITER: u32 = 4;
-const COMPLETION_CANCEL_ENV: u32 = 5;
-const COMPLETION_CANCEL_FN: u32 = 6;
-const COMPLETION_VALUE: u32 = 7;
-/// `%Completion.state`: 0 pending, 1 completed, 2 cancelled, 3 consumer-gone.
-const COMPLETION_STATE_COMPLETED: u64 = 1;
-/// `%Completion.flags` bit 1: a cancellation callback is still armed.
-#[allow(dead_code)] // documents the layout; the value is inlined above / in `coroutine.ll`
-const COMPLETION_FLAG_CANCEL_ARMED: u8 = 0b10;
-
-/// `%TaskRecord` field indices (see `coroutine.ll`). The record is
-/// `{ i8 state, i8 cancel, ptr frame, ptr waiter, ptr scheduler, ptr scope_next,
-/// T result }`; the runtime only ever touches the header.
-#[allow(dead_code)] // field 0; loaded directly through the record pointer
-const TASK_RECORD_STATE: u32 = 0;
-const TASK_RECORD_CANCEL: u32 = 1;
-const TASK_RECORD_FRAME: u32 = 2;
-#[allow(dead_code)] // written only by `coroutine.ll` (`__staple_task_await_register`)
-const TASK_RECORD_WAITER: u32 = 3;
-const TASK_RECORD_SCHEDULER: u32 = 4;
-#[allow(dead_code)] // read/written only by `coroutine.ll` (scope teardown list)
-const TASK_RECORD_SCOPE_NEXT: u32 = 5;
-const TASK_RECORD_RESULT: u32 = 6;
-/// `%TaskRecord.state`: 0 pending, 1 completed, 2 cancelled.
-#[allow(dead_code)] // documents the runtime layout; `coroutine.ll` uses the literal
-const TASK_STATE_CANCELLED: u64 = 2;
 
 /// Which external record an `await` parks on (`compile_external_await`).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -351,32 +334,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let _ = symbol;
     }
 
-    fn build_reactive_runtime_call(
-        &self,
-        name: &str,
-        arguments: &[inkwell::values::BasicMetadataValueEnum<'context>],
-        _result: Option<BasicTypeEnum<'context>>,
-        call_name: &str,
-        span: Span,
-    ) -> CodeGenerationResult<Option<BasicValueEnum<'context>>> {
-        let function = self.llvm_module.get_function(name).ok_or_else(|| {
-            Diagnostic::new(
-                span.clone(),
-                format!("missing reactive runtime function `{name}`"),
-            )
-        })?;
-        let call = self
-            .builder
-            .build_direct_call(function, arguments, call_name)
-            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
-        Ok(call.try_as_basic_value().basic())
-    }
-
     fn new(
         context: &'context inkwell::context::Context,
-        typed_module: &'module TypedModule,
+        module: &'module LoweredModule,
         target_machine: &TargetMachine,
     ) -> Self {
+        let typed_module = module.typed();
         let captured_cell_symbols = typed_module
             .functions()
             .iter()
@@ -387,10 +350,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             })
             .collect();
         Self {
-            context,
             typed_module,
-            llvm_module: context.create_module("staple"),
-            builder: context.create_builder(),
+            backend: Backend::new(
+                context,
+                target_machine,
+                LayoutContext::new(module.program()),
+            ),
             functions: HashMap::new(),
             specialized_functions: HashMap::new(),
             constructor_codes: HashMap::new(),
@@ -444,8 +409,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             signal_metadata: HashMap::new(),
             derived_metadata: HashMap::new(),
             initializers: HashMap::new(),
-            size_type: context.ptr_sized_int_type(&target_machine.get_target_data(), None),
-            target_data: target_machine.get_target_data(),
         }
     }
 }
@@ -466,7 +429,7 @@ impl<'context> CodeGenerator<'context> {
     ) -> Result<String, Vec<Diagnostic>> {
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        let emitter = ModuleEmitter::new(self.context, module.typed(), &target_machine);
+        let emitter = ModuleEmitter::new(self.context, module, &target_machine);
         emitter
             .compile(&target_machine)
             .map(|module| module.print_to_string().to_string())
@@ -487,7 +450,7 @@ impl<'context> CodeGenerator<'context> {
         }
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        let emitter = ModuleEmitter::new(self.context, module.typed(), &target_machine);
+        let emitter = ModuleEmitter::new(self.context, module, &target_machine);
         let llvm_module = emitter
             .compile(&target_machine)
             .map_err(|diagnostic| vec![diagnostic])?;
@@ -502,262 +465,6 @@ impl<'context> CodeGenerator<'context> {
     }
 }
 
-/// Stage 3.5 test-only view of the legacy LLVM backend's discoveries: the
-/// source-function specialization queue (function, concrete type, recorded
-/// substitutions), constructor adapters, and structural methods. Production
-/// emission never reads this record.
-/// Test-only: one emitted constructor adapter and the decisions its body
-/// makes.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) struct LegacyConstructorAdapter {
-    pub(crate) symbol: SymbolId,
-    pub(crate) callable_type: CheckedFunctionType,
-    /// The concrete result is a managed reference.
-    pub(crate) managed_ref: bool,
-    /// `build_ref_value` set a payload finalizer.
-    pub(crate) finalizer_set: bool,
-}
-
-/// Test-only: one nested `trait_method_code` selection inside a structural
-/// body: the selected instance template with its concrete method type, or the
-/// nested structural kind with its completed arguments.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum LegacyStructuralCallee {
-    Instance(FunctionId, CheckedFunctionType),
-    Structural(crate::StructuralTraitMethod, Vec<CheckedType>),
-}
-
-/// Test-only: one emitted structural-method body and the decisions it makes.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) struct LegacyStructuralMethod {
-    pub(crate) structural: crate::StructuralTraitMethod,
-    pub(crate) arguments: Vec<CheckedType>,
-    pub(crate) function_type: CheckedFunctionType,
-    /// `compile_formatter_write_literal` strings in emission order.
-    pub(crate) debug_literals: Vec<String>,
-    /// Nested trait-method selections in emission order.
-    pub(crate) delegates: Vec<LegacyStructuralCallee>,
-    /// `DerefIndex`: `Some(true)` took the direct-load fast path; `Some(false)`
-    /// delegated; `None` for other kinds.
-    pub(crate) deref_index_fast_path: Option<bool>,
-    /// `Iterator.next`: the `Done` and `Yield` alternative indices.
-    pub(crate) next_alternatives: Option<(usize, usize)>,
-    /// `Index`: whether the direct homogeneous load path was taken.
-    pub(crate) index_homogeneous: Option<bool>,
-    /// `Index`/`MutateIndex`: the target product length.
-    pub(crate) index_length: Option<usize>,
-    /// `MutateIndex`: whether the replaced element's cleanup ran.
-    pub(crate) mutate_drop_previous: Option<bool>,
-    /// `IntoIterator`: the source product the body iterated.
-    pub(crate) into_iterator_source: Option<CheckedType>,
-}
-
-/// Test-only: the cleanup branch one `compile_drop_value` call took.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum LegacyDropBranch {
-    UserDrop(FunctionId),
-    CoroutineCleanup,
-    RuntimeRelease(&'static str),
-    CStringFree,
-    Product,
-    Sum,
-    Distinct,
-    NoOp,
-}
-
-/// Test-only: one `compile_drop_value` call with its nested calls in order.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LegacyDropCall {
-    pub(crate) value_type: CheckedType,
-    pub(crate) branch: LegacyDropBranch,
-    pub(crate) nested: Vec<LegacyDropCall>,
-}
-
-/// Test-only: one finalizer body the legacy backend created.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum LegacyFinalizer {
-    Payload(CheckedType),
-    Cell(CheckedType),
-    ClosureEnvironment {
-        function: FunctionId,
-        capture_types: Vec<CheckedType>,
-        dropped: Vec<usize>,
-    },
-    Buffer(CheckedType),
-}
-
-/// Test-only: one legacy ownership registration in `owned_order`.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LegacyOwned {
-    pub(crate) function: FunctionId,
-    pub(crate) function_type: CheckedFunctionType,
-    pub(crate) substitutions: HashMap<TypeParameterId, CheckedType>,
-    pub(crate) symbol: SymbolId,
-    /// A binding cell (owned cell) versus an SSA value.
-    pub(crate) cell: bool,
-}
-
-/// Test-only: one `compile_buffer_clone` element `Clone` selection.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LegacyBufferClone {
-    pub(crate) element: CheckedType,
-    pub(crate) function: FunctionId,
-}
-
-/// Test-only: one `ensure_coroutine_codes` pair *creation*, with the facts the
-/// plan comparison records. Legacy's unwind drops follow `HashMap` order, so
-/// the test compares them as a set.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) struct LegacyCoroutinePair {
-    /// The `coro` body syntax the legacy cache key uses.
-    pub(crate) body_syntax: staple_syntax::SyntaxId,
-    /// The active substitutions at creation.
-    pub(crate) substitutions: HashMap<TypeParameterId, CheckedType>,
-    /// The substituted frame-binding types in plan order.
-    pub(crate) frame_binding_types: Vec<CheckedType>,
-    pub(crate) result_type: CheckedType,
-    pub(crate) await_result_types: Vec<CheckedType>,
-    pub(crate) resume_points: usize,
-    pub(crate) wait_await_states: Vec<usize>,
-    pub(crate) until_await_states: Vec<usize>,
-    /// Each deferred resource's pass mode (`true` = loaded through a pointer).
-    pub(crate) resource_slots: Vec<bool>,
-    /// Whether the cancel/cleanup path calls the capture-environment
-    /// finalizer; legacy gates it on non-empty captures.
-    pub(crate) capture_finalizer: bool,
-    /// The frame bindings the cancel unwind conditionally drops, as a set.
-    pub(crate) unwind_drops: Vec<(SymbolId, CheckedType)>,
-}
-
-/// Test-only: one `compile_coro_expression` *request* for a pair, so the test
-/// can show where the syntax-keyed cache aliased two instantiations.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) struct LegacyCoroutineRequest {
-    pub(crate) body_syntax: staple_syntax::SyntaxId,
-    pub(crate) substitutions: HashMap<TypeParameterId, CheckedType>,
-}
-
-/// Test-only: the three reactive runner families.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum LegacyRunnerFamily {
-    Reaction,
-    Until,
-    Derived,
-}
-
-/// Test-only: one legacy runner creation with its legacy key and call facts.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) struct LegacyReactiveRunner {
-    pub(crate) family: LegacyRunnerFamily,
-    /// The call `SyntaxId` for reaction and `until`.
-    pub(crate) call_syntax: Option<staple_syntax::SyntaxId>,
-    /// The evaluator `FunctionId` for derived.
-    pub(crate) evaluator: Option<FunctionId>,
-    /// The specialization being emitted, or `None` for module initializers.
-    pub(crate) owner: Option<(
-        FunctionId,
-        CheckedFunctionType,
-        HashMap<TypeParameterId, CheckedType>,
-    )>,
-    pub(crate) callback_type: CheckedFunctionType,
-    /// Reaction resource pass modes (`true` = pointer).
-    pub(crate) resource_slots: Vec<bool>,
-    /// `until` only: the syntax-keyed name already existed, so the runner was
-    /// reused across two instantiations.
-    pub(crate) name_reused: bool,
-}
-
-/// Test-only: which legacy record one emitted function belongs to. Indexed
-/// variants point into the matching `LegacyEmissions` vector, whose per-family
-/// transition tests compare the record's contents with its plan.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) enum LegacyFunctionOrigin {
-    /// A concrete template `declare_functions` emits eagerly.
-    Declared {
-        function: FunctionId,
-        function_type: CheckedFunctionType,
-    },
-    /// A generic specialization; the substitutions are the ones legacy
-    /// queued.
-    Specialization {
-        function: FunctionId,
-        function_type: CheckedFunctionType,
-        substitutions: HashMap<TypeParameterId, CheckedType>,
-    },
-    /// One source module's initializer.
-    Initializer(ModuleId),
-    /// The executable harness, which Stage 5 regenerates from entry metadata.
-    Main,
-    /// The UTF-8 validator, a fixed runtime helper.
-    Utf8Validator,
-    ConstructorAdapter(usize),
-    StructuralMethod(usize),
-    Finalizer(usize),
-    CoroutineResume(usize),
-    CoroutineCleanup(usize),
-    Runner(usize),
-    ExternAdapter(usize),
-}
-
-/// Test-only: one eager extern closure adapter and whether `compile_symbol_value`
-/// read it as a first-class value.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) struct LegacyExternAdapter {
-    pub(crate) symbol: SymbolId,
-    pub(crate) callable_type: CheckedFunctionType,
-    pub(crate) used: bool,
-}
-
-#[cfg(test)]
-pub(crate) struct LegacyEmissions {
-    pub(crate) specializations: Vec<(
-        FunctionId,
-        CheckedFunctionType,
-        HashMap<TypeParameterId, CheckedType>,
-    )>,
-    pub(crate) constructor_adapters: Vec<LegacyConstructorAdapter>,
-    pub(crate) structural_methods: Vec<LegacyStructuralMethod>,
-    pub(crate) drop_calls: Vec<LegacyDropCall>,
-    pub(crate) finalizers: Vec<LegacyFinalizer>,
-    pub(crate) owned: Vec<LegacyOwned>,
-    pub(crate) buffer_clones: Vec<LegacyBufferClone>,
-    pub(crate) coroutine_pairs: Vec<LegacyCoroutinePair>,
-    pub(crate) coroutine_requests: Vec<LegacyCoroutineRequest>,
-    pub(crate) runners: Vec<LegacyReactiveRunner>,
-    pub(crate) extern_adapters: Vec<LegacyExternAdapter>,
-    /// Every runtime symbol some emitted function actually references, read
-    /// from the finished LLVM module rather than from hand-placed hooks, in
-    /// module function order. References from inside the installed runtime
-    /// modules, the UTF-8 validator, and the `main` harness (which Stage 5
-    /// regenerates from entry metadata) are excluded.
-    pub(crate) runtime_surfaces: Vec<String>,
-    /// The same references as `(runtime symbol, referencing function)` pairs,
-    /// one per referencing function, for per-function comparison. A
-    /// non-instruction user has no function and is named by an empty string.
-    pub(crate) runtime_references: Vec<(String, String)>,
-    /// Every function the emitter defined, excluding the runtime modules, the
-    /// UTF-8 validator, and `main`, so a function with no runtime reference
-    /// still compares.
-    pub(crate) emitted_functions: Vec<String>,
-    /// Every function the emitter created, with the legacy record it belongs
-    /// to, in creation order.
-    pub(crate) defined_functions: Vec<(String, LegacyFunctionOrigin)>,
-}
-
 /// Compiles one lowered module with the legacy backend and returns its typed
 /// discoveries for the Stage 3.5 transition comparison.
 #[cfg(test)]
@@ -766,7 +473,7 @@ pub(crate) fn legacy_emissions(
     module: &LoweredModule,
 ) -> Result<LegacyEmissions, Vec<Diagnostic>> {
     let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
-    let mut emitter = ModuleEmitter::new(context, module.typed(), &target_machine);
+    let mut emitter = ModuleEmitter::new(context, module, &target_machine);
     emitter
         .run(&target_machine)
         .map_err(|diagnostic| vec![diagnostic])?;
@@ -865,7 +572,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         target_machine: &TargetMachine,
     ) -> CodeGenerationResult<LlvmModule<'context>> {
         self.run(target_machine)?;
-        Ok(self.llvm_module)
+        Ok(self.backend.llvm_module)
     }
 
     /// Emits every function into `self.llvm_module`. Split from `compile` so
@@ -922,104 +629,29 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(())
     }
 
-    fn install_gc_runtime(&self) -> CodeGenerationResult<()> {
-        let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
-        let pointer_shift = pointer_bytes.trailing_zeros();
-        let bits = pointer_bytes * 8;
-        let size = format!("i{bits}");
-        let maximum = if bits == 64 {
-            u64::MAX.to_string()
-        } else {
-            ((1_u64 << bits) - 1).to_string()
-        };
-        let maximum_half = if bits == 64 {
-            (u64::MAX / 2).to_string()
-        } else {
-            (((1_u64 << bits) - 1) / 2).to_string()
-        };
-        let maximum_allocation = if bits == 64 {
-            (u64::MAX - pointer_bytes * 5).to_string()
-        } else {
-            (((1_u64 << bits) - 1) - pointer_bytes * 5).to_string()
-        };
-        let runtime = include_str!("gc.ll")
-            .replace("{{SIZE}}", &size)
-            .replace("{{PTR_BYTES}}", &pointer_bytes.to_string())
-            .replace("{{PTR_SHIFT}}", &pointer_shift.to_string())
-            .replace("{{HEADER_BYTES}}", &(pointer_bytes * 5).to_string())
-            .replace("{{ROOT_BYTES}}", &(pointer_bytes * 3).to_string())
-            .replace("{{REGISTER_BYTES}}", &(pointer_bytes * 64).to_string())
-            .replace("{{MAX_HALF}}", &maximum_half)
-            .replace("{{MAX_ALLOC}}", &maximum_allocation)
-            .replace("{{MAX}}", &maximum);
-        let buffer = MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-gc");
-        let module = self
-            .context
-            .create_module_from_ir(buffer)
-            .map_err(|error| {
-                Diagnostic::new(
-                    Span::Compiler,
-                    format!("could not build garbage collector runtime: {error}"),
-                )
-            })?;
-        self.llvm_module.link_in_module(module).map_err(|error| {
-            Diagnostic::new(
-                Span::Compiler,
-                format!("could not link garbage collector runtime: {error}"),
-            )
-        })
+    /// Test-only wrapper: emits the shared validator and records it with the
+    /// legacy origin the transition tests expect.
+    fn build_utf8_validator(&mut self) -> CodeGenerationResult<()> {
+        let function = self.backend.build_utf8_validator()?;
+        #[cfg(test)]
+        self.legacy_register_function(function, LegacyFunctionOrigin::Utf8Validator);
+        #[cfg(not(test))]
+        let _ = function;
+        Ok(())
     }
 
-    fn install_coroutine_runtime(&self) -> CodeGenerationResult<()> {
-        let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
-        let bits = pointer_bytes * 8;
-        let runtime = include_str!("coroutine.ll").replace("{{SIZE}}", &format!("i{bits}"));
-        let buffer =
-            MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-coroutine");
-        let module = self
-            .context
-            .create_module_from_ir(buffer)
-            .map_err(|error| {
-                Diagnostic::new(
-                    Span::Compiler,
-                    format!("could not build coroutine runtime: {error}"),
-                )
-            })?;
-        self.llvm_module.link_in_module(module).map_err(|error| {
-            Diagnostic::new(
-                Span::Compiler,
-                format!("could not link coroutine runtime: {error}"),
-            )
-        })
-    }
-
-    fn install_reactive_runtime(&self) -> CodeGenerationResult<()> {
-        let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
-        let bits = pointer_bytes * 8;
-        let runtime = include_str!("reactive.ll")
-            .replace("{{SIZE}}", &format!("i{bits}"))
-            .replace("{{SCOPE_BYTES}}", &pointer_bytes.to_string())
-            .replace("{{SIGNAL_BYTES}}", &pointer_bytes.to_string())
-            .replace("{{REACTION_BYTES}}", &(pointer_bytes * 8).to_string())
-            .replace("{{DEP_BYTES}}", &(pointer_bytes * 5).to_string())
-            .replace("{{WORK_BYTES}}", &(pointer_bytes * 3).to_string());
-        let buffer =
-            MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-reactive");
-        let module = self
-            .context
-            .create_module_from_ir(buffer)
-            .map_err(|error| {
-                Diagnostic::new(
-                    Span::Compiler,
-                    format!("could not build reactive runtime: {error}"),
-                )
-            })?;
-        self.llvm_module.link_in_module(module).map_err(|error| {
-            Diagnostic::new(
-                Span::Compiler,
-                format!("could not link reactive runtime: {error}"),
-            )
-        })
+    /// Wrapper: the test-only constructor-adapter comparison observes the real
+    /// `set_gc_finalizer` call, so the flag flips on the emitter.
+    fn set_gc_finalizer(
+        &mut self,
+        pointer: inkwell::values::PointerValue<'context>,
+        finalizer: inkwell::values::FunctionValue<'context>,
+    ) -> CodeGenerationResult<()> {
+        #[cfg(test)]
+        {
+            self.legacy_finalizer_set = true;
+        }
+        self.backend.set_gc_finalizer(pointer, finalizer)
     }
 
     fn declare_external_functions(&mut self) -> CodeGenerationResult<()> {
@@ -1693,7 +1325,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let raw_parameters = &parameters[1 + resource_count..];
         let whole_mutation = function_type.mutations.contains(&CheckedMutation::Whole);
         let logical_types = flattened_parameter_types(&function_type.parameter);
-        let indirect_mask = self.indirect_parameter_mask(&function_type, None);
+        let indirect_mask = self.indirect_parameter_mask(&function_type);
         let mut values = Vec::new();
         let mut mutable_pointers = Vec::new();
         if whole_mutation {
@@ -2251,10 +1883,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     &[self.context.ptr_type(AddressSpace::default()).into()],
                     false,
                 );
-                let free = self
-                    .llvm_module
-                    .get_function("free")
-                    .unwrap_or_else(|| self.llvm_module.add_function("free", free_type, None));
+                let free = self.lazy_libc_function("free", free_type);
                 self.builder
                     .build_direct_call(free, &[pointer.into()], "c_string.drop")
                     .map_err(|error| Diagnostic::new(span, error.to_string()))?;
@@ -2419,26 +2048,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_return(Some(&integer_type.const_zero()))
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
         Ok(())
-    }
-
-    fn register_gc_root_region(
-        &self,
-        pointer: inkwell::values::PointerValue<'context>,
-        size: u64,
-        span: Span,
-    ) -> CodeGenerationResult<()> {
-        let register = self
-            .llvm_module
-            .get_function("__staple_gc_register_root")
-            .expect("GC root registration function");
-        self.builder
-            .build_direct_call(
-                register,
-                &[pointer.into(), self.size_type.const_int(size, false).into()],
-                "",
-            )
-            .map(|_| ())
-            .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
     fn compile_module_initializers(&mut self) -> CodeGenerationResult<()> {
@@ -4418,7 +4027,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let parameters = function.get_params();
         let raw_values = &parameters[1..];
         let value_types = flattened_parameter_types(&function_type.parameter);
-        let indirect_mask = self.indirect_parameter_mask(function_type, None);
+        let indirect_mask = self.indirect_parameter_mask(function_type);
         let mutation_mask = mutation_parameter_mask(value_types.len(), &function_type.mutations);
         let mut values = Vec::with_capacity(raw_values.len());
         for (index, value) in raw_values.iter().copied().enumerate() {
@@ -5188,7 +4797,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "trait method argument layout does not match",
             ));
         }
-        let indirect = self.indirect_parameter_mask(&function_type, None);
+        let indirect = self.indirect_parameter_mask(&function_type);
         let mutations = mutation_parameter_mask(parameter_types.len(), &function_type.mutations);
         let mut call_arguments: Vec<inkwell::values::BasicMetadataValueEnum<'context>> =
             Vec::with_capacity(values.len() + 1);
@@ -5466,13 +5075,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_store(slot, replacement)
             .map(|_| ())
             .map_err(|error| Diagnostic::new(span, error.to_string()))
-    }
-
-    fn unit_value(&self) -> AnyValueEnum<'context> {
-        self.context
-            .struct_type(&[], true)
-            .const_zero()
-            .as_any_value_enum()
     }
 
     fn compile_loop_expression(
@@ -6326,10 +5928,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             false,
         );
-        let memcmp = self
-            .llvm_module
-            .get_function("memcmp")
-            .unwrap_or_else(|| self.llvm_module.add_function("memcmp", memcmp_type, None));
+        let memcmp = self.lazy_libc_function("memcmp", memcmp_type);
         let comparison = self
             .builder
             .build_direct_call(
@@ -6857,69 +6456,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(())
     }
 
-    fn set_gc_finalizer(
-        &mut self,
-        pointer: inkwell::values::PointerValue<'context>,
-        finalizer: inkwell::values::FunctionValue<'context>,
-    ) -> CodeGenerationResult<()> {
-        let setter_type = self.context.void_type().fn_type(
-            &[
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.context.ptr_type(AddressSpace::default()).into(),
-            ],
-            false,
-        );
-        let setter = self
-            .llvm_module
-            .get_function("__staple_gc_set_finalizer")
-            .unwrap_or_else(|| {
-                self.llvm_module
-                    .add_function("__staple_gc_set_finalizer", setter_type, None)
-            });
-        #[cfg(test)]
-        {
-            self.legacy_finalizer_set = true;
-        }
-        self.builder
-            .build_direct_call(
-                setter,
-                &[
-                    pointer.into(),
-                    finalizer.as_global_value().as_pointer_value().into(),
-                ],
-                "gc.finalizer",
-            )
-            .map_err(compiler_diagnostic)?;
-        Ok(())
-    }
-
-    fn build_gc_allocation(
-        &mut self,
-        size: inkwell::values::IntValue<'context>,
-        name: &str,
-        span: Span,
-    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
-        let allocator = self
-            .llvm_module
-            .get_function("__staple_gc_alloc")
-            .unwrap_or_else(|| {
-                let function_type = self
-                    .context
-                    .ptr_type(AddressSpace::default())
-                    .fn_type(&[self.size_type.into()], false);
-                self.llvm_module
-                    .add_function("__staple_gc_alloc", function_type, None)
-            });
-        let pointer = self
-            .builder
-            .build_direct_call(allocator, &[size.into()], name)
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_pointer_value();
-        Ok(pointer)
-    }
-
     /// Loads the value reached by following `payloads` (outermost first),
     /// loading the final payload as well.
     fn load_ref_payloads(
@@ -6971,16 +6507,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .into_pointer_value();
         }
         Ok(pointer)
-    }
-
-    fn slice_type(&self) -> inkwell::types::StructType<'context> {
-        self.context.struct_type(
-            &[
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.size_type.into(),
-            ],
-            false,
-        )
     }
 
     fn coerce_slice_ref_value(
@@ -8671,17 +8197,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(self.unit_value())
     }
 
-    /// `%UntilFrame` — a `%CoroHeader` (10 fields) plus, at indices 10..=16:
-    /// completion, reaction, payload, predicate code, predicate env, reactive
-    /// scope, runner fn. Matches `coroutine.ll`'s `%UntilFrame`.
-    fn until_frame_type(&self) -> inkwell::types::StructType<'context> {
-        let ptr: inkwell::types::BasicTypeEnum<'context> =
-            self.context.ptr_type(AddressSpace::default()).into();
-        let mut fields = vec![self.context.i8_type().into()];
-        fields.extend(std::iter::repeat(ptr).take(16));
-        self.context.struct_type(&fields, false)
-    }
-
     /// `until { predicate }` → a `Coroutine{Reactive} ()` value backed by a
     /// hand-written state machine (`__staple_until_resume` / `_cleanup`) that
     /// subscribes the predicate through a reaction and parks on a `Wait ()`.
@@ -9197,13 +8712,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             true,
         );
-        let snprintf = self
-            .llvm_module
-            .get_function("snprintf")
-            .unwrap_or_else(|| {
-                self.llvm_module
-                    .add_function("snprintf", snprintf_type, None)
-            });
+        let snprintf = self.lazy_libc_function("snprintf", snprintf_type);
         let length = self
             .builder
             .build_direct_call(
@@ -9364,10 +8873,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             &[self.context.ptr_type(AddressSpace::default()).into()],
             false,
         );
-        let strlen = self
-            .llvm_module
-            .get_function("strlen")
-            .unwrap_or_else(|| self.llvm_module.add_function("strlen", strlen_type, None));
+        let strlen = self.lazy_libc_function("strlen", strlen_type);
         let length = self
             .builder
             .build_direct_call(strlen, &[source.into()], "c_string.length")
@@ -9442,10 +8948,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             false,
         );
-        let memchr = self
-            .llvm_module
-            .get_function("memchr")
-            .unwrap_or_else(|| self.llvm_module.add_function("memchr", memchr_type, None));
+        let memchr = self.lazy_libc_function("memchr", memchr_type);
         let nul = self
             .builder
             .build_direct_call(
@@ -9505,390 +9008,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_store(terminator, self.context.i8_type().const_zero())
             .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
         Ok(result.as_any_value_enum())
-    }
-
-    fn build_trap_if(
-        &mut self,
-        condition: inkwell::values::IntValue<'context>,
-        span: Span,
-    ) -> CodeGenerationResult<()> {
-        let current = self
-            .builder
-            .get_insert_block()
-            .and_then(|block| block.get_parent())
-            .ok_or_else(|| Diagnostic::new(span.clone(), "trap has no containing function"))?;
-        let trap_block = self.context.append_basic_block(current, "trap");
-        let continue_block = self.context.append_basic_block(current, "trap.continue");
-        self.builder
-            .build_conditional_branch(condition, trap_block, continue_block)
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.builder.position_at_end(trap_block);
-        let trap = self
-            .llvm_module
-            .get_function("llvm.trap")
-            .unwrap_or_else(|| {
-                self.llvm_module.add_function(
-                    "llvm.trap",
-                    self.context.void_type().fn_type(&[], false),
-                    None,
-                )
-            });
-        self.builder
-            .build_direct_call(trap, &[], "")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.builder
-            .build_unreachable()
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.builder.position_at_end(continue_block);
-        Ok(())
-    }
-
-    fn build_utf8_validator(&mut self) -> CodeGenerationResult<()> {
-        let pointer_type = self.context.ptr_type(AddressSpace::default());
-        let function_type = self
-            .context
-            .bool_type()
-            .fn_type(&[pointer_type.into(), self.size_type.into()], false);
-        let function = self.llvm_module.add_function(
-            "__staple_is_valid_utf8",
-            function_type,
-            Some(inkwell::module::Linkage::Internal),
-        );
-        #[cfg(test)]
-        self.legacy_register_function(function, LegacyFunctionOrigin::Utf8Validator);
-        let entry = self.context.append_basic_block(function, "entry");
-        let loop_block = self.context.append_basic_block(function, "loop");
-        let byte_block = self.context.append_basic_block(function, "byte");
-        let done_block = self.context.append_basic_block(function, "done");
-        let continuation_block = self.context.append_basic_block(function, "continuation");
-        let continuation_valid = self
-            .context
-            .append_basic_block(function, "continuation.valid");
-        let leading_block = self.context.append_basic_block(function, "leading");
-        let leading_valid = self.context.append_basic_block(function, "leading.valid");
-        let invalid_block = self.context.append_basic_block(function, "invalid");
-
-        let pointer = function.get_nth_param(0).unwrap().into_pointer_value();
-        let length = function.get_nth_param(1).unwrap().into_int_value();
-        let byte_type = self.context.i8_type();
-        self.builder.position_at_end(entry);
-        let index_slot = self
-            .builder
-            .build_alloca(self.size_type, "index")
-            .map_err(compiler_diagnostic)?;
-        let remaining_slot = self
-            .builder
-            .build_alloca(byte_type, "remaining")
-            .map_err(compiler_diagnostic)?;
-        let minimum_slot = self
-            .builder
-            .build_alloca(byte_type, "minimum")
-            .map_err(compiler_diagnostic)?;
-        let maximum_slot = self
-            .builder
-            .build_alloca(byte_type, "maximum")
-            .map_err(compiler_diagnostic)?;
-        for (slot, value) in [
-            (index_slot, self.size_type.const_zero()),
-            (remaining_slot, byte_type.const_zero()),
-            (minimum_slot, byte_type.const_int(0x80, false)),
-            (maximum_slot, byte_type.const_int(0xbf, false)),
-        ] {
-            self.builder
-                .build_store(slot, value)
-                .map_err(compiler_diagnostic)?;
-        }
-        self.builder
-            .build_unconditional_branch(loop_block)
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(loop_block);
-        let index = self
-            .builder
-            .build_load(self.size_type, index_slot, "index")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let at_end = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, index, length, "at_end")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_conditional_branch(at_end, done_block, byte_block)
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(done_block);
-        let remaining = self
-            .builder
-            .build_load(byte_type, remaining_slot, "remaining")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let complete = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                remaining,
-                byte_type.const_zero(),
-                "complete",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_return(Some(&complete))
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(byte_block);
-        let byte_pointer = unsafe {
-            self.builder
-                .build_gep(byte_type, pointer, &[index], "byte.pointer")
-        }
-        .map_err(compiler_diagnostic)?;
-        let byte = self
-            .builder
-            .build_load(byte_type, byte_pointer, "byte")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let remaining = self
-            .builder
-            .build_load(byte_type, remaining_slot, "remaining")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let expects_continuation = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::NE,
-                remaining,
-                byte_type.const_zero(),
-                "expects_continuation",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_conditional_branch(expects_continuation, continuation_block, leading_block)
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(continuation_block);
-        let minimum = self
-            .builder
-            .build_load(byte_type, minimum_slot, "minimum")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let maximum = self
-            .builder
-            .build_load(byte_type, maximum_slot, "maximum")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let above_minimum = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::UGE, byte, minimum, "above_minimum")
-            .map_err(compiler_diagnostic)?;
-        let below_maximum = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::ULE, byte, maximum, "below_maximum")
-            .map_err(compiler_diagnostic)?;
-        let valid_continuation = self
-            .builder
-            .build_and(above_minimum, below_maximum, "valid_continuation")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_conditional_branch(valid_continuation, continuation_valid, invalid_block)
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(continuation_valid);
-        let next_remaining = self
-            .builder
-            .build_int_sub(remaining, byte_type.const_int(1, false), "next_remaining")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(remaining_slot, next_remaining)
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(minimum_slot, byte_type.const_int(0x80, false))
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(maximum_slot, byte_type.const_int(0xbf, false))
-            .map_err(compiler_diagnostic)?;
-        self.increment_utf8_index(index_slot, index, loop_block)?;
-
-        self.builder.position_at_end(leading_block);
-        let ascii = self.byte_in_range(byte, 0, 0x7f)?;
-        let two = self.byte_in_range(byte, 0xc2, 0xdf)?;
-        let three_low = self.byte_in_range(byte, 0xe1, 0xec)?;
-        let three_high = self.byte_in_range(byte, 0xee, 0xef)?;
-        let three_general = self
-            .builder
-            .build_or(three_low, three_high, "three.general")
-            .map_err(compiler_diagnostic)?;
-        let e0 = self.byte_equals(byte, 0xe0)?;
-        let ed = self.byte_equals(byte, 0xed)?;
-        let three = self
-            .builder
-            .build_or(e0, ed, "three.special")
-            .and_then(|special| self.builder.build_or(special, three_general, "three"))
-            .map_err(compiler_diagnostic)?;
-        let four_general = self.byte_in_range(byte, 0xf1, 0xf3)?;
-        let f0 = self.byte_equals(byte, 0xf0)?;
-        let f4 = self.byte_equals(byte, 0xf4)?;
-        let four = self
-            .builder
-            .build_or(f0, f4, "four.special")
-            .and_then(|special| self.builder.build_or(special, four_general, "four"))
-            .map_err(compiler_diagnostic)?;
-        let valid_leading = self
-            .builder
-            .build_or(ascii, two, "leading.short")
-            .and_then(|short| self.builder.build_or(short, three, "leading.three"))
-            .and_then(|partial| self.builder.build_or(partial, four, "valid_leading"))
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_conditional_branch(valid_leading, leading_valid, invalid_block)
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(leading_valid);
-        let three_or_four = self
-            .builder
-            .build_or(three, four, "three_or_four")
-            .map_err(compiler_diagnostic)?;
-        let remaining_for_multibyte = self
-            .builder
-            .build_select(
-                four,
-                byte_type.const_int(3, false),
-                byte_type.const_int(2, false),
-                "long_remaining",
-            )
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let remaining = self
-            .builder
-            .build_select(
-                two,
-                byte_type.const_int(1, false),
-                remaining_for_multibyte,
-                "multibyte_remaining",
-            )
-            .and_then(|value| {
-                self.builder.build_select(
-                    ascii,
-                    byte_type.const_zero(),
-                    value.into_int_value(),
-                    "remaining",
-                )
-            })
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let minimum = self
-            .builder
-            .build_select(
-                e0,
-                byte_type.const_int(0xa0, false),
-                byte_type.const_int(0x80, false),
-                "minimum.e0",
-            )
-            .and_then(|value| {
-                self.builder.build_select(
-                    f0,
-                    byte_type.const_int(0x90, false),
-                    value.into_int_value(),
-                    "minimum",
-                )
-            })
-            .map_err(compiler_diagnostic)?;
-        let maximum = self
-            .builder
-            .build_select(
-                ed,
-                byte_type.const_int(0x9f, false),
-                byte_type.const_int(0xbf, false),
-                "maximum.ed",
-            )
-            .and_then(|value| {
-                self.builder.build_select(
-                    f4,
-                    byte_type.const_int(0x8f, false),
-                    value.into_int_value(),
-                    "maximum",
-                )
-            })
-            .map_err(compiler_diagnostic)?;
-        let _ = three_or_four;
-        self.builder
-            .build_store(remaining_slot, remaining)
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(minimum_slot, minimum)
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(maximum_slot, maximum)
-            .map_err(compiler_diagnostic)?;
-        self.increment_utf8_index(index_slot, index, loop_block)?;
-
-        self.builder.position_at_end(invalid_block);
-        self.builder
-            .build_return(Some(&self.context.bool_type().const_zero()))
-            .map_err(compiler_diagnostic)?;
-        Ok(())
-    }
-
-    fn increment_utf8_index(
-        &self,
-        slot: inkwell::values::PointerValue<'context>,
-        index: inkwell::values::IntValue<'context>,
-        destination: inkwell::basic_block::BasicBlock<'context>,
-    ) -> CodeGenerationResult<()> {
-        let next = self
-            .builder
-            .build_int_add(index, self.size_type.const_int(1, false), "next_index")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(slot, next)
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_unconditional_branch(destination)
-            .map_err(compiler_diagnostic)?;
-        Ok(())
-    }
-
-    fn byte_in_range(
-        &self,
-        byte: inkwell::values::IntValue<'context>,
-        minimum: u64,
-        maximum: u64,
-    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
-        let ty = self.context.i8_type();
-        let lower = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::UGE,
-                byte,
-                ty.const_int(minimum, false),
-                "byte.lower",
-            )
-            .map_err(compiler_diagnostic)?;
-        let upper = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::ULE,
-                byte,
-                ty.const_int(maximum, false),
-                "byte.upper",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_and(lower, upper, "byte.in_range")
-            .map_err(compiler_diagnostic)
-    }
-
-    fn byte_equals(
-        &self,
-        byte: inkwell::values::IntValue<'context>,
-        expected: u64,
-    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
-        self.builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                byte,
-                self.context.i8_type().const_int(expected, false),
-                "byte.equals",
-            )
-            .map_err(compiler_diagnostic)
     }
 
     fn build_closure(
@@ -10021,115 +9140,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .is_some()
     }
 
-    /// The fixed frame-header prefix every coroutine frame starts with; used to
-    /// GEP a header field through a `ptr` whose full frame type is not known at
-    /// the site (`await`, `block_on`, drop). Matches `coroutine.ll`'s
-    /// `%CoroHeader` plus the trailing `resources` pointer.
-    fn coroutine_header_type(&self) -> inkwell::types::StructType<'context> {
-        let ptr: inkwell::types::BasicTypeEnum<'context> =
-            self.context.ptr_type(AddressSpace::default()).into();
-        self.context.struct_type(
-            &[
-                self.context.i8_type().into(),
-                ptr,
-                ptr,
-                ptr,
-                ptr,
-                ptr,
-                ptr,
-                ptr,
-                ptr,
-                ptr,
-            ],
-            false,
-        )
-    }
-
-    /// The full `%TaskRecord` layout for a `spawn`ed task whose result type
-    /// lowers to `result_llvm`. Field indices are the `TASK_RECORD_*` constants.
-    fn task_record_type(
-        &self,
-        result_llvm: inkwell::types::BasicTypeEnum<'context>,
-    ) -> inkwell::types::StructType<'context> {
-        let i8_type = self.context.i8_type();
-        let ptr = self.context.ptr_type(AddressSpace::default());
-        self.context.struct_type(
-            &[
-                i8_type.into(),
-                i8_type.into(),
-                ptr.into(),
-                ptr.into(),
-                ptr.into(),
-                ptr.into(),
-                result_llvm,
-            ],
-            false,
-        )
-    }
-
-    /// The `%TaskRecord` header (everything the runtime touches), for GEPs
-    /// through a `ptr` whose result type is not known at the site.
-    fn task_record_header_type(&self) -> inkwell::types::StructType<'context> {
-        let i8_type = self.context.i8_type();
-        let ptr = self.context.ptr_type(AddressSpace::default());
-        self.context.struct_type(
-            &[
-                i8_type.into(),
-                i8_type.into(),
-                ptr.into(),
-                ptr.into(),
-                ptr.into(),
-                ptr.into(),
-            ],
-            false,
-        )
-    }
-
-    /// The full `%Completion` layout for a completion whose value type lowers to
-    /// `value_llvm`. Field indices are the `COMPLETION_*` constants.
-    fn completion_record_type(
-        &self,
-        value_llvm: inkwell::types::BasicTypeEnum<'context>,
-    ) -> inkwell::types::StructType<'context> {
-        let i8_type = self.context.i8_type();
-        let ptr = self.context.ptr_type(AddressSpace::default());
-        self.context.struct_type(
-            &[
-                i8_type.into(),        // state
-                i8_type.into(),        // flags
-                self.size_type.into(), // generation
-                ptr.into(),            // scheduler
-                ptr.into(),            // waiter
-                ptr.into(),            // cancel_env
-                ptr.into(),            // cancel_fn
-                value_llvm,            // value
-            ],
-            false,
-        )
-    }
-
-    /// A packed struct of a deferred effect row's resource values, GC-allocated
-    /// by whoever drives a coroutine frame and unpacked by its `resume`.
-    fn coroutine_resource_bundle_type(
-        &self,
-        deferred: &CheckedEffectSet,
-    ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let mut fields = Vec::new();
-        for resource in &deferred.resources {
-            if resource.mutable
-                || !self
-                    .typed_module
-                    .is_copy_in_function(&resource.value_type, None)
-            {
-                fields.push(ptr_type.into());
-            } else {
-                fields.push(self.compile_type(&resource.value_type)?);
-            }
-        }
-        Ok(self.context.struct_type(&fields, false))
-    }
-
     /// The full per-coroutine frame type and the field indices code generation
     /// needs to lay out and address it.
     fn coroutine_frame_layout(
@@ -10172,24 +9182,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             result_field,
             pending_field,
         })
-    }
-
-    fn build_fn_type(
-        &self,
-        return_type: inkwell::types::BasicTypeEnum<'context>,
-        parameters: &[inkwell::types::BasicMetadataTypeEnum<'context>],
-    ) -> inkwell::types::FunctionType<'context> {
-        match return_type {
-            inkwell::types::BasicTypeEnum::ArrayType(value) => value.fn_type(parameters, false),
-            inkwell::types::BasicTypeEnum::FloatType(value) => value.fn_type(parameters, false),
-            inkwell::types::BasicTypeEnum::IntType(value) => value.fn_type(parameters, false),
-            inkwell::types::BasicTypeEnum::PointerType(value) => value.fn_type(parameters, false),
-            inkwell::types::BasicTypeEnum::StructType(value) => value.fn_type(parameters, false),
-            inkwell::types::BasicTypeEnum::VectorType(_)
-            | inkwell::types::BasicTypeEnum::ScalableVectorType(_) => {
-                self.context.void_type().fn_type(parameters, false)
-            }
-        }
     }
 
     /// Emits (and caches) the state-machine `resume` and `cleanup` functions for
@@ -11470,17 +10462,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(result.as_any_value_enum())
     }
 
-    /// Declares a runtime helper from `coroutine.ll` with the given signature.
-    fn coroutine_runtime_fn(
-        &self,
-        name: &str,
-        signature: inkwell::types::FunctionType<'context>,
-    ) -> inkwell::values::FunctionValue<'context> {
-        self.llvm_module
-            .get_function(name)
-            .unwrap_or_else(|| self.llvm_module.add_function(name, signature, None))
-    }
-
     fn compile_scheduler_intrinsic(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
@@ -12588,7 +11569,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<CompiledCallArguments<'context>> {
         let mutations = &function_type.mutations;
         let types = flattened_parameter_types(&function_type.parameter);
-        let mut mask = self.indirect_parameter_mask(function_type, None);
+        let mut mask = self.indirect_parameter_mask(function_type);
         let mutation_mask = mutation_parameter_mask(types.len(), mutations);
         let move_mask = mutation_parameter_mask(types.len(), &function_type.moves);
         if let Some(actual) = self.concrete_expression_type(argument) {
@@ -12827,25 +11808,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         ))
     }
 
-    fn indirect_parameter_mask(
-        &self,
-        function_type: &CheckedFunctionType,
-        function: Option<FunctionId>,
-    ) -> Vec<bool> {
-        let types = flattened_parameter_types(&function_type.parameter);
-        let mutation_mask = mutation_parameter_mask(types.len(), &function_type.mutations);
-        let move_mask = mutation_parameter_mask(types.len(), &function_type.moves);
-        types
-            .iter()
-            .enumerate()
-            .map(|(index, value_type)| {
-                mutation_mask[index]
-                    || (!move_mask[index]
-                        && !self.typed_module.is_copy_in_function(value_type, function))
-            })
-            .collect()
-    }
-
     fn compile_mutation_argument_pointer(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
@@ -13028,262 +11990,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
         Ok(product.into())
     }
-
-    fn compile_native_function_type(
-        &self,
-        function_type: &CheckedFunctionType,
-    ) -> CodeGenerationResult<inkwell::types::FunctionType<'context>> {
-        let return_type = self.compile_type(&function_type.result)?;
-        let parameter_types = self.compile_parameter_types(&function_type.parameter)?;
-        let variadic = matches!(
-            &*function_type.parameter,
-            CheckedType::Product(product) if product.variadic
-        );
-        Ok(match return_type {
-            inkwell::types::BasicTypeEnum::ArrayType(value) => {
-                value.fn_type(&parameter_types, variadic)
-            }
-            inkwell::types::BasicTypeEnum::FloatType(value) => {
-                value.fn_type(&parameter_types, variadic)
-            }
-            inkwell::types::BasicTypeEnum::IntType(value) => {
-                value.fn_type(&parameter_types, variadic)
-            }
-            inkwell::types::BasicTypeEnum::PointerType(value) => {
-                value.fn_type(&parameter_types, variadic)
-            }
-            inkwell::types::BasicTypeEnum::StructType(value) => {
-                value.fn_type(&parameter_types, variadic)
-            }
-            inkwell::types::BasicTypeEnum::VectorType(_)
-            | inkwell::types::BasicTypeEnum::ScalableVectorType(_) => {
-                return Err(Diagnostic::new(
-                    Span::Compiler,
-                    "vector return types are not supported",
-                ));
-            }
-        })
-    }
-
-    fn compile_closure_function_type(
-        &self,
-        function_type: &CheckedFunctionType,
-    ) -> CodeGenerationResult<inkwell::types::FunctionType<'context>> {
-        let return_type = self.compile_type(&function_type.result)?;
-        let mut parameter_types = vec![self.context.ptr_type(AddressSpace::default()).into()];
-        for resource in &function_type.effects.resources {
-            if resource.mutable
-                || !self
-                    .typed_module
-                    .is_copy_in_function(&resource.value_type, None)
-            {
-                parameter_types.push(self.context.ptr_type(AddressSpace::default()).into());
-            } else {
-                parameter_types.push(self.compile_type(&resource.value_type)?.into());
-            }
-        }
-        let value_parameters = if function_type.mutations.contains(&CheckedMutation::Whole) {
-            vec![self.context.ptr_type(AddressSpace::default()).into()]
-        } else {
-            let mut parameters = self.compile_parameter_types(&function_type.parameter)?;
-            let indirect_mask = self.indirect_parameter_mask(function_type, None);
-            for (index, parameter) in parameters.iter_mut().enumerate() {
-                if indirect_mask[index] {
-                    *parameter = self.context.ptr_type(AddressSpace::default()).into();
-                }
-            }
-            parameters
-        };
-        parameter_types.extend(value_parameters);
-        Ok(match return_type {
-            inkwell::types::BasicTypeEnum::ArrayType(value) => {
-                value.fn_type(&parameter_types, false)
-            }
-            inkwell::types::BasicTypeEnum::FloatType(value) => {
-                value.fn_type(&parameter_types, false)
-            }
-            inkwell::types::BasicTypeEnum::IntType(value) => value.fn_type(&parameter_types, false),
-            inkwell::types::BasicTypeEnum::PointerType(value) => {
-                value.fn_type(&parameter_types, false)
-            }
-            inkwell::types::BasicTypeEnum::StructType(value) => {
-                value.fn_type(&parameter_types, false)
-            }
-            inkwell::types::BasicTypeEnum::VectorType(_)
-            | inkwell::types::BasicTypeEnum::ScalableVectorType(_) => {
-                return Err(Diagnostic::new(
-                    Span::Compiler,
-                    "vector return types are not supported",
-                ));
-            }
-        })
-    }
-
-    fn compile_parameter_types(
-        &self,
-        parameter_type: &CheckedType,
-    ) -> CodeGenerationResult<Vec<inkwell::types::BasicMetadataTypeEnum<'context>>> {
-        match parameter_type {
-            CheckedType::Product(product) => product
-                .elements
-                .iter()
-                .map(|element| self.compile_type(&element.value_type).map(Into::into))
-                .collect(),
-            other => Ok(vec![self.compile_type(other)?.into()]),
-        }
-    }
-
-    fn compile_type(
-        &self,
-        value_type: &CheckedType,
-    ) -> CodeGenerationResult<inkwell::types::BasicTypeEnum<'context>> {
-        match value_type {
-            CheckedType::Inferred => Err(Diagnostic::new(
-                Span::Compiler,
-                "cannot generate code for an inferred type before type checking",
-            )),
-            CheckedType::Error => Err(Diagnostic::new(
-                Span::Compiler,
-                "cannot generate code for an erroneous type",
-            )),
-            CheckedType::Never => Ok(self.context.struct_type(&[], false).into()),
-            CheckedType::NumberLiteral(_) => {
-                Ok(self.compile_integer_type(IntegerType::USize).into())
-            }
-            CheckedType::Array { .. } => Err(Diagnostic::new(
-                Span::Compiler,
-                "cannot generate code for an array with an unspecialized length",
-            )),
-            CheckedType::CChar => Ok(self.context.i8_type().into()),
-            CheckedType::Parameter { name, .. } => Err(Diagnostic::new(
-                Span::Compiler,
-                format!("cannot generate code for unspecialized type parameter `{name}`"),
-            )),
-            CheckedType::TypeConstructor { name, .. } => Err(Diagnostic::new(
-                Span::Compiler,
-                format!("cannot generate code for partially applied type `{name}`"),
-            )),
-            CheckedType::Opaque { .. } if self.typed_module.is_io_type(value_type) => {
-                Ok(self.context.struct_type(&[], false).into())
-            }
-            CheckedType::Opaque { .. } if self.typed_module.is_reactive_type(value_type) => {
-                Ok(self.context.ptr_type(AddressSpace::default()).into())
-            }
-            CheckedType::Opaque { .. }
-                if self.typed_module.is_coroutine_type(value_type)
-                    || self.typed_module.is_task_type(value_type)
-                    || self.typed_module.is_scheduler_type(value_type)
-                    || self.typed_module.is_tasks_type(value_type)
-                    || self.typed_module.is_wait_type(value_type)
-                    || self.typed_module.is_resolver_type(value_type)
-                    || self.typed_module.is_completion_token_type(value_type) =>
-            {
-                // A coroutine value is a pointer to its GC-allocated frame; a
-                // task handle points to its `%TaskRecord`; a `Wait` / `Resolver`
-                // / `CompletionToken` all point to the shared `%Completion`
-                // record; a scheduler / task scope point to their runtime
-                // records.
-                Ok(self.context.ptr_type(AddressSpace::default()).into())
-            }
-            CheckedType::Opaque { name, .. } => Err(Diagnostic::new(
-                Span::Compiler,
-                format!("opaque type `{name}` has no by-value representation"),
-            )),
-            CheckedType::CString => Ok(self.context.ptr_type(AddressSpace::default()).into()),
-            CheckedType::String | CheckedType::StringLiteralSet(_) => self
-                .typed_module
-                .string_representation()
-                .ok_or_else(|| {
-                    Diagnostic::new(
-                        Span::Compiler,
-                        "standard library String representation was not checked",
-                    )
-                })
-                .and_then(|representation| self.compile_type(representation)),
-            CheckedType::Slice(_) => Ok(self.slice_type().into()),
-            CheckedType::Ref(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
-            CheckedType::Buffer(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
-            CheckedType::CPointer { .. } => {
-                Ok(self.context.ptr_type(AddressSpace::default()).into())
-            }
-            CheckedType::Function(_) => Ok(self.closure_type().into()),
-            CheckedType::Product(product) => self.compile_product_type(product).map(Into::into),
-            CheckedType::Sum(sum) => self.compile_sum_type(sum).map(Into::into),
-            CheckedType::I8 => Ok(self.compile_integer_type(IntegerType::I8).into()),
-            CheckedType::I16 => Ok(self.compile_integer_type(IntegerType::I16).into()),
-            CheckedType::I32 => Ok(self.compile_integer_type(IntegerType::I32).into()),
-            CheckedType::I64 => Ok(self.compile_integer_type(IntegerType::I64).into()),
-            CheckedType::U8 => Ok(self.compile_integer_type(IntegerType::U8).into()),
-            CheckedType::U16 => Ok(self.compile_integer_type(IntegerType::U16).into()),
-            CheckedType::U32 => Ok(self.compile_integer_type(IntegerType::U32).into()),
-            CheckedType::U64 => Ok(self.compile_integer_type(IntegerType::U64).into()),
-            CheckedType::ISize => Ok(self.compile_integer_type(IntegerType::ISize).into()),
-            CheckedType::USize => Ok(self.compile_integer_type(IntegerType::USize).into()),
-            CheckedType::F32 => Ok(self.compile_float_type(FloatType::F32).into()),
-            CheckedType::F64 => Ok(self.compile_float_type(FloatType::F64).into()),
-            CheckedType::Distinct { representation, .. } => self.compile_type(representation),
-        }
-    }
-
-    fn compile_integer_type(&self, integer: IntegerType) -> inkwell::types::IntType<'context> {
-        match integer {
-            IntegerType::I8 | IntegerType::U8 => self.context.i8_type(),
-            IntegerType::I16 | IntegerType::U16 => self.context.i16_type(),
-            IntegerType::I32 | IntegerType::U32 => self.context.i32_type(),
-            IntegerType::I64 | IntegerType::U64 => self.context.i64_type(),
-            IntegerType::ISize | IntegerType::USize => self.size_type,
-        }
-    }
-
-    fn compile_float_type(&self, float: FloatType) -> inkwell::types::FloatType<'context> {
-        match float {
-            FloatType::F32 => self.context.f32_type(),
-            FloatType::F64 => self.context.f64_type(),
-        }
-    }
-
-    fn closure_type(&self) -> inkwell::types::StructType<'context> {
-        let pointer = self.context.ptr_type(AddressSpace::default());
-        self.context
-            .struct_type(&[pointer.into(), pointer.into()], false)
-    }
-
-    fn compile_product_type(
-        &self,
-        product: &CheckedProductType,
-    ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
-        let fields = product
-            .elements
-            .iter()
-            .map(|element| self.compile_type(&element.value_type))
-            .collect::<CodeGenerationResult<Vec<_>>>()?;
-        Ok(self.context.struct_type(&fields, true))
-    }
-
-    fn compile_sum_type(
-        &self,
-        sum: &crate::CheckedSumType,
-    ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
-        let mut maximum_size = 0;
-        let mut carrier = self.context.i8_type().into();
-        let mut maximum_alignment = 1;
-        for alternative in &sum.alternatives {
-            let alternative_type = self.compile_type(alternative)?;
-            let size = self.target_data.get_store_size(&alternative_type);
-            let alignment = self.target_data.get_abi_alignment(&alternative_type);
-            maximum_size = maximum_size.max(size);
-            if alignment > maximum_alignment {
-                maximum_alignment = alignment;
-                carrier = alternative_type;
-            }
-        }
-        let carrier_size = self.target_data.get_store_size(&carrier).max(1);
-        let length = maximum_size.max(1).div_ceil(carrier_size) as u32;
-        let payload = carrier.array_type(length);
-        Ok(self
-            .context
-            .struct_type(&[self.context.i32_type().into(), payload.into()], false))
-    }
 }
 
 fn create_target_machine(target: Option<&str>) -> CodeGenerationResult<TargetMachine> {
@@ -13321,21 +12027,6 @@ fn standard_function_name_matches(candidate: &str, name: &str) -> bool {
         return false;
     };
     rest.rsplit_once('.').is_some_and(|(_, last)| last == name)
-}
-
-fn value_as_basic(value: AnyValueEnum<'_>) -> Option<BasicValueEnum<'_>> {
-    match value {
-        AnyValueEnum::ArrayValue(value) => Some(value.into()),
-        AnyValueEnum::FloatValue(value) => Some(value.into()),
-        AnyValueEnum::FunctionValue(value) => {
-            Some(value.as_global_value().as_pointer_value().into())
-        }
-        AnyValueEnum::IntValue(value) => Some(value.into()),
-        AnyValueEnum::PointerValue(value) => Some(value.into()),
-        AnyValueEnum::StructValue(value) => Some(value.into()),
-        AnyValueEnum::VectorValue(value) => Some(value.into()),
-        _ => None,
-    }
 }
 
 fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
@@ -13376,21 +12067,6 @@ fn strip_place_wrappers(mut value_type: CheckedType) -> CheckedType {
 }
 
 impl<'module, 'context> ModuleEmitter<'module, 'context> {
-    fn buffer_header_type(
-        &self,
-        element: BasicTypeEnum<'context>,
-    ) -> inkwell::types::StructType<'context> {
-        self.context.struct_type(
-            &[
-                self.size_type.into(),
-                self.size_type.into(),
-                self.context.i8_type().into(),
-                element,
-            ],
-            false,
-        )
-    }
-
     fn buffer_data_pointer(
         &self,
         buffer: inkwell::values::PointerValue<'context>,
@@ -14334,31 +13010,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.build_trap_if(frozen, span)
     }
 
-    fn register_gc_interior(
-        &mut self,
-        interior: inkwell::values::PointerValue<'context>,
-        payload: inkwell::values::PointerValue<'context>,
-    ) -> CodeGenerationResult<()> {
-        let function_type = self.context.void_type().fn_type(
-            &[
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.context.ptr_type(AddressSpace::default()).into(),
-            ],
-            false,
-        );
-        let register = self
-            .llvm_module
-            .get_function("__staple_gc_register_interior")
-            .unwrap_or_else(|| {
-                self.llvm_module
-                    .add_function("__staple_gc_register_interior", function_type, None)
-            });
-        self.builder
-            .build_direct_call(register, &[interior.into(), payload.into()], "")
-            .map(|_| ())
-            .map_err(compiler_diagnostic)
-    }
-
     fn ensure_buffer_finalizer(
         &mut self,
         element: &CheckedType,
@@ -14477,24 +13128,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
 fn compiler_diagnostic(error: inkwell::builder::BuilderError) -> Diagnostic {
     Diagnostic::new(Span::Compiler, error.to_string())
-}
-
-fn mutation_parameter_mask(count: usize, mutations: &[CheckedMutation]) -> Vec<bool> {
-    let whole = mutations.contains(&CheckedMutation::Whole);
-    (0..count)
-        .map(|index| whole || mutations.contains(&CheckedMutation::Element(index)))
-        .collect()
-}
-
-fn flattened_parameter_types(parameter: &CheckedType) -> Vec<&CheckedType> {
-    match parameter {
-        CheckedType::Product(product) => product
-            .elements
-            .iter()
-            .map(|element| &element.value_type)
-            .collect(),
-        other => vec![other],
-    }
 }
 
 fn top_level_pattern_symbols(module: &ResolvedModule, pattern: &Pattern) -> Vec<Option<SymbolId>> {
