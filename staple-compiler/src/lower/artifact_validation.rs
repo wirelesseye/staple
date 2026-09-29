@@ -229,4 +229,168 @@ mod tests {
             "a use recorded at the wrong site is diagnosed: {diagnostics:?}"
         );
     }
+
+    /// Every catalog fact Stage 5 consumes, rendered in catalog order: planned
+    /// names, instances with their edges, uses, and owned bindings, artifacts
+    /// with their request roots, edges, and plans, the initializers' uses,
+    /// edges, and owned bindings, and the runtime requirement set.
+    fn catalog_snapshot(program: &crate::LoweredProgram) -> String {
+        use crate::ArenaId;
+        let mut out = String::new();
+        out.push_str(&format!(
+            "names={:?}\n",
+            program
+                .specializations
+                .planned_names()
+                .expect("unique planned names")
+        ));
+        for (id, instance) in program.instances.iter() {
+            out.push_str(&format!(
+                "instance {} ordinal={} name={} request={:?} deps={:?} artifacts={:?}\n",
+                id.index(),
+                instance.ordinal.index(),
+                instance.name,
+                instance.request,
+                instance
+                    .dependencies
+                    .iter()
+                    .map(|edge| (edge.instance.index(), edge.kind.description(), &edge.origin))
+                    .collect::<Vec<_>>(),
+                instance
+                    .artifacts
+                    .iter()
+                    .map(|edge| (edge.artifact.index(), edge.kind.description(), &edge.origin))
+                    .collect::<Vec<_>>(),
+            ));
+            if let Some(body) = &instance.body {
+                out.push_str(&format!(
+                    "  uses={:?} instance_uses={:?} owned={:?}\n",
+                    body.artifact_uses
+                        .iter()
+                        .map(|use_| (use_.artifact.index(), use_.kind.description(), use_.site))
+                        .collect::<Vec<_>>(),
+                    body.instance_uses
+                        .iter()
+                        .map(|use_| (use_.instance.index(), use_.kind.description(), use_.site))
+                        .collect::<Vec<_>>(),
+                    body.owned_bindings,
+                ));
+            }
+        }
+        for (id, artifact) in program.artifacts.iter() {
+            out.push_str(&format!(
+                "artifact {} ordinal={} name={} root={:?} edges={:?} instances={:?} plan={:?}\n",
+                id.index(),
+                artifact.ordinal.index(),
+                artifact.name,
+                artifact.request,
+                artifact
+                    .artifacts
+                    .iter()
+                    .map(|edge| (edge.artifact.index(), edge.kind.description()))
+                    .collect::<Vec<_>>(),
+                artifact
+                    .instances
+                    .iter()
+                    .map(|edge| (edge.instance.index(), edge.kind.description()))
+                    .collect::<Vec<_>>(),
+                artifact.plan,
+            ));
+        }
+        for (id, _) in program.initializers.iter() {
+            let index = id.index();
+            out.push_str(&format!(
+                "initializer {index} uses={:?} instance_uses={:?} artifacts={:?} instances={:?} owned={:?}\n",
+                program.initializer_artifact_uses.get(index).map(|uses| uses
+                    .iter()
+                    .map(|use_| (use_.artifact.index(), use_.kind.description(), use_.site))
+                    .collect::<Vec<_>>()),
+                program.initializer_instance_uses.get(index).map(|uses| uses
+                    .iter()
+                    .map(|use_| (use_.instance.index(), use_.kind.description(), use_.site))
+                    .collect::<Vec<_>>()),
+                program.initializer_artifacts.get(index).map(|edges| edges
+                    .iter()
+                    .map(|edge| (edge.artifact.index(), edge.kind.description()))
+                    .collect::<Vec<_>>()),
+                program.initializer_instances.get(index).map(|edges| edges
+                    .iter()
+                    .map(|edge| (edge.instance.index(), edge.kind.description()))
+                    .collect::<Vec<_>>()),
+                program.initializer_owned_bindings.get(index),
+            ));
+        }
+        out.push_str(&format!(
+            "runtime={:?}\n",
+            program.runtime_requirements.requirements()
+        ));
+        out
+    }
+
+    #[test]
+    fn repeated_lowering_yields_identical_catalogs_and_plans() {
+        // Each run loads, checks, and lowers from scratch; every `HashMap`
+        // in the pipeline gets a fresh random seed, so iteration-order
+        // dependence would show up as a snapshot difference.
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "use std.cinterop.(CString, c_string)\n",
+            "use std.buffer.*\n",
+            "extern \"c\" { inspect: CString -> I32 }\n",
+            "type Resource = ctor I32\n",
+            "impl Drop Resource { def drop = Resource value => () }\n",
+            "let make_resource: () -> (Resource -> Ref Resource) = () => Ref\n",
+            "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
+            "def pick: Bool -> (CString | I32) = condition => when { condition => c_string \"a\", else => 1 }\n",
+            "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",
+            "def peek: <T> T -> I32 = _ => 1\n",
+            "def generic: <T where Copy T> T -> Coroutine{} I32 = value => coro { peek value; 1 }\n",
+            "let signal flag = 0\n",
+            "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+            "  let _ = await (until { flag >= 1 })\n",
+            "  ()\n",
+            "}\n",
+            "let mut strings: Buffer CString = Buffer.with_capacity (2 satisfies USize)\n",
+            "let shown = show_pair (1, 2)\n",
+            "let picked = pick True\n",
+            "let run = capture (c_string \"x\")\n",
+            "let a: Coroutine{} I32 = generic 1\n",
+            "let b: Coroutine{} I32 = generic (1 satisfies U8)\n",
+            "let c = with Reactive = reactive_scope () { waiting () }\n",
+            "let d = with Reactive = reactive_scope () { reaction { () } }\n",
+            "let inspected = inspect\n",
+            "let doubled = flag + flag\n",
+        );
+        let first = catalog_snapshot(&lower(source).program);
+        for plan in [
+            "ConstructorAdapter(",
+            "StructuralMethod(",
+            "DropGlue(",
+            "GcFinalizer(",
+            "CoroutineCodes(",
+            "ReactionRunner(",
+            "UntilRunner(",
+            "DerivedRunner(",
+            "ExternAdapter(",
+        ] {
+            assert!(
+                first.contains(plan),
+                "the snapshot fixture covers `{plan}` plans"
+            );
+        }
+        for run in 0..2 {
+            let again = catalog_snapshot(&lower(source).program);
+            if again != first {
+                let line = first
+                    .lines()
+                    .zip(again.lines())
+                    .position(|(left, right)| left != right);
+                panic!(
+                    "repeated lowering {run} changed the catalog at line {line:?}:\nfirst:  {:?}\nagain:  {:?}",
+                    line.and_then(|line| first.lines().nth(line)),
+                    line.and_then(|line| again.lines().nth(line)),
+                );
+            }
+        }
+    }
 }
