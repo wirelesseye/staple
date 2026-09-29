@@ -478,6 +478,13 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
+    /// One string literal expression. Stage 4.6 records its GC-allocated data
+    /// here; a `c_string` literal lowers to `CString` instead and never reaches
+    /// this hook.
+    fn string_literal_site(&mut self, _origin: &Origin) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
     /// One string template. Stage 4.6 records literal-data allocation here.
     fn string_template_site(
         &mut self,
@@ -927,9 +934,11 @@ impl<'a> LoweredWalker<'a> {
                     self.visitor.reactive_operation(operation, &origin)?;
                 }
             }
+            super::LoweredExpressionKind::String(_) => {
+                self.visitor.string_literal_site(&origin)?;
+            }
             super::LoweredExpressionKind::Integer(_)
             | super::LoweredExpressionKind::Float(_)
-            | super::LoweredExpressionKind::String(_)
             | super::LoweredExpressionKind::CString(_) => {}
             super::LoweredExpressionKind::Access(access) => self.walk_expression(access.base)?,
             super::LoweredExpressionKind::Product(product) => {

@@ -3745,6 +3745,66 @@ mod tests {
         );
     }
 
+    /// Per-function ground truth: for every instance whose template is the
+    /// only instance of its name and whose emitted function carries that
+    /// exact name, the owner-local derivation equals the runtime surfaces the
+    /// emitted function itself references. Returns how many were compared.
+    fn assert_owner_requirements_match_emitted_functions(
+        program: &LoweredProgram,
+        legacy: &crate::codegen::LegacyEmissions,
+    ) -> usize {
+        use crate::RuntimeRequirement;
+        use std::collections::{HashMap, HashSet};
+
+        let mut instances_by_name: HashMap<&str, Vec<_>> = HashMap::new();
+        for (_, instance) in program.instances.iter() {
+            if let (Some(function), Some(body)) = (
+                program.functions.get(instance.template),
+                instance.body.as_ref(),
+            ) {
+                instances_by_name
+                    .entry(function.name.as_str())
+                    .or_default()
+                    .push(body);
+            }
+        }
+        let emitted = legacy
+            .emitted_functions
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut compared = 0;
+        for (name, bodies) in instances_by_name {
+            let [body] = bodies.as_slice() else {
+                continue;
+            };
+            if !emitted.contains(name) {
+                continue;
+            }
+            let derived = program
+                .owner_runtime_requirements(
+                    super::super::cleanup_artifacts::OwnerArenas::Instance(body),
+                    &body.artifact_uses,
+                )
+                .requirements()
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let referenced = legacy
+                .runtime_references
+                .iter()
+                .filter(|(_, function)| function == name)
+                .filter_map(|(symbol, _)| RuntimeRequirement::for_runtime_symbol(symbol))
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                derived, referenced,
+                "`{name}`'s derived requirements match its emitted function's references"
+            );
+            compared += 1;
+        }
+        compared
+    }
+
     #[test]
     fn stage_4_6_runtime_requirements_cover_legacy_surfaces() {
         use crate::RuntimeRequirement;
@@ -3821,6 +3881,7 @@ mod tests {
         ];
 
         let mut covered = HashSet::new();
+        let mut compared = 0;
         for source in fixtures {
             let module = checked_program(source);
             let lowered = Lowerer::new().lower(&module).unwrap_or_else(|diagnostics| {
@@ -3848,12 +3909,96 @@ mod tests {
                 "the recorded requirements must match the surfaces legacy emission references\n{source}"
             );
             covered.extend(requirements);
+            compared +=
+                assert_owner_requirements_match_emitted_functions(&lowered.program, &legacy);
         }
+        assert!(
+            compared >= 10,
+            "the per-function comparison covers many emitted functions: {compared}"
+        );
         for requirement in RuntimeRequirement::ALL {
             assert!(
                 covered.contains(&requirement),
                 "the fixtures cover `{}`",
                 requirement.description()
+            );
+        }
+    }
+
+    #[test]
+    fn stage_4_6_owner_requirements_match_each_emitted_function() {
+        use crate::RuntimeRequirement;
+        use std::collections::HashSet;
+
+        // The program-wide set is masked by the eagerly emitted standard
+        // library, which already needs the collector. A per-function
+        // comparison is not: each body's own derivation must equal the
+        // surfaces its emitted function references. `second` is read by
+        // `first` before its initializer, so legacy predeclares it with a
+        // malloc'd state cell registered as a GC root region. `first`'s
+        // environment, which captures `second`, is GC-allocated in the same
+        // function, so the collector is required either way; the check is
+        // that the per-function sets agree, in a body and in a loop body.
+        let source = concat!(
+            "def forward: () -> I32 = () => {\n",
+            "  def first = () => second ()\n",
+            "  def second = () => 42\n",
+            "  first ()\n",
+            "}\n",
+            "def looped: () -> I32 = () => {\n",
+            "  loop {\n",
+            "    def first = () => second ()\n",
+            "    def second = () => 7\n",
+            "    break first ()\n",
+            "  }\n",
+            "}\n",
+            "let a = forward ()\n",
+            "let b = looped ()\n",
+        );
+        let module = checked_program(source);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .unwrap_or_else(|diagnostics| panic!("fixture should lower: {diagnostics:?}"));
+        let context = Context::create();
+        let legacy = crate::codegen::legacy_emissions(&context, &lowered)
+            .unwrap_or_else(|diagnostics| panic!("fixture should compile: {diagnostics:?}"));
+        let program = &lowered.program;
+
+        for name in ["forward", "looped"] {
+            let body = program
+                .instances
+                .iter()
+                .find(|(_, instance)| {
+                    program
+                        .functions
+                        .get(instance.template)
+                        .is_some_and(|function| function.name == name)
+                })
+                .and_then(|(_, instance)| instance.body.as_ref())
+                .unwrap_or_else(|| panic!("`{name}` has a materialized instance"));
+            let derived = program
+                .owner_runtime_requirements(
+                    super::super::cleanup_artifacts::OwnerArenas::Instance(body),
+                    &body.artifact_uses,
+                )
+                .requirements()
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let emitted = legacy
+                .runtime_references
+                .iter()
+                .filter(|(_, function)| function == name)
+                .filter_map(|(symbol, _)| RuntimeRequirement::for_runtime_symbol(symbol))
+                .collect::<HashSet<_>>();
+            assert!(
+                emitted.contains(&RuntimeRequirement::GarbageCollector),
+                "legacy registers `{name}`'s predeclared state cell as a GC root: {:?}",
+                legacy.runtime_references
+            );
+            assert_eq!(
+                derived, emitted,
+                "`{name}`'s derived requirements match its emitted function's references"
             );
         }
     }

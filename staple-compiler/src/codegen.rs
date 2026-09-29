@@ -108,11 +108,11 @@ struct ModuleEmitter<'module, 'context> {
     /// the adapter was read as a first-class value.
     #[cfg(test)]
     legacy_extern_adapters: Vec<LegacyExternAdapter>,
-    /// Test-only: every lazily declared or installed runtime surface the
-    /// emitted code actually references, in reference order. `RefCell` keeps
-    /// the immutable runtime helpers callable through `&self`.
+    /// Test-only: the functions the installed runtime modules and the UTF-8
+    /// validator define. A runtime reference from inside one of them is the
+    /// runtime's own business, not a surface emitted code needs.
     #[cfg(test)]
-    legacy_runtime_surfaces: std::cell::RefCell<Vec<String>>,
+    legacy_runtime_internal: HashSet<String>,
     active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
     expression_type_overrides: HashMap<staple_syntax::SyntaxId, CheckedType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
@@ -317,18 +317,6 @@ struct LoopCodegenContext<'context> {
 type CodeGenerationResult<T> = Result<T, Diagnostic>;
 
 impl<'module, 'context> ModuleEmitter<'module, 'context> {
-    /// Test-only: records one lazily declared or installed runtime surface the
-    /// emitted code actually references. Callable through `&self` so the
-    /// runtime-install helpers stay immutable.
-    fn record_runtime_surface(&self, name: &str) {
-        #[cfg(test)]
-        self.legacy_runtime_surfaces
-            .borrow_mut()
-            .push(name.to_string());
-        #[cfg(not(test))]
-        let _ = name;
-    }
-
     /// Test-only: marks the extern adapter for `symbol` as read as a
     /// first-class value.
     fn mark_extern_adapter_used(&mut self, symbol: SymbolId) {
@@ -352,7 +340,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         call_name: &str,
         span: Span,
     ) -> CodeGenerationResult<Option<BasicValueEnum<'context>>> {
-        self.record_runtime_surface(name);
         let function = self.llvm_module.get_function(name).ok_or_else(|| {
             Diagnostic::new(
                 span.clone(),
@@ -421,7 +408,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             #[cfg(test)]
             legacy_extern_adapters: Vec::new(),
             #[cfg(test)]
-            legacy_runtime_surfaces: std::cell::RefCell::new(Vec::new()),
+            legacy_runtime_internal: HashSet::new(),
             active_type_substitutions: HashMap::new(),
             expression_type_overrides: HashMap::new(),
             function_symbols: HashMap::new(),
@@ -698,11 +685,20 @@ pub(crate) struct LegacyEmissions {
     pub(crate) coroutine_requests: Vec<LegacyCoroutineRequest>,
     pub(crate) runners: Vec<LegacyReactiveRunner>,
     pub(crate) extern_adapters: Vec<LegacyExternAdapter>,
-    /// Every lazily declared or installed runtime symbol the emitted functions
-    /// actually reference, deduplicated in first-reference order. The
-    /// executable harness's unconditional GC stack/root calls are excluded
-    /// because Stage 5 regenerates the harness from entry metadata.
+    /// Every runtime symbol some emitted function actually references, read
+    /// from the finished LLVM module rather than from hand-placed hooks, in
+    /// module function order. References from inside the installed runtime
+    /// modules, the UTF-8 validator, and the `main` harness (which Stage 5
+    /// regenerates from entry metadata) are excluded.
     pub(crate) runtime_surfaces: Vec<String>,
+    /// The same references as `(runtime symbol, referencing function)` pairs,
+    /// one per referencing function, for per-function comparison. A
+    /// non-instruction user has no function and is named by an empty string.
+    pub(crate) runtime_references: Vec<(String, String)>,
+    /// Every function the emitter defined, excluding the runtime modules, the
+    /// UTF-8 validator, and `main`, so a function with no runtime reference
+    /// still compares.
+    pub(crate) emitted_functions: Vec<String>,
 }
 
 /// Compiles one lowered module with the legacy backend and returns its typed
@@ -731,14 +727,78 @@ pub(crate) fn legacy_emissions(
         extern_adapters: emitter.legacy_extern_adapters.clone(),
         runtime_surfaces: {
             let mut surfaces: Vec<String> = Vec::new();
-            for name in emitter.legacy_runtime_surfaces.borrow().iter() {
-                if !surfaces.contains(name) {
-                    surfaces.push(name.clone());
+            for (symbol, _) in referenced_runtime_symbols(&emitter) {
+                if !surfaces.contains(&symbol) {
+                    surfaces.push(symbol);
                 }
             }
             surfaces
         },
+        runtime_references: referenced_runtime_symbols(&emitter),
+        emitted_functions: emitter
+            .llvm_module
+            .get_functions()
+            .filter(|function| function.count_basic_blocks() > 0)
+            .filter_map(|function| function.get_name().to_str().ok().map(str::to_string))
+            .filter(|name| name != "main" && !emitter.legacy_runtime_internal.contains(name))
+            .collect(),
     })
+}
+
+/// Test-only ground truth for the runtime surfaces: every `(runtime symbol,
+/// referencing function)` pair for a use outside the runtime's own functions
+/// and the `main` harness. A use that is not an instruction (a constant
+/// expression or global initializer) counts, conservatively, under an empty
+/// function name.
+#[cfg(test)]
+fn referenced_runtime_symbols(emitter: &ModuleEmitter<'_, '_>) -> Vec<(String, String)> {
+    use inkwell::values::{AnyValueEnum, InstructionValue};
+
+    fn user_instruction(user: AnyValueEnum<'_>) -> Option<InstructionValue<'_>> {
+        match user {
+            AnyValueEnum::InstructionValue(instruction) => Some(instruction),
+            AnyValueEnum::IntValue(value) => value.as_instruction(),
+            AnyValueEnum::FloatValue(value) => value.as_instruction(),
+            AnyValueEnum::PointerValue(value) => value.as_instruction(),
+            AnyValueEnum::StructValue(value) => value.as_instruction(),
+            AnyValueEnum::ArrayValue(value) => value.as_instruction(),
+            AnyValueEnum::VectorValue(value) => value.as_instruction(),
+            AnyValueEnum::ScalableVectorValue(value) => value.as_instruction(),
+            AnyValueEnum::PhiValue(value) => Some(value.as_instruction()),
+            AnyValueEnum::FunctionValue(_) | AnyValueEnum::MetadataValue(_) => None,
+        }
+    }
+
+    let mut references = Vec::new();
+    for function in emitter.llvm_module.get_functions() {
+        let Ok(name) = function.get_name().to_str() else {
+            continue;
+        };
+        if crate::RuntimeRequirement::for_runtime_symbol(name).is_none() {
+            continue;
+        }
+        let mut next = function
+            .as_global_value()
+            .as_pointer_value()
+            .get_first_use();
+        while let Some(use_) = next {
+            next = use_.get_next_use();
+            let parent = user_instruction(use_.get_user())
+                .and_then(|instruction| instruction.get_parent())
+                .and_then(|block| block.get_parent())
+                .and_then(|parent| parent.get_name().to_str().ok().map(str::to_string));
+            let excluded = parent.as_deref().is_some_and(|parent| {
+                parent == "main" || emitter.legacy_runtime_internal.contains(parent)
+            });
+            if !excluded {
+                let reference = (name.to_string(), parent.unwrap_or_default());
+                if !references.contains(&reference) {
+                    references.push(reference);
+                }
+            }
+        }
+    }
+    references
 }
 
 impl<'module, 'context> ModuleEmitter<'module, 'context> {
@@ -760,11 +820,23 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.install_gc_runtime()?;
         self.install_reactive_runtime()?;
         self.install_coroutine_runtime()?;
+        #[cfg(test)]
+        {
+            self.legacy_runtime_internal = self
+                .llvm_module
+                .get_functions()
+                .filter(|function| function.count_basic_blocks() > 0)
+                .filter_map(|function| function.get_name().to_str().ok().map(str::to_string))
+                .collect();
+        }
         self.declare_external_functions()?;
         self.declare_functions()?;
         self.declare_top_level_storage()?;
         self.declare_initializers();
         self.build_utf8_validator()?;
+        #[cfg(test)]
+        self.legacy_runtime_internal
+            .insert("__staple_is_valid_utf8".to_string());
         let typed_module = self.typed_module;
         let functions = typed_module
             .functions()
@@ -2026,7 +2098,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let BasicValueEnum::PointerValue(sched) = value else {
                 return Err(Diagnostic::new(span, "scheduler value is not a pointer"));
             };
-            self.record_runtime_surface("__staple_sched_destroy");
             let destroy = self
                 .llvm_module
                 .get_function("__staple_sched_destroy")
@@ -2088,7 +2159,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     &[self.context.ptr_type(AddressSpace::default()).into()],
                     false,
                 );
-                self.record_runtime_surface("free");
                 let free = self
                     .llvm_module
                     .get_function("free")
@@ -6158,7 +6228,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             false,
         );
-        self.record_runtime_surface("memcmp");
         let memcmp = self
             .llvm_module
             .get_function("memcmp")
@@ -6687,7 +6756,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pointer: inkwell::values::PointerValue<'context>,
         finalizer: inkwell::values::FunctionValue<'context>,
     ) -> CodeGenerationResult<()> {
-        self.record_runtime_surface("__staple_gc_set_finalizer");
         let setter_type = self.context.void_type().fn_type(
             &[
                 self.context.ptr_type(AddressSpace::default()).into(),
@@ -6725,7 +6793,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         name: &str,
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
-        self.record_runtime_surface("__staple_gc_alloc");
         let allocator = self
             .llvm_module
             .get_function("__staple_gc_alloc")
@@ -9009,7 +9076,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             true,
         );
-        self.record_runtime_surface("snprintf");
         let snprintf = self
             .llvm_module
             .get_function("snprintf")
@@ -9177,7 +9243,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             &[self.context.ptr_type(AddressSpace::default()).into()],
             false,
         );
-        self.record_runtime_surface("strlen");
         let strlen = self
             .llvm_module
             .get_function("strlen")
@@ -9189,7 +9254,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .try_as_basic_value()
             .unwrap_basic()
             .into_int_value();
-        self.record_runtime_surface("__staple_is_valid_utf8");
         let validator = self
             .llvm_module
             .get_function("__staple_is_valid_utf8")
@@ -9257,7 +9321,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             false,
         );
-        self.record_runtime_surface("memchr");
         let memchr = self
             .llvm_module
             .get_function("memchr")
@@ -10612,7 +10675,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(compiler_diagnostic)?;
 
             self.builder.position_at_end(finish);
-            self.record_runtime_surface("__staple_gc_unregister_root");
             let unregister = self
                 .llvm_module
                 .get_function("__staple_gc_unregister_root")
@@ -11225,7 +11287,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_alloca(ptr_type, "coro.leaf")
             .map_err(compiler_diagnostic)?;
 
-        self.record_runtime_surface("__staple_coro_drive");
         let drive = self
             .llvm_module
             .get_function("__staple_coro_drive")
@@ -11286,7 +11347,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         name: &str,
         signature: inkwell::types::FunctionType<'context>,
     ) -> inkwell::values::FunctionValue<'context> {
-        self.record_runtime_surface(name);
         self.llvm_module
             .get_function(name)
             .unwrap_or_else(|| self.llvm_module.add_function(name, signature, None))
@@ -14153,7 +14213,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             false,
         );
-        self.record_runtime_surface("__staple_gc_register_interior");
         let register = self
             .llvm_module
             .get_function("__staple_gc_register_interior")

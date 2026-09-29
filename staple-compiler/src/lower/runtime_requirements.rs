@@ -24,7 +24,7 @@ use super::{
     LoweredAwaitKind, LoweredBindingItem, LoweredCall, LoweredCallableTarget, LoweredCallableValue,
     LoweredCallableValueId, LoweredClosureEnvironment, LoweredPattern, LoweredPatternKind,
     LoweredProgram, LoweredStringTemplate, LoweredStringTemplatePart, Origin, RuntimeRelease,
-    StructuralBody,
+    StructuralBody, SymbolId, SymbolStorage,
 };
 
 /// One runtime surface a lowered program needs. The declaration order is the
@@ -184,22 +184,23 @@ impl LoweredProgram {
     /// closure fixed point so expanded plans are visible, and rebuilds the set
     /// from scratch so repeated lowering is stable.
     pub(super) fn record_runtime_requirements(&mut self) -> Vec<Diagnostic> {
-        let derived = self.derive_runtime_requirements();
+        let (derived, diagnostics) = self.derive_runtime_requirements();
         self.runtime_requirements = derived;
-        Vec::new()
+        diagnostics
     }
 
     /// The read-only derivation used by recording and by the fixed-point
-    /// validator. Never mutates the program.
-    pub(super) fn derive_runtime_requirements(&self) -> LoweredRuntimeRequirements {
+    /// validator. Never mutates the program. A walk that fails leaves its
+    /// owner's surfaces incomplete, so its diagnostics are returned rather
+    /// than dropped.
+    pub(super) fn derive_runtime_requirements(
+        &self,
+    ) -> (LoweredRuntimeRequirements, Vec<Diagnostic>) {
         let mut requirements = LoweredRuntimeRequirements::default();
         let mut diagnostics = Vec::new();
         for (id, _) in self.initializers.iter() {
-            let mut visitor = RequirementVisitor {
-                program: self,
-                requirements: &mut requirements,
-            };
-            if let Err(mut problems) = walk_owner(self, OwnerArenas::Initializer(id), &mut visitor)
+            if let Err(mut problems) =
+                self.record_owner_requirements(OwnerArenas::Initializer(id), &mut requirements)
             {
                 diagnostics.append(&mut problems);
             }
@@ -208,11 +209,9 @@ impl LoweredProgram {
             let Some(body) = instance.body.as_ref() else {
                 continue;
             };
-            let mut visitor = RequirementVisitor {
-                program: self,
-                requirements: &mut requirements,
-            };
-            if let Err(mut problems) = walk_owner(self, OwnerArenas::Instance(body), &mut visitor) {
+            if let Err(mut problems) =
+                self.record_owner_requirements(OwnerArenas::Instance(body), &mut requirements)
+            {
                 diagnostics.append(&mut problems);
             }
         }
@@ -221,10 +220,77 @@ impl LoweredProgram {
                 record_plan_requirements(plan, &mut requirements);
             }
         }
-        debug_assert!(
-            diagnostics.is_empty(),
-            "runtime requirement derivation failed: {diagnostics:?}"
-        );
+        (requirements.canonicalized(), diagnostics)
+    }
+
+    /// Records the surfaces one owner's lowered body needs.
+    fn record_owner_requirements(
+        &self,
+        owner: OwnerArenas<'_>,
+        requirements: &mut LoweredRuntimeRequirements,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let mut visitor = RequirementVisitor {
+            program: self,
+            owner,
+            requirements,
+        };
+        walk_owner(self, owner, &mut visitor)
+    }
+
+    /// Test-only: the surfaces one owner's emitted function references, for
+    /// per-function comparison where the program-wide set is masked by the
+    /// eagerly emitted standard library. Legacy inlines drop glue at each drop
+    /// site (nested product, sum, and distinct glue included), so the owner's
+    /// drop-glue uses contribute their releases; finalizers and user `Drop`
+    /// methods are separate functions and do not.
+    #[cfg(test)]
+    pub(super) fn owner_runtime_requirements(
+        &self,
+        owner: OwnerArenas<'_>,
+        uses: &[super::LoweredArtifactUse],
+    ) -> LoweredRuntimeRequirements {
+        let mut requirements = LoweredRuntimeRequirements::default();
+        self.record_owner_requirements(owner, &mut requirements)
+            .expect("the owner walks cleanly");
+        let mut pending = uses.iter().map(|use_| use_.artifact).collect::<Vec<_>>();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(ordinal) = pending.pop() {
+            if !seen.insert(ordinal) {
+                continue;
+            }
+            let Some(LoweredArtifactPlan::DropGlue(plan)) = self
+                .artifacts
+                .iter()
+                .find(|(_, artifact)| artifact.ordinal == ordinal)
+                .and_then(|(_, artifact)| artifact.plan.as_ref())
+            else {
+                continue;
+            };
+            record_plan_requirements(
+                &LoweredArtifactPlan::DropGlue(plan.clone()),
+                &mut requirements,
+            );
+            let nested = match &plan.body {
+                DropGlueBody::Product { fields } => fields
+                    .iter()
+                    .filter_map(|field| field.glue.artifact)
+                    .collect(),
+                DropGlueBody::Sum { alternatives } => alternatives
+                    .iter()
+                    .filter_map(|alternative| alternative.glue.artifact)
+                    .collect(),
+                DropGlueBody::Distinct { representation } => {
+                    representation.artifact.into_iter().collect()
+                }
+                DropGlueBody::UserDrop { representation, .. } => representation
+                    .as_ref()
+                    .and_then(|glue| glue.artifact)
+                    .into_iter()
+                    .collect(),
+                _ => Vec::new(),
+            };
+            pending.extend(nested);
+        }
         requirements.canonicalized()
     }
 }
@@ -303,6 +369,7 @@ fn record_plan_requirements(
 /// same lowered facts the backend consumes, never emission.
 struct RequirementVisitor<'a> {
     program: &'a LoweredProgram,
+    owner: OwnerArenas<'a>,
     requirements: &'a mut LoweredRuntimeRequirements,
 }
 
@@ -320,6 +387,34 @@ impl RequirementVisitor<'_> {
     fn reactive(&mut self) {
         self.requirements
             .record(RuntimeRequirement::ReactiveRuntime);
+    }
+
+    /// Whether binding `symbol` GC-allocates its cell. Legacy
+    /// `allocate_binding_cell` allocates through the collector exactly when
+    /// the symbol is in `captured_cell_symbols`: some function captures it and
+    /// it has mutable storage or is derived. `LoweredSymbol::captured_cell` is
+    /// not that fact (it says whether a capture *would* need a cell, captured
+    /// or not). Module globals live in global storage, a mutated parameter
+    /// arrives as the caller's pointer, and a coroutine frame binding already
+    /// has its frame cell, so none of them allocate one.
+    fn allocates_captured_cell(&self, symbol: SymbolId) -> bool {
+        self.program.symbols.get(symbol).is_some_and(|record| {
+            record.captured
+                && (record.mutable_storage || record.derived)
+                && record.storage != SymbolStorage::GlobalStorage
+                && !record.mutated_parameter
+        }) && !self.is_frame_binding(symbol)
+    }
+
+    /// Whether `symbol` is a frame binding of the coroutine body this owner
+    /// is; legacy pre-seeds those as frame cells before any block predeclares.
+    fn is_frame_binding(&self, symbol: SymbolId) -> bool {
+        let OwnerArenas::Instance(body) = self.owner else {
+            return false;
+        };
+        body.plan_template
+            .and_then(|plan| body.plan(plan))
+            .is_some_and(|plan| plan.frame_bindings.contains(&symbol))
     }
 }
 
@@ -401,8 +496,23 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
             self.reactive();
         }
         if let Some(symbol) = binding.symbol
-            && let Some(record) = self.program.symbols.get(symbol)
-            && record.captured_cell
+            && self.allocates_captured_cell(symbol)
+        {
+            self.gc();
+        }
+        // `predeclare_checked_bindings`: a block-local `def` that an earlier
+        // closure reads before its initializer gets a malloc'd state cell
+        // registered as a GC root region. Module globals keep their state in
+        // global storage, and a coroutine frame binding already owns a frame
+        // cell, so neither registers one.
+        if binding.requires_initialization_check
+            && let Some(symbol) = binding.symbol
+            && self
+                .program
+                .symbols
+                .get(symbol)
+                .is_some_and(|record| record.storage != SymbolStorage::GlobalStorage)
+            && !self.is_frame_binding(symbol)
         {
             self.gc();
         }
@@ -414,10 +524,23 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
         pattern: &LoweredPattern,
         _origin: &Origin,
     ) -> Result<(), Vec<Diagnostic>> {
-        if matches!(pattern.kind, LoweredPatternKind::Literal { .. }) {
-            self.requirements
-                .record(RuntimeRequirement::LiteralComparison);
+        match pattern.kind {
+            LoweredPatternKind::Literal { .. } => {
+                self.requirements
+                    .record(RuntimeRequirement::LiteralComparison);
+            }
+            LoweredPatternKind::Binding {
+                symbol: Some(symbol),
+                ..
+            } if self.allocates_captured_cell(symbol) => self.gc(),
+            _ => {}
         }
+        Ok(())
+    }
+
+    fn string_literal_site(&mut self, _origin: &Origin) -> Result<(), Vec<Diagnostic>> {
+        // Legacy copies every string literal's bytes into GC-allocated data.
+        self.gc();
         Ok(())
     }
 
@@ -478,7 +601,11 @@ pub(super) fn check_runtime_requirements(
     program: &LoweredProgram,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let derived = program.derive_runtime_requirements();
+    let (derived, mut problems) = program.derive_runtime_requirements();
+    if !problems.is_empty() {
+        diagnostics.append(&mut problems);
+        return;
+    }
     let stored = &program.runtime_requirements;
     if stored == &derived {
         return;
