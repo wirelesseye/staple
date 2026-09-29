@@ -132,6 +132,41 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.expression(self.program, id)
     }
 
+    pub(crate) fn call(
+        &self,
+        owner: EmissionOwner,
+        id: super::LoweredCallId,
+    ) -> Option<&'a LoweredCall> {
+        self.owner(owner)?.call(self.program, id)
+    }
+
+    pub(crate) fn pattern(
+        &self,
+        owner: EmissionOwner,
+        id: PatternId,
+    ) -> Option<&'a LoweredPattern> {
+        self.owner(owner)?.pattern(self.program, id)
+    }
+
+    pub(crate) fn callable_value(
+        &self,
+        owner: EmissionOwner,
+        id: super::LoweredCallableValueId,
+    ) -> Option<&'a LoweredCallableValue> {
+        self.owner(owner)?.callable_value(self.program, id)
+    }
+
+    pub(crate) fn binding(
+        &self,
+        owner: EmissionOwner,
+        site: LoweredBindingSite,
+    ) -> Option<&'a LoweredBoundTarget> {
+        match owner {
+            EmissionOwner::Instance(id) => self.instance_bindings(id)?.get(&site),
+            EmissionOwner::Initializer(id) => self.initializer_bindings(id)?.get(&site),
+        }
+    }
+
     pub(crate) fn modules(&self) -> impl Iterator<Item = (ModuleId, &'a LoweredModuleInfo)> + 'a {
         self.program.modules.iter().map(|(_, id, info)| (id, info))
     }

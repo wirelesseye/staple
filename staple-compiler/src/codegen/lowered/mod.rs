@@ -6,14 +6,20 @@ use inkwell::{
     AddressSpace,
     module::{Linkage, Module as LlvmModule},
     targets::TargetMachine,
-    values::{AnyValue, AnyValueEnum, FunctionValue, GlobalValue, PointerValue},
+    values::{
+        AnyValue, AnyValueEnum, BasicMetadataValueEnum, FunctionValue, GlobalValue, PointerValue,
+    },
 };
 
 use crate::specialization::ArtifactOrdinal;
 use crate::{
     BlockId, CheckedMutation, CheckedResource, CheckedType, EmissionView, ExpressionId,
-    FunctionInstanceId, InitializerId, LoweredArtifactPlan, LoweredEntryResourceKind,
-    LoweredExpressionKind, LoweredItemKind, ModuleId, RuntimeRequirement, SymbolId,
+    FunctionInstanceId, InitializerId, IntegerBinaryOperation, IntrinsicFunction,
+    LoweredArgumentPassMode, LoweredArtifactPlan, LoweredBindingSite, LoweredBoundTarget,
+    LoweredCallEnvironment, LoweredCallId, LoweredCallStep, LoweredCallableAdapter,
+    LoweredCallableTarget, LoweredCallableValueId, LoweredClosureEnvironment,
+    LoweredEntryResourceKind, LoweredExpressionKind, LoweredItemKind, LoweredPatternKind, ModuleId,
+    RuntimeRequirement, SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -28,8 +34,10 @@ struct FunctionEnvironment<'context> {
     locals: HashMap<SymbolId, AnyValueEnum<'context>>,
     binding_cells: HashMap<SymbolId, PointerValue<'context>>,
     parameter_pointers: HashMap<SymbolId, PointerValue<'context>>,
+    closure_environment: Option<PointerValue<'context>>,
     resources: Vec<(CheckedResource, AnyValueEnum<'context>, bool)>,
     reactive_scopes: Vec<PointerValue<'context>>,
+    loops: Vec<(usize, inkwell::basic_block::BasicBlock<'context>)>,
     returned: bool,
 }
 
@@ -524,6 +532,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Diagnostic::new(body.origin.span.clone(), "missing closure environment")
             })?
             .into_pointer_value();
+        environment.closure_environment = Some(environment_pointer);
         if !body.captures.is_empty() {
             let fields = body
                 .captures
@@ -876,10 +885,82 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 environment.returned = true;
                 Ok(())
             }
-            LoweredItemKind::PatternBinding(_) => Err(unimplemented("pattern binding")),
+            LoweredItemKind::PatternBinding(binding) => {
+                if binding.propagating {
+                    return Err(unimplemented("propagating pattern binding"));
+                }
+                let value = self.emit_expression(owner, binding.value, environment)?;
+                self.bind_pattern(owner, binding.pattern, value, environment)
+            }
             LoweredItemKind::Assignment(_) => Err(unimplemented("assignment")),
             LoweredItemKind::Break(_) => Err(unimplemented("break")),
-            LoweredItemKind::Continue(_) => Err(unimplemented("continue")),
+            LoweredItemKind::Continue(item) => {
+                let Some((_, header)) = environment
+                    .loops
+                    .iter()
+                    .rev()
+                    .find(|(depth, _)| *depth == item.loop_depth)
+                else {
+                    return Err(unimplemented("continue target"));
+                };
+                self.backend
+                    .builder
+                    .build_unconditional_branch(*header)
+                    .map_err(compiler_diagnostic)?;
+                environment.returned = true;
+                Ok(())
+            }
+        }
+    }
+
+    fn bind_pattern(
+        &mut self,
+        owner: EmissionOwner,
+        id: crate::PatternId,
+        value: AnyValueEnum<'context>,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let pattern = self
+            .view
+            .pattern(owner, id)
+            .ok_or_else(|| {
+                Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered pattern")
+            })?
+            .clone();
+        let unsupported = |family| {
+            Diagnostic::new(
+                pattern.origin.span.clone(),
+                format!("lowered emitter: {family} is not implemented yet"),
+            )
+        };
+        match pattern.kind {
+            LoweredPatternKind::Wildcard => {
+                if !self.view.concrete_is_copy(&pattern.value_type) {
+                    return Err(unsupported("wildcard cleanup"));
+                }
+                Ok(())
+            }
+            LoweredPatternKind::Binding {
+                symbol: Some(symbol),
+                mutable: false,
+                moved: false,
+                ..
+            } => {
+                environment.locals.insert(symbol, value);
+                Ok(())
+            }
+            LoweredPatternKind::Binding { .. } => {
+                Err(unsupported("mutable or moved pattern binding"))
+            }
+            LoweredPatternKind::Product { .. } => Err(unsupported("product pattern binding")),
+            LoweredPatternKind::Nominal { argument, .. }
+                if pattern.value_type == CheckedType::String =>
+            {
+                self.bind_pattern(owner, argument, value, environment)
+            }
+            LoweredPatternKind::Nominal { .. } => Err(unsupported("nominal pattern binding")),
+            LoweredPatternKind::Literal { .. } => Err(unsupported("literal pattern binding")),
+            LoweredPatternKind::At { .. } => Err(unsupported("at pattern binding")),
         }
     }
 
@@ -943,22 +1024,737 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::Deferred(_) => Err(unimplemented("deferred expression")),
             LoweredExpressionKind::Stage26Deferred(_) => Err(unimplemented("Stage 2.6 expression")),
             LoweredExpressionKind::String(_) => Err(unimplemented("string")),
-            LoweredExpressionKind::CString(_) => Err(unimplemented("C string")),
+            LoweredExpressionKind::CString(string) => {
+                let text =
+                    std::str::from_utf8(&string.bytes[..string.bytes.len() - 1]).map_err(|_| {
+                        Diagnostic::new(expression.origin.span.clone(), "invalid C string payload")
+                    })?;
+                let source = self
+                    .backend
+                    .builder
+                    .build_global_string_ptr(text, "c_string.literal")
+                    .map_err(compiler_diagnostic)?
+                    .as_pointer_value();
+                let length = self
+                    .backend
+                    .size_type
+                    .const_int(string.bytes.len() as u64, false);
+                let pointer = self
+                    .backend
+                    .builder
+                    .build_array_malloc(self.backend.context.i8_type(), length, "c_string.data")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_memcpy(pointer, 1, source, 1, length)
+                    .map_err(compiler_diagnostic)?;
+                Ok(pointer.as_any_value_enum())
+            }
             LoweredExpressionKind::Access(_) => Err(unimplemented("access")),
+            LoweredExpressionKind::Product(product) if product.fields.is_empty() => {
+                Ok(self.backend.unit_value())
+            }
             LoweredExpressionKind::Product(_) => Err(unimplemented("product")),
             LoweredExpressionKind::RepeatedProduct(_) => Err(unimplemented("repeated product")),
             LoweredExpressionKind::Satisfies(_) => Err(unimplemented("satisfies")),
             LoweredExpressionKind::Logical(_) => Err(unimplemented("logical")),
-            LoweredExpressionKind::Loop(_) => Err(unimplemented("loop")),
+            LoweredExpressionKind::Loop(loop_) => {
+                if loop_.drops_body_result || loop_.result_type != CheckedType::Never {
+                    return Err(unimplemented("loop value or cleanup"));
+                }
+                let function = self
+                    .backend
+                    .builder
+                    .get_insert_block()
+                    .and_then(|block| block.get_parent())
+                    .ok_or_else(|| {
+                        Diagnostic::new(expression.origin.span.clone(), "loop is not in a function")
+                    })?;
+                let header = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "loop.body");
+                let exit = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "loop.exit");
+                self.backend
+                    .builder
+                    .build_unconditional_branch(header)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(header);
+                environment.loops.push((loop_.depth, header));
+                environment.returned = false;
+                self.emit_block(owner, loop_.body, environment)?;
+                if !environment.returned {
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(header)
+                        .map_err(compiler_diagnostic)?;
+                }
+                environment.loops.pop();
+                self.backend.builder.position_at_end(exit);
+                self.backend
+                    .builder
+                    .build_unreachable()
+                    .map_err(compiler_diagnostic)?;
+                environment.returned = true;
+                Ok(self.backend.unit_value())
+            }
             LoweredExpressionKind::Match(_) => Err(unimplemented("match")),
             LoweredExpressionKind::Index(_) => Err(unimplemented("index")),
             LoweredExpressionKind::StringTemplate(_) => Err(unimplemented("string template")),
-            LoweredExpressionKind::Call(_) => Err(unimplemented("call")),
-            LoweredExpressionKind::CallableValue(_) => Err(unimplemented("callable value")),
+            LoweredExpressionKind::Call(call) => self.emit_call(owner, call, environment),
+            LoweredExpressionKind::CallableValue(callable) => {
+                self.emit_callable_value(owner, callable, environment)
+            }
             LoweredExpressionKind::Resource(_) => Err(unimplemented("resource")),
             LoweredExpressionKind::With(_) => Err(unimplemented("with")),
             LoweredExpressionKind::Coro(_) => Err(unimplemented("coro")),
             LoweredExpressionKind::Await(_) => Err(unimplemented("await")),
         }
+    }
+
+    fn emit_callable_value(
+        &mut self,
+        owner: EmissionOwner,
+        id: LoweredCallableValueId,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let callable = self.view.callable_value(owner, id).ok_or_else(|| {
+            Diagnostic::new(
+                staple_syntax::Span::Compiler,
+                "missing lowered callable value",
+            )
+        })?;
+        let unsupported = |family| {
+            Diagnostic::new(
+                callable.origin.span.clone(),
+                format!("lowered emitter: {family} is not implemented yet"),
+            )
+        };
+        if callable.requires_initialization_check
+            || callable.adapter != LoweredCallableAdapter::None
+        {
+            return Err(unsupported("callable adapter or initialization check"));
+        }
+        let pointer = match callable.closure.as_ref().map(|plan| plan.environment) {
+            Some(LoweredClosureEnvironment::Fresh) => {
+                return Err(unsupported("fresh closure environment"));
+            }
+            Some(LoweredClosureEnvironment::Stored) => match &callable.target {
+                LoweredCallableTarget::DirectFunction { function, .. }
+                    if self
+                        .view
+                        .function(*function)
+                        .is_some_and(|template| template.captures.is_empty()) =>
+                {
+                    self.backend
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                }
+                _ => return Err(unsupported("stored closure")),
+            },
+            Some(LoweredClosureEnvironment::Current) => environment
+                .closure_environment
+                .ok_or_else(|| unsupported("current closure environment"))?,
+            Some(LoweredClosureEnvironment::None) | None => self
+                .backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null(),
+        };
+        let binding = self
+            .view
+            .binding(owner, LoweredBindingSite::CallableValue(id))
+            .ok_or_else(|| unsupported("callable binding"))?;
+        let code = match &callable.target {
+            LoweredCallableTarget::DirectFunction { .. }
+            | LoweredCallableTarget::TraitImplementation { .. } => {
+                let LoweredBoundTarget::Instance(instance) = binding else {
+                    return Err(unsupported("callable instance binding"));
+                };
+                self.instances
+                    .get(instance)
+                    .copied()
+                    .ok_or_else(|| unsupported("callable instance declaration"))?
+            }
+            LoweredCallableTarget::Constructor { .. }
+            | LoweredCallableTarget::StructuralTraitMethod { .. }
+            | LoweredCallableTarget::ExternalFunction { .. } => {
+                let LoweredBoundTarget::Artifact(ordinal) = binding else {
+                    return Err(unsupported("callable artifact binding"));
+                };
+                self.artifacts
+                    .get(ordinal)
+                    .and_then(|values| values.first())
+                    .copied()
+                    .ok_or_else(|| unsupported("callable artifact declaration"))?
+            }
+            LoweredCallableTarget::IndirectClosure { callee } => {
+                return self.emit_expression(owner, *callee, environment);
+            }
+            LoweredCallableTarget::Intrinsic { .. } => {
+                return Err(unsupported("intrinsic callable value"));
+            }
+            LoweredCallableTarget::CompilerHelper { .. } => {
+                return Err(unsupported("compiler helper callable value"));
+            }
+        };
+        let mut closure = self.backend.closure_type().const_zero();
+        closure = self
+            .backend
+            .builder
+            .build_insert_value(
+                closure,
+                code.as_global_value().as_pointer_value(),
+                0,
+                "closure.code",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        closure = self
+            .backend
+            .builder
+            .build_insert_value(closure, pointer, 1, "closure.environment")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        Ok(closure.as_any_value_enum())
+    }
+
+    fn emit_call(
+        &mut self,
+        owner: EmissionOwner,
+        id: LoweredCallId,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let call = self
+            .view
+            .call(owner, id)
+            .ok_or_else(|| Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered call"))?
+            .clone();
+        let unsupported = |family| {
+            Diagnostic::new(
+                call.origin.span.clone(),
+                format!("lowered emitter: {family} is not implemented yet"),
+            )
+        };
+        let c_string_conversion = matches!(
+            call.target,
+            LoweredCallableTarget::Intrinsic {
+                intrinsic: IntrinsicFunction::StringFromCString
+                    | IntrinsicFunction::StringToCString,
+                ..
+            }
+        );
+        let native_extern = matches!(call.target, LoweredCallableTarget::ExternalFunction { .. });
+        let string_constructor = matches!(call.target, LoweredCallableTarget::Constructor { .. })
+            && call.result_type == CheckedType::String;
+        let direct_value_route = c_string_conversion || native_extern || string_constructor;
+        if !call.resource_bindings.is_empty()
+            || !call.initialization_checks.is_empty()
+            || (call.c_string_temporary && !native_extern)
+            || call.reactive.is_some()
+            || !call.mutations.is_empty()
+            || (!c_string_conversion && !string_constructor && !call.moves.is_empty())
+        {
+            return Err(unsupported("call resources, mutation, or cleanup"));
+        }
+        let mut parameter_count = flattened_parameter_types(&call.function_type.parameter).len();
+        if matches!(call.function_type.parameter.as_ref(), CheckedType::Product(product) if product.variadic)
+        {
+            for step in &call.steps {
+                let slot = match step {
+                    LoweredCallStep::Argument { argument } => call
+                        .arguments
+                        .get(*argument)
+                        .and_then(|argument| argument.slot),
+                    LoweredCallStep::ProductElement { slot, .. }
+                    | LoweredCallStep::Default { slot, .. } => Some(*slot),
+                    LoweredCallStep::Callee { .. }
+                    | LoweredCallStep::ProductSpread { .. }
+                    | LoweredCallStep::NamedProductSpread { .. }
+                    | LoweredCallStep::Resource { .. }
+                    | LoweredCallStep::Invoke => None,
+                };
+                if let Some(slot) = slot {
+                    parameter_count = parameter_count.max(slot + 1);
+                }
+            }
+        }
+        let mut slots: Vec<Option<BasicMetadataValueEnum<'context>>> = vec![None; parameter_count];
+        let mut invoked = false;
+        let mut callee_value = None;
+        for step in &call.steps {
+            let (slot, expression) = match step {
+                LoweredCallStep::Argument { argument } => {
+                    let record = call
+                        .arguments
+                        .get(*argument)
+                        .ok_or_else(|| unsupported("call argument"))?;
+                    let slot = record
+                        .slot
+                        .ok_or_else(|| unsupported("materialized argument"))?;
+                    let expression = record
+                        .expression
+                        .ok_or_else(|| unsupported("implicit thunk"))?;
+                    if !direct_value_route
+                        && (record.pass_mode != LoweredArgumentPassMode::Value
+                            || record.temporary
+                            || record.writeback
+                            || record.drops_after_call)
+                    {
+                        return Err(unsupported("indirect argument"));
+                    }
+                    (slot, expression)
+                }
+                LoweredCallStep::ProductElement {
+                    argument,
+                    slot,
+                    expression,
+                } => {
+                    let record = call
+                        .arguments
+                        .get(*argument)
+                        .ok_or_else(|| unsupported("product argument"))?;
+                    if !direct_value_route
+                        && (record.pass_mode != LoweredArgumentPassMode::Value
+                            || record.temporary
+                            || record.writeback
+                            || record.drops_after_call)
+                    {
+                        return Err(unsupported("indirect product argument"));
+                    }
+                    (*slot, *expression)
+                }
+                LoweredCallStep::Invoke => {
+                    invoked = true;
+                    break;
+                }
+                LoweredCallStep::Callee { expression } => {
+                    let value = self.emit_expression(owner, *expression, environment)?;
+                    let AnyValueEnum::StructValue(closure) = value else {
+                        return Err(unsupported("indirect closure value"));
+                    };
+                    callee_value = Some(closure);
+                    continue;
+                }
+                LoweredCallStep::ProductSpread { .. } => {
+                    return Err(unsupported("product spread call"));
+                }
+                LoweredCallStep::NamedProductSpread { .. } => {
+                    return Err(unsupported("named spread call"));
+                }
+                LoweredCallStep::Default { .. } => return Err(unsupported("default argument")),
+                LoweredCallStep::Resource { .. } => return Err(unsupported("resource argument")),
+            };
+            let value = self.emit_expression(owner, expression, environment)?;
+            let value = value_as_basic(value).ok_or_else(|| unsupported("call argument value"))?;
+            let destination = slots
+                .get_mut(slot)
+                .ok_or_else(|| unsupported("call argument slot"))?;
+            if destination.is_some() {
+                return Err(unsupported("duplicate argument slot"));
+            }
+            *destination = Some(value.into());
+        }
+        if !invoked || slots.iter().any(Option::is_none) {
+            return Err(unsupported("incomplete call"));
+        }
+        let values = slots.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+        let binding = self
+            .view
+            .binding(owner, LoweredBindingSite::Call(id))
+            .ok_or_else(|| unsupported("call binding"))?;
+        match &call.target {
+            LoweredCallableTarget::DirectFunction {
+                environment: route, ..
+            } => {
+                let LoweredBoundTarget::Instance(instance) = binding else {
+                    return Err(unsupported("direct call binding"));
+                };
+                let function = self
+                    .instances
+                    .get(instance)
+                    .copied()
+                    .ok_or_else(|| unsupported("direct function declaration"))?;
+                let pointer = match route {
+                    LoweredCallEnvironment::None => self
+                        .backend
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .const_null(),
+                    LoweredCallEnvironment::Current => environment
+                        .closure_environment
+                        .ok_or_else(|| unsupported("current closure environment"))?,
+                };
+                let mut arguments = vec![pointer.into()];
+                arguments.extend(values);
+                let result = self
+                    .backend
+                    .builder
+                    .build_direct_call(function, &arguments, "call")
+                    .map_err(compiler_diagnostic)?;
+                Ok(result.try_as_basic_value().basic().map_or_else(
+                    || self.backend.unit_value(),
+                    |value| value.as_any_value_enum(),
+                ))
+            }
+            LoweredCallableTarget::Intrinsic { intrinsic, .. } => {
+                if !matches!(binding, LoweredBoundTarget::Route(_)) {
+                    return Err(unsupported("intrinsic call binding"));
+                }
+                self.emit_intrinsic(*intrinsic, &values, call.origin.span.clone())
+            }
+            LoweredCallableTarget::IndirectClosure { .. } => {
+                if !matches!(binding, LoweredBoundTarget::Route(_)) {
+                    return Err(unsupported("indirect call binding"));
+                }
+                let closure = callee_value.ok_or_else(|| unsupported("indirect callee"))?;
+                let code = self
+                    .backend
+                    .builder
+                    .build_extract_value(closure, 0, "closure.code")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let pointer = self
+                    .backend
+                    .builder
+                    .build_extract_value(closure, 1, "closure.environment")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let mut arguments = vec![pointer.into()];
+                arguments.extend(values);
+                let signature = self
+                    .backend
+                    .compile_closure_function_type(&call.function_type)?;
+                let result = self
+                    .backend
+                    .builder
+                    .build_indirect_call(signature, code, &arguments, "closure.call")
+                    .map_err(compiler_diagnostic)?;
+                Ok(result.try_as_basic_value().basic().map_or_else(
+                    || self.backend.unit_value(),
+                    |value| value.as_any_value_enum(),
+                ))
+            }
+            LoweredCallableTarget::ExternalFunction { symbol } => {
+                if !matches!(binding, LoweredBoundTarget::Route(_)) {
+                    return Err(unsupported("extern call binding"));
+                }
+                let function = self
+                    .externs
+                    .get(symbol)
+                    .copied()
+                    .ok_or_else(|| unsupported("foreign symbol declaration"))?;
+                let result = self
+                    .backend
+                    .builder
+                    .build_direct_call(function, &values, "extern.call")
+                    .map_err(compiler_diagnostic)?;
+                if call.c_string_temporary
+                    && let Some(BasicMetadataValueEnum::PointerValue(pointer)) = values.first()
+                {
+                    let free = self
+                        .backend
+                        .llvm_module
+                        .get_function("free")
+                        .ok_or_else(|| unsupported("CString cleanup function"))?;
+                    self.backend
+                        .builder
+                        .build_direct_call(free, &[(*pointer).into()], "c_string.drop")
+                        .map_err(compiler_diagnostic)?;
+                }
+                Ok(result.try_as_basic_value().basic().map_or_else(
+                    || self.backend.unit_value(),
+                    |value| value.as_any_value_enum(),
+                ))
+            }
+            LoweredCallableTarget::Constructor { .. } if string_constructor => {
+                let [BasicMetadataValueEnum::StructValue(value)] = values.as_slice() else {
+                    return Err(unsupported("String constructor representation"));
+                };
+                Ok(value.as_any_value_enum())
+            }
+            LoweredCallableTarget::Constructor { .. } => Err(unsupported("constructor call")),
+            LoweredCallableTarget::TraitImplementation { .. } => Err(unsupported("trait call")),
+            LoweredCallableTarget::StructuralTraitMethod { .. } => {
+                Err(unsupported("structural call"))
+            }
+            LoweredCallableTarget::CompilerHelper { .. } => {
+                Err(unsupported("compiler helper call"))
+            }
+        }
+    }
+
+    fn emit_intrinsic(
+        &self,
+        intrinsic: IntrinsicFunction,
+        arguments: &[BasicMetadataValueEnum<'context>],
+        span: staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let unsupported = |family| {
+            Diagnostic::new(
+                span.clone(),
+                format!("lowered emitter: {family} is not implemented yet"),
+            )
+        };
+        match intrinsic {
+            IntrinsicFunction::IntegerBinary { integer, operation } => {
+                let [
+                    BasicMetadataValueEnum::IntValue(left),
+                    BasicMetadataValueEnum::IntValue(right),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "integer arithmetic operands must be integers",
+                    ));
+                };
+                let name = format!("{}.arithmetic", integer.intrinsic_name());
+                let value = match operation {
+                    IntegerBinaryOperation::Add => {
+                        self.backend.builder.build_int_add(*left, *right, &name)
+                    }
+                    IntegerBinaryOperation::Subtract => {
+                        self.backend.builder.build_int_sub(*left, *right, &name)
+                    }
+                    IntegerBinaryOperation::Multiply => {
+                        self.backend.builder.build_int_mul(*left, *right, &name)
+                    }
+                    IntegerBinaryOperation::Divide if integer.is_signed() => self
+                        .backend
+                        .builder
+                        .build_int_signed_div(*left, *right, &name),
+                    IntegerBinaryOperation::Divide => self
+                        .backend
+                        .builder
+                        .build_int_unsigned_div(*left, *right, &name),
+                }
+                .map_err(compiler_diagnostic)?;
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::ToString { .. } => Err(unsupported("numeric string conversion")),
+            IntrinsicFunction::IntegerCompare { .. } => Err(unsupported("integer comparison")),
+            IntrinsicFunction::FloatBinary { .. } => Err(unsupported("float arithmetic")),
+            IntrinsicFunction::FloatCompare { .. } => Err(unsupported("float comparison")),
+            IntrinsicFunction::StringFromCString => self.string_from_c_string(arguments, span),
+            IntrinsicFunction::StringToCString => self.string_to_c_string(arguments, span),
+            IntrinsicFunction::StringAdd => Err(unsupported("string addition")),
+            IntrinsicFunction::SliceLength => Err(unsupported("slice length")),
+            IntrinsicFunction::SliceGetRef => Err(unsupported("slice reference")),
+            IntrinsicFunction::BufferWithCapacity => Err(unsupported("buffer allocation")),
+            IntrinsicFunction::BufferLength => Err(unsupported("buffer length")),
+            IntrinsicFunction::BufferCapacity => Err(unsupported("buffer capacity")),
+            IntrinsicFunction::BufferPush => Err(unsupported("buffer push")),
+            IntrinsicFunction::BufferPop => Err(unsupported("buffer pop")),
+            IntrinsicFunction::BufferGet => Err(unsupported("buffer get")),
+            IntrinsicFunction::BufferFreeze => Err(unsupported("buffer freeze")),
+            IntrinsicFunction::BufferTransfer => Err(unsupported("buffer transfer")),
+            IntrinsicFunction::BufferClone => Err(unsupported("buffer clone")),
+            IntrinsicFunction::RefReplace => Err(unsupported("reference replacement")),
+            IntrinsicFunction::Drop => Err(unsupported("drop")),
+            IntrinsicFunction::ReactiveScope => Err(unsupported("reactive scope")),
+            IntrinsicFunction::Reaction => Err(unsupported("reaction")),
+            IntrinsicFunction::Batch => Err(unsupported("batch")),
+            IntrinsicFunction::Snapshot => Err(unsupported("snapshot")),
+            IntrinsicFunction::CoroutineBlockOn => Err(unsupported("coroutine block_on")),
+            IntrinsicFunction::SchedulerCreate => Err(unsupported("scheduler")),
+            IntrinsicFunction::TaskScope => Err(unsupported("task scope")),
+            IntrinsicFunction::Spawn => Err(unsupported("spawn")),
+            IntrinsicFunction::Pump => Err(unsupported("pump")),
+            IntrinsicFunction::YieldNow => Err(unsupported("yield_now")),
+            IntrinsicFunction::TaskIsFinished => Err(unsupported("task is_finished")),
+            IntrinsicFunction::TaskCancel => Err(unsupported("task cancel")),
+            IntrinsicFunction::Completion => Err(unsupported("completion")),
+            IntrinsicFunction::CompletionWithCancel => Err(unsupported("completion with cancel")),
+            IntrinsicFunction::CompletionToken => Err(unsupported("completion token")),
+            IntrinsicFunction::CompletionTokenResolve => {
+                Err(unsupported("completion token resolve"))
+            }
+            IntrinsicFunction::CompletionTokenCancel => Err(unsupported("completion token cancel")),
+            IntrinsicFunction::ResolverComplete => Err(unsupported("resolver complete")),
+            IntrinsicFunction::ResolverCancel => Err(unsupported("resolver cancel")),
+            IntrinsicFunction::Until => Err(unsupported("until")),
+        }
+    }
+
+    fn string_from_c_string(
+        &self,
+        arguments: &[BasicMetadataValueEnum<'context>],
+        span: staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let [BasicMetadataValueEnum::PointerValue(source)] = arguments else {
+            return Err(Diagnostic::new(
+                span,
+                "CString conversion requires a pointer",
+            ));
+        };
+        let strlen = self
+            .backend
+            .llvm_module
+            .get_function("strlen")
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing CString length function"))?;
+        let length = self
+            .backend
+            .builder
+            .build_direct_call(strlen, &[(*source).into()], "c_string.length")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let validator = self
+            .backend
+            .llvm_module
+            .get_function("__staple_is_valid_utf8")
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing UTF-8 validator"))?;
+        let valid = self
+            .backend
+            .builder
+            .build_direct_call(
+                validator,
+                &[(*source).into(), length.into()],
+                "c_string.valid_utf8",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let invalid = self
+            .backend
+            .builder
+            .build_not(valid, "c_string.invalid_utf8")
+            .map_err(compiler_diagnostic)?;
+        self.backend.build_trap_if(invalid, span.clone())?;
+        let pointer = self
+            .backend
+            .build_gc_allocation(length, "string.data", span.clone())?;
+        self.backend
+            .builder
+            .build_memcpy(pointer, 1, *source, 1, length)
+            .map_err(compiler_diagnostic)?;
+        let mut result = self.backend.slice_type().const_zero();
+        result = self
+            .backend
+            .builder
+            .build_insert_value(result, pointer, 0, "string.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        result = self
+            .backend
+            .builder
+            .build_insert_value(result, length, 1, "string.length")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        let free = self
+            .backend
+            .llvm_module
+            .get_function("free")
+            .ok_or_else(|| Diagnostic::new(span, "missing CString release function"))?;
+        self.backend
+            .builder
+            .build_direct_call(free, &[(*source).into()], "c_string.drop")
+            .map_err(compiler_diagnostic)?;
+        Ok(result.as_any_value_enum())
+    }
+
+    fn string_to_c_string(
+        &self,
+        arguments: &[BasicMetadataValueEnum<'context>],
+        span: staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+            return Err(Diagnostic::new(
+                span,
+                "String conversion requires a String value",
+            ));
+        };
+        let pointer = self
+            .backend
+            .builder
+            .build_extract_value(*string, 0, "string.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let length = self
+            .backend
+            .builder
+            .build_extract_value(*string, 1, "string.length")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let memchr = self
+            .backend
+            .llvm_module
+            .get_function("memchr")
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing interior-NUL check function"))?;
+        let nul = self
+            .backend
+            .builder
+            .build_direct_call(
+                memchr,
+                &[
+                    pointer.into(),
+                    self.backend.context.i32_type().const_zero().into(),
+                    length.into(),
+                ],
+                "string.interior_nul",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+        let has_nul = self
+            .backend
+            .builder
+            .build_is_not_null(nul, "string.has_interior_nul")
+            .map_err(compiler_diagnostic)?;
+        self.backend.build_trap_if(has_nul, span.clone())?;
+        let allocation_length = self
+            .backend
+            .builder
+            .build_int_add(
+                length,
+                self.backend.size_type.const_int(1, false),
+                "c_string.length",
+            )
+            .map_err(compiler_diagnostic)?;
+        let overflow = self
+            .backend
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                allocation_length,
+                length,
+                "c_string.length_overflow",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend.build_trap_if(overflow, span.clone())?;
+        let result = self
+            .backend
+            .builder
+            .build_array_malloc(
+                self.backend.context.i8_type(),
+                allocation_length,
+                "c_string.data",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_memcpy(result, 1, pointer, 1, length)
+            .map_err(compiler_diagnostic)?;
+        let terminator = unsafe {
+            self.backend.builder.build_gep(
+                self.backend.context.i8_type(),
+                result,
+                &[length],
+                "c_string.terminator",
+            )
+        }
+        .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(terminator, self.backend.context.i8_type().const_zero())
+            .map_err(compiler_diagnostic)?;
+        Ok(result.as_any_value_enum())
     }
 }

@@ -151,7 +151,7 @@ Progress:
 
 ### Stage 5 - Migrate LLVM Generation to Lowered IR (In Progress)
 
-Stage 5.3 is in progress: the parallel emitter has catalog declarations for instances, artifacts, externs, globals, and initializers, plus owner-local dispatch and a lowered entry harness. The standard library's eager bodies still reach unported-family diagnostics; complete parameter/pattern handling, artifact bodies, and the differential gate remain. Details are in [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md).
+Stage 5.3 is in progress: the parallel emitter has catalog declarations for instances, artifacts, externs, globals, and initializers, plus owner-local dispatch and a lowered entry harness. Simple direct and indirect calls, native calls, selected intrinsics and callable values, and basic patterns now compile from lowered records. Empty-program compilation with the worktree standard library advances through `cinterop`, `io`, `process`, and `string` before reaching the mutable `Formatter` pattern in `fmt`. Complete pattern/place handling, artifact bodies, and the runnable differential gate remain. Details are in [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md).
 
 The lowered initializer now sets up the entry IO/reactive resources and disposes its reactive scope. A declaration-only comparison checks catalog function count and LLVM type parity for eager instances, initializers, and constructor adapters against the legacy emitter. Stage 5.3 remains incomplete because the runnable differential corpus and the remaining family comparisons do not pass yet.
 

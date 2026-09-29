@@ -173,6 +173,8 @@ The next declaration pass adds entry IO/reactive resource setup and reactive sco
 
 **Gate:** The corpus of an empty `main`, integer arithmetic with non-generic functions, and module initializers with globals passes the differential harness. The catalog declaration count equals the census mapping on the standard library, and all declarations verify. `rg` finds no `typed_module`, `TypedModule`, `staple_syntax::Expression`, or `SyntaxId` in `codegen/lowered/`.
 
+**Progress (incomplete):** The owner dispatcher now reads ordered call, binding, pattern, and callable-value records from `EmissionView`. It emits basic direct/indirect calls, native extern calls with C-string temporary cleanup, selected integer/string/memory intrinsics, simple closure values, literal strings, simple bindings, and a restricted never-returning loop. The empty CLI program with the worktree standard library now passes eager bodies in `cinterop`, `io`, `process`, and `string`, then diagnoses the mutable `Formatter` destructuring pattern in `fmt.sta:110`. The runnable differential harness and this stage's corpus gate have not passed; broader pattern/place and artifact emission are still outstanding.
+
 ## Stage 5.4 - Functions, Calls, Callable Values, Closures, and Resources
 
 > **Separate plan required:** `STAGE_5_4_CALLS_CLOSURES_RESOURCES_PLAN.md`. This is the backbone every other family depends on. It spans about 2.5k legacy lines (`compile_call_expression`, `compile_indirect_call_value`, `compile_arguments`, `compile_effect_arguments`, `compile_resource_arguments`, `compile_symbol_value`, `build_closure*`, `build_capture_environment`, and the constructor/extern adapters), and the ABI risk concentrates here.
