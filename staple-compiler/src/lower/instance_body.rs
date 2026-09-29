@@ -71,8 +71,9 @@ pub(crate) struct LoweredInstanceCapture {
 }
 
 /// A dispatch or construction site inside one instance body. Sites are keys
-/// into the per-body binding tables; IDs are instance-local.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// into the per-body binding tables; IDs are instance-local. Module
+/// initializers use the same variant keys over program-arena IDs (Stage 5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum LoweredBindingSite {
     /// A direct, trait-dispatched, external, intrinsic, constructor, or helper
     /// call target.

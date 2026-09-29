@@ -17,7 +17,8 @@
 use staple_syntax::{Diagnostic, Span};
 
 use super::artifact_closure::{ArtifactUseSite, ClosureRequest, ExpansionResult, ScanResult};
-use super::cleanup_artifacts::{LoweredOwnerVisitor, OwnerArenas, walk_owner};
+use super::cleanup_artifacts::{LoweredOwnerVisitor, walk_owner};
+use super::emission::OwnerArenas;
 use super::{
     ArenaId, ExternAdapterPlan, ExternDeclaration, FunctionInstanceId, InitializerId,
     LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,

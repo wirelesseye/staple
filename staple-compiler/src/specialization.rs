@@ -1505,17 +1505,33 @@ impl SpecializationCatalog {
     /// collision-checked: a repeated name is reported instead of silently
     /// aliasing two semantic keys.
     pub(crate) fn planned_names(&self) -> Result<Vec<String>, SpecializationNameCollision> {
+        self.planned_names_with(|_| None)
+    }
+
+    /// The planned emitted symbol names in emission order, with the D2
+    /// declared-name rule: an instance of a non-generic template (empty
+    /// substitutions and evidence) keeps its declared mangled name, supplied
+    /// by `declared`. Two distinct templates can share a declared name (for
+    /// example two nested functions named `first`), so a declared name is
+    /// used only when it is still free; the later instance deterministically
+    /// falls back to `__staple_instance_{ordinal}`. Every other instance
+    /// keeps its ordinal name. All families are collision-checked together,
+    /// and only a name that repeats after fallback is reported.
+    pub(crate) fn planned_names_with(
+        &self,
+        declared: impl Fn(&InstanceKey) -> Option<String>,
+    ) -> Result<Vec<String>, SpecializationNameCollision> {
         let mut names = Vec::with_capacity(self.instances.len() + self.artifacts.len());
         let mut seen = HashSet::new();
-        for (ordinal, _) in self.instances() {
-            let name = format!("__staple_instance_{}", ordinal.0);
+        for (ordinal, key) in self.instances() {
+            let name = self.planned_instance_name(ordinal, key, &declared, &seen);
             if !seen.insert(name.clone()) {
                 return Err(SpecializationNameCollision { name });
             }
             names.push(name);
         }
         for (ordinal, key) in self.artifacts() {
-            let name = format!("{}_{}", artifact_name_prefix(key), ordinal.0);
+            let name = artifact_ordinal_name(ordinal, key);
             if !seen.insert(name.clone()) {
                 return Err(SpecializationNameCollision { name });
             }
@@ -1523,6 +1539,41 @@ impl SpecializationCatalog {
         }
         Ok(names)
     }
+
+    /// The planned name of one instance, given the names already assigned in
+    /// catalog order: the declared mangled name for a non-generic template
+    /// instance when it is still free, otherwise the ordinal name.
+    fn planned_instance_name(
+        &self,
+        ordinal: InstanceOrdinal,
+        key: &InstanceKey,
+        declared: &impl Fn(&InstanceKey) -> Option<String>,
+        seen: &HashSet<String>,
+    ) -> String {
+        if key.substitutions().is_empty() && key.evidence().is_none() {
+            if let Some(candidate) = declared(key) {
+                if !candidate.is_empty() && !seen.contains(&candidate) {
+                    return candidate;
+                }
+            }
+        }
+        instance_ordinal_name(ordinal)
+    }
+
+    /// The planned name of one artifact. `None` when the ordinal was never
+    /// reserved.
+    pub(crate) fn planned_artifact_name(&self, ordinal: ArtifactOrdinal) -> Option<String> {
+        self.artifact(ordinal)
+            .map(|key| artifact_ordinal_name(ordinal, key))
+    }
+}
+
+fn instance_ordinal_name(ordinal: InstanceOrdinal) -> String {
+    format!("__staple_instance_{}", ordinal.0)
+}
+
+fn artifact_ordinal_name(ordinal: ArtifactOrdinal, key: &ArtifactRequestKey) -> String {
+    format!("{}_{}", artifact_name_prefix(key), ordinal.0)
 }
 
 /// The stable family prefix of one artifact's planned emitted symbol. Every
@@ -2864,6 +2915,81 @@ mod tests {
                 "__staple_instance_0".to_owned(),
                 "__staple_instance_1".to_owned(),
                 "__staple_structural_index_0".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn planned_names_use_declared_names_for_non_generic_instances_and_collision_check() {
+        let mut catalog = SpecializationCatalog::default();
+        let generic = catalog.reserve_instance(instance_key(
+            1,
+            vec![type_substitution(1, CheckedType::I32)],
+            None,
+        ));
+        let declared = catalog.reserve_instance(instance_key(2, Vec::new(), None));
+        let declared_name = |key: &InstanceKey| {
+            (key.function() == FunctionId(2)).then(|| "__staple_mm.name".to_owned())
+        };
+        assert_eq!(
+            catalog
+                .planned_names_with(declared_name)
+                .expect("unique names"),
+            vec![
+                "__staple_instance_0".to_owned(),
+                "__staple_mm.name".to_owned(),
+            ]
+        );
+        assert_eq!(
+            catalog
+                .planned_names_with(declared_name)
+                .expect("unique names")
+                .get(generic.index())
+                .map(String::as_str),
+            Some("__staple_instance_0"),
+            "a generic instance keeps its ordinal name"
+        );
+        assert_eq!(
+            catalog
+                .planned_names_with(declared_name)
+                .expect("unique names")
+                .get(declared.index())
+                .map(String::as_str),
+            Some("__staple_mm.name")
+        );
+
+        // A declared name that aliases a name already assigned in catalog
+        // order falls back to the instance's ordinal name instead of failing:
+        // two distinct templates can share a declared name.
+        let mut aliasing = SpecializationCatalog::default();
+        aliasing.reserve_instance(instance_key(
+            1,
+            vec![type_substitution(1, CheckedType::I32)],
+            None,
+        ));
+        aliasing.reserve_instance(instance_key(2, Vec::new(), None));
+        assert_eq!(
+            aliasing
+                .planned_names_with(|_| Some("__staple_instance_0".to_owned()))
+                .expect("the alias falls back"),
+            vec![
+                "__staple_instance_0".to_owned(),
+                "__staple_instance_1".to_owned(),
+            ]
+        );
+
+        // Two non-generic templates that share a declared name get one
+        // declared name and one ordinal fallback, deterministically.
+        let mut shared = SpecializationCatalog::default();
+        shared.reserve_instance(instance_key(1, Vec::new(), None));
+        shared.reserve_instance(instance_key(2, Vec::new(), None));
+        assert_eq!(
+            shared
+                .planned_names_with(|_| Some("__staple_mm.first".to_owned()))
+                .expect("unique names"),
+            vec![
+                "__staple_mm.first".to_owned(),
+                "__staple_instance_1".to_owned()
             ]
         );
     }

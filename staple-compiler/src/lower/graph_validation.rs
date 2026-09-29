@@ -63,7 +63,11 @@ impl<'a> GraphValidator<'a> {
     /// Planned names must be non-empty and unique across both key families,
     /// and every interned record must carry its planned name.
     fn check_names(&mut self) {
-        let names = match self.program.specializations.planned_names() {
+        let names = match self
+            .program
+            .specializations
+            .planned_names_with(|key| self.program.declared_instance_name(key))
+        {
             Ok(names) => names,
             Err(collision) => {
                 self.diagnostics.push(Diagnostic::new(
@@ -3800,7 +3804,7 @@ mod tests {
             }
             let derived = program
                 .owner_runtime_requirements(
-                    super::super::cleanup_artifacts::OwnerArenas::Instance(body),
+                    super::super::emission::OwnerArenas::Instance(body),
                     &body.artifact_uses,
                 )
                 .requirements()
@@ -3995,7 +3999,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("`{name}` has a materialized instance"));
             let derived = program
                 .owner_runtime_requirements(
-                    super::super::cleanup_artifacts::OwnerArenas::Instance(body),
+                    super::super::emission::OwnerArenas::Instance(body),
                     &body.artifact_uses,
                 )
                 .requirements()

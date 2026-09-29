@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use staple_syntax::{Diagnostic, Span};
 
 use crate::specialization::{
-    ArtifactOrdinal, ArtifactRequestKey, ConstructorAdapterKey, InstanceOrdinal,
+    ArtifactOrdinal, ArtifactRequestKey, ConstructorAdapterKey, InstanceKey, InstanceOrdinal,
     SpecializationCatalog, SpecializationNameCollision, StructuralMethodKey,
 };
 use crate::{
@@ -575,8 +575,11 @@ impl GraphRecorder {
         (ordinal, created)
     }
 
-    pub(super) fn assign_names(&mut self) -> Result<(), Vec<Diagnostic>> {
-        let names = match self.catalog.planned_names() {
+    pub(super) fn assign_names(
+        &mut self,
+        declared: impl Fn(&InstanceKey) -> Option<String>,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let names = match self.catalog.planned_names_with(declared) {
             Ok(names) => names,
             Err(SpecializationNameCollision { name }) => {
                 return Err(vec![Diagnostic::new(
@@ -725,7 +728,8 @@ impl<'a> WorklistBuilder<'a> {
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
         }
-        self.recorder.assign_names()?;
+        self.recorder
+            .assign_names(|key| self.program.declared_instance_name(key))?;
         Ok(self.recorder.into_parts())
     }
 
@@ -747,7 +751,9 @@ impl<'a> WorklistBuilder<'a> {
         if !builder.diagnostics.is_empty() {
             return Err(builder.diagnostics);
         }
-        builder.recorder.assign_names()?;
+        builder
+            .recorder
+            .assign_names(|key| builder.program.declared_instance_name(key))?;
         Ok(builder.recorder.into_parts())
     }
 
@@ -2026,6 +2032,37 @@ impl LoweredProgram {
         }
     }
 
+    /// D2: the declared mangled name of an instance of a non-generic template
+    /// (empty substitutions and evidence). Generic instances have no declared
+    /// name and keep their ordinal name. The emitter reads this through
+    /// [`Self::planned_name`] and never builds names itself.
+    pub(crate) fn declared_instance_name(&self, key: &InstanceKey) -> Option<String> {
+        if !key.substitutions().is_empty() || key.evidence().is_some() {
+            return None;
+        }
+        let function = self.functions.get(key.function())?;
+        let module = self.modules.get(function.module)?;
+        Some(format!(
+            "__staple_m{}.{}",
+            module.symbol_prefix, function.name
+        ))
+    }
+
+    /// The planned emitted name of one interned source-function instance (D2).
+    pub(crate) fn planned_name(&self, instance: FunctionInstanceId) -> Option<String> {
+        let record = self.instances.get(instance)?;
+        let names = self
+            .specializations
+            .planned_names_with(|key| self.declared_instance_name(key))
+            .ok()?;
+        names.get(record.ordinal.index()).cloned()
+    }
+
+    /// The planned emitted name of one interned generated artifact.
+    pub(crate) fn planned_artifact_name(&self, ordinal: ArtifactOrdinal) -> Option<String> {
+        self.specializations.planned_artifact_name(ordinal)
+    }
+
     /// Validates the installed worklist against its own catalog: dense
     /// ordinals, catalog agreement, planned names, and in-range edges.
     /// Reports an artifact edge whose kind disagrees with the key family of
@@ -2073,7 +2110,10 @@ impl LoweredProgram {
                 ),
             ));
         }
-        let names = match self.specializations.planned_names() {
+        let names = match self
+            .specializations
+            .planned_names_with(|key| self.declared_instance_name(key))
+        {
             Ok(names) => names,
             Err(SpecializationNameCollision { name }) => {
                 diagnostics.push(Diagnostic::new(
@@ -2325,6 +2365,63 @@ mod tests {
             .type_parameters()
             .next()
             .expect("fixture should have one relevant type parameter")
+    }
+
+    #[test]
+    fn planned_names_follow_the_declared_name_rule() {
+        let (_, program) = lower(concat!(
+            "def plain: I32 -> I32 = value => value\n",
+            "def generic: <T where Copy T> T -> T = value => value\n",
+            "let first = plain (1)\n",
+            "let second = generic 2\n",
+        ));
+        let plain = function_id(&program, "plain");
+        let generic = function_id(&program, "generic");
+        let plain_instance = program
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.template == plain)
+            .map(|(id, _)| id)
+            .expect("plain has an instance");
+        let generic_instance = program
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.template == generic)
+            .map(|(id, _)| id)
+            .expect("generic has an instance");
+
+        let plain_name = program
+            .planned_name(plain_instance)
+            .expect("plain has a planned name");
+        assert!(
+            plain_name.starts_with("__staple_m") && plain_name.ends_with(".plain"),
+            "a non-generic template keeps its declared mangled name: {plain_name}"
+        );
+        assert_eq!(
+            program
+                .instances
+                .get(plain_instance)
+                .expect("instance")
+                .name,
+            plain_name,
+            "the assigned record name agrees with the accessor"
+        );
+        assert_eq!(
+            program
+                .planned_name(generic_instance)
+                .expect("generic has a planned name"),
+            format!("__staple_instance_{}", generic_instance.index()),
+            "a generic instance keeps its ordinal name"
+        );
+
+        // The artifact accessors name every interned artifact by family and
+        // ordinal, matching the record the worklist assigned.
+        for (_, artifact) in program.artifacts.iter() {
+            assert_eq!(
+                program.planned_artifact_name(artifact.ordinal).as_deref(),
+                Some(artifact.name.as_str())
+            );
+        }
     }
 
     fn graph_snapshot(program: &LoweredProgram) -> String {

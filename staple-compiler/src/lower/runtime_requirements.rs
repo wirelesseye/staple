@@ -18,7 +18,8 @@
 
 use staple_syntax::Diagnostic;
 
-use super::cleanup_artifacts::{LoweredOwnerVisitor, OwnerArenas, walk_owner};
+use super::cleanup_artifacts::{LoweredOwnerVisitor, walk_owner};
+use super::emission::OwnerArenas;
 use super::{
     ConstructorConstruction, DropGlueBody, IntrinsicFunction, LoweredArtifactPlan,
     LoweredAwaitKind, LoweredBindingItem, LoweredCall, LoweredCallableTarget, LoweredCallableValue,

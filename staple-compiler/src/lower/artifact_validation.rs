@@ -241,7 +241,7 @@ mod tests {
             "names={:?}\n",
             program
                 .specializations
-                .planned_names()
+                .planned_names_with(|key| program.declared_instance_name(key))
                 .expect("unique planned names")
         ));
         for (id, instance) in program.instances.iter() {
@@ -300,7 +300,7 @@ mod tests {
         for (id, _) in program.initializers.iter() {
             let index = id.index();
             out.push_str(&format!(
-                "initializer {index} uses={:?} instance_uses={:?} artifacts={:?} instances={:?} owned={:?}\n",
+                "initializer {index} uses={:?} instance_uses={:?} artifacts={:?} instances={:?} owned={:?} bindings={:?} evidence={:?}\n",
                 program.initializer_artifact_uses.get(index).map(|uses| uses
                     .iter()
                     .map(|use_| (use_.artifact.index(), use_.kind.description(), use_.site))
@@ -318,6 +318,36 @@ mod tests {
                     .map(|edge| (edge.instance.index(), edge.kind.description()))
                     .collect::<Vec<_>>()),
                 program.initializer_owned_bindings.get(index),
+                program.initializer_bindings.get(index).map(|bindings| bindings
+                    .iter()
+                    .map(|(site, target)| (*site, target.clone()))
+                    .collect::<Vec<_>>()),
+                program.initializer_evidence.get(index).map(|evidence| evidence
+                    .iter()
+                    .map(|(site, evidence)| (*site, evidence.clone()))
+                    .collect::<Vec<_>>()),
+            ));
+        }
+        for (_, id, symbol) in program.symbols.iter() {
+            out.push_str(&format!(
+                "symbol {} name={} storage={:?} module={} module_symbol={} has_global={} global_root={} overloaded={} flags=[mut={} captured={} non_owning={} derived={} signal={} mutated_param={} move_param={} captured_cell={} external={}]\n",
+                id.0,
+                symbol.name,
+                symbol.storage,
+                symbol.module.0,
+                symbol.module_symbol,
+                symbol.has_global,
+                symbol.global_root,
+                symbol.overloaded,
+                symbol.mutable_storage,
+                symbol.captured,
+                symbol.non_owning,
+                symbol.derived,
+                symbol.signal,
+                symbol.mutated_parameter,
+                symbol.move_parameter,
+                symbol.captured_cell,
+                symbol.external,
             ));
         }
         out.push_str(&format!(

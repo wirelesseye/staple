@@ -472,6 +472,10 @@ impl LoweredProgram {
         self.initializer_instance_uses = vec![Vec::new(); self.initializers.len()];
         self.initializer_instances = vec![Vec::new(); self.initializers.len()];
         self.initializer_owned_bindings = vec![Vec::new(); self.initializers.len()];
+        self.initializer_bindings =
+            vec![std::collections::BTreeMap::new(); self.initializers.len()];
+        self.initializer_evidence =
+            vec![std::collections::BTreeMap::new(); self.initializers.len()];
 
         let budget = GrowthBudget {
             baseline_instances: self.instances.len(),
@@ -581,6 +585,13 @@ impl LoweredProgram {
                 if !diagnostics.is_empty() {
                     return diagnostics;
                 }
+                // Stage 5.1 (D4): the initializer binding tables need the same
+                // closure fixed point, so they are built here, once, before
+                // names are assigned.
+                let diagnostics = self.bind_initializer_sites();
+                if !diagnostics.is_empty() {
+                    return diagnostics;
+                }
                 #[cfg(test)]
                 {
                     self.closure_stats = Some(super::ClosureStats {
@@ -672,7 +683,7 @@ impl LoweredProgram {
     /// never renames an earlier entry.
     fn finish_closure(&mut self) -> Vec<Diagnostic> {
         let mut recorder = GraphRecorder::from_parts(self.take_graph());
-        let result = recorder.assign_names();
+        let result = recorder.assign_names(|key| self.declared_instance_name(key));
         self.install_graph(recorder.into_parts());
         result.err().unwrap_or_default()
     }

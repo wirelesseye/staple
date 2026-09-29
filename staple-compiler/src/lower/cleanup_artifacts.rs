@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use staple_syntax::{Diagnostic, Span};
 
 use super::artifact_closure::{ArtifactUseSite, ClosureRequest, ExpansionResult, ScanResult};
+use super::emission::OwnerArenas;
 use super::instance_resolution::{
     InstanceResolutionRequest, InstanceResolutionTarget, RuntimeOpaqueKind,
 };
@@ -22,9 +23,8 @@ use super::{
     ArenaId, BlockId, CallSubstitutions, DropGlueBody, DropGluePlan, DroppedAlternative,
     DroppedCapture, DroppedElement, ExpressionId, GcFinalizerPlan, InitializerId, ItemId,
     LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
-    LoweredInstanceBody, LoweredInstanceDependencyKind, LoweredItemKind, LoweredOwnedBinding,
-    LoweredProgram, Origin, OwnedStorage, PatternId, PlaceId, PlannedArtifact, PlannedInstance,
-    RuntimeRelease, SymbolId,
+    LoweredInstanceDependencyKind, LoweredItemKind, LoweredOwnedBinding, LoweredProgram, Origin,
+    OwnedStorage, PatternId, PlaceId, PlannedArtifact, PlannedInstance, RuntimeRelease, SymbolId,
 };
 use crate::specialization::{ArtifactRequestKey, CanonicalType, GcFinalizerKey};
 use crate::{CheckedType, FunctionId, IntrinsicFunction};
@@ -222,149 +222,6 @@ fn closure_environment_drops(
 // Stage 4.4 scanner and owned-binding collector.
 // ---------------------------------------------------------------------------
 
-/// The owner whose cleanup sites a scan reads: a materialized instance body or
-/// a module initializer. Instance bodies own private arenas; initializer sites
-/// index the program's template arenas.
-#[derive(Clone, Copy)]
-pub(super) enum OwnerArenas<'a> {
-    Instance(&'a LoweredInstanceBody),
-    Initializer(InitializerId),
-}
-
-impl<'a> OwnerArenas<'a> {
-    pub(super) fn block(
-        self,
-        program: &'a LoweredProgram,
-        id: BlockId,
-    ) -> Option<&'a super::LoweredBlock> {
-        match self {
-            OwnerArenas::Instance(body) => body.block(id),
-            OwnerArenas::Initializer(_) => program.blocks.get(id),
-        }
-    }
-
-    pub(super) fn item(
-        self,
-        program: &'a LoweredProgram,
-        id: ItemId,
-    ) -> Option<&'a super::LoweredItem> {
-        match self {
-            OwnerArenas::Instance(body) => body.item(id),
-            OwnerArenas::Initializer(_) => program.items.get(id),
-        }
-    }
-
-    pub(super) fn expression(
-        self,
-        program: &'a LoweredProgram,
-        id: ExpressionId,
-    ) -> Option<&'a super::LoweredExpression> {
-        match self {
-            OwnerArenas::Instance(body) => body.expression(id),
-            OwnerArenas::Initializer(_) => program.expressions.get(id),
-        }
-    }
-
-    pub(super) fn pattern(
-        self,
-        program: &'a LoweredProgram,
-        id: PatternId,
-    ) -> Option<&'a super::LoweredPattern> {
-        match self {
-            OwnerArenas::Instance(body) => body.pattern(id),
-            OwnerArenas::Initializer(_) => program.patterns.get(id),
-        }
-    }
-
-    pub(super) fn place(
-        self,
-        program: &'a LoweredProgram,
-        id: PlaceId,
-    ) -> Option<&'a super::LoweredPlace> {
-        match self {
-            OwnerArenas::Instance(body) => body.place(id),
-            OwnerArenas::Initializer(_) => program.places.get(id),
-        }
-    }
-
-    pub(super) fn call(
-        self,
-        program: &'a LoweredProgram,
-        id: super::LoweredCallId,
-    ) -> Option<&'a super::LoweredCall> {
-        match self {
-            OwnerArenas::Instance(body) => body.call(id),
-            OwnerArenas::Initializer(_) => program.calls.get(id),
-        }
-    }
-
-    pub(super) fn callable_value(
-        self,
-        program: &'a LoweredProgram,
-        id: super::LoweredCallableValueId,
-    ) -> Option<&'a super::LoweredCallableValue> {
-        match self {
-            OwnerArenas::Instance(body) => body.callable_value(id),
-            OwnerArenas::Initializer(_) => program.callable_values.get(id),
-        }
-    }
-
-    pub(super) fn with(
-        self,
-        program: &'a LoweredProgram,
-        id: super::LoweredWithId,
-    ) -> Option<&'a super::LoweredWith> {
-        match self {
-            OwnerArenas::Instance(body) => body.withs.get(id),
-            OwnerArenas::Initializer(_) => program.withs.get(id),
-        }
-    }
-
-    pub(super) fn coro(
-        self,
-        program: &'a LoweredProgram,
-        id: super::LoweredCoroId,
-    ) -> Option<&'a super::LoweredCoro> {
-        match self {
-            OwnerArenas::Instance(body) => body.coro(id),
-            OwnerArenas::Initializer(_) => program.coros.get(id),
-        }
-    }
-
-    pub(super) fn reactive_operation(
-        self,
-        program: &'a LoweredProgram,
-        id: super::LoweredReactiveOperationId,
-    ) -> Option<&'a super::LoweredReactiveOperation> {
-        match self {
-            OwnerArenas::Instance(body) => body.reactive_operation(id),
-            OwnerArenas::Initializer(_) => program.reactive_operations.get(id),
-        }
-    }
-
-    pub(super) fn reactive_callback(
-        self,
-        program: &'a LoweredProgram,
-        id: super::LoweredReactiveCallbackId,
-    ) -> Option<&'a super::LoweredReactiveCallback> {
-        match self {
-            OwnerArenas::Instance(body) => body.reactive_callback(id),
-            OwnerArenas::Initializer(_) => program.reactive_callbacks.get(id),
-        }
-    }
-
-    pub(super) fn await_record(
-        self,
-        program: &'a LoweredProgram,
-        id: super::LoweredAwaitId,
-    ) -> Option<&'a super::LoweredAwait> {
-        match self {
-            OwnerArenas::Instance(body) => body.await_record(id),
-            OwnerArenas::Initializer(_) => program.awaits.get(id),
-        }
-    }
-}
-
 /// One owned-binding draft produced by the shared walk, before its glue is
 /// bound through the owner's use records. Visible to sibling scanners that
 /// implement the family-neutral visitor.
@@ -447,6 +304,52 @@ pub(super) trait LoweredOwnerVisitor {
     /// 4.6 records runtime requirements from the call's target.
     fn call_site(&mut self, _call: &super::LoweredCall) -> Result<(), Vec<Diagnostic>> {
         Ok(())
+    }
+
+    /// One complete call with its owner-local ID. Stage 5.1 binds initializer
+    /// dispatch sites here; the default keeps every other visitor unchanged.
+    fn call_id_site(
+        &mut self,
+        _id: super::LoweredCallId,
+        _call: &super::LoweredCall,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// One caller-level item with its owner-local ID, before it is walked.
+    fn item_site(
+        &mut self,
+        _id: ItemId,
+        _item: &super::LoweredItem,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// One expression with its owner-local ID, before it is walked.
+    fn expression_site(
+        &mut self,
+        _id: ExpressionId,
+        _expression: &super::LoweredExpression,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// One `await` record with its owner-local ID, before its operand.
+    fn await_id_site(
+        &mut self,
+        _id: super::LoweredAwaitId,
+        _await_: &super::LoweredAwait,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// Whether the walk descends into a derived binding's value expression.
+    /// Legacy never evaluates a derived binding inline, so cleanup scanning
+    /// stops at the binding; Stage 5.1's initializer binder mirrors the
+    /// worklist traversal, which requests the value's sites under the
+    /// enclosing owner.
+    fn walks_derived_binding_values(&self) -> bool {
+        false
     }
 
     /// One first-class callable value. Stage 4.6 requests extern adapters and
@@ -750,6 +653,7 @@ impl<'a> LoweredWalker<'a> {
         };
         let origin = item.origin.clone();
         let kind = item.kind.clone();
+        self.visitor.item_site(id, item)?;
         match kind {
             LoweredItemKind::Binding(binding) => {
                 self.visitor.binding_site(&binding, &origin)?;
@@ -773,9 +677,16 @@ impl<'a> LoweredWalker<'a> {
                 };
                 // A derived binding is evaluated lazily by its own evaluator
                 // thunk; legacy allocates its cell and never emits the
-                // initializer inline.
+                // initializer inline. The Stage 5.1 binder still walks the
+                // value because the worklist requests its sites under the
+                // enclosing owner.
                 if binding.derived {
                     self.register_binding(symbol, None, &value_type, &origin)?;
+                    if self.visitor.walks_derived_binding_values()
+                        && let Some(value) = binding.value
+                    {
+                        self.walk_expression(value)?;
+                    }
                     return Ok(());
                 }
                 // A mutable binding allocates its cell before the value
@@ -925,6 +836,7 @@ impl<'a> LoweredWalker<'a> {
         };
         let origin = expression.origin.clone();
         let kind = expression.kind.clone();
+        self.visitor.expression_site(id, expression)?;
         match kind {
             super::LoweredExpressionKind::Deferred(_)
             | super::LoweredExpressionKind::Stage26Deferred(_) => {}
@@ -1028,6 +940,7 @@ impl<'a> LoweredWalker<'a> {
                 // owner's sites.
                 if let Some(await_) = self.owner.await_record(self.program, await_id) {
                     let await_ = await_.clone();
+                    self.visitor.await_id_site(await_id, &await_)?;
                     self.visitor.await_site(&await_, &origin)?;
                     self.walk_expression(await_.operand)?;
                 }
@@ -1074,6 +987,7 @@ impl<'a> LoweredWalker<'a> {
             }
         }
         self.visitor.call_site(&call)?;
+        self.visitor.call_id_site(id, &call)?;
 
         // Call-specific cleanup runs when the invocation executes.
         match &target {

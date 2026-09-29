@@ -29,8 +29,10 @@ mod artifact_plan;
 mod artifact_validation;
 mod cleanup_artifacts;
 mod coroutine_artifacts;
+mod emission;
 mod extern_artifacts;
 mod graph_validation;
+mod initializer_bindings;
 mod instance_body;
 mod instance_resolution;
 mod runtime_requirements;
@@ -1862,6 +1864,9 @@ pub(crate) struct LoweredModuleInfo {
     pub origin: Origin,
     pub semantic_id: ModuleId,
     pub qualified_name: String,
+    /// The stable, load-order-independent prefix used to mangle the module's
+    /// symbols (`__staple_m{prefix}.{name}`, `__staple_init_m{prefix}`).
+    pub symbol_prefix: String,
     pub parent: Option<ModuleId>,
     pub companion: bool,
     pub initialization_index: usize,
@@ -1889,6 +1894,10 @@ pub(crate) struct LoweredSymbol {
     pub origin: Origin,
     pub semantic_id: SymbolId,
     pub module: ModuleId,
+    /// The declared name of a module-level binding, pattern binding, or
+    /// `extern` binding. Empty for function-local symbols, whose LLVM names
+    /// are backend-local.
+    pub name: String,
     pub owner: Option<FunctionId>,
     pub value_type: CheckedType,
     pub storage: SymbolStorage,
@@ -1910,6 +1919,20 @@ pub(crate) struct LoweredSymbol {
     pub singleton: Option<TypeId>,
     pub intrinsic: Option<crate::IntrinsicFunction>,
     pub external: bool,
+    /// The resolver assigned the symbol to an arity-overload set, so the
+    /// backend disambiguates its emitted name (external names get an arity
+    /// suffix, module globals get an overload suffix).
+    pub overloaded: bool,
+    /// The symbol is declared at module scope, so a signal or derived symbol
+    /// lives in a module global rather than a binding cell.
+    pub module_symbol: bool,
+    /// The backend declares module-level storage for this symbol: a
+    /// non-generic module binding or a top-level pattern binding that is not
+    /// an already-declared external symbol.
+    pub has_global: bool,
+    /// The harness registers a GC root region for this symbol's module global
+    /// (`has_global` and the value type contains a managed reference).
+    pub global_root: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2074,6 +2097,14 @@ pub(crate) struct LoweredProgram {
     /// Stage 4.4 owned bindings of nested initializer block locals, indexed by
     /// `InitializerId` in registration order. Module globals are never owned.
     initializer_owned_bindings: Vec<Vec<LoweredOwnedBinding>>,
+    /// Stage 5.1 (D4) concrete bindings for every dispatch/construction site in
+    /// each module initializer, keyed by program-arena `LoweredBindingSite` and
+    /// indexed by `InitializerId`. Built at the closure fixed point; instance
+    /// bodies carry the same table per body.
+    initializer_bindings: Vec<std::collections::BTreeMap<LoweredBindingSite, LoweredBoundTarget>>,
+    /// Stage 5.1 (D4) resolved trait evidence for the initializer sites that
+    /// need it, indexed by `InitializerId`.
+    initializer_evidence: Vec<std::collections::BTreeMap<LoweredBindingSite, TraitEvidence>>,
     /// Append-only instance/artifact key catalog. Stage 3.3 alone reserves
     /// ordinals, before visiting a body, so recursion converges.
     specializations: SpecializationCatalog,
@@ -2369,6 +2400,7 @@ impl LoweredProgram {
     fn snapshot_symbols(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
         let resolved = module.resolved();
         let mut diagnostics = Vec::new();
+        let facts = SymbolDeclarationFacts::collect(module);
         let declared = resolved.symbols_in_id_order();
         let origins = declared
             .iter()
@@ -2401,9 +2433,15 @@ impl LoweredProgram {
             }
             referenced.remove(&info.id);
             let origin = origins[&info.id].clone();
-            if let Some(diagnostic) =
-                self.snapshot_symbol(module, info.id, origin, info.module, info.owner, &captured)
-            {
+            if let Some(diagnostic) = self.snapshot_symbol(
+                module,
+                info.id,
+                origin,
+                info.module,
+                info.owner,
+                &captured,
+                &facts,
+            ) {
                 diagnostics.push(diagnostic);
             }
         }
@@ -2423,7 +2461,7 @@ impl LoweredProgram {
                 .cloned()
                 .unwrap_or_else(Origin::compiler);
             if let Some(diagnostic) =
-                self.snapshot_symbol(module, symbol, origin, module_id, None, &captured)
+                self.snapshot_symbol(module, symbol, origin, module_id, None, &captured, &facts)
             {
                 diagnostics.push(diagnostic);
             }
@@ -2445,6 +2483,7 @@ impl LoweredProgram {
         module_id: ModuleId,
         owner: Option<FunctionId>,
         captured: &HashSet<SymbolId>,
+        facts: &SymbolDeclarationFacts,
     ) -> Option<Diagnostic> {
         let resolved = module.resolved();
         let Some(value_type) = module.declared_type_of_symbol(symbol) else {
@@ -2471,10 +2510,13 @@ impl LoweredProgram {
             module_symbol,
             mutable,
         );
+        let has_global = facts.globals.contains(&symbol);
+        let global_root = has_global && checked_type_contains_ref(&value_type);
         let value = LoweredSymbol {
             origin: origin.clone(),
             semantic_id: symbol,
             module: module_id,
+            name: facts.names.get(&symbol).cloned().unwrap_or_default(),
             owner,
             value_type,
             storage,
@@ -2492,6 +2534,10 @@ impl LoweredProgram {
             singleton,
             intrinsic,
             external,
+            overloaded: resolved.symbol_is_overloaded(symbol),
+            module_symbol,
+            has_global,
+            global_root,
         };
         self.symbols.insert("symbol", symbol, origin, value).err()
     }
@@ -2761,6 +2807,7 @@ impl LoweredProgram {
                 origin: origin.clone(),
                 semantic_id: module_id,
                 qualified_name: source.qualified_name.clone(),
+                symbol_prefix: program.mangled_module_prefix(module_id),
                 parent: source.parent,
                 companion: source.companion,
                 initialization_index: index,
@@ -11192,6 +11239,48 @@ impl LoweredProgram {
                     ),
                 ));
             }
+            // Module storage facts: a global-storage symbol is module-scoped,
+            // a local cell never is, an emitted global has a declared name,
+            // and the harness root-region fact is exactly "has a global whose
+            // type contains a managed reference".
+            if symbol.storage == SymbolStorage::GlobalStorage && !symbol.module_symbol {
+                diagnostics.push(Diagnostic::new(
+                    symbol.origin.span.clone(),
+                    format!("symbol {key:?} has global storage but is not module-scoped"),
+                ));
+            }
+            if matches!(
+                symbol.storage,
+                SymbolStorage::MutableCell | SymbolStorage::ImmutableValue
+            ) && symbol.module_symbol
+            {
+                diagnostics.push(Diagnostic::new(
+                    symbol.origin.span.clone(),
+                    format!("symbol {key:?} is module-scoped but has no global storage"),
+                ));
+            }
+            if symbol.has_global && !symbol.module_symbol {
+                diagnostics.push(Diagnostic::new(
+                    symbol.origin.span.clone(),
+                    format!("symbol {key:?} has a module global but is not module-scoped"),
+                ));
+            }
+            if symbol.has_global && symbol.name.is_empty() {
+                diagnostics.push(Diagnostic::new(
+                    symbol.origin.span.clone(),
+                    format!("symbol {key:?} has a module global without a declared name"),
+                ));
+            }
+            let expected_root = symbol.has_global && checked_type_contains_ref(&symbol.value_type);
+            if symbol.global_root != expected_root {
+                diagnostics.push(Diagnostic::new(
+                    symbol.origin.span.clone(),
+                    format!(
+                        "symbol {key:?} global-root fact {} disagrees with `has_global` and its type",
+                        symbol.global_root
+                    ),
+                ));
+            }
         }
         diagnostics
     }
@@ -11808,6 +11897,120 @@ fn compile_time_only_symbol(module: &TypedModule, symbol: SymbolId) -> bool {
     resolved.constructor_type(symbol).is_some_and(|id| {
         resolved.recursive_construction(id) == Some(crate::RecursiveConstruction::Syntax)
     })
+}
+
+/// The declaration facts the legacy backend re-derived from the module AST:
+/// each module-level symbol's declared name, and whether the backend declares
+/// module-level storage for it. Collected once during symbol snapshotting, so
+/// the Stage 5 emitter reads records instead of syntax.
+struct SymbolDeclarationFacts {
+    names: HashMap<SymbolId, String>,
+    globals: HashSet<SymbolId>,
+}
+
+impl SymbolDeclarationFacts {
+    fn collect(module: &TypedModule) -> Self {
+        let resolved = module.resolved();
+        let mut names = HashMap::new();
+        let mut globals = HashSet::new();
+        for source in resolved.program().modules() {
+            for item in &source.syntax.items {
+                match item {
+                    Item::Binding(binding) => {
+                        let Some(symbol) = resolved.symbol_for(binding.syntax.id) else {
+                            continue;
+                        };
+                        names.insert(symbol, binding.name.clone());
+                        // Legacy skips generic bindings (no storage global) and
+                        // symbols that already have a declaration global
+                        // (externs are predeclared before storage runs).
+                        if binding.type_parameters.is_empty()
+                            && !resolved.is_external_symbol(symbol)
+                        {
+                            globals.insert(symbol);
+                        }
+                    }
+                    Item::ExternBlock(block) => {
+                        for binding in &block.bindings {
+                            if let Some(symbol) = resolved.symbol_for(binding.syntax.id) {
+                                names.insert(symbol, binding.name.clone());
+                            }
+                        }
+                    }
+                    Item::PatternBinding(binding) => {
+                        collect_pattern_facts(resolved, &binding.pattern, &mut names, &mut globals);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        SymbolDeclarationFacts { names, globals }
+    }
+}
+
+/// Collects declared names and module-level storage symbols from one
+/// top-level pattern, mirroring `declare_pattern_storage`'s traversal.
+fn collect_pattern_facts(
+    resolved: &ResolvedModule,
+    pattern: &Pattern,
+    names: &mut HashMap<SymbolId, String>,
+    globals: &mut HashSet<SymbolId>,
+) {
+    match pattern {
+        Pattern::Binding(binding) => {
+            if let Some(symbol) = resolved.symbol_for(binding.syntax.id) {
+                names.insert(symbol, binding.name.clone());
+                globals.insert(symbol);
+            }
+        }
+        Pattern::At(at) => {
+            if let Some(symbol) = resolved.symbol_for(at.binding.syntax.id) {
+                names.insert(symbol, at.binding.name.clone());
+                globals.insert(symbol);
+            }
+            collect_pattern_facts(resolved, &at.pattern, names, globals);
+        }
+        Pattern::Product(product) => {
+            for element in &product.elements {
+                collect_pattern_facts(resolved, element, names, globals);
+            }
+        }
+        Pattern::Nominal(nominal) => {
+            collect_pattern_facts(resolved, &nominal.argument, names, globals);
+        }
+        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+    }
+}
+
+/// Whether one checked type contains a garbage-collector-managed reference.
+/// Ported from the legacy harness's `checked_type_contains_ref` so
+/// `LoweredSymbol::global_root` records the decision lowering-side.
+fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
+    match value_type {
+        CheckedType::Ref(_) | CheckedType::Buffer(_) => true,
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| checked_type_contains_ref(&element.value_type)),
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(checked_type_contains_ref),
+        CheckedType::Function(function) => {
+            checked_type_contains_ref(&function.parameter)
+                || checked_type_contains_ref(&function.result)
+        }
+        CheckedType::Distinct {
+            arguments,
+            representation,
+            ..
+        } => {
+            arguments.iter().any(checked_type_contains_ref)
+                || checked_type_contains_ref(representation)
+        }
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
+            arguments.iter().any(checked_type_contains_ref)
+        }
+        CheckedType::CPointer { pointee } => checked_type_contains_ref(pointee),
+        _ => false,
+    }
 }
 
 /// Primary storage classification, in documented precedence order. Facts
@@ -12766,6 +12969,13 @@ impl LoweredModule {
     pub(crate) fn typed(&self) -> &TypedModule {
         self.typed.as_ref()
     }
+
+    /// Stage 5.1: the read-only backend view of the lowered program. The
+    /// emitter receives this instead of the private arenas; the legacy
+    /// `typed()` bridge is removed at Stage 5.10.
+    pub(crate) fn program(&self) -> emission::EmissionView<'_> {
+        self.program.emission_view()
+    }
 }
 
 /// Converts checked compiler state into the code-generation input.
@@ -12804,6 +13014,9 @@ impl Lowerer {
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.validate_artifact_closure(&ProductionHooks));
+        }
+        if diagnostics.is_empty() {
+            diagnostics.extend(program.validate_initializer_bindings());
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.validate_closed_catalog());
@@ -13510,6 +13723,44 @@ mod tests {
                 .iter()
                 .any(|capture| capture.requires_cell && module.has_mutable_storage(capture.symbol)),
             "the mutable local `count` capture should require a shared cell"
+        );
+    }
+
+    #[test]
+    fn symbols_record_global_names_roots_and_arity_overloads() {
+        let program = snapshot(concat!(
+            "let managed: Ref I32 = Ref 0\n",
+            "let plain = 1\n",
+            "def pick: () -> I32 = () => 1\n",
+            "def pick: I32 * I32 -> I32 = left * right => left\n",
+        ));
+        let symbol_named = |name: &str| {
+            program
+                .symbols
+                .iter()
+                .filter(|(_, _, symbol)| symbol.name == name)
+                .map(|(_, id, symbol)| (id, symbol))
+                .collect::<Vec<_>>()
+        };
+
+        let managed = symbol_named("managed");
+        assert_eq!(managed.len(), 1);
+        let (_, managed) = managed[0];
+        assert!(managed.has_global && managed.module_symbol);
+        assert!(managed.global_root, "a `Ref` global is a harness root");
+
+        let (_, plain) = symbol_named("plain")[0];
+        assert!(plain.has_global && !plain.global_root);
+
+        let picks = symbol_named("pick");
+        assert_eq!(picks.len(), 2, "both arity overloads lower");
+        for (_, pick) in &picks {
+            assert!(pick.overloaded, "an overload-set member is recorded");
+            assert!(pick.has_global && pick.name == "pick");
+        }
+        assert!(
+            program.validate_symbols().is_empty(),
+            "the recorded facts validate"
         );
     }
 

@@ -27,7 +27,8 @@
 use staple_syntax::Diagnostic;
 
 use super::artifact_closure::{ArtifactUseSite, ClosureRequest, ExpansionResult, ScanResult};
-use super::cleanup_artifacts::{LoweredOwnerVisitor, OwnerArenas, walk_owner};
+use super::cleanup_artifacts::{LoweredOwnerVisitor, walk_owner};
+use super::emission::OwnerArenas;
 use super::instance_resolution::{InstanceResolutionRequest, InstanceResolutionTarget};
 use super::{
     ArenaId, CallSubstitutions, CoroutineCodesPlan, CoroutineFrameBinding, CoroutineFramePlan,
