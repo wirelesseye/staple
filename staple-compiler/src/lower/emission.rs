@@ -6,8 +6,10 @@
 //! the program's template arenas. This module is the one read-only surface the
 //! backend may use:
 //!
-//! - [`EmissionView`] exposes catalog iteration, metadata, planned names, and
-//!   binding tables without granting mutation or arena access;
+//! - [`EmissionView`] exposes catalog iteration, metadata, planned names,
+//!   binding tables, and the per-owner artifact uses, instance uses, and owned
+//!   bindings (uniformly for both owner shapes) without granting mutation or
+//!   arena access;
 //! - [`OwnerArenas`] resolves one owner-local or program-local ID (block, item,
 //!   expression, pattern, place, call, callable value, provider, use, with,
 //!   reactive operation/callback, plan, `coro`, await) against either owner
@@ -20,9 +22,10 @@ use std::collections::BTreeMap;
 use crate::specialization::ArtifactOrdinal;
 use crate::{CheckedFunctionType, FunctionId, ModuleId, SymbolId, TraitId, TypeId};
 
+use super::artifact_closure::{LoweredArtifactUse, LoweredInstanceUse};
 use super::instance_body::{
     LoweredBindingSite, LoweredBoundTarget, LoweredInstanceBody, LoweredInstanceCapture,
-    LoweredInstanceParameter,
+    LoweredInstanceParameter, LoweredOwnedBinding,
 };
 use super::{
     ArenaId, BlockId, ExpressionId, FunctionInstanceId, InitializerId, ItemId,
@@ -178,12 +181,12 @@ impl<'a> EmissionView<'a> {
     }
 
     /// The planned emitted name of one interned source-function instance (D2).
-    pub(crate) fn planned_name(&self, instance: FunctionInstanceId) -> Option<String> {
+    pub(crate) fn planned_name(&self, instance: FunctionInstanceId) -> Option<&'a str> {
         self.program.planned_name(instance)
     }
 
     /// The planned emitted name of one interned generated artifact.
-    pub(crate) fn planned_artifact_name(&self, ordinal: ArtifactOrdinal) -> Option<String> {
+    pub(crate) fn planned_artifact_name(&self, ordinal: ArtifactOrdinal) -> Option<&'a str> {
         self.program.planned_artifact_name(ordinal)
     }
 
@@ -261,6 +264,72 @@ impl<'a> EmissionView<'a> {
             .get(instance)
             .and_then(|record| record.body.as_ref())
             .map(LoweredInstanceBody::signature)
+    }
+
+    /// The closure-phase artifact uses of one owner, in scan order: the drop
+    /// glue, finalizers, coroutine pairs, runners, and adapters each site
+    /// emits. `None` for an unknown owner or a body-less instance.
+    pub(crate) fn artifact_uses(&self, owner: EmissionOwner) -> Option<&'a [LoweredArtifactUse]> {
+        match owner {
+            EmissionOwner::Instance(instance) => self
+                .instance_body(instance)
+                .map(|body| body.artifact_uses.as_slice()),
+            EmissionOwner::Initializer(initializer) => {
+                self.program.initializers.get(initializer)?;
+                Some(
+                    self.program
+                        .initializer_artifact_uses
+                        .get(initializer.index())
+                        .map_or(&[][..], Vec::as_slice),
+                )
+            }
+        }
+    }
+
+    /// The closure-phase source-function instance uses of one owner, in scan
+    /// order (for example a buffer clone's element `Clone` instance).
+    pub(crate) fn instance_uses(&self, owner: EmissionOwner) -> Option<&'a [LoweredInstanceUse]> {
+        match owner {
+            EmissionOwner::Instance(instance) => self
+                .instance_body(instance)
+                .map(|body| body.instance_uses.as_slice()),
+            EmissionOwner::Initializer(initializer) => {
+                self.program.initializers.get(initializer)?;
+                Some(
+                    self.program
+                        .initializer_instance_uses
+                        .get(initializer.index())
+                        .map_or(&[][..], Vec::as_slice),
+                )
+            }
+        }
+    }
+
+    /// The owned bindings of one owner in registration order, each with the
+    /// drop glue its scope-exit cleanup calls. An initializer's records cover
+    /// nested block locals only; module globals are never owned.
+    pub(crate) fn owned_bindings(&self, owner: EmissionOwner) -> Option<&'a [LoweredOwnedBinding]> {
+        match owner {
+            EmissionOwner::Instance(instance) => self
+                .instance_body(instance)
+                .map(|body| body.owned_bindings.as_slice()),
+            EmissionOwner::Initializer(initializer) => {
+                self.program.initializers.get(initializer)?;
+                Some(
+                    self.program
+                        .initializer_owned_bindings
+                        .get(initializer.index())
+                        .map_or(&[][..], Vec::as_slice),
+                )
+            }
+        }
+    }
+
+    fn instance_body(&self, instance: FunctionInstanceId) -> Option<&'a LoweredInstanceBody> {
+        self.program
+            .instances
+            .get(instance)
+            .and_then(|record| record.body.as_ref())
     }
 }
 
@@ -517,9 +586,76 @@ mod tests {
                 .is_some_and(|bindings| !bindings.is_empty()),
             "the instance table is readable"
         );
+        assert_eq!(view.planned_name(instance), Some(record.name.as_str()));
+    }
+
+    /// The per-owner cleanup and use records are readable for both owner
+    /// shapes through one accessor: an initializer `coro` creation's pair
+    /// and an instance's owned block local, each with its use record.
+    #[test]
+    fn emission_view_lends_owner_uses_and_owned_bindings() {
+        let lowered = lower(concat!(
+            "use std.coroutine.*\n",
+            "use std.cinterop.(CString, c_string)\n",
+            "def keep: I32 -> I32 = value => { let text = c_string \"y\"; value }\n",
+            "let started = coro { 1 }\n",
+            "let kept = keep 1\n",
+        ));
+        let program = &lowered.program;
+        let view = lowered.program();
+        let entry = view
+            .modules()
+            .find(|(_, module)| module.executable_entry)
+            .map(|(_, module)| module.initializer)
+            .expect("an entry initializer");
+        let owner = EmissionOwner::Initializer(entry);
+        let uses = view
+            .artifact_uses(owner)
+            .expect("initializer artifact uses");
+        assert!(
+            uses.iter()
+                .any(|use_| matches!(use_.site, super::super::ArtifactUseSite::CoroCreation(_))),
+            "the initializer coroutine pair use is readable: {uses:?}"
+        );
         assert_eq!(
-            view.planned_name(instance).as_deref(),
-            Some(record.name.as_str())
+            view.owned_bindings(owner).map(<[_]>::len),
+            program
+                .initializer_owned_bindings
+                .get(entry.index())
+                .map(Vec::len)
+        );
+        assert_eq!(
+            view.instance_uses(owner).map(<[_]>::len),
+            program
+                .initializer_instance_uses
+                .get(entry.index())
+                .map(Vec::len)
+        );
+
+        let keep = view
+            .instances()
+            .find(|(_, instance)| {
+                view.function(instance.template)
+                    .is_some_and(|function| function.name == "keep")
+            })
+            .map(|(id, _)| EmissionOwner::Instance(id))
+            .expect("keep has an instance");
+        let owned = view.owned_bindings(keep).expect("instance owned bindings");
+        let glue = owned
+            .iter()
+            .find_map(|binding| binding.glue)
+            .expect("the droppable block local is owned with its glue");
+        assert!(
+            view.artifact_uses(keep)
+                .is_some_and(|uses| uses.iter().any(|use_| use_.artifact == glue)),
+            "the owned binding's glue has its use record"
+        );
+        assert!(
+            view.owned_bindings(EmissionOwner::Initializer(InitializerId::from_index(
+                10_000
+            )))
+            .is_none(),
+            "an unknown owner has no records"
         );
     }
 }

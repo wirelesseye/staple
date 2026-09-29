@@ -66,7 +66,7 @@ impl<'a> GraphValidator<'a> {
         let names = match self
             .program
             .specializations
-            .planned_names_with(|key| self.program.declared_instance_name(key))
+            .planned_names_with(self.program.declared_name_resolver())
         {
             Ok(names) => names,
             Err(collision) => {
@@ -5444,5 +5444,104 @@ mod tests {
                 "the census fixtures exercise the `{explained}` explanation: {coverage:?}"
             );
         }
+    }
+
+    /// Stage 5.1 (D2): every non-generic instance the legacy backend emits
+    /// eagerly keeps exactly the LLVM name legacy gives it. Legacy hands the
+    /// resolver's name straight to LLVM, which suffixes a definition whose
+    /// name is already taken (by a runtime-module symbol such as libc
+    /// `write`, an extern, or an earlier duplicate); the catalog gives that
+    /// instance its ordinal name instead.
+    #[test]
+    fn stage_5_1_planned_names_match_legacy_declared_names() {
+        let source = concat!(
+            "use std.cinterop.(CString, c_string)\n",
+            "def plain: I32 -> I32 = value => value\n",
+            "def generic: <T where Copy T> T -> T = value => value\n",
+            "let first = plain (1)\n",
+            "let second = generic 2\n",
+            "let owned = c_string \"x\"\n",
+        );
+        let lowered = lower(source);
+        let context = Context::create();
+        let legacy =
+            crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(|diagnostics| {
+                panic!("the legacy backend should compile: {diagnostics:?}")
+            });
+        let program = &lowered.program;
+        let mut compared = Vec::new();
+        let mut fallbacks = Vec::new();
+        for (legacy_name, origin) in &legacy.defined_functions {
+            let crate::codegen::LegacyFunctionOrigin::Declared { function, .. } = origin else {
+                continue;
+            };
+            let Some((id, instance)) = program.instances.iter().find(|(_, instance)| {
+                instance.template == *function
+                    && program
+                        .specializations
+                        .instance(instance.ordinal)
+                        .is_some_and(|key| {
+                            key.substitutions().is_empty() && key.evidence().is_none()
+                        })
+            }) else {
+                continue;
+            };
+            let declared = &program
+                .functions
+                .get(*function)
+                .expect("declared template")
+                .name;
+            let planned = program.planned_name(id).expect("planned name");
+            if legacy_name == declared {
+                assert_eq!(
+                    planned, legacy_name,
+                    "a non-generic instance keeps legacy's name"
+                );
+            } else {
+                // LLVM renamed a clashing duplicate; the catalog falls back.
+                assert_eq!(
+                    planned,
+                    format!("__staple_instance_{}", instance.ordinal.index()),
+                    "a taken declared name `{declared}` (legacy `{legacy_name}`) falls back to the ordinal name"
+                );
+                fallbacks.push(declared.clone());
+            }
+            compared.push(planned.to_owned());
+        }
+        for (shape, found) in [
+            (
+                "a single-module user function keeps its bare name",
+                compared.iter().any(|name| name == "plain"),
+            ),
+            (
+                "a standard-library function keeps its mangled name",
+                compared.iter().any(|name| {
+                    name.starts_with("__staple_mstd.") && !name[3..].contains("__staple_m")
+                }),
+            ),
+            (
+                "no planned name is double-prefixed",
+                compared
+                    .iter()
+                    .all(|name| name.matches("__staple_m").count() <= 1),
+            ),
+        ] {
+            assert!(found, "{shape}: {compared:?}");
+        }
+        assert!(
+            fallbacks.iter().any(|name| name == "write"),
+            "the standard-library `write` method clashes with the reactive runtime's libc `write`: {fallbacks:?}"
+        );
+        let generic = function_id(program, "generic");
+        let (generic_instance, _) = program
+            .instances
+            .iter()
+            .find(|(_, instance)| instance.template == generic)
+            .expect("generic has an instance");
+        assert_eq!(
+            program.planned_name(generic_instance),
+            Some(format!("__staple_instance_{}", generic_instance.index()).as_str()),
+            "a generic instance keeps its ordinal name"
+        );
     }
 }

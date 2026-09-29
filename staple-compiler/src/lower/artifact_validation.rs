@@ -241,7 +241,7 @@ mod tests {
             "names={:?}\n",
             program
                 .specializations
-                .planned_names_with(|key| program.declared_instance_name(key))
+                .planned_names_with(program.declared_name_resolver())
                 .expect("unique planned names")
         ));
         for (id, instance) in program.instances.iter() {

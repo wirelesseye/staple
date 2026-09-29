@@ -729,7 +729,7 @@ impl<'a> WorklistBuilder<'a> {
             return Err(self.diagnostics);
         }
         self.recorder
-            .assign_names(|key| self.program.declared_instance_name(key))?;
+            .assign_names(self.program.declared_name_resolver())?;
         Ok(self.recorder.into_parts())
     }
 
@@ -753,7 +753,7 @@ impl<'a> WorklistBuilder<'a> {
         }
         builder
             .recorder
-            .assign_names(|key| builder.program.declared_instance_name(key))?;
+            .assign_names(builder.program.declared_name_resolver())?;
         Ok(builder.recorder.into_parts())
     }
 
@@ -2032,35 +2032,85 @@ impl LoweredProgram {
         }
     }
 
-    /// D2: the declared mangled name of an instance of a non-generic template
-    /// (empty substitutions and evidence). Generic instances have no declared
-    /// name and keep their ordinal name. The emitter reads this through
-    /// [`Self::planned_name`] and never builds names itself.
-    pub(crate) fn declared_instance_name(&self, key: &InstanceKey) -> Option<String> {
+    /// D2: the resolver that names non-generic instances. It computes the
+    /// reserved symbol set once, so a naming pass stays linear.
+    pub(crate) fn declared_name_resolver(&self) -> impl Fn(&InstanceKey) -> Option<String> + '_ {
+        let reserved = self.reserved_symbol_names();
+        move |key| self.declared_instance_name(key, &reserved)
+    }
+
+    /// D2: the declared name of an instance of a non-generic template (empty
+    /// substitutions and evidence), exactly as the legacy backend emits it.
+    /// The resolver already mangled `LoweredFunction::name` (`__staple_m…`
+    /// for the standard library and multi-module programs, the bare name for
+    /// single-module code), so it is used verbatim. A name some symbol outside
+    /// the catalog already owns (see [`Self::reserved_symbol_names`]) is not
+    /// available, and the instance falls back to its ordinal name. Generic
+    /// instances have no declared name and keep their ordinal name.
+    fn declared_instance_name(
+        &self,
+        key: &InstanceKey,
+        reserved: &HashSet<String>,
+    ) -> Option<String> {
         if !key.substitutions().is_empty() || key.evidence().is_some() {
             return None;
         }
-        let function = self.functions.get(key.function())?;
-        let module = self.modules.get(function.module)?;
-        Some(format!(
-            "__staple_m{}.{}",
-            module.symbol_prefix, function.name
-        ))
+        self.functions
+            .get(key.function())
+            .map(|function| function.name.clone())
+            .filter(|name| !reserved.contains(name))
     }
 
-    /// The planned emitted name of one interned source-function instance (D2).
-    pub(crate) fn planned_name(&self, instance: FunctionInstanceId) -> Option<String> {
-        let record = self.instances.get(instance)?;
-        let names = self
-            .specializations
-            .planned_names_with(|key| self.declared_instance_name(key))
-            .ok()?;
-        names.get(record.ordinal.index()).cloned()
+    /// Symbol names that exist in the emitted module before any catalog
+    /// function is declared, so a declared name must not take them: every
+    /// function and global the runtime modules define or declare (legacy
+    /// installs them first, so a clashing source function is renamed, as a
+    /// standard-library `write` method is by `reactive.ll`'s libc `write`),
+    /// every non-intrinsic extern symbol with legacy's overload arity suffix
+    /// (declared next), and the fixed helpers the backend declares by name
+    /// (`main`, the UTF-8 validator, and the lazily declared libc and LLVM
+    /// functions, which the backend looks up by name and must never resolve
+    /// to a source function). The set is the same for every program, apart
+    /// from externs, whatever `LoweredRuntimeRequirements` holds, so names do
+    /// not depend on which runtime modules a program installs.
+    pub(crate) fn reserved_symbol_names(&self) -> HashSet<String> {
+        let mut reserved = runtime_module_symbols().clone();
+        for name in [
+            "main",
+            "__staple_is_valid_utf8",
+            "free",
+            "memcmp",
+            "snprintf",
+            "strlen",
+            "memchr",
+            "llvm.trap",
+        ] {
+            reserved.insert(name.to_owned());
+        }
+        for (_, _, symbol) in self.symbols.iter() {
+            if !symbol.external || symbol.intrinsic.is_some() || symbol.name.is_empty() {
+                continue;
+            }
+            reserved.insert(external_symbol_name(symbol));
+        }
+        reserved
     }
 
-    /// The planned emitted name of one interned generated artifact.
-    pub(crate) fn planned_artifact_name(&self, ordinal: ArtifactOrdinal) -> Option<String> {
-        self.specializations.planned_artifact_name(ordinal)
+    /// The planned emitted name of one interned source-function instance (D2):
+    /// the name the worklist assigned from the planned-name vector, which
+    /// `validate_specializations` proves agrees with a fresh computation.
+    pub(crate) fn planned_name(&self, instance: FunctionInstanceId) -> Option<&str> {
+        self.instances
+            .get(instance)
+            .map(|record| record.name.as_str())
+    }
+
+    /// The planned emitted name of one interned generated artifact: the name
+    /// the worklist assigned, validated like instance names.
+    pub(crate) fn planned_artifact_name(&self, ordinal: ArtifactOrdinal) -> Option<&str> {
+        self.artifacts
+            .get(LoweredArtifactRequestId::from_index(ordinal.index()))
+            .map(|record| record.name.as_str())
     }
 
     /// Validates the installed worklist against its own catalog: dense
@@ -2112,7 +2162,7 @@ impl LoweredProgram {
         }
         let names = match self
             .specializations
-            .planned_names_with(|key| self.declared_instance_name(key))
+            .planned_names_with(self.declared_name_resolver())
         {
             Ok(names) => names,
             Err(SpecializationNameCollision { name }) => {
@@ -2205,6 +2255,14 @@ impl LoweredProgram {
                     ),
                 ));
             }
+            if !names.is_empty()
+                && names.get(self.instances.len() + id.index()) != Some(&artifact.name)
+            {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    format!("artifact {} has an unstable name", id.index()),
+                ));
+            }
             match self.specializations.artifact(artifact.ordinal) {
                 Some(key) => {
                     if let Some(plan) = &artifact.plan {
@@ -2288,6 +2346,60 @@ impl LoweredProgram {
         }
         diagnostics
     }
+}
+
+/// The LLVM name legacy gives one extern symbol: the declared name, with an
+/// `.arity{N}` suffix when the symbol is in an arity-overload set.
+fn external_symbol_name(symbol: &super::LoweredSymbol) -> String {
+    if !symbol.overloaded {
+        return symbol.name.clone();
+    }
+    let arity = match &symbol.value_type {
+        CheckedType::Function(function)
+            if function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed =>
+        {
+            match function.parameter.as_ref() {
+                CheckedType::Product(product) => product.elements.len(),
+                _ => 1,
+            }
+        }
+        _ => 1,
+    };
+    format!("{}.arity{arity}", symbol.name)
+}
+
+/// Every function and global name the runtime modules define or declare,
+/// parsed once from the same sources the backend installs.
+fn runtime_module_symbols() -> &'static HashSet<String> {
+    static SYMBOLS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    SYMBOLS.get_or_init(|| {
+        let mut symbols = HashSet::new();
+        for source in [
+            include_str!("../gc.ll"),
+            include_str!("../coroutine.ll"),
+            include_str!("../reactive.ll"),
+        ] {
+            for line in source.lines() {
+                let declares = line.starts_with("define") || line.starts_with("declare");
+                if !(declares || line.starts_with('@')) {
+                    continue;
+                }
+                let Some(start) = line.find('@') else {
+                    continue;
+                };
+                let name = line[start + 1..]
+                    .split(|character: char| {
+                        character == '(' || character == ' ' || character == '='
+                    })
+                    .next()
+                    .unwrap_or_default();
+                if !name.is_empty() {
+                    symbols.insert(name.to_owned());
+                }
+            }
+        }
+        symbols
+    })
 }
 
 #[cfg(test)]
@@ -2392,10 +2504,12 @@ mod tests {
 
         let plain_name = program
             .planned_name(plain_instance)
-            .expect("plain has a planned name");
-        assert!(
-            plain_name.starts_with("__staple_m") && plain_name.ends_with(".plain"),
-            "a non-generic template keeps its declared mangled name: {plain_name}"
+            .expect("plain has a planned name")
+            .to_owned();
+        assert_eq!(
+            plain_name,
+            program.functions.get(plain).expect("template").name,
+            "a non-generic template keeps its resolver name verbatim"
         );
         assert_eq!(
             program
@@ -2410,7 +2524,7 @@ mod tests {
             program
                 .planned_name(generic_instance)
                 .expect("generic has a planned name"),
-            format!("__staple_instance_{}", generic_instance.index()),
+            format!("__staple_instance_{}", generic_instance.index()).as_str(),
             "a generic instance keeps its ordinal name"
         );
 
@@ -2418,7 +2532,7 @@ mod tests {
         // ordinal, matching the record the worklist assigned.
         for (_, artifact) in program.artifacts.iter() {
             assert_eq!(
-                program.planned_artifact_name(artifact.ordinal).as_deref(),
+                program.planned_artifact_name(artifact.ordinal),
                 Some(artifact.name.as_str())
             );
         }

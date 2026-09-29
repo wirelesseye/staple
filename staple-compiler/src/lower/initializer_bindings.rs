@@ -91,7 +91,53 @@ impl LoweredProgram {
                 diagnostics: Vec::new(),
             };
             diagnostics.append(&mut validator.run());
+            diagnostics.append(&mut self.check_initializer_binding_fixed_point(initializer));
         }
+        diagnostics
+    }
+
+    /// Re-resolves every site of one initializer from scratch and requires the
+    /// stored tables to equal the fresh ones. The structural checks above
+    /// prove each binding is well-formed; this proves it is the right one (a
+    /// site bound to another existing instance passes every structural check).
+    fn check_initializer_binding_fixed_point(&self, initializer: InitializerId) -> Vec<Diagnostic> {
+        let index = initializer.index();
+        let mut binder = InitializerBinder::new(self, initializer);
+        let mut diagnostics = Vec::new();
+        if let Err(mut problems) =
+            walk_owner(self, OwnerArenas::Initializer(initializer), &mut binder)
+        {
+            diagnostics.append(&mut problems);
+        }
+        diagnostics.append(&mut binder.diagnostics);
+        if !diagnostics.is_empty() {
+            return diagnostics;
+        }
+        let span = self.initializer_span(initializer);
+        compare_tables(
+            &self.initializer_bindings[index],
+            &binder.bindings,
+            |site, stored, fresh| {
+                diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    format!(
+                        "initializer {index} site {site:?} binds {stored:?} but re-resolves to {fresh:?}"
+                    ),
+                ));
+            },
+        );
+        compare_tables(
+            &self.initializer_evidence[index],
+            &binder.evidence,
+            |site, stored, fresh| {
+                diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    format!(
+                        "initializer {index} site {site:?} carries evidence {stored:?} but re-resolves to {fresh:?}"
+                    ),
+                ));
+            },
+        );
         diagnostics
     }
 
@@ -762,6 +808,26 @@ impl<'a> InitializerBinder<'a> {
     }
 }
 
+/// Reports every site whose stored entry differs from the fresh one, in site
+/// order. A site present on only one side reports `None` for the other.
+fn compare_tables<T: PartialEq>(
+    stored: &BTreeMap<LoweredBindingSite, T>,
+    fresh: &BTreeMap<LoweredBindingSite, T>,
+    mut report: impl FnMut(LoweredBindingSite, Option<&T>, Option<&T>),
+) {
+    let sites = stored
+        .keys()
+        .chain(fresh.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    for site in sites {
+        let (stored, fresh) = (stored.get(&site), fresh.get(&site));
+        if stored != fresh {
+            report(site, stored, fresh);
+        }
+    }
+}
+
 /// The trait a resolved evidence recipe selects. Every evidence variant names
 /// its owning trait.
 fn evidence_trait_id(evidence: &TraitEvidence) -> TraitId {
@@ -1358,6 +1424,38 @@ mod tests {
         assert!(
             program.validate_initializer_bindings().is_empty(),
             "the tables validate before corruption"
+        );
+    }
+
+    /// Two sites bound to each other's (existing, initializer-requested)
+    /// instances pass every structural check; only re-resolution sees it.
+    #[test]
+    fn swapped_bindings_are_diagnosed() {
+        let mut lowered = lower(concat!(
+            "def one: I32 -> I32 = value => value + 1\n",
+            "def two: I32 -> I32 = value => value + 2\n",
+            "let a = one (1)\n",
+            "let b = two (2)\n",
+        ));
+        let program = &mut lowered.program;
+        let index = entry_initializer(program);
+        assert!(program.validate_initializer_bindings().is_empty());
+        let bound = program.initializer_bindings[index]
+            .iter()
+            .filter_map(|(site, target)| target.instance_id().map(|instance| (*site, instance)))
+            .collect::<Vec<_>>();
+        let (first_site, first) = bound[0];
+        let (second_site, second) = bound
+            .iter()
+            .copied()
+            .find(|(_, instance)| *instance != first)
+            .expect("the fixture binds two distinct instances");
+        let table = &mut program.initializer_bindings[index];
+        table.insert(first_site, LoweredBoundTarget::Instance(second));
+        table.insert(second_site, LoweredBoundTarget::Instance(first));
+        assert!(
+            contains_message(&program.validate_initializer_bindings(), "re-resolves to"),
+            "a binding to the wrong existing instance is diagnosed"
         );
     }
 

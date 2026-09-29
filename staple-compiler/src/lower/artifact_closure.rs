@@ -683,7 +683,7 @@ impl LoweredProgram {
     /// never renames an earlier entry.
     fn finish_closure(&mut self) -> Vec<Diagnostic> {
         let mut recorder = GraphRecorder::from_parts(self.take_graph());
-        let result = recorder.assign_names(|key| self.declared_instance_name(key));
+        let result = recorder.assign_names(self.declared_name_resolver());
         self.install_graph(recorder.into_parts());
         result.err().unwrap_or_default()
     }

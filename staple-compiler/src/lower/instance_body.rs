@@ -111,7 +111,7 @@ pub(crate) enum LoweredBindingSite {
 /// instances from generated artifacts and the non-instance routes that
 /// intentionally stay indirect/external/intrinsic. A `CompilerHelper` site has
 /// no binding: the graph rejects the category with a diagnostic.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LoweredBoundTarget {
     /// A known source function interned as a concrete instance.
     Instance(FunctionInstanceId),

@@ -827,7 +827,7 @@ pub(crate) struct CallEffectSubstitution {
 /// Trait selection evidence for a call, index read, indexed mutation, or
 /// formatting interpolation. Negative implementations stay rejection data and
 /// never become callable targets.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TraitEvidence {
     /// A selected explicit implementation and its method function.
     ExplicitImplementation {
