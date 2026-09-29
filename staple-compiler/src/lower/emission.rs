@@ -115,6 +115,23 @@ impl<'a> EmissionView<'a> {
         self.program.initializers.get(id)
     }
 
+    /// Resolve an owner's runtime block without exposing either arena.
+    pub(crate) fn block(&self, owner: EmissionOwner, id: BlockId) -> Option<&'a LoweredBlock> {
+        self.owner(owner)?.block(self.program, id)
+    }
+
+    pub(crate) fn item(&self, owner: EmissionOwner, id: ItemId) -> Option<&'a super::LoweredItem> {
+        self.owner(owner)?.item(self.program, id)
+    }
+
+    pub(crate) fn expression(
+        &self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+    ) -> Option<&'a LoweredExpression> {
+        self.owner(owner)?.expression(self.program, id)
+    }
+
     pub(crate) fn modules(&self) -> impl Iterator<Item = (ModuleId, &'a LoweredModuleInfo)> + 'a {
         self.program.modules.iter().map(|(_, id, info)| (id, info))
     }

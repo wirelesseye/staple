@@ -43,6 +43,7 @@ mod worklist;
 // type; Stage 5.2's `codegen::layout::LayoutContext` stores it so the shared
 // layout layer can read semantic IDs and the concrete `Copy` decision without
 // naming the lowered arenas.
+pub(crate) use emission::EmissionOwner;
 pub(crate) use emission::EmissionView;
 
 // Stage 3.2 resolver API consumed by Stage 3.3. The implementation stays in a
