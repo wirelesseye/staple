@@ -536,10 +536,11 @@ mod tests {
     };
 
     use super::super::{
-        LoweredArtifactRequestId, LoweredArtifactRequestRoot, LoweredBindingSite,
-        LoweredBoundTarget, LoweredCallStep, LoweredCallableCategory, LoweredCallableTarget,
-        LoweredExpressionKind, LoweredInstanceDependency, LoweredInstanceDependencyKind,
-        LoweredInstanceRequest, LoweredRepeatCount, LoweredStringTemplatePart, TraitEvidence,
+        LoweredArtifactDependencyKind, LoweredArtifactRequestId, LoweredArtifactRequestRoot,
+        LoweredBindingSite, LoweredBoundTarget, LoweredCallStep, LoweredCallableCategory,
+        LoweredCallableTarget, LoweredExpressionKind, LoweredInstanceDependency,
+        LoweredInstanceDependencyKind, LoweredInstanceRequest, LoweredRepeatCount,
+        LoweredStringTemplatePart, ProductionHooks, TraitEvidence,
     };
     use super::*;
 
@@ -2194,6 +2195,7 @@ mod tests {
             ArtifactUseSite::ReactiveCallbackEnvironment(_) => "reactive-callback-environment",
             ArtifactUseSite::DerivedEvaluatorEnvironment(_) => "derived-evaluator-environment",
             ArtifactUseSite::ReactiveRunner(_) => "reactive-runner",
+            ArtifactUseSite::ExternAdapterValue(_) => "extern-adapter-value",
             #[cfg(test)]
             ArtifactUseSite::Test(_) => "test",
         }
@@ -3432,6 +3434,470 @@ mod tests {
             "coroutine and reactive environment finalizers flow through the 4.4 comparison: {cleanup:?}"
         );
         eprintln!("stage 4.5 stdlib transition coverage: {coverage:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // Stage 4.6 extern adapters and runtime requirements.
+    // ------------------------------------------------------------------
+
+    const STAGE_4_6_EXTERN_FIXTURE: &str = concat!(
+        "use std.cinterop.(CString, c_string)\n",
+        "extern \"c\" { inspect: CString -> I32 }\n",
+        "extern \"c\" { unused_extern: CString -> I32 }\n",
+        "def apply: ((CString -> I32), CString) -> I32 = (f, value) => f value\n",
+        "def forward: ((CString -> I32) -> (CString -> I32)) = f => f\n",
+        "let direct = inspect (c_string \"d\")\n",
+        "let indirect = apply (inspect, c_string \"i\")\n",
+        "let forwarded = forward inspect\n",
+        "let result = forwarded (c_string \"f\")\n",
+    );
+
+    /// How many closure-phase uses of one artifact are `ExternAdapterValue`
+    /// sites.
+    fn extern_adapter_use_count(
+        program: &LoweredProgram,
+        artifact: crate::specialization::ArtifactOrdinal,
+    ) -> usize {
+        let counts = |uses: &[crate::LoweredArtifactUse]| {
+            uses.iter()
+                .filter(|use_| {
+                    use_.artifact == artifact
+                        && use_.kind == LoweredArtifactDependencyKind::ExternAdapter
+                        && matches!(use_.site, crate::ArtifactUseSite::ExternAdapterValue(_))
+                })
+                .count()
+        };
+        let mut total = 0;
+        for (_, instance) in program.instances.iter() {
+            if let Some(body) = &instance.body {
+                total += counts(&body.artifact_uses);
+            }
+        }
+        for uses in &program.initializer_artifact_uses {
+            total += counts(uses);
+        }
+        total
+    }
+
+    #[test]
+    fn stage_4_6_extern_adapters_match_legacy_emission() {
+        let module = checked_program(STAGE_4_6_EXTERN_FIXTURE);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .expect("the extern fixture lowers and validates");
+        let context = Context::create();
+        let legacy = crate::codegen::legacy_emissions(&context, &lowered)
+            .expect("the legacy backend compiles the extern fixture");
+        let program = &lowered.program;
+
+        let origin = Origin::compiler();
+        let canonical_type = |value: &crate::CheckedFunctionType| {
+            CanonicalFunctionType::concrete(value, &origin)
+                .expect("an extern adapter type is concrete")
+        };
+
+        // The owned catalog has one expanded artifact per extern adapter that
+        // a callable-value site reaches, and every use is bound to it.
+        let mut artifacts = Vec::new();
+        for (id, artifact) in program.artifacts.iter() {
+            let Some(crate::LoweredArtifactPlan::ExternAdapter(plan)) = &artifact.plan else {
+                continue;
+            };
+            let Some(ArtifactRequestKey::ExternAdapter(key)) =
+                program.specializations.artifact(artifact.ordinal)
+            else {
+                panic!("extern adapter artifact {id:?} has a mismatched key");
+            };
+            let declaration = plan
+                .declaration
+                .unwrap_or_else(|| panic!("extern adapter artifact {id:?} is expanded"));
+            assert!(
+                declaration.eagerly_declared,
+                "the plan records the legacy eager foreign-symbol declaration: {plan:?}"
+            );
+            let expected_arity = if plan.callable_type.parameter_style
+                == staple_syntax::FunctionParameterStyle::Juxtaposed
+            {
+                match plan.callable_type.parameter.as_ref() {
+                    crate::CheckedType::Product(product) => product.elements.len(),
+                    _ => 1,
+                }
+            } else {
+                1
+            };
+            assert_eq!(
+                declaration.arity, expected_arity,
+                "the recorded arity matches the adapter's parameter shape"
+            );
+            let uses = extern_adapter_use_count(program, artifact.ordinal);
+            assert!(
+                uses >= 1,
+                "extern adapter artifact {id:?} has at least one callable-value use"
+            );
+            artifacts.push((key.symbol, key.callable_type.clone(), uses));
+        }
+        assert!(
+            !artifacts.is_empty(),
+            "the fixture uses extern bindings as first-class values"
+        );
+
+        let used = legacy
+            .extern_adapters
+            .iter()
+            .filter(|adapter| adapter.used)
+            .collect::<Vec<_>>();
+        let unused = legacy
+            .extern_adapters
+            .iter()
+            .filter(|adapter| !adapter.used)
+            .collect::<Vec<_>>();
+        assert!(
+            !used.is_empty(),
+            "legacy reads at least one extern adapter as a first-class value"
+        );
+        assert!(
+            !unused.is_empty(),
+            "legacy eagerly declares an adapter for the unused extern"
+        );
+        assert_eq!(
+            artifacts.len(),
+            used.len(),
+            "every reachable legacy adapter has exactly one artifact"
+        );
+        for adapter in &used {
+            assert!(
+                artifacts.iter().any(|(symbol, callable_type, _)| {
+                    *symbol == adapter.symbol
+                        && *callable_type == canonical_type(&adapter.callable_type)
+                }),
+                "legacy-used adapter for symbol {} has no matching artifact",
+                adapter.symbol.0
+            );
+        }
+        for (symbol, _, _) in &artifacts {
+            assert!(
+                used.iter().any(|adapter| adapter.symbol == *symbol),
+                "artifact for symbol {} has no legacy-used adapter",
+                symbol.0
+            );
+        }
+        // Eager-declaration parity: the unused extern gets no artifact.
+        for adapter in &unused {
+            assert!(
+                !artifacts
+                    .iter()
+                    .any(|(symbol, _, _)| *symbol == adapter.symbol),
+                "unused extern symbol {} must not get an adapter artifact",
+                adapter.symbol.0
+            );
+        }
+        assert!(
+            artifacts.iter().any(|(_, _, uses)| *uses > 1),
+            "two callable-value sites dedup to one adapter artifact: {artifacts:?}"
+        );
+    }
+
+    #[test]
+    fn stage_4_6_variadic_extern_values_are_rejected_at_lowering() {
+        let module = checked_program(concat!(
+            "extern \"c\" { report: (I32, ...) -> I32 }\n",
+            "def forward: ((I32, ...) -> I32) -> ((I32, ...) -> I32) = f => f\n",
+            "let forwarded = forward report\n",
+        ));
+        let diagnostics = Lowerer::new()
+            .lower(&module)
+            .expect_err("a variadic extern used as a value is rejected");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("variadic external functions cannot be used as first-class values")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn stage_4_6_corrupted_extern_adapter_plans_and_uses_are_diagnosed() {
+        let module = checked_program(STAGE_4_6_EXTERN_FIXTURE);
+        let mut lowered = Lowerer::new()
+            .lower(&module)
+            .expect("the extern fixture lowers and validates");
+
+        // A plan that lost its expansion marker is rejected.
+        let mut broken = lowered.clone();
+        let artifact = broken
+            .program
+            .artifacts
+            .iter()
+            .find(|(_, artifact)| {
+                matches!(
+                    artifact.plan,
+                    Some(crate::LoweredArtifactPlan::ExternAdapter(_))
+                )
+            })
+            .map(|(id, _)| id)
+            .expect("an extern adapter artifact");
+        if let Some(crate::LoweredArtifactPlan::ExternAdapter(plan)) = broken
+            .program
+            .artifacts
+            .get_mut(artifact)
+            .and_then(|artifact| artifact.plan.as_mut())
+        {
+            plan.declaration = None;
+        }
+        let diagnostics = broken.program.validate_artifact_closure(&ProductionHooks);
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("still carries the request-time plan marker")),
+            "{diagnostics:?}"
+        );
+
+        // A use whose callable value no longer names the adapter's symbol.
+        // The fixture's callable values live in module initializers, so the
+        // program's template arena owns them.
+        let (value_id, site_origin) = lowered
+            .program
+            .initializer_artifact_uses
+            .iter()
+            .flat_map(|uses| uses.iter())
+            .find_map(|use_| {
+                let crate::ArtifactUseSite::ExternAdapterValue(value) = use_.site else {
+                    return None;
+                };
+                Some((value, use_.origin.clone()))
+            })
+            .expect("an extern adapter use site");
+        if let Some(value) = lowered.program.callable_values.get_mut(value_id) {
+            value.target = LoweredCallableTarget::ExternalFunction {
+                symbol: crate::SymbolId(9_999),
+            };
+        }
+        let diagnostics = lowered.program.validate_artifact_closure(&ProductionHooks);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.span == site_origin.span
+                    && diagnostic.message.contains(
+                        "an extern adapter use names a different symbol or callable type"
+                    )),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// The recorded requirements of one fixture, in canonical order.
+    fn runtime_requirements(source: &str) -> Vec<crate::RuntimeRequirement> {
+        lower(source)
+            .program
+            .runtime_requirements
+            .requirements()
+            .to_vec()
+    }
+
+    #[test]
+    fn stage_4_6_unused_subsystems_record_no_requirement() {
+        use crate::RuntimeRequirement::*;
+
+        // The backend emits every eagerly declared standard-library template,
+        // so the surfaces those bodies reference are required by every program
+        // that links the library. The test therefore checks the two surfaces
+        // no eager body references, and that adding a use adds its surface.
+        let base = runtime_requirements("let answer: I32 = 1 + 2\n");
+        assert!(
+            base.contains(&GarbageCollector)
+                && base.contains(&ReactiveRuntime)
+                && base.contains(&Utf8Validator)
+                && base.contains(&CStringFree)
+                && base.contains(&NumericToString)
+                && base.contains(&CStringLength)
+                && base.contains(&InteriorNulCheck),
+            "the eagerly emitted library bodies reference these surfaces: {base:?}"
+        );
+        assert!(
+            !base.contains(&CoroutineRuntime),
+            "a program without coroutines records no coroutine runtime: {base:?}"
+        );
+        assert!(
+            !base.contains(&LiteralComparison),
+            "a program without string patterns records no literal comparison: {base:?}"
+        );
+
+        let pattern = runtime_requirements(concat!(
+            "def classify: String -> I32 = value => match value { \"a\" => 1, _ => 0 }\n",
+            "let result = classify \"a\"\n",
+        ));
+        assert!(
+            pattern.contains(&LiteralComparison),
+            "string-literal matching adds `memcmp`: {pattern:?}"
+        );
+
+        let coroutine = runtime_requirements(concat!(
+            "use std.coroutine.*\n",
+            "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "let handle = task ()\n",
+        ));
+        assert!(
+            coroutine.contains(&CoroutineRuntime),
+            "a coroutine frame needs the coroutine runtime: {coroutine:?}"
+        );
+        assert!(
+            coroutine.contains(&GarbageCollector),
+            "a coroutine frame allocates through the collector: {coroutine:?}"
+        );
+    }
+
+    #[test]
+    fn stage_4_6_runtime_requirements_cover_legacy_surfaces() {
+        use crate::RuntimeRequirement;
+        use std::collections::HashSet;
+
+        let fixtures = [
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "def convert: CString -> String = value => CString.to_string value\n",
+                "def render: String -> CString = value => CString.from_string value\n",
+                "def classify: String -> I32 = value => match value { \"a\" => 1, _ => 0 }\n",
+                "def owned: () -> CString = () => c_string \"owned\"\n",
+                "let text: String = to_string 1\n",
+                "let a = convert (c_string \"x\")\n",
+                "let b = render \"text\"\n",
+                "let c = classify \"a\"\n",
+                "let d = owned ()\n",
+                "let dropped = inspect (c_string \"z\")\n",
+                "let joined = a + \"y\"\n",
+                "let rendered = \"rank=$c\"\n",
+            ),
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "let signal flag = 0\n",
+                "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+                "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+                "  let _ = await (until { flag >= 1 })\n",
+                "  ()\n",
+                "}\n",
+                "def run: () -> Coroutine{} I32 = () => coro {\n",
+                "  let first = await (coro { 2 })\n",
+                "  first\n",
+                "}\n",
+                "def owning: move CString -> Coroutine{} I32 = move value => coro { inspect value; 1 }\n",
+                "let handle = task ()\n",
+                "let driven = run ()\n",
+                "let subscribed = with Reactive = reactive_scope () { reaction { () } }\n",
+                "let derived = flag + flag\n",
+                "let owned = owning (c_string \"x\")\n",
+            ),
+            concat!(
+                "use std.buffer.*\n",
+                "use std.clone.Clone\n",
+                "let mut values: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
+                "Buffer.push values 1\n",
+                "let copied = Clone.clone values\n",
+            ),
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "let signal count = 0\n",
+                "def waiter: move Wait I32 -> Coroutine{} I32 = move pending => coro {\n",
+                "  let _ = await pending\n",
+                "  0\n",
+                "}\n",
+                "def make_completion: () -> (wait: Wait I32, resolver: Resolver I32) = () => completion (scheduler ())\n",
+                "def drive_wait: () -> Coroutine{} I32 = () => {\n",
+                "  let (wait, resolver) = make_completion ()\n",
+                "  let _ = resolver\n",
+                "  waiter wait\n",
+                "}\n",
+                "def driver: () -> Coroutine{} I32 = () => coro { let v = await (coro { 7 }); v + 1 }\n",
+                "let a = drive_wait ()\n",
+                "let sched = scheduler ()\n",
+                "with Tasks = task_scope (sched) {\n",
+                "  let _ = spawn (driver ())\n",
+                "  let _ = pump (sched, 4)\n",
+                "}\n",
+            ),
+        ];
+
+        let mut covered = HashSet::new();
+        for source in fixtures {
+            let module = checked_program(source);
+            let lowered = Lowerer::new().lower(&module).unwrap_or_else(|diagnostics| {
+                panic!("fixture should lower: {diagnostics:?}\n{source}")
+            });
+            let context = Context::create();
+            let legacy = crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(
+                |diagnostics| panic!("fixture should compile: {diagnostics:?}\n{source}"),
+            );
+            let requirements = lowered
+                .program
+                .runtime_requirements
+                .requirements()
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let mut mapped = HashSet::new();
+            for name in &legacy.runtime_surfaces {
+                if let Some(requirement) = RuntimeRequirement::for_runtime_symbol(name) {
+                    mapped.insert(requirement);
+                }
+            }
+            assert_eq!(
+                requirements, mapped,
+                "the recorded requirements must match the surfaces legacy emission references\n{source}"
+            );
+            covered.extend(requirements);
+        }
+        for requirement in RuntimeRequirement::ALL {
+            assert!(
+                covered.contains(&requirement),
+                "the fixtures cover `{}`",
+                requirement.description()
+            );
+        }
+    }
+
+    #[test]
+    fn stage_4_6_runtime_requirements_are_deterministic_and_validated() {
+        use crate::RuntimeRequirement;
+
+        let source = concat!(
+            "use std.cinterop.(CString, c_string)\n",
+            "let text: String = CString.to_string (c_string \"x\")\n",
+            "let joined: String = text + \"y\"\n",
+        );
+        let first = lower(source);
+        let second = lower(source);
+        assert_eq!(
+            first.program.runtime_requirements, second.program.runtime_requirements,
+            "repeated lowering records the same requirements"
+        );
+
+        // A cleared set is diagnosed as missing.
+        let mut broken = lower(source);
+        broken.program.runtime_requirements = crate::LoweredRuntimeRequirements::default();
+        let diagnostics = broken.program.validate_artifact_closure(&ProductionHooks);
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("is missing from the recorded set")),
+            "{diagnostics:?}"
+        );
+
+        // A requirement no lowered operation needs is diagnosed as extra.
+        let mut broken = lower("let answer: I32 = 1 + 2\n");
+        broken
+            .program
+            .runtime_requirements
+            .record(RuntimeRequirement::CoroutineRuntime);
+        let diagnostics = broken.program.validate_artifact_closure(&ProductionHooks);
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("has no lowered operation that needs it")),
+            "{diagnostics:?}"
+        );
     }
 
     // ------------------------------------------------------------------

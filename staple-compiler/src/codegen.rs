@@ -104,6 +104,15 @@ struct ModuleEmitter<'module, 'context> {
     /// the constructor-adapter record observes the real call.
     #[cfg(test)]
     legacy_finalizer_set: bool,
+    /// Test-only: every eager extern closure adapter declaration, with whether
+    /// the adapter was read as a first-class value.
+    #[cfg(test)]
+    legacy_extern_adapters: Vec<LegacyExternAdapter>,
+    /// Test-only: every lazily declared or installed runtime surface the
+    /// emitted code actually references, in reference order. `RefCell` keeps
+    /// the immutable runtime helpers callable through `&self`.
+    #[cfg(test)]
+    legacy_runtime_surfaces: std::cell::RefCell<Vec<String>>,
     active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
     expression_type_overrides: HashMap<staple_syntax::SyntaxId, CheckedType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
@@ -308,6 +317,33 @@ struct LoopCodegenContext<'context> {
 type CodeGenerationResult<T> = Result<T, Diagnostic>;
 
 impl<'module, 'context> ModuleEmitter<'module, 'context> {
+    /// Test-only: records one lazily declared or installed runtime surface the
+    /// emitted code actually references. Callable through `&self` so the
+    /// runtime-install helpers stay immutable.
+    fn record_runtime_surface(&self, name: &str) {
+        #[cfg(test)]
+        self.legacy_runtime_surfaces
+            .borrow_mut()
+            .push(name.to_string());
+        #[cfg(not(test))]
+        let _ = name;
+    }
+
+    /// Test-only: marks the extern adapter for `symbol` as read as a
+    /// first-class value.
+    fn mark_extern_adapter_used(&mut self, symbol: SymbolId) {
+        #[cfg(test)]
+        if let Some(adapter) = self
+            .legacy_extern_adapters
+            .iter_mut()
+            .find(|adapter| adapter.symbol == symbol)
+        {
+            adapter.used = true;
+        }
+        #[cfg(not(test))]
+        let _ = symbol;
+    }
+
     fn build_reactive_runtime_call(
         &self,
         name: &str,
@@ -316,6 +352,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         call_name: &str,
         span: Span,
     ) -> CodeGenerationResult<Option<BasicValueEnum<'context>>> {
+        self.record_runtime_surface(name);
         let function = self.llvm_module.get_function(name).ok_or_else(|| {
             Diagnostic::new(
                 span.clone(),
@@ -381,6 +418,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             legacy_runners: Vec::new(),
             #[cfg(test)]
             legacy_finalizer_set: false,
+            #[cfg(test)]
+            legacy_extern_adapters: Vec::new(),
+            #[cfg(test)]
+            legacy_runtime_surfaces: std::cell::RefCell::new(Vec::new()),
             active_type_substitutions: HashMap::new(),
             expression_type_overrides: HashMap::new(),
             function_symbols: HashMap::new(),
@@ -630,6 +671,16 @@ pub(crate) struct LegacyReactiveRunner {
     pub(crate) name_reused: bool,
 }
 
+/// Test-only: one eager extern closure adapter and whether `compile_symbol_value`
+/// read it as a first-class value.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyExternAdapter {
+    pub(crate) symbol: SymbolId,
+    pub(crate) callable_type: CheckedFunctionType,
+    pub(crate) used: bool,
+}
+
 #[cfg(test)]
 pub(crate) struct LegacyEmissions {
     pub(crate) specializations: Vec<(
@@ -646,6 +697,12 @@ pub(crate) struct LegacyEmissions {
     pub(crate) coroutine_pairs: Vec<LegacyCoroutinePair>,
     pub(crate) coroutine_requests: Vec<LegacyCoroutineRequest>,
     pub(crate) runners: Vec<LegacyReactiveRunner>,
+    pub(crate) extern_adapters: Vec<LegacyExternAdapter>,
+    /// Every lazily declared or installed runtime symbol the emitted functions
+    /// actually reference, deduplicated in first-reference order. The
+    /// executable harness's unconditional GC stack/root calls are excluded
+    /// because Stage 5 regenerates the harness from entry metadata.
+    pub(crate) runtime_surfaces: Vec<String>,
 }
 
 /// Compiles one lowered module with the legacy backend and returns its typed
@@ -671,6 +728,16 @@ pub(crate) fn legacy_emissions(
         coroutine_pairs: emitter.legacy_coroutine_pairs.clone(),
         coroutine_requests: emitter.legacy_coroutine_requests.clone(),
         runners: emitter.legacy_runners.clone(),
+        extern_adapters: emitter.legacy_extern_adapters.clone(),
+        runtime_surfaces: {
+            let mut surfaces: Vec<String> = Vec::new();
+            for name in emitter.legacy_runtime_surfaces.borrow().iter() {
+                if !surfaces.contains(name) {
+                    surfaces.push(name.clone());
+                }
+            }
+            surfaces
+        },
     })
 }
 
@@ -927,6 +994,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             .build_return(Some(&result))
                             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
                         self.closure_codes.insert(symbol, adapter);
+                        #[cfg(test)]
+                        self.legacy_extern_adapters.push(LegacyExternAdapter {
+                            symbol,
+                            callable_type: function_type.clone(),
+                            used: false,
+                        });
                     }
                 }
             }
@@ -1953,6 +2026,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let BasicValueEnum::PointerValue(sched) = value else {
                 return Err(Diagnostic::new(span, "scheduler value is not a pointer"));
             };
+            self.record_runtime_surface("__staple_sched_destroy");
             let destroy = self
                 .llvm_module
                 .get_function("__staple_sched_destroy")
@@ -2014,6 +2088,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     &[self.context.ptr_type(AddressSpace::default()).into()],
                     false,
                 );
+                self.record_runtime_surface("free");
                 let free = self
                     .llvm_module
                     .get_function("free")
@@ -6083,6 +6158,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             false,
         );
+        self.record_runtime_surface("memcmp");
         let memcmp = self
             .llvm_module
             .get_function("memcmp")
@@ -6611,6 +6687,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pointer: inkwell::values::PointerValue<'context>,
         finalizer: inkwell::values::FunctionValue<'context>,
     ) -> CodeGenerationResult<()> {
+        self.record_runtime_surface("__staple_gc_set_finalizer");
         let setter_type = self.context.void_type().fn_type(
             &[
                 self.context.ptr_type(AddressSpace::default()).into(),
@@ -6648,6 +6725,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         name: &str,
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        self.record_runtime_surface("__staple_gc_alloc");
         let allocator = self
             .llvm_module
             .get_function("__staple_gc_alloc")
@@ -6952,6 +7030,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(|error| Diagnostic::new(span, error.to_string()));
         }
         if let Some(code) = self.closure_codes.get(&symbol).copied() {
+            self.mark_extern_adapter_used(symbol);
             let closure_environment =
                 if self.function_symbols.get(&symbol).copied() == environment.function_id {
                     environment.closure_environment.unwrap_or_else(|| {
@@ -8930,6 +9009,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             true,
         );
+        self.record_runtime_surface("snprintf");
         let snprintf = self
             .llvm_module
             .get_function("snprintf")
@@ -9097,6 +9177,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             &[self.context.ptr_type(AddressSpace::default()).into()],
             false,
         );
+        self.record_runtime_surface("strlen");
         let strlen = self
             .llvm_module
             .get_function("strlen")
@@ -9108,6 +9189,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .try_as_basic_value()
             .unwrap_basic()
             .into_int_value();
+        self.record_runtime_surface("__staple_is_valid_utf8");
         let validator = self
             .llvm_module
             .get_function("__staple_is_valid_utf8")
@@ -9175,6 +9257,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             false,
         );
+        self.record_runtime_surface("memchr");
         let memchr = self
             .llvm_module
             .get_function("memchr")
@@ -10529,6 +10612,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(compiler_diagnostic)?;
 
             self.builder.position_at_end(finish);
+            self.record_runtime_surface("__staple_gc_unregister_root");
             let unregister = self
                 .llvm_module
                 .get_function("__staple_gc_unregister_root")
@@ -11141,6 +11225,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_alloca(ptr_type, "coro.leaf")
             .map_err(compiler_diagnostic)?;
 
+        self.record_runtime_surface("__staple_coro_drive");
         let drive = self
             .llvm_module
             .get_function("__staple_coro_drive")
@@ -11201,6 +11286,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         name: &str,
         signature: inkwell::types::FunctionType<'context>,
     ) -> inkwell::values::FunctionValue<'context> {
+        self.record_runtime_surface(name);
         self.llvm_module
             .get_function(name)
             .unwrap_or_else(|| self.llvm_module.add_function(name, signature, None))
@@ -14067,6 +14153,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             false,
         );
+        self.record_runtime_surface("__staple_gc_register_interior");
         let register = self
             .llvm_module
             .get_function("__staple_gc_register_interior")

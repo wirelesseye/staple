@@ -28,9 +28,11 @@ mod artifact_closure;
 mod artifact_plan;
 mod cleanup_artifacts;
 mod coroutine_artifacts;
+mod extern_artifacts;
 mod graph_validation;
 mod instance_body;
 mod instance_resolution;
+mod runtime_requirements;
 mod structural_artifacts;
 mod worklist;
 
@@ -75,11 +77,16 @@ pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
     CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DropGlueBody,
     DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement, ExternAdapterPlan,
-    GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlannedArtifact, PlannedCallee,
-    PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReactiveRunnerBody, ReactiveRunnerPlan,
-    RunnerResourceSlot, RuntimeRelease, StructuralBody, StructuralMethodPlan, SumAlternative,
-    TraitDelegate,
+    ExternDeclaration, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlannedArtifact,
+    PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReactiveRunnerBody,
+    ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody, StructuralMethodPlan,
+    SumAlternative, TraitDelegate,
 };
+
+// Stage 4.6 runtime-requirement API. Fixed-named runtime surfaces are not an
+// artifact family; each program carries the ordered set its operations need.
+#[allow(unused_imports)] // Stage 4.7 and Stage 5 consume the requirement set.
+pub(crate) use runtime_requirements::{LoweredRuntimeRequirements, RuntimeRequirement};
 
 macro_rules! arena_id {
     ($name:ident) => {
@@ -2071,6 +2078,10 @@ pub(crate) struct LoweredProgram {
     specializations: SpecializationCatalog,
     semantic_ids: LoweredSemanticIds,
     string_formatting: LoweredStringFormatting,
+    /// Stage 4.6 ordered, deduplicated runtime surfaces the closed catalog
+    /// needs. Recorded after the closure fixed point; Stage 5 installs each
+    /// surface only when present.
+    pub(crate) runtime_requirements: LoweredRuntimeRequirements,
     /// Transient lowering state: the number of currently enclosing loops,
     /// recorded on break/continue items and loop nodes so validation can tie
     /// exits to the loop that owns them. Not part of the lowered program.

@@ -3245,6 +3245,7 @@ mod tests {
             LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
                 symbol: SymbolId(1),
                 callable_type: simple_callable(),
+                declaration: None,
             }),
         ];
         assert_eq!(plans.len(), keys.len());
@@ -3339,6 +3340,7 @@ mod tests {
                 LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
                     symbol: SymbolId(2),
                     callable_type: simple_callable(),
+                    declaration: None,
                 }),
                 ArtifactRequestKey::ExternAdapter(ExternAdapterKey {
                     symbol: SymbolId(1),

@@ -62,8 +62,9 @@ pub(crate) enum LoweredArtifactPlan {
     UntilRunner(ReactiveRunnerPlan),
     /// A derived binding runner. Stage 4.5 adds the evaluator call shape.
     DerivedRunner(ReactiveRunnerPlan),
-    /// An extern closure adapter. Stage 4.6 adds the callable sites that use
-    /// it and the eager-declaration parity notes.
+    /// An extern closure adapter. Stage 4.6 records the eager
+    /// foreign-symbol declaration parity facts; the callable sites that use
+    /// the adapter live on their owners' use records.
     ExternAdapter(ExternAdapterPlan),
 }
 
@@ -261,8 +262,9 @@ impl LoweredArtifactPlan {
 
     /// Whether this plan's schema records its callees as `PlannedCallee`s, so
     /// the closure validator can match them one-to-one with artifact-owned
-    /// edges. Families whose schema has no callee slots yet (Stage 4.6 fills
-    /// them) keep their Stage 4.2 request-based representation.
+    /// edges. The runner and extern-adapter families call indirectly or
+    /// directly through fixed symbols, so their schemas have no callee slots
+    /// and keep their Stage 4.2 request-based representation.
     pub(crate) fn supports_planned_callees(&self) -> bool {
         matches!(
             self,
@@ -298,7 +300,7 @@ impl LoweredArtifactPlan {
             | LoweredArtifactPlan::DerivedRunner(plan) => {
                 !matches!(plan.body, ReactiveRunnerBody::Unexpanded)
             }
-            LoweredArtifactPlan::ExternAdapter(_) => true,
+            LoweredArtifactPlan::ExternAdapter(plan) => plan.declaration.is_some(),
         }
     }
 
@@ -1005,4 +1007,21 @@ pub(crate) struct RunnerResourceSlot {
 pub(crate) struct ExternAdapterPlan {
     pub symbol: SymbolId,
     pub callable_type: CheckedFunctionType,
+    /// The foreign-symbol declaration facts. `None` at request time; the
+    /// family expander fills it.
+    pub declaration: Option<ExternDeclaration>,
+}
+
+/// The declaration parity facts of one extern adapter, recorded so Stage 5 can
+/// keep legacy's eager foreign-symbol declaration while emitting the adapter
+/// body only for a reachable artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExternDeclaration {
+    /// The C symbol's declared arity, which legacy embeds in the overloaded
+    /// `name.arityN` spelling.
+    pub arity: usize,
+    /// Legacy declares the foreign symbol and creates this adapter eagerly for
+    /// every non-variadic extern binding, used or not. The artifact records
+    /// which adapters a callable-value site actually reaches.
+    pub eagerly_declared: bool,
 }

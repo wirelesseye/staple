@@ -84,9 +84,9 @@ pub(super) enum ClosureRequest {
 /// Sites in one owner body that use a generated artifact. Stage 4.2 defines no
 /// family variants; Stage 4.4 adds the ownership-cleanup sites (drops,
 /// finalizers, and buffer clones); Stage 4.5 adds `coro` creations, reactive
-/// callback/evaluator environments, and reactive runners. Every match on this
-/// enum must stay exhaustive, and every variant's ID must be interpreted in
-/// the owning body's own arenas.
+/// callback/evaluator environments, and reactive runners; Stage 4.6 adds the
+/// extern callable-value site. Every match on this enum must stay exhaustive,
+/// and every variant's ID must be interpreted in the owning body's own arenas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ArtifactUseSite {
     /// A scripted test site identified by its position in the hook table.
@@ -140,6 +140,8 @@ pub(crate) enum ArtifactUseSite {
     /// A reaction, `until`, or derived runner, after the callback
     /// environment use.
     ReactiveRunner(LoweredReactiveOperationId),
+    /// A non-variadic extern binding used as a first-class callable value.
+    ExternAdapterValue(super::LoweredCallableValueId),
 }
 
 /// One artifact use recorded on its owner in scan order. The validator proves
@@ -195,9 +197,9 @@ pub(super) trait ArtifactFamilyHooks {
     }
 }
 
-/// The production hook set. Stage 4.2 scanners request nothing and expanders
-/// keep the existing Stage 4.1 placeholder plan, so the loop is a no-op over
-/// the Stage 3 catalog. Stages 4.3-4.6 replace the family arms.
+/// The production hook set. Stages 4.3-4.6 register every family's scanner in
+/// the fixed 4.3 -> 4.4 -> 4.5 -> 4.6 order and every family's expander, so
+/// the closure loop closes the whole catalog.
 pub(super) struct ProductionHooks;
 
 impl ArtifactFamilyHooks for ProductionHooks {
@@ -210,6 +212,10 @@ impl ArtifactFamilyHooks for ProductionHooks {
             program,
             initializer,
         )?);
+        requests.extend(super::extern_artifacts::scan_initializer(
+            program,
+            initializer,
+        )?);
         Ok(requests)
     }
 
@@ -218,9 +224,9 @@ impl ArtifactFamilyHooks for ProductionHooks {
         requests.extend(super::coroutine_artifacts::scan_instance(
             program, instance,
         )?);
+        requests.extend(super::extern_artifacts::scan_instance(program, instance)?);
         Ok(requests)
     }
-
     fn expand(
         &self,
         program: &LoweredProgram,
@@ -348,7 +354,15 @@ impl ArtifactFamilyHooks for ProductionHooks {
                     super::coroutine_artifacts::ReactiveRunnerFamily::Derived,
                 )
             }
-            ArtifactRequestKey::ExternAdapter(_) => Ok((plan, Vec::new())),
+            ArtifactRequestKey::ExternAdapter(_) => {
+                let LoweredArtifactPlan::ExternAdapter(plan) = plan else {
+                    return Err(vec![Diagnostic::new(
+                        record.origin.span.clone(),
+                        "extern-adapter artifact carries a mismatched plan".to_string(),
+                    )]);
+                };
+                super::extern_artifacts::expand_extern_adapter(program, artifact, plan)
+            }
         }
     }
 
@@ -363,6 +377,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::ReactionRunner(_)
                 | ArtifactRequestKey::UntilRunner(_)
                 | ArtifactRequestKey::DerivedRunner(_)
+                | ArtifactRequestKey::ExternAdapter(_)
         )
     }
 }
@@ -559,6 +574,10 @@ impl LoweredProgram {
                     return diagnostics;
                 }
                 let diagnostics = super::cleanup_artifacts::collect_owned_bindings(self);
+                if !diagnostics.is_empty() {
+                    return diagnostics;
+                }
+                let diagnostics = self.record_runtime_requirements();
                 if !diagnostics.is_empty() {
                     return diagnostics;
                 }
@@ -1077,6 +1096,8 @@ impl LoweredProgram {
         self.check_planned_callees(hooks, &mut diagnostics);
         super::cleanup_artifacts::check_owned_bindings(self, &mut diagnostics);
         super::coroutine_artifacts::check_stage_4_5(self, &mut diagnostics);
+        super::extern_artifacts::check_stage_4_6(self, &mut diagnostics);
+        super::runtime_requirements::check_runtime_requirements(self, &mut diagnostics);
         self.check_request_root_acyclicity(&mut diagnostics);
         self.check_closure_fixed_point(hooks, &mut diagnostics);
         diagnostics
@@ -1671,6 +1692,11 @@ impl LoweredProgram {
             | ArtifactUseSite::ReactiveRunner(id) => {
                 if !reactive_operation(id) {
                     report("reactive operation", id.index());
+                }
+            }
+            ArtifactUseSite::ExternAdapterValue(id) => {
+                if !callable_value(id) {
+                    report("callable value", id.index());
                 }
             }
         }

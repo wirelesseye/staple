@@ -442,6 +442,60 @@ pub(super) trait LoweredOwnerVisitor {
     ) -> Result<(), Vec<Diagnostic>> {
         Ok(())
     }
+
+    /// One complete call after its callee and arguments were visited. Stage
+    /// 4.6 records runtime requirements from the call's target.
+    fn call_site(&mut self, _call: &super::LoweredCall) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// One first-class callable value. Stage 4.6 requests extern adapters and
+    /// records closure-environment requirements here.
+    fn callable_value_site(
+        &mut self,
+        _id: super::LoweredCallableValueId,
+        _value: &super::LoweredCallableValue,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// One binding item. Stage 4.6 records captured binding cells here.
+    fn binding_site(
+        &mut self,
+        _binding: &super::LoweredBindingItem,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// One pattern. Stage 4.6 records string-literal comparison here.
+    fn pattern_site(
+        &mut self,
+        _pattern: &super::LoweredPattern,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// One string template. Stage 4.6 records literal-data allocation here.
+    fn string_template_site(
+        &mut self,
+        _template: &super::LoweredStringTemplate,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    /// One `await` record. Stage 4.6 records the completion surfaces the
+    /// suspension implies.
+    fn await_site(
+        &mut self,
+        _await_: &super::LoweredAwait,
+        _origin: &Origin,
+    ) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
 }
 
 /// The scanning visitor: every site becomes a closure request with its exact
@@ -691,6 +745,7 @@ impl<'a> LoweredWalker<'a> {
         let kind = item.kind.clone();
         match kind {
             LoweredItemKind::Binding(binding) => {
+                self.visitor.binding_site(&binding, &origin)?;
                 if binding.generic {
                     return Ok(());
                 }
@@ -817,7 +872,9 @@ impl<'a> LoweredWalker<'a> {
         let Some(pattern) = self.owner.pattern(self.program, id) else {
             return Ok(());
         };
+        let pattern = pattern.clone();
         let origin = pattern.origin.clone();
+        self.visitor.pattern_site(&pattern, &origin)?;
         let value_type = pattern.value_type.clone();
         let kind = pattern.kind.clone();
         match kind {
@@ -933,6 +990,7 @@ impl<'a> LoweredWalker<'a> {
                 self.walk_expression(index.index)?;
             }
             super::LoweredExpressionKind::StringTemplate(template) => {
+                self.visitor.string_template_site(&template, &origin)?;
                 for part in &template.parts {
                     if let super::LoweredStringTemplatePart::Interpolation(interpolation) = part {
                         self.walk_expression(interpolation.expression)?;
@@ -960,8 +1018,9 @@ impl<'a> LoweredWalker<'a> {
                 // its creations, reactive operations, and cleanups are this
                 // owner's sites.
                 if let Some(await_) = self.owner.await_record(self.program, await_id) {
-                    let operand = await_.operand;
-                    self.walk_expression(operand)?;
+                    let await_ = await_.clone();
+                    self.visitor.await_site(&await_, &origin)?;
+                    self.walk_expression(await_.operand)?;
                 }
             }
         }
@@ -975,6 +1034,7 @@ impl<'a> LoweredWalker<'a> {
         let Some(call) = self.owner.call(self.program, id) else {
             return Ok(());
         };
+        let call = call.clone();
         let origin = call.origin.clone();
         let target = call.target.clone();
         let steps = call.steps.clone();
@@ -1004,6 +1064,7 @@ impl<'a> LoweredWalker<'a> {
                 super::LoweredCallStep::Resource { .. } | super::LoweredCallStep::Invoke => {}
             }
         }
+        self.visitor.call_site(&call)?;
 
         // Call-specific cleanup runs when the invocation executes.
         match &target {
@@ -1167,7 +1228,9 @@ impl<'a> LoweredWalker<'a> {
         let Some(value) = self.owner.callable_value(self.program, id) else {
             return Ok(());
         };
+        let value = value.clone();
         let origin = value.origin.clone();
+        self.visitor.callable_value_site(id, &value, &origin)?;
         let Some(closure) = &value.closure else {
             return Ok(());
         };
