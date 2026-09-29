@@ -26,6 +26,7 @@ use crate::{
 
 mod artifact_closure;
 mod artifact_plan;
+mod artifact_validation;
 mod cleanup_artifacts;
 mod coroutine_artifacts;
 mod extern_artifacts;
@@ -77,10 +78,10 @@ pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
     CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DropGlueBody,
     DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement, ExternAdapterPlan,
-    ExternDeclaration, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlannedArtifact,
-    PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReactiveRunnerBody,
-    ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody, StructuralMethodPlan,
-    SumAlternative, TraitDelegate,
+    ExternDeclaration, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlanType,
+    PlannedArtifact, PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance,
+    ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody,
+    StructuralMethodPlan, SumAlternative, TraitDelegate,
 };
 
 // Stage 4.6 runtime-requirement API. Fixed-named runtime surfaces are not an
@@ -12803,6 +12804,9 @@ impl Lowerer {
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.validate_artifact_closure(&ProductionHooks));
+        }
+        if diagnostics.is_empty() {
+            diagnostics.extend(program.validate_closed_catalog());
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.validate_source_coverage(module));

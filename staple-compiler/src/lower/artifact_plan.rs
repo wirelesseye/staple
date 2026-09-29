@@ -68,6 +68,14 @@ pub(crate) enum LoweredArtifactPlan {
     ExternAdapter(ExternAdapterPlan),
 }
 
+/// One type a plan carries, as `LoweredArtifactPlan::visit_types` yields it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PlanType<'a> {
+    Value(&'a CheckedType),
+    Function(&'a CheckedFunctionType),
+    Resource(&'a CheckedResource),
+}
+
 /// A plan-local callee reference: an instance or artifact key whose catalog id
 /// is only known once the closure reaches a fixed point. Expansion fills the
 /// key and leaves the id empty; `bind_artifact_plan_callees` writes the id
@@ -321,6 +329,298 @@ impl LoweredArtifactPlan {
         clear(&mut left);
         clear(&mut right);
         left == right
+    }
+
+    /// Every checked type, function type, and resource the plan carries, in
+    /// field order. The closed-catalog validator requires each to be fully
+    /// concrete. Every struct is destructured without `..`, so a new plan
+    /// field fails to compile until it is visited (or explicitly skipped as a
+    /// non-type field).
+    pub(crate) fn visit_types<'a>(&'a self, visit: &mut impl FnMut(PlanType<'a>)) {
+        use PlanType::{Function, Resource, Value};
+        fn values<'a>(types: &'a [CheckedType], visit: &mut impl FnMut(PlanType<'a>)) {
+            for value_type in types {
+                visit(Value(value_type));
+            }
+        }
+        fn indexed<'a>(elements: &'a [IndexedElement], visit: &mut impl FnMut(PlanType<'a>)) {
+            for IndexedElement {
+                index: _,
+                element,
+                coercion,
+            } in elements
+            {
+                visit(Value(element));
+                if let Some((from, to)) = coercion {
+                    visit(Value(from));
+                    visit(Value(to));
+                }
+            }
+        }
+        fn debug<'a>(delegate: &'a DebugDelegate, visit: &mut impl FnMut(PlanType<'a>)) {
+            let DebugDelegate {
+                value_type,
+                callee: _,
+                callee_type,
+            } = delegate;
+            visit(Value(value_type));
+            visit(Function(callee_type));
+        }
+        match self {
+            LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
+                symbol: _,
+                type_id: _,
+                adapter: _,
+                callable_type,
+                construction,
+            }) => {
+                visit(Function(callable_type));
+                match construction {
+                    ConstructorConstruction::Unexpanded => {}
+                    ConstructorConstruction::Value {
+                        parameters,
+                        product,
+                    } => {
+                        values(parameters, visit);
+                        visit(Value(product));
+                    }
+                    ConstructorConstruction::ManagedRef {
+                        parameters,
+                        product,
+                        payload,
+                        finalizer: _,
+                    } => {
+                        values(parameters, visit);
+                        visit(Value(product));
+                        visit(Value(payload));
+                    }
+                }
+            }
+            LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
+                structural: _,
+                trait_id: _,
+                method: _,
+                arguments,
+                callable_type,
+                body,
+            }) => {
+                values(arguments, visit);
+                visit(Function(callable_type));
+                match body {
+                    StructuralBody::Unexpanded => {}
+                    StructuralBody::ProductDebug { steps, write: _ } => {
+                        for step in steps {
+                            match step {
+                                DebugStep::Write(_) => {}
+                                DebugStep::Element { index: _, delegate } => debug(delegate, visit),
+                            }
+                        }
+                    }
+                    StructuralBody::SumDebug { alternatives } => {
+                        for delegate in alternatives {
+                            debug(delegate, visit);
+                        }
+                    }
+                    StructuralBody::IndexSwitch { elements, output } => {
+                        indexed(elements, visit);
+                        visit(Value(output));
+                    }
+                    StructuralBody::IndexLoad {
+                        element,
+                        length: _,
+                        output,
+                    }
+                    | StructuralBody::DerefIndexLoad {
+                        element,
+                        length: _,
+                        output,
+                    } => {
+                        visit(Value(element));
+                        visit(Value(output));
+                    }
+                    StructuralBody::MutateReplace {
+                        element,
+                        length: _,
+                        drop_previous: _,
+                    } => visit(Value(element)),
+                    StructuralBody::DerefDelegate { payload, delegate } => {
+                        visit(Value(payload));
+                        let TraitDelegate {
+                            trait_id: _,
+                            method: _,
+                            arguments,
+                            callee: _,
+                            callee_type,
+                        } = delegate;
+                        values(arguments, visit);
+                        visit(Function(callee_type));
+                    }
+                    StructuralBody::IntoIterator { source, iterator } => {
+                        visit(Value(source));
+                        visit(Value(iterator));
+                    }
+                    StructuralBody::Next {
+                        product,
+                        iterator,
+                        item,
+                        elements,
+                        result,
+                        done,
+                        yield_,
+                    } => {
+                        visit(Value(product));
+                        visit(Value(iterator));
+                        visit(Value(item));
+                        indexed(elements, visit);
+                        visit(Value(result));
+                        for SumAlternative {
+                            index: _,
+                            alternative,
+                        } in [done, yield_]
+                        {
+                            visit(Value(alternative));
+                        }
+                    }
+                }
+            }
+            LoweredArtifactPlan::DropGlue(DropGluePlan { value_type, body }) => {
+                visit(Value(value_type));
+                match body {
+                    DropGlueBody::Unexpanded
+                    | DropGlueBody::UserDrop { .. }
+                    | DropGlueBody::CoroutineCleanup
+                    | DropGlueBody::RuntimeRelease(_)
+                    | DropGlueBody::CStringFree
+                    | DropGlueBody::Distinct { .. } => {}
+                    DropGlueBody::Product { fields } => {
+                        for DroppedElement {
+                            index: _,
+                            value_type,
+                            glue: _,
+                        } in fields
+                        {
+                            visit(Value(value_type));
+                        }
+                    }
+                    DropGlueBody::Sum { alternatives } => {
+                        for DroppedAlternative {
+                            index: _,
+                            value_type,
+                            glue: _,
+                        } in alternatives
+                        {
+                            visit(Value(value_type));
+                        }
+                    }
+                }
+            }
+            LoweredArtifactPlan::GcFinalizer(plan) => match plan {
+                GcFinalizerPlan::Payload {
+                    value_type,
+                    glue: _,
+                }
+                | GcFinalizerPlan::Cell {
+                    value_type,
+                    glue: _,
+                }
+                | GcFinalizerPlan::Buffer {
+                    element: value_type,
+                    glue: _,
+                } => visit(Value(value_type)),
+                GcFinalizerPlan::ClosureEnvironment {
+                    closure: _,
+                    captures,
+                    drops,
+                } => {
+                    values(captures, visit);
+                    for DroppedCapture {
+                        index: _,
+                        value_type,
+                        glue: _,
+                    } in drops.iter().flatten()
+                    {
+                        visit(Value(value_type));
+                    }
+                }
+            },
+            LoweredArtifactPlan::CoroutineCodes(CoroutineCodesPlan { body: _, frame }) => {
+                let Some(CoroutineFramePlan {
+                    result_type,
+                    resume_points: _,
+                    frame_bindings,
+                    await_result_types,
+                    wait_await_states: _,
+                    until_await_states: _,
+                    resources,
+                    captures,
+                    capture_finalizer: _,
+                }) = frame
+                else {
+                    return;
+                };
+                visit(Value(result_type));
+                for CoroutineFrameBinding {
+                    symbol: _,
+                    value_type,
+                    unwind_drop: _,
+                } in frame_bindings
+                {
+                    visit(Value(value_type));
+                }
+                values(await_result_types, visit);
+                for CoroutineResourceSlot {
+                    resource,
+                    indirect: _,
+                } in resources
+                {
+                    visit(Resource(resource));
+                }
+                values(captures, visit);
+            }
+            LoweredArtifactPlan::ReactionRunner(ReactiveRunnerPlan {
+                owner: _,
+                site: _,
+                body,
+            })
+            | LoweredArtifactPlan::UntilRunner(ReactiveRunnerPlan {
+                owner: _,
+                site: _,
+                body,
+            })
+            | LoweredArtifactPlan::DerivedRunner(ReactiveRunnerPlan {
+                owner: _,
+                site: _,
+                body,
+            }) => match body {
+                ReactiveRunnerBody::Unexpanded => {}
+                ReactiveRunnerBody::Reaction {
+                    callback_type,
+                    resources,
+                } => {
+                    visit(Function(callback_type));
+                    for RunnerResourceSlot {
+                        resource,
+                        indirect: _,
+                    } in resources
+                    {
+                        visit(Resource(resource));
+                    }
+                }
+                ReactiveRunnerBody::Until { predicate_type } => visit(Function(predicate_type)),
+                ReactiveRunnerBody::Derived {
+                    evaluator_type,
+                    output_type,
+                } => {
+                    visit(Function(evaluator_type));
+                    visit(Value(output_type));
+                }
+            },
+            LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
+                symbol: _,
+                callable_type,
+                declaration: _,
+            }) => visit(Function(callable_type)),
+        }
     }
 
     fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {

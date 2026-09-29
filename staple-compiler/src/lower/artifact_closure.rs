@@ -1847,7 +1847,7 @@ impl LoweredProgram {
                     resolved,
                     kind,
                     origin,
-                    ..
+                    use_site,
                 } => {
                     let Some(ordinal) = self.specializations.instance_ordinal(&resolved.key) else {
                         diagnostics.push(Diagnostic::new(
@@ -1870,9 +1870,25 @@ impl LoweredProgram {
                             ),
                         ));
                     }
+                    if let Some(site) = use_site
+                        && !self.owner_uses_instance_at(owner, *site, instance, *kind)
+                    {
+                        diagnostics.push(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "{} site {site:?} is not bound to requested instance {}",
+                                owner.describe(),
+                                instance.index()
+                            ),
+                        ));
+                    }
                 }
                 ClosureRequest::Artifact {
-                    key, kind, origin, ..
+                    key,
+                    kind,
+                    origin,
+                    use_site,
+                    ..
                 } => {
                     let Some(ordinal) = self.specializations.artifact_ordinal(key) else {
                         diagnostics.push(Diagnostic::new(
@@ -1894,9 +1910,78 @@ impl LoweredProgram {
                             ),
                         ));
                     }
+                    if let Some(site) = use_site
+                        && !self.owner_uses_artifact_at(owner, *site, ordinal, *kind)
+                    {
+                        diagnostics.push(Diagnostic::new(
+                            origin.span.clone(),
+                            format!(
+                                "{} site {site:?} is not bound to requested artifact {}",
+                                owner.describe(),
+                                ordinal.index()
+                            ),
+                        ));
+                    }
                 }
             }
         }
+    }
+
+    /// Whether the owner's use records bind `site` to exactly this instance
+    /// and kind. Edge agreement alone cannot prove this: two sites requesting
+    /// the same target with the same kind and origin share one edge shape, so
+    /// only the use record ties the reference to the site Stage 5 emits it
+    /// from. Artifact owners carry no use records.
+    fn owner_uses_instance_at(
+        &self,
+        owner: FixedPointOwner,
+        site: ArtifactUseSite,
+        instance: FunctionInstanceId,
+        kind: LoweredInstanceDependencyKind,
+    ) -> bool {
+        let uses: &[LoweredInstanceUse] = match owner {
+            FixedPointOwner::Initializer(initializer) => self
+                .initializer_instance_uses
+                .get(initializer.index())
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            FixedPointOwner::Instance(owner) => self
+                .instances
+                .get(owner)
+                .and_then(|record| record.body.as_ref())
+                .map(|body| body.instance_uses.as_slice())
+                .unwrap_or_default(),
+            FixedPointOwner::Artifact(_) => return true,
+        };
+        uses.iter()
+            .any(|use_| use_.site == site && use_.instance == instance && use_.kind == kind)
+    }
+
+    /// Whether the owner's use records bind `site` to exactly this artifact
+    /// and kind.
+    fn owner_uses_artifact_at(
+        &self,
+        owner: FixedPointOwner,
+        site: ArtifactUseSite,
+        artifact: ArtifactOrdinal,
+        kind: LoweredArtifactDependencyKind,
+    ) -> bool {
+        let uses: &[LoweredArtifactUse] = match owner {
+            FixedPointOwner::Initializer(initializer) => self
+                .initializer_artifact_uses
+                .get(initializer.index())
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            FixedPointOwner::Instance(owner) => self
+                .instances
+                .get(owner)
+                .and_then(|record| record.body.as_ref())
+                .map(|body| body.artifact_uses.as_slice())
+                .unwrap_or_default(),
+            FixedPointOwner::Artifact(_) => return true,
+        };
+        uses.iter()
+            .any(|use_| use_.site == site && use_.artifact == artifact && use_.kind == kind)
     }
 
     fn owner_records_instance(
