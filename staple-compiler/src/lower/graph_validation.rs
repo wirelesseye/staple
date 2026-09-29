@@ -2799,6 +2799,116 @@ mod tests {
         })
     }
 
+    /// The runner plans matching one legacy runner creation: same family,
+    /// the owner instance legacy was emitting (or any initializer), and a
+    /// site that resolves to the operation with the legacy call syntax or
+    /// evaluator. Shared by the Stage 4.5 comparison and the Stage 4.7
+    /// census.
+    fn runner_plans_for_legacy<'a>(
+        program: &'a LoweredProgram,
+        runner: &crate::codegen::LegacyReactiveRunner,
+    ) -> Vec<(
+        crate::specialization::ArtifactOrdinal,
+        &'a crate::ReactiveRunnerPlan,
+    )> {
+        use crate::LoweredArtifactPlan;
+        use crate::codegen::LegacyRunnerFamily;
+        let expected_owner =
+            runner
+                .owner
+                .as_ref()
+                .map(|(function, function_type, substitutions)| {
+                    let instance = program
+                        .instance_for_legacy_specialization(*function, function_type, substitutions)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "no instance matches the legacy runner's owner function {:?}",
+                                function
+                            )
+                        });
+                    program
+                        .instances
+                        .get(instance)
+                        .expect("the owner instance")
+                        .ordinal
+                });
+        let syntax = runner.call_syntax;
+        let evaluator = runner.evaluator;
+        program
+            .artifacts
+            .iter()
+            .filter_map(|(_, artifact)| {
+                let ordinal = artifact.ordinal;
+                let plan = match artifact.plan.as_ref()? {
+                    LoweredArtifactPlan::ReactionRunner(plan)
+                        if runner.family == LegacyRunnerFamily::Reaction =>
+                    {
+                        plan
+                    }
+                    LoweredArtifactPlan::UntilRunner(plan)
+                        if runner.family == LegacyRunnerFamily::Until =>
+                    {
+                        plan
+                    }
+                    LoweredArtifactPlan::DerivedRunner(plan)
+                        if runner.family == LegacyRunnerFamily::Derived =>
+                    {
+                        plan
+                    }
+                    _ => return None,
+                };
+                let owner_ok = match (expected_owner, plan.owner) {
+                    (Some(ordinal), ArtifactSiteOwner::Instance(owner)) => owner == ordinal,
+                    (None, ArtifactSiteOwner::Initializer(_)) => true,
+                    _ => false,
+                };
+                if !owner_ok {
+                    return None;
+                }
+                let operations = runner_owner_operations(program, plan.owner);
+                let site_ok = match (runner.family, plan.site) {
+                    (LegacyRunnerFamily::Reaction, ArtifactSite::Callback(callback)) => {
+                        operations.iter().any(|(_, operation)| {
+                            matches!(
+                                &operation.kind,
+                                crate::LoweredReactiveOperationKind::Reaction {
+                                    callback: recorded,
+                                    ..
+                                } if *recorded == callback && operation.origin.syntax == syntax.unwrap_or(staple_syntax::SyntaxId(usize::MAX))
+                            )
+                        })
+                    }
+                    (LegacyRunnerFamily::Until, ArtifactSite::Callback(predicate)) => {
+                        operations.iter().any(|(_, operation)| {
+                            matches!(
+                                &operation.kind,
+                                crate::LoweredReactiveOperationKind::Until {
+                                    predicate: recorded,
+                                    ..
+                                } if *recorded == predicate && operation.origin.syntax == syntax.unwrap_or(staple_syntax::SyntaxId(usize::MAX))
+                            )
+                        })
+                    }
+                    (LegacyRunnerFamily::Derived, ArtifactSite::Operation(operation)) => {
+                        operations.iter().find(|(id, _)| *id == operation).is_some_and(
+                            |(_, operation)| {
+                                matches!(
+                                    &operation.kind,
+                                    crate::LoweredReactiveOperationKind::DerivedCreate {
+                                        evaluator: recorded,
+                                        ..
+                                    } if *recorded == evaluator.unwrap_or(crate::FunctionId(usize::MAX))
+                                )
+                            },
+                        )
+                    }
+                    _ => false,
+                };
+                site_ok.then_some((ordinal, plan))
+            })
+            .collect::<Vec<_>>()
+    }
+
     /// The Stage 4.5 transition comparison for one fixture: every legacy pair
     /// creation matches exactly one plan on all recorded facts (unwind drops
     /// as a set), every plan whose template has a legacy pair is matched or
@@ -2982,102 +3092,9 @@ mod tests {
         // ---- runners ----
         let mut matched_runner_plans = std::collections::HashSet::new();
         for runner in &legacy.runners {
-            let expected_owner =
-                runner
-                    .owner
-                    .as_ref()
-                    .map(|(function, function_type, substitutions)| {
-                        let instance = program
-                            .instance_for_legacy_specialization(
-                                *function,
-                                function_type,
-                                substitutions,
-                            )
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "no instance matches the legacy runner's owner function {:?}",
-                                    function
-                                )
-                            });
-                        program
-                            .instances
-                            .get(instance)
-                            .expect("the owner instance")
-                            .ordinal
-                    });
-            let syntax = runner.call_syntax;
-            let evaluator = runner.evaluator;
-            let matching = program
-                .artifacts
-                .iter()
-                .filter_map(|(_, artifact)| {
-                    let plan = match artifact.plan.as_ref()? {
-                        LoweredArtifactPlan::ReactionRunner(plan)
-                            if runner.family == LegacyRunnerFamily::Reaction =>
-                        {
-                            plan
-                        }
-                        LoweredArtifactPlan::UntilRunner(plan)
-                            if runner.family == LegacyRunnerFamily::Until =>
-                        {
-                            plan
-                        }
-                        LoweredArtifactPlan::DerivedRunner(plan)
-                            if runner.family == LegacyRunnerFamily::Derived =>
-                        {
-                            plan
-                        }
-                        _ => return None,
-                    };
-                    let owner_ok = match (expected_owner, plan.owner) {
-                        (Some(ordinal), ArtifactSiteOwner::Instance(owner)) => owner == ordinal,
-                        (None, ArtifactSiteOwner::Initializer(_)) => true,
-                        _ => false,
-                    };
-                    if !owner_ok {
-                        return None;
-                    }
-                    let operations = runner_owner_operations(program, plan.owner);
-                    let site_ok = match (runner.family, plan.site) {
-                        (LegacyRunnerFamily::Reaction, ArtifactSite::Callback(callback)) => {
-                            operations.iter().any(|(_, operation)| {
-                                matches!(
-                                    &operation.kind,
-                                    crate::LoweredReactiveOperationKind::Reaction {
-                                        callback: recorded,
-                                        ..
-                                    } if *recorded == callback && operation.origin.syntax == syntax.unwrap_or(staple_syntax::SyntaxId(usize::MAX))
-                                )
-                            })
-                        }
-                        (LegacyRunnerFamily::Until, ArtifactSite::Callback(predicate)) => {
-                            operations.iter().any(|(_, operation)| {
-                                matches!(
-                                    &operation.kind,
-                                    crate::LoweredReactiveOperationKind::Until {
-                                        predicate: recorded,
-                                        ..
-                                    } if *recorded == predicate && operation.origin.syntax == syntax.unwrap_or(staple_syntax::SyntaxId(usize::MAX))
-                                )
-                            })
-                        }
-                        (LegacyRunnerFamily::Derived, ArtifactSite::Operation(operation)) => {
-                            operations.iter().find(|(id, _)| *id == operation).is_some_and(
-                                |(_, operation)| {
-                                    matches!(
-                                        &operation.kind,
-                                        crate::LoweredReactiveOperationKind::DerivedCreate {
-                                            evaluator: recorded,
-                                            ..
-                                        } if *recorded == evaluator.unwrap_or(crate::FunctionId(usize::MAX))
-                                    )
-                                },
-                            )
-                        }
-                        _ => false,
-                    };
-                    site_ok.then_some(plan)
-                })
+            let matching = runner_plans_for_legacy(program, runner)
+                .into_iter()
+                .map(|(_, plan)| plan)
                 .collect::<Vec<_>>();
             assert_eq!(
                 matching.len(),
@@ -4908,5 +4925,520 @@ mod tests {
                 .instance_for_legacy_specialization(template, &wrong_signature, &substitutions)
                 .is_none()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Stage 4.7 emitted-function census.
+    // ------------------------------------------------------------------
+
+    /// What one census run accounted for, by legacy origin and by the
+    /// explained differences.
+    #[derive(Debug, Default)]
+    struct CensusCoverage {
+        origins: std::collections::BTreeSet<&'static str>,
+        functions: usize,
+        explained: std::collections::BTreeSet<&'static str>,
+    }
+
+    impl CensusCoverage {
+        fn merge(&mut self, other: CensusCoverage) {
+            self.origins.extend(other.origins);
+            self.functions += other.functions;
+            self.explained.extend(other.explained);
+        }
+    }
+
+    /// Stage 4.7's legacy census for one program. Every function the legacy
+    /// module defines (outside the installed runtime modules) is registered
+    /// exactly once with the record it belongs to, and each registered
+    /// function maps to one catalog instance or artifact, or to an explained
+    /// negative reason. In reverse, every artifact and every materialized
+    /// instance is emitted by legacy or explained. The per-family transition
+    /// tests compare each record's contents with its plan; the census proves
+    /// no emitted function is outside the catalog and no catalog entry is
+    /// unaccounted.
+    fn assert_census(source: &str) -> CensusCoverage {
+        use crate::codegen::{LegacyFinalizer, LegacyFunctionOrigin};
+        use std::collections::{HashMap, HashSet};
+
+        let module = checked_program(source);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}\n{source}"));
+        let context = Context::create();
+        let legacy =
+            crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(|diagnostics| {
+                panic!("the legacy backend should compile: {diagnostics:?}\n{source}")
+            });
+        let program = &lowered.program;
+        let origin = Origin::compiler();
+        let mut coverage = CensusCoverage::default();
+        let mut unexplained = Vec::new();
+
+        // Completeness: every defined function has exactly one registration.
+        let mut registered: HashMap<&str, Vec<&LegacyFunctionOrigin>> = HashMap::new();
+        for (name, origin) in &legacy.defined_functions {
+            registered.entry(name.as_str()).or_default().push(origin);
+        }
+        for name in &legacy.emitted_functions {
+            match registered.get(name.as_str()).map(Vec::as_slice) {
+                Some([_]) => {}
+                Some(many) => unexplained.push(format!(
+                    "emitted function `{name}` is registered {} times",
+                    many.len()
+                )),
+                None => unexplained.push(format!("emitted function `{name}` is not registered")),
+            }
+        }
+        let emitted = legacy
+            .emitted_functions
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+
+        // Forward: every emitted registration maps into the catalog.
+        let mut instances = HashSet::new();
+        let mut artifacts = HashSet::new();
+        let artifact_where = |matches: &dyn Fn(&ArtifactRequestKey) -> bool| {
+            program
+                .artifacts
+                .iter()
+                .filter(|(_, artifact)| {
+                    program
+                        .specializations
+                        .artifact(artifact.ordinal)
+                        .is_some_and(|key| matches(key))
+                })
+                .map(|(_, artifact)| artifact.ordinal)
+                .collect::<Vec<_>>()
+        };
+        for (name, registration) in &legacy.defined_functions {
+            if !emitted.contains(name.as_str()) {
+                // Declared without a body (a coroutine body thunk, compiled
+                // into its `resume` instead) or excluded (`main`, the UTF-8
+                // validator).
+                continue;
+            }
+            coverage.functions += 1;
+            let found: Result<(), String> = match registration {
+                LegacyFunctionOrigin::Declared {
+                    function,
+                    function_type,
+                } => {
+                    coverage.origins.insert("declared");
+                    program
+                        .instance_for_legacy_specialization(
+                            *function,
+                            function_type,
+                            &HashMap::new(),
+                        )
+                        .map(|instance| {
+                            instances.insert(instance);
+                        })
+                        .ok_or_else(|| format!("declared function `{name}` has no instance"))
+                }
+                LegacyFunctionOrigin::Specialization {
+                    function,
+                    function_type,
+                    substitutions,
+                } => {
+                    coverage.origins.insert("specialization");
+                    program
+                        .instance_for_legacy_specialization(*function, function_type, substitutions)
+                        .map(|instance| {
+                            instances.insert(instance);
+                        })
+                        .ok_or_else(|| format!("specialization `{name}` has no instance"))
+                }
+                LegacyFunctionOrigin::Initializer(module) => {
+                    coverage.origins.insert("initializer");
+                    program
+                        .initializers
+                        .iter()
+                        .any(|(_, initializer)| initializer.module == *module)
+                        .then_some(())
+                        .ok_or_else(|| format!("initializer `{name}` has no lowered initializer"))
+                }
+                LegacyFunctionOrigin::Main | LegacyFunctionOrigin::Utf8Validator => Ok(()),
+                LegacyFunctionOrigin::ConstructorAdapter(index) => {
+                    coverage.origins.insert("constructor-adapter");
+                    let adapter = &legacy.constructor_adapters[*index];
+                    let callable_type =
+                        CanonicalFunctionType::concrete(&adapter.callable_type, &origin)
+                            .expect("concrete adapter type");
+                    match artifact_where(&|key| {
+                        matches!(key, ArtifactRequestKey::ConstructorAdapter(key)
+                            if key.symbol == adapter.symbol && key.callable_type == callable_type)
+                    })
+                    .as_slice()
+                    {
+                        [ordinal] => {
+                            artifacts.insert(*ordinal);
+                            Ok(())
+                        }
+                        other => Err(format!(
+                            "constructor adapter `{name}` matches {} artifacts",
+                            other.len()
+                        )),
+                    }
+                }
+                LegacyFunctionOrigin::StructuralMethod(index) => {
+                    coverage.origins.insert("structural-method");
+                    let method = &legacy.structural_methods[*index];
+                    let arguments = canonical_arguments(&method.arguments);
+                    match artifact_where(&|key| {
+                        matches!(key, ArtifactRequestKey::StructuralMethod(key)
+                            if key.structural == method.structural && key.arguments == arguments)
+                    })
+                    .as_slice()
+                    {
+                        [ordinal] => {
+                            artifacts.insert(*ordinal);
+                            Ok(())
+                        }
+                        other => Err(format!(
+                            "structural method `{name}` matches {} artifacts",
+                            other.len()
+                        )),
+                    }
+                }
+                LegacyFunctionOrigin::Finalizer(index) => {
+                    coverage.origins.insert("finalizer");
+                    let key = match &legacy.finalizers[*index] {
+                        LegacyFinalizer::Payload(value_type) => {
+                            Some(GcFinalizerKey::Payload(canonical(value_type)))
+                        }
+                        LegacyFinalizer::Cell(value_type) => {
+                            Some(GcFinalizerKey::Cell(canonical(value_type)))
+                        }
+                        LegacyFinalizer::Buffer(element) => {
+                            Some(GcFinalizerKey::Buffer(canonical(element)))
+                        }
+                        LegacyFinalizer::ClosureEnvironment {
+                            function,
+                            capture_types,
+                            ..
+                        } => {
+                            let captures = capture_types.iter().map(canonical).collect::<Vec<_>>();
+                            program
+                                .instances
+                                .iter()
+                                .find(|(_, instance)| {
+                                    instance.template == *function
+                                        && instance.body.as_ref().is_some_and(|body| {
+                                            body.captures()
+                                                .iter()
+                                                .map(|capture| canonical(&capture.value_type))
+                                                .collect::<Vec<_>>()
+                                                == captures
+                                        })
+                                })
+                                .map(|(_, instance)| GcFinalizerKey::ClosureEnvironment {
+                                    closure: instance.ordinal,
+                                    captures: captures.clone(),
+                                })
+                        }
+                    };
+                    key.and_then(|key| {
+                        program
+                            .specializations
+                            .artifact_ordinal(&ArtifactRequestKey::GcFinalizer(key))
+                    })
+                    .map(|ordinal| {
+                        artifacts.insert(ordinal);
+                    })
+                    .ok_or_else(|| format!("finalizer `{name}` has no artifact"))
+                }
+                LegacyFunctionOrigin::CoroutineResume(index)
+                | LegacyFunctionOrigin::CoroutineCleanup(index) => {
+                    coverage.origins.insert("coroutine-pair");
+                    let pair = &legacy.coroutine_pairs[*index];
+                    pair_plans_by_syntax(program)
+                        .get(&pair.body_syntax)
+                        .and_then(|candidates| {
+                            candidates.iter().find(|(id, _)| {
+                                instance_substitutions_match(program, *id, &pair.substitutions)
+                            })
+                        })
+                        .and_then(|(id, _)| {
+                            let ordinal = program.instances.get(*id)?.ordinal;
+                            program.specializations.artifact_ordinal(
+                                &ArtifactRequestKey::CoroutineCodes(
+                                    crate::specialization::CoroutineCodesKey { body: ordinal },
+                                ),
+                            )
+                        })
+                        .map(|ordinal| {
+                            artifacts.insert(ordinal);
+                        })
+                        .ok_or_else(|| format!("coroutine function `{name}` has no pair plan"))
+                }
+                LegacyFunctionOrigin::Runner(index) => {
+                    coverage.origins.insert("runner");
+                    match runner_plans_for_legacy(program, &legacy.runners[*index]).as_slice() {
+                        [(ordinal, _)] => {
+                            artifacts.insert(*ordinal);
+                            Ok(())
+                        }
+                        other => Err(format!("runner `{name}` matches {} plans", other.len())),
+                    }
+                }
+                LegacyFunctionOrigin::ExternAdapter(index) => {
+                    coverage.origins.insert("extern-adapter");
+                    let adapter = &legacy.extern_adapters[*index];
+                    let callable_type =
+                        CanonicalFunctionType::concrete(&adapter.callable_type, &origin)
+                            .expect("concrete extern type");
+                    match artifact_where(&|key| {
+                        matches!(key, ArtifactRequestKey::ExternAdapter(key)
+                            if key.symbol == adapter.symbol && key.callable_type == callable_type)
+                    })
+                    .as_slice()
+                    {
+                        [ordinal] => {
+                            artifacts.insert(*ordinal);
+                            Ok(())
+                        }
+                        // Legacy declares every non-variadic extern's adapter
+                        // eagerly; the catalog holds only reachable ones.
+                        [] if !adapter.used => {
+                            coverage.explained.insert("eager-unused-extern-adapter");
+                            Ok(())
+                        }
+                        other => Err(format!(
+                            "extern adapter `{name}` matches {} artifacts",
+                            other.len()
+                        )),
+                    }
+                }
+            };
+            if let Err(problem) = found {
+                unexplained.push(problem);
+            }
+        }
+
+        // The syntax-keyed legacy cache emitted one pair for several
+        // instantiations of the same `coro` body (Stage 4.5). An unmatched
+        // pair whose body syntax legacy did emit is that alias, and anything
+        // reachable only through it (its capture finalizer, the
+        // instantiation-specific callees of its body) was never emitted.
+        let aliased_pair = |plan: &crate::CoroutineCodesPlan| {
+            program
+                .instances
+                .get(plan.body)
+                .and_then(|instance| program.functions.get(instance.template))
+                .is_some_and(|template| {
+                    legacy
+                        .coroutine_pairs
+                        .iter()
+                        .any(|pair| pair.body_syntax == template.body_syntax)
+                })
+        };
+        let artifact_record = |ordinal| {
+            program
+                .artifacts
+                .iter()
+                .find(|(_, artifact)| artifact.ordinal == ordinal)
+                .map(|(_, artifact)| artifact)
+        };
+        let mut aliased_instances = HashSet::new();
+        let mut aliased_artifacts = HashSet::new();
+        let mut pending_instances = Vec::new();
+        let mut pending_artifacts = Vec::new();
+        for (_, artifact) in program.artifacts.iter() {
+            if let Some(LoweredArtifactPlan::CoroutineCodes(plan)) = &artifact.plan
+                && !artifacts.contains(&artifact.ordinal)
+                && aliased_pair(plan)
+            {
+                pending_artifacts.push(artifact.ordinal);
+                pending_instances.push(plan.body);
+            }
+        }
+        while !pending_instances.is_empty() || !pending_artifacts.is_empty() {
+            while let Some(id) = pending_instances.pop() {
+                if instances.contains(&id) || !aliased_instances.insert(id) {
+                    continue;
+                }
+                if let Some(instance) = program.instances.get(id) {
+                    pending_instances
+                        .extend(instance.dependencies.iter().map(|edge| edge.instance));
+                    pending_artifacts.extend(instance.artifacts.iter().map(|edge| edge.artifact));
+                }
+            }
+            while let Some(ordinal) = pending_artifacts.pop() {
+                if artifacts.contains(&ordinal) || !aliased_artifacts.insert(ordinal) {
+                    continue;
+                }
+                if let Some(artifact) = artifact_record(ordinal) {
+                    pending_instances.extend(artifact.instances.iter().map(|edge| edge.instance));
+                    pending_artifacts.extend(artifact.artifacts.iter().map(|edge| edge.artifact));
+                }
+            }
+        }
+
+        // Reverse: every artifact is emitted by legacy or explained.
+        for (_, artifact) in program.artifacts.iter() {
+            if artifacts.contains(&artifact.ordinal) {
+                continue;
+            }
+            match artifact.plan.as_ref() {
+                // Legacy inlines drop glue at every drop site.
+                Some(LoweredArtifactPlan::DropGlue(_)) => {
+                    coverage.explained.insert("inlined-drop-glue");
+                }
+                Some(LoweredArtifactPlan::CoroutineCodes(plan)) if aliased_pair(plan) => {
+                    coverage.explained.insert("aliased-coroutine-pair");
+                }
+                Some(_) if aliased_artifacts.contains(&artifact.ordinal) => {
+                    coverage
+                        .explained
+                        .insert("reachable-only-from-aliased-pair");
+                }
+                plan => unexplained.push(format!(
+                    "artifact {} ({}) has no legacy function",
+                    artifact.ordinal.index(),
+                    plan.map_or("no plan", LoweredArtifactPlan::family_name)
+                )),
+            }
+        }
+
+        // Reverse: every materialized instance is emitted by legacy or
+        // explained.
+        for (id, instance) in program.instances.iter() {
+            if instances.contains(&id) || instance.body.is_none() {
+                continue;
+            }
+            let template = program.functions.get(instance.template);
+            if template.is_some_and(|template| template.class.coroutine_body) {
+                // Legacy compiles a coroutine body inside its pair's `resume`.
+                coverage.explained.insert("coroutine-body-in-resume");
+                continue;
+            }
+            if aliased_instances.contains(&id) {
+                coverage
+                    .explained
+                    .insert("reachable-only-from-aliased-pair");
+                continue;
+            }
+            unexplained.push(format!(
+                "instance {} of `{}` has no legacy function",
+                id.index(),
+                template.map_or("?", |template| template.name.as_str())
+            ));
+        }
+
+        assert!(
+            unexplained.is_empty(),
+            "the census left functions unaccounted:\n{}\n{source}",
+            unexplained.join("\n")
+        );
+        coverage
+    }
+
+    #[test]
+    fn stage_4_7_census_accounts_for_every_emitted_function() {
+        let mut coverage = CensusCoverage::default();
+        for source in [
+            // Constructor adapters and finalizer-bearing `Ref` payloads.
+            concat!(
+                "type Point = ctor (I32, I32)\n",
+                "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+                "type Resource = ctor I32\n",
+                "impl Drop Resource { def drop = Resource value => () }\n",
+                "let make_resource: () -> (Resource -> Ref Resource) = () => Ref\n",
+                "def ref_maker: <T where Copy T> () -> (T -> Ref T) = () => Ref\n",
+                "let maker_i32: I32 -> Ref I32 = ref_maker ()\n",
+                "let maker_u8: U8 -> Ref U8 = ref_maker ()\n",
+            ),
+            // Structural methods.
+            concat!(
+                "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
+                "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (1 satisfies U8) }\n",
+                "def show_sum: (I32 | U8) -> String = value => \"${value:?}\"\n",
+                "def index_mixed: (U8, I32) -> (I32 | U8) = pair => pair[0]\n",
+                "def count_pair: (U8, I32) -> I32 = pair => {\n",
+                "  let mut count = 0\n",
+                "  for item in pair { count = count + 1 }\n",
+                "  count\n",
+                "}\n",
+                "def deref_mixed: (Ref (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
+                "let a = show_pair (1, 2)\n",
+                "let b = show_sum (pick True)\n",
+                "let c = index_mixed ((1 satisfies U8), 2)\n",
+                "let d = count_pair ((1 satisfies U8), 2)\n",
+                "let e = deref_mixed (Ref ((1 satisfies U8), 2))\n",
+            ),
+            // Cleanup: closures, cells, buffers, and an extern used as a
+            // value next to an unused one.
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "use std.buffer.*\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "extern \"c\" { abs: I32 -> I32 }\n",
+                "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",
+                "def counter: () -> I32 = () => {\n",
+                "  let mut total = 0\n",
+                "  let bump = () => { total = total + 1 }\n",
+                "  total\n",
+                "}\n",
+                "let mut strings: Buffer CString = Buffer.with_capacity (2 satisfies USize)\n",
+                "let run = capture (c_string \"x\")\n",
+                "let absolute = abs\n",
+                "let counted = counter ()\n",
+            ),
+            // Coroutines, including an aliased generic `coro`, and runners.
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "let signal flag = 0\n",
+                "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+                "def owning: move CString -> Coroutine{} I32 = move value => coro { inspect value; 1 }\n",
+                "def peek: <T> T -> I32 = _ => 1\n",
+                "def generic: <T where Copy T> T -> Coroutine{} I32 = value => coro { peek value; 1 }\n",
+                "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+                "  let _ = await (until { flag >= 1 })\n",
+                "  ()\n",
+                "}\n",
+                "let a = task ()\n",
+                "let b = owning (c_string \"x\")\n",
+                "let c: Coroutine{} I32 = generic 1\n",
+                "let d: Coroutine{} I32 = generic (1 satisfies U8)\n",
+                "let e = with Reactive = reactive_scope () { waiting () }\n",
+                "let f = with Reactive = reactive_scope () { reaction { () } }\n",
+                "let doubled = flag + flag\n",
+            ),
+        ] {
+            coverage.merge(assert_census(source));
+        }
+        eprintln!("stage 4.7 census coverage: {coverage:?}");
+        for origin in [
+            "declared",
+            "specialization",
+            "initializer",
+            "constructor-adapter",
+            "structural-method",
+            "finalizer",
+            "coroutine-pair",
+            "runner",
+            "extern-adapter",
+        ] {
+            assert!(
+                coverage.origins.contains(origin),
+                "the census fixtures cover `{origin}` functions: {coverage:?}"
+            );
+        }
+        for explained in [
+            "inlined-drop-glue",
+            "aliased-coroutine-pair",
+            "reachable-only-from-aliased-pair",
+            "coroutine-body-in-resume",
+            "eager-unused-extern-adapter",
+        ] {
+            assert!(
+                coverage.explained.contains(explained),
+                "the census fixtures exercise the `{explained}` explanation: {coverage:?}"
+            );
+        }
     }
 }

@@ -113,6 +113,12 @@ struct ModuleEmitter<'module, 'context> {
     /// runtime's own business, not a surface emitted code needs.
     #[cfg(test)]
     legacy_runtime_internal: HashSet<String>,
+    /// Test-only: every function the emitter creates with a body, keyed by
+    /// its final LLVM name, with the legacy record it belongs to. The Stage
+    /// 4.7 census proves every function the module defines is here and maps
+    /// to a catalog entry.
+    #[cfg(test)]
+    legacy_defined_functions: Vec<(String, LegacyFunctionOrigin)>,
     active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
     expression_type_overrides: HashMap<staple_syntax::SyntaxId, CheckedType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
@@ -317,6 +323,19 @@ struct LoopCodegenContext<'context> {
 type CodeGenerationResult<T> = Result<T, Diagnostic>;
 
 impl<'module, 'context> ModuleEmitter<'module, 'context> {
+    /// Test-only: registers one function the emitter created, under the name
+    /// LLVM gave it (a clashing name is suffixed on the new function only, so
+    /// the name is stable once added).
+    #[cfg(test)]
+    fn legacy_register_function(
+        &mut self,
+        function: inkwell::values::FunctionValue<'context>,
+        origin: LegacyFunctionOrigin,
+    ) {
+        let name = function.get_name().to_string_lossy().into_owned();
+        self.legacy_defined_functions.push((name, origin));
+    }
+
     /// Test-only: marks the extern adapter for `symbol` as read as a
     /// first-class value.
     fn mark_extern_adapter_used(&mut self, symbol: SymbolId) {
@@ -409,6 +428,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             legacy_extern_adapters: Vec::new(),
             #[cfg(test)]
             legacy_runtime_internal: HashSet::new(),
+            #[cfg(test)]
+            legacy_defined_functions: Vec::new(),
             active_type_substitutions: HashMap::new(),
             expression_type_overrides: HashMap::new(),
             function_symbols: HashMap::new(),
@@ -658,6 +679,39 @@ pub(crate) struct LegacyReactiveRunner {
     pub(crate) name_reused: bool,
 }
 
+/// Test-only: which legacy record one emitted function belongs to. Indexed
+/// variants point into the matching `LegacyEmissions` vector, whose per-family
+/// transition tests compare the record's contents with its plan.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) enum LegacyFunctionOrigin {
+    /// A concrete template `declare_functions` emits eagerly.
+    Declared {
+        function: FunctionId,
+        function_type: CheckedFunctionType,
+    },
+    /// A generic specialization; the substitutions are the ones legacy
+    /// queued.
+    Specialization {
+        function: FunctionId,
+        function_type: CheckedFunctionType,
+        substitutions: HashMap<TypeParameterId, CheckedType>,
+    },
+    /// One source module's initializer.
+    Initializer(ModuleId),
+    /// The executable harness, which Stage 5 regenerates from entry metadata.
+    Main,
+    /// The UTF-8 validator, a fixed runtime helper.
+    Utf8Validator,
+    ConstructorAdapter(usize),
+    StructuralMethod(usize),
+    Finalizer(usize),
+    CoroutineResume(usize),
+    CoroutineCleanup(usize),
+    Runner(usize),
+    ExternAdapter(usize),
+}
+
 /// Test-only: one eager extern closure adapter and whether `compile_symbol_value`
 /// read it as a first-class value.
 #[cfg(test)]
@@ -699,6 +753,9 @@ pub(crate) struct LegacyEmissions {
     /// UTF-8 validator, and `main`, so a function with no runtime reference
     /// still compares.
     pub(crate) emitted_functions: Vec<String>,
+    /// Every function the emitter created, with the legacy record it belongs
+    /// to, in creation order.
+    pub(crate) defined_functions: Vec<(String, LegacyFunctionOrigin)>,
 }
 
 /// Compiles one lowered module with the legacy backend and returns its typed
@@ -725,6 +782,7 @@ pub(crate) fn legacy_emissions(
         coroutine_requests: emitter.legacy_coroutine_requests.clone(),
         runners: emitter.legacy_runners.clone(),
         extern_adapters: emitter.legacy_extern_adapters.clone(),
+        defined_functions: emitter.legacy_defined_functions.clone(),
         runtime_surfaces: {
             let mut surfaces: Vec<String> = Vec::new();
             for (symbol, _) in referenced_runtime_symbols(&emitter) {
@@ -1067,11 +1125,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
                         self.closure_codes.insert(symbol, adapter);
                         #[cfg(test)]
-                        self.legacy_extern_adapters.push(LegacyExternAdapter {
-                            symbol,
-                            callable_type: function_type.clone(),
-                            used: false,
-                        });
+                        {
+                            self.legacy_extern_adapters.push(LegacyExternAdapter {
+                                symbol,
+                                callable_type: function_type.clone(),
+                                used: false,
+                            });
+                            let index = self.legacy_extern_adapters.len() - 1;
+                            self.legacy_register_function(
+                                adapter,
+                                LegacyFunctionOrigin::ExternAdapter(index),
+                            );
+                        }
                     }
                 }
             }
@@ -1231,6 +1296,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Some(inkwell::module::Linkage::Internal),
             );
             self.initializers.insert(source_module.id, function);
+            #[cfg(test)]
+            self.legacy_register_function(
+                function,
+                LegacyFunctionOrigin::Initializer(source_module.id),
+            );
         }
     }
 
@@ -1267,6 +1337,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .llvm_module
                 .add_function(&function.name, llvm_type, None);
             self.functions.insert(function.id, llvm_function);
+            #[cfg(test)]
+            self.legacy_register_function(
+                llvm_function,
+                LegacyFunctionOrigin::Declared {
+                    function: function.id,
+                    function_type: function_type.clone(),
+                },
+            );
         }
         Ok(())
     }
@@ -1429,6 +1507,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         );
         self.specialized_functions
             .insert((function_id, key), llvm_function);
+        #[cfg(test)]
+        self.legacy_register_function(
+            llvm_function,
+            LegacyFunctionOrigin::Specialization {
+                function: function_id,
+                function_type: function_type.clone(),
+                substitutions: substitutions.clone(),
+            },
+        );
         self.specialization_queue
             .push((function_id, function_type.clone(), substitutions));
         Ok(llvm_function)
@@ -1491,6 +1578,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     managed_ref,
                     finalizer_set,
                 });
+            let index = self.legacy_constructor_adapters.len() - 1;
+            self.legacy_register_function(
+                function,
+                LegacyFunctionOrigin::ConstructorAdapter(index),
+            );
         }
         if let Some(block) = previous_block {
             self.builder.position_at_end(block);
@@ -2277,6 +2369,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let integer_type = self.context.i32_type();
         let function_type = integer_type.fn_type(&[], false);
         let function = self.llvm_module.add_function("main", function_type, None);
+        #[cfg(test)]
+        self.legacy_register_function(function, LegacyFunctionOrigin::Main);
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
@@ -4395,11 +4489,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             self.builder.position_at_end(block);
         }
         #[cfg(test)]
-        self.legacy_structural_methods.push(
-            self.legacy_structural_stack
-                .pop()
-                .expect("every emitted structural body has a record"),
-        );
+        {
+            self.legacy_structural_methods.push(
+                self.legacy_structural_stack
+                    .pop()
+                    .expect("every emitted structural body has a record"),
+            );
+            let index = self.legacy_structural_methods.len() - 1;
+            self.legacy_register_function(function, LegacyFunctionOrigin::StructuralMethod(index));
+        }
         Ok(function)
     }
 
@@ -6629,8 +6727,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let function = self.llvm_module.add_function(&name, function_type, None);
         self.gc_finalizers.insert(key, function);
         #[cfg(test)]
-        self.legacy_finalizers
-            .push(LegacyFinalizer::Payload(payload.clone()));
+        {
+            self.legacy_finalizers
+                .push(LegacyFinalizer::Payload(payload.clone()));
+            let index = self.legacy_finalizers.len() - 1;
+            self.legacy_register_function(function, LegacyFunctionOrigin::Finalizer(index));
+        }
 
         let previous_block = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
@@ -6672,8 +6774,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let function = self.llvm_module.add_function(&name, function_type, None);
         self.gc_finalizers.insert(key, function);
         #[cfg(test)]
-        self.legacy_finalizers
-            .push(LegacyFinalizer::Cell(value_type.clone()));
+        {
+            self.legacy_finalizers
+                .push(LegacyFinalizer::Cell(value_type.clone()));
+            let index = self.legacy_finalizers.len() - 1;
+            self.legacy_register_function(function, LegacyFunctionOrigin::Finalizer(index));
+        }
         let previous_block = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
@@ -8397,6 +8503,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             runner_type,
             Some(inkwell::module::Linkage::Internal),
         );
+        #[cfg(test)]
+        {
+            let index = self.legacy_runners.len() - 1;
+            self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
+        }
         let entry = self.context.append_basic_block(runner, "entry");
         self.builder.position_at_end(entry);
         let payload_argument = runner.get_first_param().unwrap().into_pointer_value();
@@ -8752,6 +8863,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             self.context.void_type().fn_type(&[ptr_type.into()], false),
             Some(inkwell::module::Linkage::Internal),
         );
+        #[cfg(test)]
+        {
+            let index = self.legacy_runners.len() - 1;
+            self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
+        }
         let entry = self.context.append_basic_block(runner, "entry");
         let eval = self.context.append_basic_block(runner, "eval");
         let resolve = self.context.append_basic_block(runner, "resolve");
@@ -8927,6 +9043,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             runner_type,
             Some(inkwell::module::Linkage::Internal),
         );
+        #[cfg(test)]
+        {
+            let index = self.legacy_runners.len() - 1;
+            self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
+        }
         let entry = self.context.append_basic_block(runner, "entry");
         self.builder.position_at_end(entry);
         let payload_argument = runner.get_first_param().unwrap().into_pointer_value();
@@ -9433,6 +9554,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             function_type,
             Some(inkwell::module::Linkage::Internal),
         );
+        #[cfg(test)]
+        self.legacy_register_function(function, LegacyFunctionOrigin::Utf8Validator);
         let entry = self.context.append_basic_block(function, "entry");
         let loop_block = self.context.append_basic_block(function, "loop");
         let byte_block = self.context.append_basic_block(function, "byte");
@@ -10174,6 +10297,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 capture_finalizer: !thunk.captures.is_empty(),
                 unwind_drops,
             });
+            let index = self.legacy_coroutine_pairs.len() - 1;
+            self.legacy_register_function(resume_fn, LegacyFunctionOrigin::CoroutineResume(index));
+            self.legacy_register_function(
+                cleanup_fn,
+                LegacyFunctionOrigin::CoroutineCleanup(index),
+            );
         }
 
         let previous_block = self.builder.get_insert_block();
@@ -12001,12 +12130,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             self.compile_drop_value(value, &value_type, Span::Compiler)?;
         }
         #[cfg(test)]
-        self.legacy_finalizers
-            .push(LegacyFinalizer::ClosureEnvironment {
-                function: closure.id,
-                capture_types,
-                dropped: legacy_dropped,
-            });
+        {
+            self.legacy_finalizers
+                .push(LegacyFinalizer::ClosureEnvironment {
+                    function: closure.id,
+                    capture_types,
+                    dropped: legacy_dropped,
+                });
+            let index = self.legacy_finalizers.len() - 1;
+            self.legacy_register_function(function, LegacyFunctionOrigin::Finalizer(index));
+        }
         self.builder
             .build_return(None)
             .map_err(compiler_diagnostic)?;
@@ -14244,8 +14377,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let function = self.llvm_module.add_function(&name, function_type, None);
         self.gc_finalizers.insert(key, function);
         #[cfg(test)]
-        self.legacy_finalizers
-            .push(LegacyFinalizer::Buffer(element.clone()));
+        {
+            self.legacy_finalizers
+                .push(LegacyFinalizer::Buffer(element.clone()));
+            let index = self.legacy_finalizers.len() - 1;
+            self.legacy_register_function(function, LegacyFunctionOrigin::Finalizer(index));
+        }
         let previous_block = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
         let check = self
