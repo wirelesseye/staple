@@ -69,25 +69,20 @@ pub(crate) struct LoweredFunctionInstance {
     /// The concrete Stage 3.4 body. `None` until materialization runs and for
     /// instances whose template has no runtime body (externs, intrinsics).
     pub body: Option<super::instance_body::LoweredInstanceBody>,
+    /// Stage 5.3 (F2): whether legacy declares this instance on demand with
+    /// internal linkage, i.e. its template signature still contains a type
+    /// parameter (the same condition `seed_eager_templates` uses to skip the
+    /// eager declaration). An instance of a non-generic template keeps the
+    /// eager declaration's default linkage. This is deliberately not the D2
+    /// declared-name condition: a generic template can have an empty relevant
+    /// environment and still be emitted on demand.
+    pub requires_internal_linkage: bool,
     /// Transient traversal state, like `LoweredProgram::loop_depth`: whether the
     /// Stage 3.3/4.2 traversal has visited this instance. The worklist and the
     /// closure loop resume over the append-only arena, so an instance that is
     /// already traversed must never be traversed again. Not part of instance
     /// identity.
     pub traversed: bool,
-}
-
-impl LoweredFunctionInstance {
-    /// Stage 5.3 (F2): whether legacy declares this instance on demand with
-    /// `Internal` linkage. It is exactly the D2 ordinal-name set: an instance
-    /// with a relevant substitution or selected evidence. The environment is
-    /// the pruned relevant environment the instance key is built from, so an
-    /// empty environment and no evidence is the same "non-generic template"
-    /// condition the D2 declared-name rule uses. Instances of non-generic
-    /// templates keep the eager declaration's default linkage.
-    pub(crate) fn is_generic(&self) -> bool {
-        !self.environment.is_empty() || self.evidence.is_some()
-    }
 }
 
 /// How one function instance entered the graph.
@@ -418,6 +413,16 @@ impl GraphRecorder {
         let id = FunctionInstanceId::from_index(ordinal.index());
         if id.index() >= self.instances.len() {
             let origin = function_origin(program, resolved.key.function());
+            // Stage 5.3 F2: the linkage legacy gives this instance. Legacy
+            // declares a template eagerly only when its signature has no type
+            // parameter; every other instance is created on demand with
+            // internal linkage.
+            let requires_internal_linkage = program
+                .functions
+                .get(resolved.key.function())
+                .is_some_and(|function| {
+                    contains_type_parameter(&CheckedType::Function(function.signature.clone()))
+                });
             // Only the template's own relevant parameters stay in the
             // instance environment. The unpruned environment also carries the
             // requesting site's trait-parameter mappings, which are not
@@ -436,6 +441,7 @@ impl GraphRecorder {
                 dependencies: Vec::new(),
                 artifacts: Vec::new(),
                 body: None,
+                requires_internal_linkage,
                 traversed: false,
             });
             self.queue.push(id);
@@ -2400,7 +2406,7 @@ fn external_symbol_name(symbol: &super::LoweredSymbol) -> String {
 
 /// Every function and global name the runtime modules define or declare,
 /// parsed once from the same sources the backend installs.
-fn runtime_module_symbols() -> &'static HashSet<String> {
+pub(crate) fn runtime_module_symbols() -> &'static HashSet<String> {
     static SYMBOLS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
     SYMBOLS.get_or_init(|| {
         let mut symbols = HashSet::new();

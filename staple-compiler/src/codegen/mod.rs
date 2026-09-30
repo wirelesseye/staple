@@ -709,6 +709,60 @@ pub(crate) fn lowered_catalog_types(
         .map_err(|diagnostic| vec![diagnostic])
 }
 
+/// Test-only Stage 5.3 Step 3 declaration census: the partial lowered
+/// module's function types, linkage, and defined-function set, plus the
+/// partial-emission report.
+#[cfg(test)]
+pub(crate) struct LoweredPartialEmissions {
+    pub(crate) report: LoweredEmissionReport,
+    /// LLVM function types keyed by final planned name.
+    pub(crate) function_types: HashMap<String, String>,
+    /// LLVM linkage keyed by final planned name (`true` for `Internal`).
+    pub(crate) function_linkages: HashMap<String, bool>,
+    /// Every function the partial module defines (real body or stub).
+    pub(crate) defined_functions: HashSet<String>,
+}
+
+#[cfg(test)]
+pub(crate) fn lowered_partial_emissions(
+    context: &inkwell::context::Context,
+    module: &LoweredModule,
+) -> Result<LoweredPartialEmissions, Vec<Diagnostic>> {
+    let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
+    lowered::LoweredEmitter::new(context, module.program(), &target_machine)
+        .compile_partial(&target_machine)
+        .map(|(llvm_module, report)| LoweredPartialEmissions {
+            report,
+            function_types: llvm_module
+                .get_functions()
+                .filter_map(|function| {
+                    function.get_name().to_str().ok().map(|name| {
+                        (
+                            name.to_owned(),
+                            function.get_type().print_to_string().to_string(),
+                        )
+                    })
+                })
+                .collect(),
+            function_linkages: llvm_module
+                .get_functions()
+                .filter_map(|function| {
+                    function.get_name().to_str().ok().map(|name| {
+                        (
+                            name.to_owned(),
+                            function.get_linkage() == inkwell::module::Linkage::Internal,
+                        )
+                    })
+                })
+                .collect(),
+            defined_functions: llvm_module
+                .get_functions()
+                .filter(|function| function.count_basic_blocks() > 0)
+                .filter_map(|function| function.get_name().to_str().ok().map(str::to_owned))
+                .collect(),
+        })
+}
+
 /// Test-only ground truth for the runtime surfaces: every `(runtime symbol,
 /// referencing function)` pair for a use outside the runtime's own functions
 /// and the `main` harness. A use that is not an instruction (a constant

@@ -191,12 +191,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     fn declare_instances(&mut self) -> CodeGenerationResult<()> {
-        // Linkage rule per family (F2, matching legacy): an instance of a
-        // generic template (or one selected by evidence, `is_generic`) is
-        // declared on demand by legacy `ensure_function_specialization` with
-        // `Internal` linkage; an instance of a non-generic template keeps the
-        // eager declaration's default (external) linkage. Names always come
-        // from the catalog, never from the backend (D2).
+        // Linkage rule per family (F2, matching legacy): an instance whose
+        // template signature still has a type parameter is declared on demand
+        // by legacy `ensure_function_specialization` with `Internal` linkage
+        // (the recorded lowering fact); an instance of a non-generic template
+        // keeps the eager declaration's default (external) linkage. Names
+        // always come from the catalog, never from the backend (D2).
         for (id, instance) in self.view.instances() {
             let Some(signature) = self.view.instance_signature(id) else {
                 continue;
@@ -215,7 +215,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )
             })?;
             let function_type = self.backend.compile_closure_function_type(signature)?;
-            let linkage = instance.is_generic().then_some(Linkage::Internal);
+            let linkage = instance
+                .requires_internal_linkage
+                .then_some(Linkage::Internal);
             let function = self
                 .backend
                 .llvm_module

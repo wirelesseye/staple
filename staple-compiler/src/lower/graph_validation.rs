@@ -529,14 +529,14 @@ mod tests {
     use inkwell::context::Context;
 
     use crate::specialization::{
-        ArtifactRequestKey, ArtifactSite, ArtifactSiteOwner, CanonicalFunctionType, CanonicalType,
-        GcFinalizerKey,
+        ArtifactOrdinal, ArtifactRequestKey, ArtifactSite, ArtifactSiteOwner,
+        CanonicalFunctionType, CanonicalType, GcFinalizerKey,
     };
     use crate::{
         CallTypeSubstitution, CheckedFunctionType, CheckedType, ConstructorConstruction, DebugStep,
-        LoweredArtifactPlan, LoweredModule, Lowerer, NameResolver, PlannedArtifact, PlannedCallee,
-        ProgramLoader, StructuralBody, StructuralTraitMethod, SubstitutionEnvironment, TypeChecker,
-        TypeParameterId, TypedModule,
+        LoweredArtifactPlan, LoweredModule, Lowerer, ModuleId, NameResolver, PlannedArtifact,
+        PlannedCallee, ProgramLoader, StructuralBody, StructuralTraitMethod,
+        SubstitutionEnvironment, TypeChecker, TypeParameterId, TypedModule,
     };
 
     use super::super::{
@@ -4967,30 +4967,101 @@ mod tests {
         }
     }
 
-    /// Stage 4.7's legacy census for one program. Every function the legacy
-    /// module defines (outside the installed runtime modules) is registered
-    /// exactly once with the record it belongs to, and each registered
-    /// function maps to one catalog instance or artifact, or to an explained
-    /// negative reason. In reverse, every artifact and every materialized
-    /// instance is emitted by legacy or explained. The per-family transition
-    /// tests compare each record's contents with its plan; the census proves
-    /// no emitted function is outside the catalog and no catalog entry is
-    /// unaccounted.
-    fn assert_census(source: &str) -> CensusCoverage {
+    /// Stage 5.3 Step 3: one legacy-defined function's catalog mapping.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum LegacyCatalogEntry {
+        /// A source-function instance.
+        Instance(FunctionInstanceId),
+        /// A generated artifact function. A coroutine pair maps to its
+        /// `resume` or `cleanup` slot; every other family maps to `Single`.
+        Artifact {
+            ordinal: ArtifactOrdinal,
+            slot: ArtifactSlot,
+        },
+        /// A module initializer.
+        Initializer(ModuleId),
+        /// The entry harness.
+        Main,
+        /// The fixed UTF-8 validator.
+        Utf8Validator,
+    }
+
+    /// Which planned name of an artifact one legacy function uses.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ArtifactSlot {
+        Single,
+        Resume,
+        Cleanup,
+    }
+
+    /// Stage 4.7's forward census, kept reusable for the Stage 5.3
+    /// declaration-parity comparison: every legacy-defined function mapped to
+    /// the catalog entry that plans it, the explained negatives, and the
+    /// entries reachable only through a syntax-aliased coroutine.
+    #[derive(Debug, Default)]
+    struct CensusMapping {
+        /// `(legacy final name, catalog entry)` for every mapped legacy
+        /// function. `main` and the UTF-8 validator are included; an eager but
+        /// unused extern adapter is explained instead.
+        mapped: Vec<(String, LegacyCatalogEntry)>,
+        instances: HashSet<FunctionInstanceId>,
+        artifacts: HashSet<ArtifactOrdinal>,
+        /// Lowered entries legacy never emitted because their coroutine pair
+        /// was syntax-aliased to another instantiation. The lowered module
+        /// does define them.
+        aliased_instances: HashSet<FunctionInstanceId>,
+        aliased_artifacts: HashSet<ArtifactOrdinal>,
+        coverage: CensusCoverage,
+        unexplained: Vec<String>,
+    }
+
+    /// Whether one coroutine pair plan's body syntax is a syntax legacy
+    /// emitted for another instantiation (Stage 4.5's syntax-keyed cache).
+    fn aliased_coroutine_pair(
+        program: &crate::LoweredProgram,
+        legacy: &crate::codegen::LegacyEmissions,
+        plan: &crate::CoroutineCodesPlan,
+    ) -> bool {
+        program
+            .instances
+            .get(plan.body)
+            .and_then(|instance| program.functions.get(instance.template))
+            .is_some_and(|template| {
+                legacy
+                    .coroutine_pairs
+                    .iter()
+                    .any(|pair| pair.body_syntax == template.body_syntax)
+            })
+    }
+
+    /// Stage 4.7's forward census for one already-lowered program. Every
+    /// function the legacy module defines (outside the installed runtime
+    /// modules) is registered exactly once with the record it belongs to, and
+    /// each registered function maps to one catalog instance or artifact, or
+    /// to an explained negative reason. The reverse checks stay in
+    /// [`assert_census`]; the Stage 5.3 declaration comparison consumes the
+    /// mapping directly.
+    fn census_mapping(
+        lowered: &crate::LoweredModule,
+        legacy: &crate::codegen::LegacyEmissions,
+    ) -> CensusMapping {
         use crate::codegen::{LegacyFinalizer, LegacyFunctionOrigin};
         use std::collections::{HashMap, HashSet};
 
-        let module = checked_program(source);
-        let lowered = Lowerer::new()
-            .lower(&module)
-            .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}\n{source}"));
-        let context = Context::create();
-        let legacy =
-            crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(|diagnostics| {
-                panic!("the legacy backend should compile: {diagnostics:?}\n{source}")
-            });
         let program = &lowered.program;
         let origin = Origin::compiler();
+        let mut mapping = CensusMapping::default();
+        let mut mapped = Vec::new();
+        let mut instances = HashSet::new();
+        let mut artifacts = HashSet::new();
+        // A non-generic function legacy also reaches through
+        // `ensure_function_specialization` (the formatter helpers) has an
+        // eager declaration and an internal specialization in the legacy
+        // module. The catalog holds one instance for both; the eager
+        // declaration is canonical, so the duplicate specialization mapping
+        // is skipped (its linkage differs only because legacy emitted the
+        // body twice).
+        let mut eager_instances = HashSet::new();
         let mut coverage = CensusCoverage::default();
         let mut unexplained = Vec::new();
 
@@ -5016,8 +5087,6 @@ mod tests {
             .collect::<HashSet<_>>();
 
         // Forward: every emitted registration maps into the catalog.
-        let mut instances = HashSet::new();
-        let mut artifacts = HashSet::new();
         let artifact_where = |matches: &dyn Fn(&ArtifactRequestKey) -> bool| {
             program
                 .artifacts
@@ -5032,6 +5101,20 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         for (name, registration) in &legacy.defined_functions {
+            // `main` and the UTF-8 validator are mapped but excluded from the
+            // emitted-function set (legacy registers them without emitting
+            // through the regular path).
+            match registration {
+                LegacyFunctionOrigin::Main => {
+                    mapped.push((name.clone(), LegacyCatalogEntry::Main));
+                    continue;
+                }
+                LegacyFunctionOrigin::Utf8Validator => {
+                    mapped.push((name.clone(), LegacyCatalogEntry::Utf8Validator));
+                    continue;
+                }
+                _ => {}
+            }
             if !emitted.contains(name.as_str()) {
                 // Declared without a body (a coroutine body thunk, compiled
                 // into its `resume` instead) or excluded (`main`, the UTF-8
@@ -5053,6 +5136,8 @@ mod tests {
                         )
                         .map(|instance| {
                             instances.insert(instance);
+                            eager_instances.insert(instance);
+                            mapped.push((name.clone(), LegacyCatalogEntry::Instance(instance)));
                         })
                         .ok_or_else(|| format!("declared function `{name}` has no instance"))
                 }
@@ -5066,6 +5151,9 @@ mod tests {
                         .instance_for_legacy_specialization(*function, function_type, substitutions)
                         .map(|instance| {
                             instances.insert(instance);
+                            if !eager_instances.contains(&instance) {
+                                mapped.push((name.clone(), LegacyCatalogEntry::Instance(instance)));
+                            }
                         })
                         .ok_or_else(|| format!("specialization `{name}` has no instance"))
                 }
@@ -5077,6 +5165,9 @@ mod tests {
                         .any(|(_, initializer)| initializer.module == *module)
                         .then_some(())
                         .ok_or_else(|| format!("initializer `{name}` has no lowered initializer"))
+                        .map(|()| {
+                            mapped.push((name.clone(), LegacyCatalogEntry::Initializer(*module)));
+                        })
                 }
                 LegacyFunctionOrigin::Main | LegacyFunctionOrigin::Utf8Validator => Ok(()),
                 LegacyFunctionOrigin::ConstructorAdapter(index) => {
@@ -5093,6 +5184,13 @@ mod tests {
                     {
                         [ordinal] => {
                             artifacts.insert(*ordinal);
+                            mapped.push((
+                                name.clone(),
+                                LegacyCatalogEntry::Artifact {
+                                    ordinal: *ordinal,
+                                    slot: ArtifactSlot::Single,
+                                },
+                            ));
                             Ok(())
                         }
                         other => Err(format!(
@@ -5113,6 +5211,13 @@ mod tests {
                     {
                         [ordinal] => {
                             artifacts.insert(*ordinal);
+                            mapped.push((
+                                name.clone(),
+                                LegacyCatalogEntry::Artifact {
+                                    ordinal: *ordinal,
+                                    slot: ArtifactSlot::Single,
+                                },
+                            ));
                             Ok(())
                         }
                         other => Err(format!(
@@ -5165,12 +5270,24 @@ mod tests {
                     })
                     .map(|ordinal| {
                         artifacts.insert(ordinal);
+                        mapped.push((
+                            name.clone(),
+                            LegacyCatalogEntry::Artifact {
+                                ordinal,
+                                slot: ArtifactSlot::Single,
+                            },
+                        ));
                     })
                     .ok_or_else(|| format!("finalizer `{name}` has no artifact"))
                 }
                 LegacyFunctionOrigin::CoroutineResume(index)
                 | LegacyFunctionOrigin::CoroutineCleanup(index) => {
                     coverage.origins.insert("coroutine-pair");
+                    let slot = if matches!(registration, LegacyFunctionOrigin::CoroutineResume(_)) {
+                        ArtifactSlot::Resume
+                    } else {
+                        ArtifactSlot::Cleanup
+                    };
                     let pair = &legacy.coroutine_pairs[*index];
                     pair_plans_by_syntax(program)
                         .get(&pair.body_syntax)
@@ -5189,6 +5306,10 @@ mod tests {
                         })
                         .map(|ordinal| {
                             artifacts.insert(ordinal);
+                            mapped.push((
+                                name.clone(),
+                                LegacyCatalogEntry::Artifact { ordinal, slot },
+                            ));
                         })
                         .ok_or_else(|| format!("coroutine function `{name}` has no pair plan"))
                 }
@@ -5197,6 +5318,13 @@ mod tests {
                     match runner_plans_for_legacy(program, &legacy.runners[*index]).as_slice() {
                         [(ordinal, _)] => {
                             artifacts.insert(*ordinal);
+                            mapped.push((
+                                name.clone(),
+                                LegacyCatalogEntry::Artifact {
+                                    ordinal: *ordinal,
+                                    slot: ArtifactSlot::Single,
+                                },
+                            ));
                             Ok(())
                         }
                         other => Err(format!("runner `{name}` matches {} plans", other.len())),
@@ -5216,6 +5344,13 @@ mod tests {
                     {
                         [ordinal] => {
                             artifacts.insert(*ordinal);
+                            mapped.push((
+                                name.clone(),
+                                LegacyCatalogEntry::Artifact {
+                                    ordinal: *ordinal,
+                                    slot: ArtifactSlot::Single,
+                                },
+                            ));
                             Ok(())
                         }
                         // Legacy declares every non-variadic extern's adapter
@@ -5241,18 +5376,8 @@ mod tests {
         // pair whose body syntax legacy did emit is that alias, and anything
         // reachable only through it (its capture finalizer, the
         // instantiation-specific callees of its body) was never emitted.
-        let aliased_pair = |plan: &crate::CoroutineCodesPlan| {
-            program
-                .instances
-                .get(plan.body)
-                .and_then(|instance| program.functions.get(instance.template))
-                .is_some_and(|template| {
-                    legacy
-                        .coroutine_pairs
-                        .iter()
-                        .any(|pair| pair.body_syntax == template.body_syntax)
-                })
-        };
+        let aliased_pair =
+            |plan: &crate::CoroutineCodesPlan| aliased_coroutine_pair(program, legacy, plan);
         let artifact_record = |ordinal| {
             program
                 .artifacts
@@ -5295,25 +5420,56 @@ mod tests {
             }
         }
 
+        mapping.mapped = mapped;
+        mapping.instances = instances;
+        mapping.artifacts = artifacts;
+        mapping.aliased_instances = aliased_instances;
+        mapping.aliased_artifacts = aliased_artifacts;
+        mapping.coverage = coverage;
+        mapping.unexplained = unexplained;
+        mapping
+    }
+
+    /// Stage 4.7's census for one program: the forward mapping plus the
+    /// reverse checks that every artifact and every materialized instance is
+    /// emitted by legacy or explained. The per-family transition tests compare
+    /// each record's contents with its plan; the census proves no emitted
+    /// function is outside the catalog and no catalog entry is unaccounted.
+    fn assert_census(source: &str) -> CensusCoverage {
+        let module = checked_program(source);
+        let lowered = Lowerer::new()
+            .lower(&module)
+            .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}\n{source}"));
+        let context = Context::create();
+        let legacy =
+            crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(|diagnostics| {
+                panic!("the legacy backend should compile: {diagnostics:?}\n{source}")
+            });
+        let mut mapping = census_mapping(&lowered, &legacy);
+        let program = &lowered.program;
+
         // Reverse: every artifact is emitted by legacy or explained.
         for (_, artifact) in program.artifacts.iter() {
-            if artifacts.contains(&artifact.ordinal) {
+            if mapping.artifacts.contains(&artifact.ordinal) {
                 continue;
             }
             match artifact.plan.as_ref() {
                 // Legacy inlines drop glue at every drop site.
                 Some(LoweredArtifactPlan::DropGlue(_)) => {
-                    coverage.explained.insert("inlined-drop-glue");
+                    mapping.coverage.explained.insert("inlined-drop-glue");
                 }
-                Some(LoweredArtifactPlan::CoroutineCodes(plan)) if aliased_pair(plan) => {
-                    coverage.explained.insert("aliased-coroutine-pair");
+                Some(LoweredArtifactPlan::CoroutineCodes(plan))
+                    if aliased_coroutine_pair(program, &legacy, plan) =>
+                {
+                    mapping.coverage.explained.insert("aliased-coroutine-pair");
                 }
-                Some(_) if aliased_artifacts.contains(&artifact.ordinal) => {
-                    coverage
+                Some(_) if mapping.aliased_artifacts.contains(&artifact.ordinal) => {
+                    mapping
+                        .coverage
                         .explained
                         .insert("reachable-only-from-aliased-pair");
                 }
-                plan => unexplained.push(format!(
+                plan => mapping.unexplained.push(format!(
                     "artifact {} ({}) has no legacy function",
                     artifact.ordinal.index(),
                     plan.map_or("no plan", LoweredArtifactPlan::family_name)
@@ -5324,22 +5480,26 @@ mod tests {
         // Reverse: every materialized instance is emitted by legacy or
         // explained.
         for (id, instance) in program.instances.iter() {
-            if instances.contains(&id) || instance.body.is_none() {
+            if mapping.instances.contains(&id) || instance.body.is_none() {
                 continue;
             }
             let template = program.functions.get(instance.template);
             if template.is_some_and(|template| template.class.coroutine_body) {
                 // Legacy compiles a coroutine body inside its pair's `resume`.
-                coverage.explained.insert("coroutine-body-in-resume");
+                mapping
+                    .coverage
+                    .explained
+                    .insert("coroutine-body-in-resume");
                 continue;
             }
-            if aliased_instances.contains(&id) {
-                coverage
+            if mapping.aliased_instances.contains(&id) {
+                mapping
+                    .coverage
                     .explained
                     .insert("reachable-only-from-aliased-pair");
                 continue;
             }
-            unexplained.push(format!(
+            mapping.unexplained.push(format!(
                 "instance {} of `{}` has no legacy function",
                 id.index(),
                 template.map_or("?", |template| template.name.as_str())
@@ -5347,11 +5507,11 @@ mod tests {
         }
 
         assert!(
-            unexplained.is_empty(),
+            mapping.unexplained.is_empty(),
             "the census left functions unaccounted:\n{}\n{source}",
-            unexplained.join("\n")
+            mapping.unexplained.join("\n")
         );
-        coverage
+        mapping.coverage
     }
 
     #[test]
@@ -5688,6 +5848,313 @@ mod tests {
             "expected a constructor adapter comparison"
         );
         assert_eq!(compared_initializers, lowered.program.initializers.len());
+    }
+
+    /// Stage 5.3 Step 3 (F2, F10): over the Stage 4.7 census corpus plus a
+    /// fixture using every artifact family, the partial lowered module defines
+    /// exactly the functions the census maps -- plus `main`, the UTF-8
+    /// validator, and the entries reachable only through a syntax-aliased
+    /// coroutine -- with identical LLVM types and linkage for every mapped
+    /// pair.
+    #[test]
+    fn stage_5_3_declaration_census_matches_legacy() {
+        let mut coverage = CensusCoverage::default();
+        let mut saw_aliased_entries = false;
+        for source in [
+            // Stage 4.7 census program 1: constructor adapters and `Ref`
+            // payload finalizers.
+            concat!(
+                "type Point = ctor (I32, I32)\n",
+                "let make: () -> ((I32, I32) -> Point) = () => Point\n",
+                "type Resource = ctor I32\n",
+                "impl Drop Resource { def drop = Resource value => () }\n",
+                "let make_resource: () -> (Resource -> Ref Resource) = () => Ref\n",
+                "def ref_maker: <T where Copy T> () -> (T -> Ref T) = () => Ref\n",
+                "let maker_i32: I32 -> Ref I32 = ref_maker ()\n",
+                "let maker_u8: U8 -> Ref U8 = ref_maker ()\n",
+            ),
+            // Stage 4.7 census program 2: structural methods.
+            concat!(
+                "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
+                "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (1 satisfies U8) }\n",
+                "def show_sum: (I32 | U8) -> String = value => \"${value:?}\"\n",
+                "def index_mixed: (U8, I32) -> (I32 | U8) = pair => pair[0]\n",
+                "def count_pair: (U8, I32) -> I32 = pair => {\n",
+                "  let mut count = 0\n",
+                "  for item in pair { count = count + 1 }\n",
+                "  count\n",
+                "}\n",
+                "def deref_mixed: (Ref (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
+                "let a = show_pair (1, 2)\n",
+                "let b = show_sum (pick True)\n",
+                "let c = index_mixed ((1 satisfies U8), 2)\n",
+                "let d = count_pair ((1 satisfies U8), 2)\n",
+                "let e = deref_mixed (Ref ((1 satisfies U8), 2))\n",
+            ),
+            // Stage 4.7 census program 3: cleanup artifacts (closure, cell,
+            // payload, and buffer finalizers) and an unused extern adapter.
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "use std.buffer.*\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "extern \"c\" { abs: I32 -> I32 }\n",
+                "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",
+                "def counter: () -> I32 = () => {\n",
+                "  let mut total = 0\n",
+                "  let bump = () => { total = total + 1 }\n",
+                "  total\n",
+                "}\n",
+                "let mut strings: Buffer CString = Buffer.with_capacity (2 satisfies USize)\n",
+                "let run = capture (c_string \"x\")\n",
+                "let absolute = abs\n",
+                "let counted = counter ()\n",
+            ),
+            // Stage 4.7 census program 4: coroutine pairs (including the
+            // syntax-aliased generic `coro`) and the three runner families.
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "let signal flag = 0\n",
+                "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+                "def owning: move CString -> Coroutine{} I32 = move value => coro { inspect value; 1 }\n",
+                "def peek: <T> T -> I32 = _ => 1\n",
+                "def generic: <T where Copy T> T -> Coroutine{} I32 = value => coro { peek value; 1 }\n",
+                "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+                "  let _ = await (until { flag >= 1 })\n",
+                "  ()\n",
+                "}\n",
+                "let a = task ()\n",
+                "let b = owning (c_string \"x\")\n",
+                "let c: Coroutine{} I32 = generic 1\n",
+                "let d: Coroutine{} I32 = generic (1 satisfies U8)\n",
+                "let e = with Reactive = reactive_scope () { waiting () }\n",
+                "let f = with Reactive = reactive_scope () { reaction { () } }\n",
+                "let doubled = flag + flag\n",
+            ),
+            // Every artifact family in one program without syntax aliasing:
+            // constructor adapter, structural method, payload/cell/closure/
+            // buffer finalizers, a coroutine pair, reaction/until/derived
+            // runners, and an extern adapter.
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.cinterop.(CString, c_string)\n",
+                "use std.buffer.*\n",
+                "extern \"c\" { inspect: CString -> I32 }\n",
+                "extern \"c\" { abs: I32 -> I32 }\n",
+                "type Point = ctor (I32, I32)\n",
+                "let make_point: () -> ((I32, I32) -> Point) = () => Point\n",
+                "let pair = (1, 2)\n",
+                "let shown = \"${pair:?}\"\n",
+                "type Resource = ctor I32\n",
+                "impl Drop Resource { def drop = Resource value => () }\n",
+                "let reference: Ref Resource = Ref (Resource 1)\n",
+                "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",
+                "def counter: () -> I32 = () => {\n",
+                "  let mut total = 0\n",
+                "  let bump = () => { total = total + 1 }\n",
+                "  total\n",
+                "}\n",
+                "let mut strings: Buffer CString = Buffer.with_capacity (1 satisfies USize)\n",
+                "let run = capture (c_string \"x\")\n",
+                "let counted = counter ()\n",
+                "let absolute = abs\n",
+                "let signal flag = 0\n",
+                "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
+                "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
+                "  let _ = await (until { flag >= 1 })\n",
+                "  ()\n",
+                "}\n",
+                "let started = task ()\n",
+                "let reaction_scope = with Reactive = reactive_scope () { reaction { () } }\n",
+                "let coroutine_scope = with Reactive = reactive_scope () { waiting () }\n",
+                "let doubled = flag + flag\n",
+            ),
+        ] {
+            let module = checked_program(source);
+            let lowered = Lowerer::new().lower(&module).unwrap_or_else(|diagnostics| {
+                panic!("source should lower: {diagnostics:?}\n{source}")
+            });
+            let context = Context::create();
+            let legacy = crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(
+                |diagnostics| {
+                    panic!("the legacy backend should compile: {diagnostics:?}\n{source}")
+                },
+            );
+            let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
+                .unwrap_or_else(|diagnostics| {
+                    panic!("partial lowered emission should verify: {diagnostics:?}\n{source}")
+                });
+            let mapping = census_mapping(&lowered, &legacy);
+            assert!(
+                mapping.unexplained.is_empty(),
+                "the census left functions unaccounted:\n{}\n{source}",
+                mapping.unexplained.join("\n")
+            );
+            let program = &lowered.program;
+
+            let planned_names_for = |entry: &LegacyCatalogEntry| -> Vec<String> {
+                match entry {
+                    LegacyCatalogEntry::Instance(instance) => vec![
+                        program
+                            .planned_name(*instance)
+                            .expect("mapped instance has a planned name")
+                            .to_owned(),
+                    ],
+                    LegacyCatalogEntry::Artifact { ordinal, slot } => match slot {
+                        ArtifactSlot::Single => vec![
+                            program
+                                .planned_artifact_name(*ordinal)
+                                .expect("mapped artifact has a planned name")
+                                .to_owned(),
+                        ],
+                        ArtifactSlot::Resume | ArtifactSlot::Cleanup => {
+                            let (resume, cleanup) = program
+                                .planned_coroutine_pair_names(*ordinal)
+                                .expect("a coroutine pair has both planned names");
+                            if *slot == ArtifactSlot::Resume {
+                                vec![resume]
+                            } else {
+                                vec![cleanup]
+                            }
+                        }
+                    },
+                    LegacyCatalogEntry::Initializer(module) => vec![format!(
+                        "__staple_init_m{}",
+                        program
+                            .modules
+                            .get(*module)
+                            .expect("module metadata")
+                            .symbol_prefix
+                    )],
+                    LegacyCatalogEntry::Main => vec!["main".to_owned()],
+                    LegacyCatalogEntry::Utf8Validator => vec!["__staple_is_valid_utf8".to_owned()],
+                }
+            };
+
+            let runtime = crate::lower::worklist::runtime_module_symbols();
+            let lowered_defined = partial
+                .defined_functions
+                .iter()
+                .filter(|name| !runtime.contains(*name))
+                .cloned()
+                .collect::<HashSet<_>>();
+
+            let mut expected_defined = HashSet::new();
+            for (legacy_name, entry) in &mapping.mapped {
+                let legacy_type = legacy
+                    .function_types
+                    .get(legacy_name)
+                    .unwrap_or_else(|| panic!("legacy `{legacy_name}` has no module type"));
+                let legacy_linkage = legacy.function_linkages[legacy_name];
+                for planned in planned_names_for(entry) {
+                    let lowered_type = partial.function_types.get(&planned).unwrap_or_else(|| {
+                        panic!(
+                            "the lowered module does not declare `{planned}` for legacy `{legacy_name}`\n{source}"
+                        )
+                    });
+                    assert_eq!(
+                        lowered_type, legacy_type,
+                        "LLVM type differs for legacy `{legacy_name}` -> `{planned}`\n{source}"
+                    );
+                    assert_eq!(
+                        partial.function_linkages[&planned], legacy_linkage,
+                        "linkage differs for legacy `{legacy_name}` -> `{planned}`\n{source}"
+                    );
+                    expected_defined.insert(planned);
+                }
+            }
+
+            // Entries reachable only through a syntax-aliased coroutine are
+            // additionally defined by the lowered module; legacy aliased them
+            // away. Coroutine body thunks are compiled inside `resume`, so
+            // their instance has no ordinary function (mirroring
+            // `declare_instances`).
+            for instance in &mapping.aliased_instances {
+                let record = program
+                    .instances
+                    .get(*instance)
+                    .expect("aliased instance is interned");
+                let is_coroutine_body = program
+                    .functions
+                    .get(record.template)
+                    .is_some_and(|template| template.class.coroutine_body);
+                if record.body.is_some() && !is_coroutine_body {
+                    expected_defined.insert(
+                        program
+                            .planned_name(*instance)
+                            .expect("aliased instance has a planned name")
+                            .to_owned(),
+                    );
+                }
+            }
+            for ordinal in &mapping.aliased_artifacts {
+                let Some(record) = program
+                    .artifacts
+                    .iter()
+                    .find(|(_, artifact)| artifact.ordinal == *ordinal)
+                    .map(|(_, artifact)| artifact)
+                else {
+                    continue;
+                };
+                match record.plan.as_ref() {
+                    Some(LoweredArtifactPlan::DropGlue(_)) | None => {}
+                    Some(LoweredArtifactPlan::CoroutineCodes(_)) => {
+                        let (resume, cleanup) = program
+                            .planned_coroutine_pair_names(*ordinal)
+                            .expect("a coroutine pair has both planned names");
+                        expected_defined.insert(resume);
+                        expected_defined.insert(cleanup);
+                    }
+                    Some(_) => {
+                        expected_defined.insert(
+                            program
+                                .planned_artifact_name(*ordinal)
+                                .expect("aliased artifact has a planned name")
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+
+            assert_eq!(
+                lowered_defined, expected_defined,
+                "the partial lowered defined set differs from the census mapping\n{source}"
+            );
+            assert!(
+                !partial.report.stubbed().is_empty(),
+                "the partial report records the standard library's unported bodies\n{source}"
+            );
+            if !mapping.aliased_instances.is_empty() || !mapping.aliased_artifacts.is_empty() {
+                saw_aliased_entries = true;
+            }
+            coverage.merge(mapping.coverage);
+        }
+        eprintln!("stage 5.3 declaration census coverage: {coverage:?}");
+        for origin in [
+            "declared",
+            "specialization",
+            "initializer",
+            "constructor-adapter",
+            "structural-method",
+            "finalizer",
+            "coroutine-pair",
+            "runner",
+            "extern-adapter",
+        ] {
+            assert!(
+                coverage.origins.contains(origin),
+                "the declaration census corpus covers `{origin}` functions: {coverage:?}"
+            );
+        }
+        assert!(
+            coverage.explained.contains("eager-unused-extern-adapter"),
+            "the corpus exercises an explained legacy function: {coverage:?}"
+        );
+        assert!(
+            saw_aliased_entries,
+            "the corpus exercises the syntax-aliased coroutine difference: {coverage:?}"
+        );
     }
 
     #[test]
