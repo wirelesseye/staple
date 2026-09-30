@@ -2417,7 +2417,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::Index(index) => {
                 self.emit_index(owner, id, expression, index, environment)
             }
-            LoweredExpressionKind::StringTemplate(_) => Err(unimplemented("string template")),
+            LoweredExpressionKind::StringTemplate(template) => {
+                self.emit_string_template(owner, id, expression, template, environment)
+            }
             LoweredExpressionKind::Call(call) => self.emit_call(owner, *call, environment),
             LoweredExpressionKind::CallableValue(callable) => {
                 self.emit_callable_value(owner, *callable, environment)
@@ -2677,6 +2679,161 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .backend
             .build_product_value(&values, expression.origin.span.clone())?
             .as_any_value_enum())
+    }
+
+    /// Stage 5.5 Step 9: one string template, mirroring legacy
+    /// `compile_string_template`: construct the formatter, write literal parts
+    /// through the shared literal core, call each interpolation's bound
+    /// `Display`/`Debug` method with the formatter storage, and finish.
+    fn emit_string_template(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        expression: &crate::LoweredExpression,
+        template: &crate::LoweredStringTemplate,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = expression.origin.span.clone();
+        let constructor = self.bound_function(
+            owner,
+            crate::LoweredBindingSite::FormattingConstructor(id),
+            &span,
+        )?;
+        let formatter = self
+            .backend
+            .builder
+            .build_direct_call(
+                constructor,
+                &[self.null_environment()],
+                "template.formatter",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic();
+        let storage = self
+            .backend
+            .builder
+            .build_alloca(formatter.get_type(), "template.formatter.storage")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(storage, formatter)
+            .map_err(compiler_diagnostic)?;
+        let mut write = None;
+        for (part_index, part) in template.parts.iter().enumerate() {
+            match part {
+                crate::LoweredStringTemplatePart::Literal(literal) => {
+                    let write = match write {
+                        Some(write) => write,
+                        None => {
+                            let function = self.bound_function(
+                                owner,
+                                crate::LoweredBindingSite::FormattingWrite(id),
+                                &span,
+                            )?;
+                            write = Some(function);
+                            function
+                        }
+                    };
+                    self.backend.build_formatter_write_literal(
+                        write,
+                        storage.into(),
+                        literal,
+                        span.clone(),
+                    )?;
+                }
+                crate::LoweredStringTemplatePart::Interpolation(interpolation) => {
+                    let value =
+                        self.emit_expression(owner, interpolation.expression, environment)?;
+                    if environment.returned {
+                        return Ok(self.backend.unit_value());
+                    }
+                    let value = value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(
+                            span.clone(),
+                            "interpolation value has no runtime representation",
+                        )
+                    })?;
+                    let function = self.bound_function(
+                        owner,
+                        crate::LoweredBindingSite::Interpolation {
+                            template: id,
+                            part: part_index,
+                        },
+                        &span,
+                    )?;
+                    self.backend
+                        .builder
+                        .build_direct_call(
+                            function,
+                            &[self.null_environment(), value.into(), storage.into()],
+                            "template.fmt",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                }
+            }
+        }
+        let finish = self.bound_function(
+            owner,
+            crate::LoweredBindingSite::FormattingFinish(id),
+            &span,
+        )?;
+        let formatter = self
+            .backend
+            .builder
+            .build_load(formatter.get_type(), storage, "template.finished.formatter")
+            .map_err(compiler_diagnostic)?;
+        Ok(self
+            .backend
+            .builder
+            .build_direct_call(
+                finish,
+                &[self.null_environment(), formatter.into()],
+                "template.finish",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .as_any_value_enum())
+    }
+
+    /// The declared function of one binding site: a direct instance or a
+    /// structural artifact (whose body stays 5.7's).
+    fn bound_function(
+        &self,
+        owner: EmissionOwner,
+        site: crate::LoweredBindingSite,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        let binding = self
+            .view
+            .binding(owner, site)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "lowered site has no binding"))?;
+        match binding {
+            crate::LoweredBoundTarget::Instance(instance) => self
+                .instances
+                .get(instance)
+                .copied()
+                .ok_or_else(|| Diagnostic::new(span.clone(), "bound instance is not declared")),
+            crate::LoweredBoundTarget::Artifact(ordinal) => self
+                .artifacts
+                .get(ordinal)
+                .and_then(|functions| functions.first())
+                .copied()
+                .ok_or_else(|| Diagnostic::new(span.clone(), "bound artifact is not declared")),
+            _ => Err(Diagnostic::new(
+                span.clone(),
+                "bound site is not a function",
+            )),
+        }
+    }
+
+    fn null_environment(&self) -> BasicMetadataValueEnum<'context> {
+        self.backend
+            .context
+            .ptr_type(AddressSpace::default())
+            .const_null()
+            .into()
     }
 
     /// Stage 5.5 Step 8: one `loop`, mirroring legacy

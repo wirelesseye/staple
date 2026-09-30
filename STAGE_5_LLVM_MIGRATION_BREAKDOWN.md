@@ -242,6 +242,8 @@ The partial-mode report is the Stage 5.4–5.8 backlog baseline. The empty progr
 
 **Progress (Step 8).** Loops are complete: `emit_loop` mirrors `compile_loop_expression` (header/exit blocks, per-loop context with break phi inputs, the E2 `LoopBodyResult` hook, the `loop.value` phi, and `unreachable` for a loop without breaks), and `break`/`continue` select their context by the recorded `loop_depth`. The step also fixed `symbol_requires_cell` to mirror legacy `bind_pattern_value` (a module-owned symbol without global storage gets a cell), which the newly reached macro-expanded bodies exposed. Results: 7700 bodies compared (+86), 361 stubs (-86); `loop value or cleanup` reaches zero, leaving only `string template` (4) for Step 9.
 
+**Progress (Step 9).** String templates are emitted through their bindings (`FormattingConstructor`/`Write`/`Finish` and each interpolation's instance or structural artifact), with literal parts going through the shared `build_formatter_write_literal` core. Every 5.5-owned family is at zero stubs corpus-wide: 7702 bodies compared (+2), 359 stubs (-2), all owned by 5.6 (224), 5.7 (7), and 5.8 (128). Step 10 adds the corpus and closes the gate.
+
 **Gate (superseded by the 5.5 plan's revised gate; kept as history):** The corpus covers every Stage 2.4 family, including nested matches over sums and products, string-literal patterns, loops with break values, propagation, indexed assignment, and default/spread products. Behavior and function types match legacy.
 
 ## Stage 5.6 - Ownership Cleanup, Finalizers, and Buffers

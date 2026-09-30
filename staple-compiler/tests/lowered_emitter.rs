@@ -75,18 +75,21 @@ fn partial_emission_empty_program_verifies() {
 /// with the stub/histogram report.
 #[test]
 fn partial_emission_stubs_unsupported_sites_and_verifies() {
-    // Stage 5.4 Step 3 emits string literals, so the stub fixture uses string
-    // templates, which stay a 5.5 diagnostic.
+    // Stage 5.5 emits expressions, patterns, places, and control flow, so the
+    // stub fixture uses the still-unported 5.6 discarded-result cleanup and a
+    // 5.7 structural Debug artifact.
     let lowered = prepare(concat!(
-        "def first: I32 -> String = value => \"first ${value:?}\"\n",
-        "def second: I32 -> String = value => \"second ${value:?}\"\n",
+        "type Handle = ctor I32\n",
+        "impl Drop Handle { def drop = Handle value => () }\n",
+        "def first: () -> () = () => { Handle 1; () }\n",
+        "def second: () -> () = () => { Handle 2; () }\n",
         "type Point = ctor (I32, I32)\n",
         "let point: Point = Point (1, 2)\n",
         "let make: () -> ((I32, I32) -> Point) = () => Point\n",
         "let pair = (1, 2)\n",
         "let shown = \"pair: ${pair:?}\"\n",
-        "let one = first 1\n",
-        "let two = second 2\n",
+        "let one = first ()\n",
+        "let two = second ()\n",
     ));
     let context = Context::create();
     let (ir, report) = CodeGenerator::with_emitter(&context, Emitter::Lowered)
@@ -97,7 +100,8 @@ fn partial_emission_stubs_unsupported_sites_and_verifies() {
         report
             .stubbed()
             .iter()
-            .any(|stub| stub.name() == "first" && stub.diagnostic().message.contains("string")),
+            .any(|stub| stub.name() == "first"
+                && stub.diagnostic().message.contains("discarded result cleanup")),
         "the unsupported `first` body is stubbed: {:?}",
         report.stubbed()
     );
@@ -117,8 +121,8 @@ fn partial_emission_stubs_unsupported_sites_and_verifies() {
         report
             .family_histogram()
             .iter()
-            .any(|(family, count)| family == "string template" && *count >= 2),
-        "the histogram counts the string-template family: {:?}",
+            .any(|(family, count)| family == "discarded result cleanup" && *count >= 2),
+        "the histogram counts the discarded-result cleanup family: {:?}",
         report.family_histogram()
     );
     assert!(
