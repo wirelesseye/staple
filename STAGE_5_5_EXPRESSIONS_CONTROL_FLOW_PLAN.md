@@ -4,6 +4,10 @@ This is the separate plan the Stage 5.5 section of [STAGE_5_LLVM_MIGRATION_BREAK
 
 Line references are against `734d7a3` and will drift; re-locate code by function name. Run the suite with `cargo nextest run --workspace` (the test profile is `opt-level = 1`; about two minutes).
 
+**Status:** In progress. Step 1 has landed.
+
+Step 1: the E2 cleanup hook is in. `LoweredEmitter::emit_drop_site(owner, site)` looks up the owner's artifact-use record for the exact site and diagnoses `discarded result cleanup`, `replaced value cleanup`, or `loop body result cleanup` (all 5.6) when one exists, and returns `Ok(())` otherwise; a discarded statement result without a `DiscardedResult` record now emits nothing, exactly as legacy does. The diagnostic family `coercion or move` is renamed to `coercion` in the emitter and the ownership table (`codegen/differential.rs`), whose 5.6 entries replace `expression result cleanup` with the three site families. The in-process harness passes unchanged: 5822 fully emitted bodies compared, 2240 stubs across 36 families, and no earlier family's count moved (each stub still records its body's first blocker; the newly emitting statements are inside bodies blocked earlier). The breakdown's 5.5 section already stated E2.
+
 ## Starting Point
 
 The lowered emitter covers calls, callable values, closures, resources, adapters, and the numeric/string/slice intrinsics (Stage 5.4). The 28-program differential corpus compares 5822 fully emitted bodies with legacy and reports 2240 stubs. Of those, 1903 are owned by 5.5:

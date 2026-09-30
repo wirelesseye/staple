@@ -115,7 +115,7 @@ const fn emits(
 ///
 /// A family that mixes two substages is assigned to the one that finishes it,
 /// so the earlier substage's zero-stub gate is not blocked by the later
-/// construct: `coercion or move` is 5.5 (5.4 emits the move half),
+/// construct: `coercion` is 5.5 (5.4 emits the move half),
 /// `checked or reactive name` is 5.8 (5.4 emits the checked half), and
 /// `reactive or cell binding` is 5.8 (5.4 emits the cell half).
 #[cfg(test)]
@@ -169,7 +169,7 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     ("assignment", "5.5"),
     ("at pattern binding", "5.5"),
     ("break", "5.5"),
-    ("coercion or move", "5.5"),
+    ("coercion", "5.5"),
     ("dereference place", "5.5"),
     ("index", "5.5"),
     ("indexed place", "5.5"),
@@ -199,12 +199,14 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     ("buffer pop", "5.6"),
     ("buffer push", "5.6"),
     ("buffer transfer", "5.6"),
+    ("discarded result cleanup", "5.6"),
     ("drop", "5.6"),
     ("drop glue artifact", "5.6"),
-    ("expression result cleanup", "5.6"),
     ("GC finalizer artifact", "5.6"),
+    ("loop body result cleanup", "5.6"),
     ("owned binding cleanup", "5.6"),
     ("reference replacement", "5.6"),
+    ("replaced value cleanup", "5.6"),
     ("wildcard cleanup", "5.6"),
     // 5.7: structural methods and formatting.
     ("structural method artifact", "5.7"),

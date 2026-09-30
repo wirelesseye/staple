@@ -579,6 +579,36 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// needs drop: legacy attaches a GC finalizer to the cell, which is 5.6's
     /// `GcFinalizer` work, and emitting the cell without it would silently
     /// change behavior.
+    ///
+    /// Stage 5.5 Step 1 (E2): a drop position checks the owner's artifact-use
+    /// record for its exact site and diagnoses the position's cleanup family
+    /// when one exists. No record means the value needs no drop, so the
+    /// position emits nothing (exactly as legacy does). Keeping the check
+    /// record-driven rather than type-driven preserves Contract 1.
+    fn emit_drop_site(
+        &self,
+        owner: EmissionOwner,
+        site: crate::ArtifactUseSite,
+    ) -> CodeGenerationResult<()> {
+        let family = match site {
+            crate::ArtifactUseSite::DiscardedResult(_) => "discarded result cleanup",
+            crate::ArtifactUseSite::ReplacedValue(_) => "replaced value cleanup",
+            crate::ArtifactUseSite::LoopBodyResult(_) => "loop body result cleanup",
+            _ => return Ok(()),
+        };
+        let Some(record) = self
+            .view
+            .artifact_uses(owner)
+            .and_then(|uses| uses.iter().find(|use_| use_.site == site))
+        else {
+            return Ok(());
+        };
+        Err(Diagnostic::new(
+            record.origin.span.clone(),
+            format!("lowered emitter: {family} is not implemented yet"),
+        ))
+    }
+
     fn guard_owned_bindings(
         &self,
         owner: EmissionOwner,
@@ -1567,9 +1597,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredItemKind::Expression(statement) => {
-                if statement.drop_result {
-                    return Err(unimplemented("expression result cleanup"));
-                }
+                // E2: the discriminant is the owner's `DiscardedResult` use
+                // record, not the `drop_result` flag, so a discarded value
+                // that needs no drop now emits.
+                self.emit_drop_site(owner, crate::ArtifactUseSite::DiscardedResult(id))?;
                 self.emit_expression(owner, statement.expression, environment)?;
                 Ok(())
             }
@@ -1733,7 +1764,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
         };
         if expression.coercion.is_some() {
-            return Err(unimplemented("coercion or move"));
+            return Err(unimplemented("coercion"));
         }
         match &expression.kind {
             LoweredExpressionKind::Integer(integer) => Ok(self

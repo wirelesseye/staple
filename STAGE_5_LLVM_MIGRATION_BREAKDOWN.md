@@ -226,6 +226,8 @@ The partial-mode report is the Stage 5.4–5.8 backlog baseline. The empty progr
 - **`emit_place_pointer` extension.** Stage 5.4's `emit_place_pointer` resolves symbol places (local, binding cell, parameter pointer, module global), captured cells, and resource places. This substage extends that one function for `Temporary`, `Dereference`, `ProductElement`, `Representation`, and `Indexed` places; there is no second place emitter.
 - Cleanup positions this substage reaches (discarded results, replaced values, loop body results, wildcard discards, and owned bindings introduced by patterns and match arms) check the owner's artifact-use record for their site and diagnose as owned by 5.6 when one exists. They never silently omit a drop (Contract 2; decision E2 in the 5.5 plan).
 
+**Progress (Step 1).** The E2 hook `LoweredEmitter::emit_drop_site(owner, ArtifactUseSite)` is in `codegen/lowered/mod.rs`: it diagnoses `discarded result cleanup`, `replaced value cleanup`, or `loop body result cleanup` (all 5.6) only when the owner has the matching artifact-use record; `LoweredItemKind::Expression` routes through it, so a discarded result with no drop emits. The `coercion or move` family is renamed `coercion`, and the ownership table's 5.6 entries now list the three site families. The differential harness is otherwise unchanged (5822 bodies compared, 2240 stubs).
+
 **Gate (superseded by the 5.5 plan's revised gate; kept as history):** The corpus covers every Stage 2.4 family, including nested matches over sums and products, string-literal patterns, loops with break values, propagation, indexed assignment, and default/spread products. Behavior and function types match legacy.
 
 ## Stage 5.6 - Ownership Cleanup, Finalizers, and Buffers
