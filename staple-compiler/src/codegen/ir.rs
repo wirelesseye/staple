@@ -503,6 +503,459 @@ impl<'program, 'context> Backend<'program, 'context> {
             )
             .map_err(compiler_diagnostic)
     }
+
+    /// Legacy's float binary builder with its SSA names
+    /// (`{type}.add`/`.subtract`/`.multiply`/`.divide`). Stage 5.4 Step 2:
+    /// both emitters share it, so the lower emitter's `FloatBinary` output is
+    /// identical to legacy's.
+    pub(crate) fn build_float_binary(
+        &self,
+        float: crate::FloatType,
+        operation: crate::IntegerBinaryOperation,
+        left: inkwell::values::FloatValue<'context>,
+        right: inkwell::values::FloatValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::FloatValue<'context>> {
+        use crate::IntegerBinaryOperation;
+        let name = format!(
+            "{}.{}",
+            float.intrinsic_name(),
+            match operation {
+                IntegerBinaryOperation::Add => "add",
+                IntegerBinaryOperation::Subtract => "subtract",
+                IntegerBinaryOperation::Multiply => "multiply",
+                IntegerBinaryOperation::Divide => "divide",
+            }
+        );
+        let value = match operation {
+            IntegerBinaryOperation::Add => self.builder.build_float_add(left, right, &name),
+            IntegerBinaryOperation::Subtract => self.builder.build_float_sub(left, right, &name),
+            IntegerBinaryOperation::Multiply => self.builder.build_float_mul(left, right, &name),
+            IntegerBinaryOperation::Divide => self.builder.build_float_div(left, right, &name),
+        }
+        .map_err(compiler_diagnostic)?;
+        Ok(value)
+    }
+
+    /// Legacy's float compare builder with its SSA name (`{type}.compare`).
+    pub(crate) fn build_float_compare(
+        &self,
+        float: crate::FloatType,
+        operation: crate::IntegerCompareOperation,
+        left: inkwell::values::FloatValue<'context>,
+        right: inkwell::values::FloatValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        use crate::IntegerCompareOperation;
+        let predicate = match operation {
+            IntegerCompareOperation::Equal => inkwell::FloatPredicate::OEQ,
+            IntegerCompareOperation::NotEqual => inkwell::FloatPredicate::UNE,
+            IntegerCompareOperation::LessThan => inkwell::FloatPredicate::OLT,
+            IntegerCompareOperation::LessThanOrEqual => inkwell::FloatPredicate::OLE,
+            IntegerCompareOperation::GreaterThan => inkwell::FloatPredicate::OGT,
+            IntegerCompareOperation::GreaterThanOrEqual => inkwell::FloatPredicate::OGE,
+        };
+        self.builder
+            .build_float_compare(
+                predicate,
+                left,
+                right,
+                &format!("{}.compare", float.intrinsic_name()),
+            )
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Legacy's Bool builder: tag 0 (`True`) or 1 (`False`) in the two-arm sum.
+    pub(crate) fn build_bool_value(
+        &self,
+        condition: inkwell::values::IntValue<'context>,
+        sum_type: inkwell::types::StructType<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
+        // `Bool` is declared as `True | False` in the standard-library contract.
+        let true_index = 0;
+        let false_index = 1;
+        let tag = self
+            .builder
+            .build_select(
+                condition,
+                self.context.i32_type().const_int(true_index as u64, false),
+                self.context.i32_type().const_int(false_index as u64, false),
+                "bool.tag",
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_insert_value(sum_type.const_zero(), tag, 0, "bool.value")
+            .map(|value| value.as_any_value_enum())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    /// Legacy's symbol-initialization check: load the state byte and trap
+    /// unless it is 2. Both emitters share it (5.4 Step 2).
+    pub(crate) fn build_initialization_check(
+        &self,
+        state_slot: inkwell::values::PointerValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let state = self
+            .builder
+            .build_load(self.context.i8_type(), state_slot, "binding.state")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_int_value();
+        let invalid = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                state,
+                self.context.i8_type().const_int(2, false),
+                "binding.uninitialized",
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.build_trap_if(invalid, span)
+    }
+
+    /// Legacy's bounds-checked element pointer: trap when `position >= length`,
+    /// then GEP. Shared by slice reads and other index paths.
+    pub(crate) fn build_index_pointer(
+        &self,
+        pointer: inkwell::values::PointerValue<'context>,
+        position: inkwell::values::IntValue<'context>,
+        length: inkwell::values::IntValue<'context>,
+        element_type: inkwell::types::BasicTypeEnum<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let out_of_bounds = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::UGE,
+                position,
+                length,
+                "index.out_of_bounds",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(out_of_bounds, span)?;
+        unsafe {
+            self.builder
+                .build_gep(element_type, pointer, &[position], "index.element")
+        }
+        .map_err(compiler_diagnostic)
+    }
+
+    /// Legacy `SliceLength`'s core: field 1 of the `{pointer, length}` slice.
+    pub(crate) fn build_slice_length(
+        &self,
+        slice: inkwell::values::StructValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        self.builder
+            .build_extract_value(slice, 1, "slice.length")
+            .map(|value| value.into_int_value())
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Legacy `SliceGetRef`'s core: extract the slice's pointer and length and
+    /// return the bounds-checked element pointer.
+    pub(crate) fn build_slice_get_ref(
+        &self,
+        slice: inkwell::values::StructValue<'context>,
+        position: inkwell::values::IntValue<'context>,
+        element_type: inkwell::types::BasicTypeEnum<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let pointer = self
+            .builder
+            .build_extract_value(slice, 0, "slice.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let length = self
+            .builder
+            .build_extract_value(slice, 1, "slice.length")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        self.build_index_pointer(pointer, position, length, element_type, span)
+    }
+
+    /// Legacy's `{code, environment}` closure value.
+    pub(crate) fn build_closure_value(
+        &self,
+        code: inkwell::values::FunctionValue<'context>,
+        environment: inkwell::values::PointerValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let mut closure = self.closure_type().const_zero();
+        closure = self
+            .builder
+            .build_insert_value(
+                closure,
+                code.as_global_value().as_pointer_value(),
+                0,
+                "closure.code",
+            )
+            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?
+            .into_struct_value();
+        self.builder
+            .build_insert_value(closure, environment, 1, "closure.environment")
+            .map(|value| value.into_struct_value())
+            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))
+    }
+
+    /// The capture-environment struct layout: one field per capture, in capture
+    /// order. `fields` are the per-capture storage types (`capture_field_type`
+    /// in the lowered emitter, legacy `compile_capture_type`).
+    pub(crate) fn capture_environment_type(
+        &self,
+        fields: &[inkwell::types::BasicTypeEnum<'context>],
+    ) -> inkwell::types::StructType<'context> {
+        self.context.struct_type(fields, false)
+    }
+
+    /// One capture field insert, always named `capture` like legacy's.
+    pub(crate) fn insert_capture(
+        &self,
+        environment: inkwell::values::StructValue<'context>,
+        value: inkwell::values::BasicValueEnum<'context>,
+        index: u32,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        self.builder
+            .build_insert_value(environment, value, index, "capture")
+            .map(|value| value.into_struct_value())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    /// GC-allocate one built capture environment and store it, like legacy
+    /// `build_capture_environment`'s allocation tail.
+    pub(crate) fn allocate_capture_environment(
+        &self,
+        environment_type: inkwell::types::StructType<'context>,
+        environment_value: inkwell::values::StructValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let size = self.target_data.get_store_size(&environment_type);
+        let pointer = self.build_gc_allocation(
+            self.size_type.const_int(size, false),
+            "closure.environment",
+            span.clone(),
+        )?;
+        self.builder
+            .build_store(pointer, environment_value)
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(pointer)
+    }
+
+    /// Legacy `build_product_value`: build a literal struct from the given
+    /// values (a single value is returned unchanged; the empty product is a
+    /// zero-sized struct only when the caller passes no values). Shared by the
+    /// constructor and product paths.
+    pub(crate) fn build_product_value(
+        &self,
+        values: &[inkwell::values::BasicValueEnum<'context>],
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
+        if let [value] = values {
+            return Ok(*value);
+        }
+        let types = values
+            .iter()
+            .map(inkwell::values::BasicValueEnum::get_type)
+            .collect::<Vec<_>>();
+        let mut product = self.context.struct_type(&types, true).const_zero();
+        for (index, value) in values.iter().copied().enumerate() {
+            product = self
+                .builder
+                .build_insert_value(product, value, index as u32, "product.element")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+                .into_struct_value();
+        }
+        Ok(product.into())
+    }
+
+    /// The computed temporary legacy's indirect/mutation argument paths
+    /// materialize: alloca the parameter's concrete type and store the value.
+    pub(crate) fn build_argument_temporary(
+        &self,
+        value: inkwell::values::BasicValueEnum<'context>,
+        llvm_type: inkwell::types::BasicTypeEnum<'context>,
+        name: &str,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let pointer = self
+            .builder
+            .build_alloca(llvm_type, name)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(pointer, value)
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(pointer)
+    }
+
+    /// Legacy `compile_numeric_to_string`'s core (the caller evaluates the
+    /// argument): format the value into a stack buffer and copy it to a GC
+    /// String.
+    pub(crate) fn build_numeric_to_string(
+        &self,
+        numeric: crate::NumericType,
+        argument: inkwell::values::BasicValueEnum<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
+        let capacity = self.context.i32_type().const_int(128, false);
+        let buffer = self
+            .builder
+            .build_array_alloca(self.context.i8_type(), capacity, "to_string.buffer")
+            .map_err(compiler_diagnostic)?;
+        let format = match numeric {
+            crate::NumericType::Integer(integer) if integer.is_signed() => "%lld",
+            crate::NumericType::Integer(_) => "%llu",
+            crate::NumericType::Float(crate::FloatType::F32) => "%.9g",
+            crate::NumericType::Float(crate::FloatType::F64) => "%.17g",
+        };
+        let format = self
+            .builder
+            .build_global_string_ptr(format, "to_string.format")
+            .map_err(compiler_diagnostic)?
+            .as_pointer_value();
+        let formatted = match (numeric, argument) {
+            (
+                crate::NumericType::Integer(integer),
+                inkwell::values::BasicValueEnum::IntValue(value),
+            ) => {
+                let bits = value.get_type().get_bit_width();
+                let wide = if bits < 64 {
+                    if integer.is_signed() {
+                        self.builder.build_int_s_extend(
+                            value,
+                            self.context.i64_type(),
+                            "to_string.integer",
+                        )
+                    } else {
+                        self.builder.build_int_z_extend(
+                            value,
+                            self.context.i64_type(),
+                            "to_string.integer",
+                        )
+                    }
+                    .map_err(compiler_diagnostic)?
+                } else {
+                    value
+                };
+                inkwell::values::BasicValueEnum::IntValue(wide)
+            }
+            (
+                crate::NumericType::Float(crate::FloatType::F32),
+                inkwell::values::BasicValueEnum::FloatValue(value),
+            ) => inkwell::values::BasicValueEnum::FloatValue(
+                self.builder
+                    .build_float_ext(value, self.context.f64_type(), "to_string.float")
+                    .map_err(compiler_diagnostic)?,
+            ),
+            (
+                crate::NumericType::Float(crate::FloatType::F64),
+                inkwell::values::BasicValueEnum::FloatValue(value),
+            ) => inkwell::values::BasicValueEnum::FloatValue(value),
+            _ => {
+                return Err(Diagnostic::new(
+                    span,
+                    "numeric conversion requires a numeric value",
+                ));
+            }
+        };
+        let snprintf_type = self.context.i32_type().fn_type(
+            &[
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.size_type.into(),
+                self.context.ptr_type(AddressSpace::default()).into(),
+            ],
+            true,
+        );
+        let snprintf = self.declare_named_function("snprintf", snprintf_type);
+        let length = self
+            .builder
+            .build_direct_call(
+                snprintf,
+                &[
+                    buffer.into(),
+                    self.size_type.const_int(128, false).into(),
+                    format.into(),
+                    formatted.into(),
+                ],
+                "to_string.length",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let length = self
+            .builder
+            .build_int_z_extend(length, self.size_type, "to_string.size")
+            .map_err(compiler_diagnostic)?;
+        let pointer = self.build_gc_allocation(length, "to_string.data", span.clone())?;
+        self.builder
+            .build_memcpy(pointer, 1, buffer, 1, length)
+            .map_err(compiler_diagnostic)?;
+        Ok(self
+            .build_string_value(pointer, length, span)?
+            .as_any_value_enum())
+    }
+
+    /// Legacy `compile_string_add`'s core (the caller evaluates the operands):
+    /// concatenate two Strings into one GC allocation, with the same overflow
+    /// check and SSA names.
+    pub(crate) fn build_string_add(
+        &self,
+        left: inkwell::values::StructValue<'context>,
+        right: inkwell::values::StructValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
+        let left_pointer = self
+            .builder
+            .build_extract_value(left, 0, "string.add.left.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let left_length = self
+            .builder
+            .build_extract_value(left, 1, "string.add.left.length")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let right_pointer = self
+            .builder
+            .build_extract_value(right, 0, "string.add.right.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let right_length = self
+            .builder
+            .build_extract_value(right, 1, "string.add.right.length")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let length = self
+            .builder
+            .build_int_add(left_length, right_length, "string.add.length")
+            .map_err(compiler_diagnostic)?;
+        let overflow = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                length,
+                left_length,
+                "string.add.overflow",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(overflow, span.clone())?;
+        let pointer = self.build_gc_allocation(length, "string.add.data", span.clone())?;
+        self.builder
+            .build_memcpy(pointer, 1, left_pointer, 1, left_length)
+            .map_err(compiler_diagnostic)?;
+        let right_target = unsafe {
+            self.builder.build_gep(
+                self.context.i8_type(),
+                pointer,
+                &[left_length],
+                "string.add.right.target",
+            )
+        }
+        .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_memcpy(right_target, 1, right_pointer, 1, right_length)
+            .map_err(compiler_diagnostic)?;
+        Ok(self
+            .build_string_value(pointer, length, span)?
+            .as_any_value_enum())
+    }
 }
 
 pub(crate) fn value_as_basic(

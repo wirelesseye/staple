@@ -21,10 +21,9 @@ use crate::typecheck::{
 };
 use crate::{
     CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType, CheckedResource,
-    CheckedStateEffect, CheckedType, CheckedTypeElement, FloatType, FunctionId,
-    IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction, LoweredModule,
-    ModuleId, NumericType, ResolvedFunction, ResolvedModule, SymbolId, TypeParameterId,
-    TypedModule,
+    CheckedStateEffect, CheckedType, CheckedTypeElement, FloatType, FunctionId, IntegerType,
+    IntrinsicFunction, LoweredModule, ModuleId, NumericType, ResolvedFunction, ResolvedModule,
+    SymbolId, TypeParameterId, TypedModule,
 };
 use staple_syntax::{
     CallExpression, Diagnostic, Expression, Item, Pattern, PatternBindingKind, ProductExpression,
@@ -45,7 +44,7 @@ pub use differential::{
     DifferentialExpectation, DifferentialProgram, DifferentialSource, differential_corpus,
 };
 
-use abi::{flattened_parameter_types, mutation_parameter_mask};
+use abi::{flattened_parameter_types, mutation_parameter_mask, variadic_argument_count_matches};
 use ir::value_as_basic;
 use layout::LayoutContext;
 use layout::{
@@ -6861,31 +6860,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
     /// Bounds-checks `position` against `length` and returns the address of
     /// the indexed element in the `pointer`-based storage.
-    fn compile_index_pointer(
-        &mut self,
-        pointer: inkwell::values::PointerValue<'context>,
-        position: inkwell::values::IntValue<'context>,
-        length: inkwell::values::IntValue<'context>,
-        element_type: BasicTypeEnum<'context>,
-        span: Span,
-    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
-        let out_of_bounds = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::UGE,
-                position,
-                length,
-                "index.out_of_bounds",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.build_trap_if(out_of_bounds, span)?;
-        unsafe {
-            self.builder
-                .build_gep(element_type, pointer, &[position], "index.element")
-        }
-        .map_err(compiler_diagnostic)
-    }
-
     fn compile_index_load(
         &mut self,
         pointer: inkwell::values::PointerValue<'context>,
@@ -6896,7 +6870,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<BasicValueEnum<'context>> {
         let element_type = self.compile_type(&element)?;
         let pointer =
-            self.compile_index_pointer(pointer, position, length, element_type, span.clone())?;
+            self.build_index_pointer(pointer, position, length, element_type, span.clone())?;
         self.builder
             .build_load(element_type, pointer, "index.value")
             .map_err(|error| Diagnostic::new(span, error.to_string()))
@@ -7122,28 +7096,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         }
         Ok(())
-    }
-
-    fn build_initialization_check(
-        &mut self,
-        state_slot: inkwell::values::PointerValue<'context>,
-        span: Span,
-    ) -> CodeGenerationResult<()> {
-        let state = self
-            .builder
-            .build_load(self.context.i8_type(), state_slot, "binding.state")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .into_int_value();
-        let invalid = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::NE,
-                state,
-                self.context.i8_type().const_int(2, false),
-                "binding.uninitialized",
-            )
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.build_trap_if(invalid, span)
     }
 
     fn check_symbol_initialization(
@@ -7824,10 +7776,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     ));
                 };
                 return self
-                    .builder
-                    .build_extract_value(reference, 1, "slice.length")
-                    .map(|value| value.as_any_value_enum())
-                    .map_err(compiler_diagnostic);
+                    .build_slice_length(reference)
+                    .map(|value| value.as_any_value_enum());
             }
             IntrinsicFunction::SliceGetRef => {
                 let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
@@ -7841,16 +7791,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "get_ref requires a slice and a position",
                     ));
                 };
-                let pointer = self
-                    .builder
-                    .build_extract_value(*slice, 0, "slice.pointer")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let length = self
-                    .builder
-                    .build_extract_value(*slice, 1, "slice.length")
-                    .map_err(compiler_diagnostic)?
-                    .into_int_value();
                 let element = match self.concrete_expression_type(&Expression::Call(call.clone())) {
                     Some(CheckedType::Ref(payload)) => payload.as_ref().clone(),
                     _ => {
@@ -7861,10 +7801,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     }
                 };
                 let element_type = self.compile_type(&element)?;
-                let pointer = self.compile_index_pointer(
-                    pointer,
+                let pointer = self.build_slice_get_ref(
+                    *slice,
                     *position,
-                    length,
                     element_type,
                     call.syntax.span.clone(),
                 )?;
@@ -7920,29 +7859,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     "float arithmetic intrinsic operands must be floats",
                 ));
             };
-            let name = format!(
-                "{}.{}",
-                float.intrinsic_name(),
-                match operation {
-                    IntegerBinaryOperation::Add => "add",
-                    IntegerBinaryOperation::Subtract => "subtract",
-                    IntegerBinaryOperation::Multiply => "multiply",
-                    IntegerBinaryOperation::Divide => "divide",
-                }
-            );
-            let value = match operation {
-                IntegerBinaryOperation::Add => self.builder.build_float_add(*left, *right, &name),
-                IntegerBinaryOperation::Subtract => {
-                    self.builder.build_float_sub(*left, *right, &name)
-                }
-                IntegerBinaryOperation::Multiply => {
-                    self.builder.build_float_mul(*left, *right, &name)
-                }
-                IntegerBinaryOperation::Divide => {
-                    self.builder.build_float_div(*left, *right, &name)
-                }
-            }
-            .map_err(compiler_diagnostic)?;
+            let value = self.build_float_binary(float, operation, *left, *right)?;
             return Ok(value.as_any_value_enum());
         }
         if let IntrinsicFunction::FloatCompare { float, operation } = intrinsic {
@@ -7956,23 +7873,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     "float comparison intrinsic operands must be floats",
                 ));
             };
-            let predicate = match operation {
-                IntegerCompareOperation::Equal => inkwell::FloatPredicate::OEQ,
-                IntegerCompareOperation::NotEqual => inkwell::FloatPredicate::UNE,
-                IntegerCompareOperation::LessThan => inkwell::FloatPredicate::OLT,
-                IntegerCompareOperation::LessThanOrEqual => inkwell::FloatPredicate::OLE,
-                IntegerCompareOperation::GreaterThan => inkwell::FloatPredicate::OGT,
-                IntegerCompareOperation::GreaterThanOrEqual => inkwell::FloatPredicate::OGE,
-            };
-            let condition = self
-                .builder
-                .build_float_compare(
-                    predicate,
-                    *left,
-                    *right,
-                    &format!("{}.compare", float.intrinsic_name()),
-                )
-                .map_err(compiler_diagnostic)?;
+            let condition = self.build_float_compare(float, operation, *left, *right)?;
             return self.compile_bool(condition, call.syntax.id, call.syntax.span.clone());
         }
         let [
@@ -8811,99 +8712,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if environment.did_return {
             return Ok(self.unit_value());
         }
-        let capacity = self.context.i32_type().const_int(128, false);
-        let buffer = self
-            .builder
-            .build_array_alloca(self.context.i8_type(), capacity, "to_string.buffer")
-            .map_err(compiler_diagnostic)?;
-        let format = match numeric {
-            NumericType::Integer(integer) if integer.is_signed() => "%lld",
-            NumericType::Integer(_) => "%llu",
-            NumericType::Float(FloatType::F32) => "%.9g",
-            NumericType::Float(FloatType::F64) => "%.17g",
-        };
-        let format = self
-            .builder
-            .build_global_string_ptr(format, "to_string.format")
-            .map_err(compiler_diagnostic)?
-            .as_pointer_value();
-        let formatted = match (numeric, value_as_basic(argument)) {
-            (NumericType::Integer(integer), Some(BasicValueEnum::IntValue(value))) => {
-                let bits = value.get_type().get_bit_width();
-                let wide = if bits < 64 {
-                    if integer.is_signed() {
-                        self.builder.build_int_s_extend(
-                            value,
-                            self.context.i64_type(),
-                            "to_string.integer",
-                        )
-                    } else {
-                        self.builder.build_int_z_extend(
-                            value,
-                            self.context.i64_type(),
-                            "to_string.integer",
-                        )
-                    }
-                    .map_err(compiler_diagnostic)?
-                } else {
-                    value
-                };
-                BasicValueEnum::IntValue(wide)
-            }
-            (NumericType::Float(FloatType::F32), Some(BasicValueEnum::FloatValue(value))) => {
-                BasicValueEnum::FloatValue(
-                    self.builder
-                        .build_float_ext(value, self.context.f64_type(), "to_string.float")
-                        .map_err(compiler_diagnostic)?,
-                )
-            }
-            (NumericType::Float(FloatType::F64), Some(BasicValueEnum::FloatValue(value))) => {
-                BasicValueEnum::FloatValue(value)
-            }
-            _ => {
-                return Err(Diagnostic::new(
-                    call.syntax.span.clone(),
-                    "numeric conversion requires a numeric value",
-                ));
-            }
-        };
-        let snprintf_type = self.context.i32_type().fn_type(
-            &[
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.size_type.into(),
-                self.context.ptr_type(AddressSpace::default()).into(),
-            ],
-            true,
-        );
-        let snprintf = self.declare_named_function("snprintf", snprintf_type);
-        let length = self
-            .builder
-            .build_direct_call(
-                snprintf,
-                &[
-                    buffer.into(),
-                    self.size_type.const_int(128, false).into(),
-                    format.into(),
-                    formatted.into(),
-                ],
-                "to_string.length",
+        // The conversion core is shared with the lowered emitter (5.4 Step 2).
+        let argument = value_as_basic(argument).ok_or_else(|| {
+            Diagnostic::new(
+                call.syntax.span.clone(),
+                "numeric conversion requires a numeric value",
             )
-            .map_err(compiler_diagnostic)?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        let length = self
-            .builder
-            .build_int_z_extend(length, self.size_type, "to_string.size")
-            .map_err(compiler_diagnostic)?;
-        let pointer =
-            self.build_gc_allocation(length, "to_string.data", call.syntax.span.clone())?;
-        self.builder
-            .build_memcpy(pointer, 1, buffer, 1, length)
-            .map_err(compiler_diagnostic)?;
-        Ok(self
-            .build_string_value(pointer, length, call.syntax.span.clone())?
-            .as_any_value_enum())
+        })?;
+        self.build_numeric_to_string(numeric, argument, call.syntax.span.clone())
     }
 
     fn compile_string_add(
@@ -8925,60 +8741,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "string concatenation requires two String values",
             ));
         };
-        let left_pointer = self
-            .builder
-            .build_extract_value(*left, 0, "string.add.left.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let left_length = self
-            .builder
-            .build_extract_value(*left, 1, "string.add.left.length")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let right_pointer = self
-            .builder
-            .build_extract_value(*right, 0, "string.add.right.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let right_length = self
-            .builder
-            .build_extract_value(*right, 1, "string.add.right.length")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let length = self
-            .builder
-            .build_int_add(left_length, right_length, "string.add.length")
-            .map_err(compiler_diagnostic)?;
-        let overflow = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::ULT,
-                length,
-                left_length,
-                "string.add.overflow",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.build_trap_if(overflow, call.syntax.span.clone())?;
-        let pointer =
-            self.build_gc_allocation(length, "string.add.data", call.syntax.span.clone())?;
-        self.builder
-            .build_memcpy(pointer, 1, left_pointer, 1, left_length)
-            .map_err(compiler_diagnostic)?;
-        let right_target = unsafe {
-            self.builder.build_gep(
-                self.context.i8_type(),
-                pointer,
-                &[left_length],
-                "string.add.right.target",
-            )
-        }
-        .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_memcpy(right_target, 1, right_pointer, 1, right_length)
-            .map_err(compiler_diagnostic)?;
-        Ok(self
-            .build_string_value(pointer, length, call.syntax.span.clone())?
-            .as_any_value_enum())
+        // The concatenation core is shared with the lowered emitter (5.4 Step 2).
+        self.build_string_add(*left, *right, call.syntax.span.clone())
     }
 
     fn compile_bool(
@@ -8998,23 +8762,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if sum.alternatives.len() != 2 {
             return Err(Diagnostic::new(span, "comparison result must be Bool"));
         }
-        // `Bool` is declared as `True | False` in the standard-library contract.
-        let true_index = 0;
-        let false_index = 1;
         let sum_type = self.compile_sum_type(&sum)?;
-        let tag = self
-            .builder
-            .build_select(
-                condition,
-                self.context.i32_type().const_int(true_index as u64, false),
-                self.context.i32_type().const_int(false_index as u64, false),
-                "bool.tag",
-            )
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.builder
-            .build_insert_value(sum_type.const_zero(), tag, 0, "bool.value")
-            .map(|value| value.as_any_value_enum())
-            .map_err(|error| Diagnostic::new(span, error.to_string()))
+        // The tag/insert core is shared with the lowered emitter (5.4 Step 2).
+        self.build_bool_value(condition, sum_type, span)
     }
 
     fn compile_string_from_c_string(
@@ -9150,21 +8900,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         Diagnostic::new(span.clone(), "captured value is not first-class")
                     })?
                 };
-                environment_value = self
-                    .builder
-                    .build_insert_value(environment_value, value, index as u32, "capture")
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-                    .into_struct_value();
+                environment_value =
+                    self.insert_capture(environment_value, value, index as u32, span.clone())?;
             }
-            let pointer = self.build_gc_allocation(
-                self.size_type
-                    .const_int(self.target_data.get_store_size(&environment_type), false),
-                "closure.environment",
+            // The allocation core is shared with the lowered emitter (5.4 Step 2).
+            let pointer = self.allocate_capture_environment(
+                environment_type,
+                environment_value,
                 span.clone(),
             )?;
-            self.builder
-                .build_store(pointer, environment_value)
-                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
             if install_finalizer
                 && function.captures.iter().copied().any(|symbol| {
                     !self
@@ -11184,28 +10928,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(function)
     }
 
-    fn build_closure_value(
-        &mut self,
-        code: inkwell::values::FunctionValue<'context>,
-        environment: inkwell::values::PointerValue<'context>,
-    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
-        let mut closure = self.closure_type().const_zero();
-        closure = self
-            .builder
-            .build_insert_value(
-                closure,
-                code.as_global_value().as_pointer_value(),
-                0,
-                "closure.code",
-            )
-            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?
-            .into_struct_value();
-        self.builder
-            .build_insert_value(closure, environment, 1, "closure.environment")
-            .map(|value| value.into_struct_value())
-            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))
-    }
-
     fn compile_capture_type(
         &self,
         function: &ResolvedFunction,
@@ -11231,7 +10953,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .and_then(|ty| self.compile_type(&ty))
             })
             .collect::<CodeGenerationResult<Vec<_>>>()?;
-        Ok(self.context.struct_type(&fields, false))
+        // The layout rule is shared with the lowered emitter (5.4 Step 2).
+        Ok(self.capture_environment_type(&fields))
     }
 
     fn compile_product_expression(
@@ -11880,13 +11603,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Diagnostic::new(expression.syntax().span.clone(), "argument is not storable")
         })?;
         let concrete = substitute_type(value_type.clone(), &self.active_type_substitutions);
-        let pointer = self
-            .builder
-            .build_alloca(self.compile_type(&concrete)?, "mutation.temporary")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(pointer, value)
-            .map_err(compiler_diagnostic)?;
+        let concrete_type = self.compile_type(&concrete)?;
+        let pointer = self.build_argument_temporary(
+            value,
+            concrete_type,
+            "mutation.temporary",
+            expression.syntax().span.clone(),
+        )?;
         Ok((pointer, Some((pointer, concrete))))
     }
 
@@ -11913,13 +11636,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Diagnostic::new(expression.syntax().span.clone(), "argument is not storable")
         })?;
         let concrete = substitute_type(value_type.clone(), &self.active_type_substitutions);
-        let pointer = self
-            .builder
-            .build_alloca(self.compile_type(&concrete)?, "borrow.temporary")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(pointer, value)
-            .map_err(compiler_diagnostic)?;
+        let concrete_type = self.compile_type(&concrete)?;
+        let pointer = self.build_argument_temporary(
+            value,
+            concrete_type,
+            "borrow.temporary",
+            expression.syntax().span.clone(),
+        )?;
         Ok((pointer, None))
     }
 
@@ -11986,7 +11709,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if environment.did_return {
             return Ok(Vec::new());
         }
-        if arguments.len() == expected_count || (variadic && arguments.len() >= expected_count) {
+        if variadic_argument_count_matches(arguments.len(), expected_count, variadic) {
             return Ok(arguments.into_iter().map(Into::into).collect());
         }
         if let [BasicValueEnum::StructValue(product)] = arguments.as_slice()
@@ -12020,29 +11743,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map(Into::into);
         }
         self.compile_expression(environment, expression)
-    }
-
-    fn build_product_value(
-        &mut self,
-        values: &[BasicValueEnum<'context>],
-        span: Span,
-    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
-        if let [value] = values {
-            return Ok(*value);
-        }
-        let types = values
-            .iter()
-            .map(BasicValueEnum::get_type)
-            .collect::<Vec<_>>();
-        let mut product = self.context.struct_type(&types, true).const_zero();
-        for (index, value) in values.iter().copied().enumerate() {
-            product = self
-                .builder
-                .build_insert_value(product, value, index as u32, "product.element")
-                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-                .into_struct_value();
-        }
-        Ok(product.into())
     }
 }
 
