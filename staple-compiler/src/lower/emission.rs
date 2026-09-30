@@ -157,6 +157,15 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.place(self.program, id)
     }
 
+    /// Resolve an owner's `with` (Stage 5.4 Step 5).
+    pub(crate) fn with(
+        &self,
+        owner: EmissionOwner,
+        id: super::LoweredWithId,
+    ) -> Option<&'a LoweredWith> {
+        self.owner(owner)?.with(self.program, id)
+    }
+
     pub(crate) fn callable_value(
         &self,
         owner: EmissionOwner,

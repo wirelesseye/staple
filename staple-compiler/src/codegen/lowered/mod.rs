@@ -20,8 +20,8 @@ use crate::{
     LoweredCallEnvironment, LoweredCallId, LoweredCallStep, LoweredCallableAdapter,
     LoweredCallableTarget, LoweredCallableValueId, LoweredClosureEnvironment,
     LoweredEntryResourceKind, LoweredExpressionKind, LoweredInstanceCapture, LoweredItemKind,
-    LoweredPatternKind, LoweredResourceProviderId, ModuleId, OwnedStorage, RuntimeRequirement,
-    SymbolId,
+    LoweredPatternKind, LoweredProviderStorage, LoweredResourceProviderId, LoweredScopeExit,
+    ModuleId, OwnedStorage, RuntimeRequirement, SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -1668,8 +1668,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::CallableValue(callable) => {
                 self.emit_callable_value(owner, *callable, environment)
             }
-            LoweredExpressionKind::Resource(_) => Err(unimplemented("resource")),
-            LoweredExpressionKind::With(_) => Err(unimplemented("with")),
+            LoweredExpressionKind::Resource(use_id) => {
+                self.emit_resource_read(owner, *use_id, environment)
+            }
+            LoweredExpressionKind::With(with_id) => self.emit_with(owner, *with_id, environment),
             LoweredExpressionKind::Coro(_) => Err(unimplemented("coro")),
             LoweredExpressionKind::Await(_) => Err(unimplemented("await")),
         }
@@ -1828,10 +1830,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // materializes.)
         let by_value_route =
             matches!(call.target, LoweredCallableTarget::Intrinsic { .. }) || native_extern;
-        // Step 5 owns hidden resource arguments; 5.8 owns reactive calls.
-        if !call.resource_bindings.is_empty() {
-            return Err(unsupported("call resources"));
-        }
+        // 5.8 owns reactive calls.
         if call.reactive.is_some() {
             return Err(unsupported("reactive call"));
         }
@@ -1880,11 +1879,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let mut slots: Vec<Option<BasicMetadataValueEnum<'context>>> = vec![None; parameter_count];
+        // Hidden effect-row resource arguments, in row order. Legacy evaluates
+        // its visible arguments first and appends the hidden ones, then passes
+        // `[environment, hidden..., visible...]` (`compile_resource_arguments`).
+        let mut hidden: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
         // Mutation temporaries whose value needs drop after the call, in
         // evaluation order; `emit_call_cleanup` drops them in reverse.
         let mut cleanups: Vec<(PointerValue<'context>, CheckedType)> = Vec::new();
         let mut invoked = false;
         let mut callee_value = None;
+        // Legacy extracts `closure.code`/`closure.environment` after the
+        // visible arguments and before the hidden resources; the parts are
+        // materialized lazily at the first resource step (or after the loop).
+        let mut callee_parts: Option<(PointerValue<'context>, PointerValue<'context>)> = None;
         for step in &call.steps {
             match step {
                 LoweredCallStep::Invoke => {
@@ -1995,15 +2002,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )?;
                     place_argument_slot(&mut slots, *slot, value, &call.origin.span)?;
                 }
-                LoweredCallStep::Resource { .. } => {
-                    return Err(unsupported("resource argument"));
+                LoweredCallStep::Resource { resource } => {
+                    self.ensure_callee_parts(&callee_value, &mut callee_parts)?;
+                    hidden.push(self.emit_hidden_resource_argument(
+                        owner,
+                        &call,
+                        *resource,
+                        environment,
+                    )?);
                 }
             }
         }
         if !invoked || slots.iter().any(Option::is_none) {
             return Err(unsupported("incomplete call"));
         }
-        let values = slots.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+        self.ensure_callee_parts(&callee_value, &mut callee_parts)?;
+        let mut values = hidden;
+        values.extend(slots.into_iter().map(Option::unwrap));
         // A non-extern C-string temporary is the first visible argument
         // (legacy's `scoped_c_string_temporary` check).
         let cleanup_c_string = if !native_extern && call.c_string_temporary {
@@ -2062,19 +2077,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if !matches!(binding, LoweredBoundTarget::Route(_)) {
                     return Err(unsupported("indirect call binding"));
                 }
-                let closure = callee_value.ok_or_else(|| unsupported("indirect callee"))?;
-                let code = self
-                    .backend
-                    .builder
-                    .build_extract_value(closure, 0, "closure.code")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let pointer = self
-                    .backend
-                    .builder
-                    .build_extract_value(closure, 1, "closure.environment")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
+                let (code, pointer) = callee_parts.ok_or_else(|| unsupported("indirect callee"))?;
                 let mut arguments = vec![pointer.into()];
                 arguments.extend(values);
                 let signature = self
@@ -2400,6 +2403,273 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             crate::LoweredPlaceKind::Indexed { .. } => Err(unsupported("indexed place")),
         }
+    }
+
+    /// Materialize an indirect call's `closure.code`/`closure.environment`
+    /// parts once, at legacy's position (after the visible arguments, before
+    /// the hidden resources).
+    fn ensure_callee_parts(
+        &self,
+        closure: &Option<inkwell::values::StructValue<'context>>,
+        parts: &mut Option<(PointerValue<'context>, PointerValue<'context>)>,
+    ) -> CodeGenerationResult<()> {
+        if parts.is_some() {
+            return Ok(());
+        }
+        let Some(closure) = closure else {
+            return Ok(());
+        };
+        let code = self
+            .backend
+            .builder
+            .build_extract_value(*closure, 0, "closure.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let environment = self
+            .backend
+            .builder
+            .build_extract_value(*closure, 1, "closure.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        *parts = Some((code, environment));
+        Ok(())
+    }
+
+    /// Stage 5.4 Step 5: one hidden effect-row resource argument, resolved
+    /// through the provider the use records (`compile_resource_arguments`).
+    fn emit_hidden_resource_argument(
+        &mut self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        index: usize,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
+        let use_id = *call.resource_bindings.get(index).ok_or_else(|| {
+            Diagnostic::new(call.origin.span.clone(), "missing hidden resource binding")
+        })?;
+        let use_record = self.view.resource_use(owner, use_id).ok_or_else(|| {
+            Diagnostic::new(call.origin.span.clone(), "missing hidden resource use")
+        })?;
+        let value = self.bound_resource_value(environment, use_record)?;
+        value_as_basic(value)
+            .map(Into::into)
+            .ok_or_else(|| Diagnostic::new(call.origin.span.clone(), "resource is not first-class"))
+    }
+
+    /// The value one resource use passes or reads: a borrow pointer for a
+    /// mutable or non-`Copy` requirement (which needs an indirect provider),
+    /// else a direct value, loading `resource.copy` when the provider is
+    /// indirect. Legacy `compile_resource_arguments`' rule.
+    fn bound_resource_value(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        use_record: &crate::LoweredResourceUse,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let provider = use_record.provider.ok_or_else(|| {
+            Diagnostic::new(
+                use_record.origin.span.clone(),
+                "resource use has no selected provider",
+            )
+        })?;
+        let bound = environment.resources.get(&provider).ok_or_else(|| {
+            Diagnostic::new(
+                use_record.origin.span.clone(),
+                format!(
+                    "resource `{}` is not available",
+                    use_record.resource.value_type
+                ),
+            )
+        })?;
+        if use_record.pass_mode != LoweredArgumentPassMode::Value {
+            if !bound.indirect {
+                return Err(Diagnostic::new(
+                    use_record.origin.span.clone(),
+                    format!(
+                        "resource `{}` is not borrowable",
+                        use_record.resource.value_type
+                    ),
+                ));
+            }
+            return Ok(bound.value);
+        }
+        if bound.indirect {
+            let pointer = value_as_basic(bound.value)
+                .and_then(|value| match value {
+                    BasicValueEnum::PointerValue(pointer) => Some(pointer),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        use_record.origin.span.clone(),
+                        "borrowed resource pointer is not first-class",
+                    )
+                })?;
+            let llvm_type = self.backend.compile_type(&use_record.resource.value_type)?;
+            return self
+                .backend
+                .builder
+                .build_load(llvm_type, pointer, "resource.copy")
+                .map(|value| value.as_any_value_enum())
+                .map_err(compiler_diagnostic);
+        }
+        Ok(bound.value)
+    }
+
+    /// Stage 5.4 Step 5: a `resource` read. Legacy loads `resource.borrow`
+    /// through an indirect provider and takes the value directly otherwise.
+    fn emit_resource_read(
+        &mut self,
+        owner: EmissionOwner,
+        id: crate::LoweredResourceUseId,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let use_record = self.view.resource_use(owner, id).ok_or_else(|| {
+            Diagnostic::new(staple_syntax::Span::Compiler, "missing resource use")
+        })?;
+        let provider = use_record.provider.ok_or_else(|| {
+            Diagnostic::new(
+                use_record.origin.span.clone(),
+                "resource read has no selected provider",
+            )
+        })?;
+        let bound = environment.resources.get(&provider).ok_or_else(|| {
+            Diagnostic::new(
+                use_record.origin.span.clone(),
+                format!(
+                    "resource `{}` is not available",
+                    use_record.resource.value_type
+                ),
+            )
+        })?;
+        if bound.indirect {
+            let pointer = value_as_basic(bound.value)
+                .map(|value| value.into_pointer_value())
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        use_record.origin.span.clone(),
+                        "borrowed resource pointer is not first-class",
+                    )
+                })?;
+            let llvm_type = self.backend.compile_type(&use_record.resource.value_type)?;
+            return self
+                .backend
+                .builder
+                .build_load(llvm_type, pointer, "resource.borrow")
+                .map(|value| value.as_any_value_enum())
+                .map_err(compiler_diagnostic);
+        }
+        Ok(bound.value)
+    }
+
+    /// Stage 5.4 Step 5: a `with` provider and its body. Legacy evaluates the
+    /// provider value, stores it in the source place (`Place`) or a
+    /// `resource.provider` alloca (`Materialized`), binds it while the body
+    /// runs, and disposes a reactive scope on a normal exit. A `Tasks` scope
+    /// is 5.8.
+    fn emit_with(
+        &mut self,
+        owner: EmissionOwner,
+        id: crate::LoweredWithId,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let with = self.view.with(owner, id).ok_or_else(|| {
+            Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered with")
+        })?;
+        if with.scope_exit == LoweredScopeExit::Tasks {
+            return Err(Diagnostic::new(
+                with.origin.span.clone(),
+                "lowered emitter: task scope is not implemented yet",
+            ));
+        }
+        let provider = self
+            .view
+            .resource_provider(owner, with.provider)
+            .ok_or_else(|| Diagnostic::new(with.origin.span.clone(), "missing `with` provider"))?;
+        let value = self.emit_expression(owner, with.value, environment)?;
+        let stored = match provider.storage {
+            LoweredProviderStorage::Place => {
+                let place = with.place.ok_or_else(|| {
+                    Diagnostic::new(
+                        with.origin.span.clone(),
+                        "`with` place provider has no place",
+                    )
+                })?;
+                self.emit_place_pointer(owner, place, environment)?
+                    .as_any_value_enum()
+            }
+            LoweredProviderStorage::Materialized => {
+                let llvm_type = self.backend.compile_type(&provider.resource.value_type)?;
+                let slot = self
+                    .backend
+                    .builder
+                    .build_alloca(llvm_type, "resource.provider")
+                    .map_err(compiler_diagnostic)?;
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        with.origin.span.clone(),
+                        "resource provider is not first-class",
+                    )
+                })?;
+                self.backend
+                    .builder
+                    .build_store(slot, value)
+                    .map_err(compiler_diagnostic)?;
+                slot.as_any_value_enum()
+            }
+        };
+        environment.resources.insert(
+            with.provider,
+            BoundResource {
+                resource: provider.resource.clone(),
+                value: stored,
+                indirect: true,
+            },
+        );
+        let reactive = with.scope_exit == LoweredScopeExit::Reactive;
+        if reactive {
+            let scope = value_as_basic(value)
+                .map(|value| value.into_pointer_value())
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        with.origin.span.clone(),
+                        "reactive scope is not first-class",
+                    )
+                })?;
+            environment.reactive_scopes.push(scope);
+        }
+        let result = self.emit_block(owner, with.body, environment);
+        if !environment.returned && reactive {
+            self.dispose_reactive_scopes(
+                environment,
+                environment.reactive_scopes.len().saturating_sub(1),
+                &with.origin.span,
+            )?;
+        }
+        if reactive {
+            environment.reactive_scopes.pop();
+        }
+        environment.resources.remove(&with.provider);
+        result
+    }
+
+    /// Legacy `dispose_reactive_scopes`: dispose every scope from `keep` on, in
+    /// reverse order.
+    fn dispose_reactive_scopes(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        keep: usize,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        for scope in environment.reactive_scopes[keep..].iter().rev() {
+            self.backend.build_reactive_runtime_call(
+                "__staple_reactive_scope_dispose",
+                &[(*scope).into()],
+                None,
+                "reactive.dispose",
+                span.clone(),
+            )?;
+        }
+        Ok(())
     }
 
     fn emit_intrinsic(

@@ -1097,6 +1097,10 @@ pub(crate) struct LoweredWith {
     pub provider: LoweredResourceProviderId,
     /// The provider value expression, evaluated before the body.
     pub value: ExpressionId,
+    /// The source place the provider storage reuses
+    /// (`LoweredProviderStorage::Place`). Stage 5.4 Step 5 records it so the
+    /// emitter does not re-derive the place decision.
+    pub place: Option<PlaceId>,
     pub body: BlockId,
     /// The scope-exit obligation, if any.
     pub scope_exit: LoweredScopeExit,
@@ -3660,6 +3664,14 @@ impl LoweredProgram {
         } else {
             LoweredProviderStorage::Materialized
         };
+        // Record the reused source place once, so emission never re-derives
+        // the place decision (Stage 5.4 Step 5).
+        let place = match storage {
+            LoweredProviderStorage::Place => {
+                Some(self.lower_place(module, owner, context, &with.value)?)
+            }
+            LoweredProviderStorage::Materialized => None,
+        };
         let scope_exit = Self::scope_exit_for(module, &resource.value_type);
         let provider = self.push_provider(
             origin.clone(),
@@ -3679,6 +3691,7 @@ impl LoweredProgram {
             origin,
             provider,
             value,
+            place,
             body,
             scope_exit,
         }))
@@ -10222,6 +10235,9 @@ impl LoweredProgram {
         }
         self.visit_owned_resource_provider(with.provider, reached);
         self.visit_owned_expression(with.value, reached);
+        if let Some(place) = with.place {
+            self.visit_owned_place(place, reached);
+        }
         self.visit_owned_block(with.body, reached);
     }
 

@@ -2049,6 +2049,7 @@ impl<'a> BodyCloner<'a> {
             return error_with(self);
         };
         let value = self.clone_expression(original.value);
+        let place = original.place.map(|place| self.clone_place(place));
         let provider = self.clone_resource_provider(original.provider);
         self.recompute_with_provider(provider, value);
         self.active_providers.push(provider);
@@ -2058,6 +2059,7 @@ impl<'a> BodyCloner<'a> {
             origin: original.origin,
             provider,
             value,
+            place,
             body,
             scope_exit: original.scope_exit,
         });
@@ -2956,6 +2958,7 @@ fn error_with(cloner: &mut BodyCloner<'_>) -> LoweredWithId {
         origin: Origin::compiler(),
         provider,
         value,
+        place: None,
         body,
         scope_exit: super::LoweredScopeExit::Ordinary,
     })
