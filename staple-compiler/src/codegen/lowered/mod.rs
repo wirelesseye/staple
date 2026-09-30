@@ -1718,27 +1718,62 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })?
             .clone();
         let value = self.emit_expression_value(owner, &expression, environment)?;
+        // Legacy `compile_expression`: a diverged body releases moved
+        // ownership and returns without coercing.
+        if environment.returned {
+            self.release_moved_ownership(owner, environment, &expression)?;
+            return Ok(value);
+        }
         // Legacy `compile_expression`'s divergence handling: an expression of
         // type `Never` (or one coerced from `Never`) ends the block. Order
         // matches legacy: the `unreachable` comes first, then the moved-
         // ownership release.
-        let diverges = !environment.returned
-            && (expression.value_type == CheckedType::Never
-                || expression
-                    .coercion
-                    .as_ref()
-                    .is_some_and(|coercion| coercion.source == CheckedType::Never));
+        let diverges = expression.value_type == CheckedType::Never
+            || expression
+                .coercion
+                .as_ref()
+                .is_some_and(|coercion| coercion.source == CheckedType::Never);
         if diverges {
             self.backend
                 .builder
                 .build_unreachable()
                 .map_err(compiler_diagnostic)?;
             environment.returned = true;
+            self.release_moved_ownership(owner, environment, &expression)?;
+            return Ok(value);
         }
-        // Legacy `compile_expression`'s `release_moved_ownership`: clear the
-        // initialization state of every symbol the expression moved out of a
-        // binding cell. The live-flag store for an owned droppable value is
-        // 5.6; the Step 1 guard already stopped bodies that own one.
+        // Stage 5.5 Step 4: apply the recorded coercion plan. Lowering already
+        // selected the alternatives (E1), so emission never re-selects one.
+        let value = match (&expression.coercion, &expression.coercion_plan) {
+            (Some(coercion), Some(plan)) => self.emit_coercion(
+                value,
+                &coercion.source,
+                &coercion.target,
+                plan,
+                &expression.origin.span,
+            )?,
+            (Some(_), None) => {
+                return Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "lowered emitter: coercion",
+                ));
+            }
+            (None, _) => value,
+        };
+        self.release_moved_ownership(owner, environment, &expression)?;
+        Ok(value)
+    }
+
+    /// Legacy `compile_expression`'s `release_moved_ownership`: clear the
+    /// initialization state of every symbol the expression moved out of a
+    /// binding cell. The live-flag store for an owned droppable value is 5.6;
+    /// the Step 1 guard already stopped bodies that own one.
+    fn release_moved_ownership(
+        &mut self,
+        owner: EmissionOwner,
+        environment: &mut FunctionEnvironment<'context>,
+        expression: &crate::LoweredExpression,
+    ) -> CodeGenerationResult<()> {
         for symbol in &expression.moved_symbols {
             self.store_local_initialization_state(
                 owner,
@@ -1748,7 +1783,139 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 &expression.origin.span,
             )?;
         }
-        Ok(value)
+        Ok(())
+    }
+
+    /// Stage 5.5 Step 4: execute one `LoweredCoercionPlan`, mirroring legacy
+    /// `coerce_value`/`coerce_sum_value`/`coerce_slice_ref_value` instruction
+    /// for instruction. `source`/`target` navigate the same recursion so the
+    /// nested payload plans and types stay in lockstep.
+    fn emit_coercion(
+        &mut self,
+        value: AnyValueEnum<'context>,
+        source: &CheckedType,
+        target: &CheckedType,
+        plan: &crate::LoweredCoercionPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        match plan {
+            crate::LoweredCoercionPlan::Identity => Ok(value),
+            crate::LoweredCoercionPlan::SliceRef { length } => {
+                let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(value) else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "invalid fixed reference representation",
+                    ));
+                };
+                self.backend.build_slice_ref_value(pointer, *length)
+            }
+            crate::LoweredCoercionPlan::SumInject {
+                alternative,
+                payload,
+            } => {
+                let CheckedType::Sum(target_sum) = target else {
+                    return Err(Diagnostic::new(span.clone(), "invalid sum coercion target"));
+                };
+                let storage = self.backend.begin_sum_storage(target_sum, span)?;
+                let target_alternative = &target_sum.alternatives[*alternative];
+                let value = self.emit_coercion(value, source, target_alternative, payload, span)?;
+                self.backend.store_sum_payload(
+                    value,
+                    target_alternative,
+                    *alternative,
+                    &storage.storage,
+                    span.clone(),
+                )?;
+                self.backend.load_sum_storage(&storage, span)
+            }
+            crate::LoweredCoercionPlan::SumWiden { arms } => {
+                let CheckedType::Sum(source_sum) = source else {
+                    return Err(Diagnostic::new(span.clone(), "invalid sum coercion source"));
+                };
+                let CheckedType::Sum(target_sum) = target else {
+                    return Err(Diagnostic::new(span.clone(), "invalid sum coercion target"));
+                };
+                let storage = self.backend.begin_sum_storage(target_sum, span)?;
+                let Some(BasicValueEnum::StructValue(source_value)) = value_as_basic(value) else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "sum value has an invalid representation",
+                    ));
+                };
+                let source_tag = self.backend.build_sum_tag(source_value, "sum.source.tag")?;
+                let function = self
+                    .backend
+                    .builder
+                    .get_insert_block()
+                    .and_then(|block| block.get_parent())
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "sum coercion is not in a function")
+                    })?;
+                let merge = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "sum.coerce.done");
+                let cases = source_sum
+                    .alternatives
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        (
+                            self.backend
+                                .context
+                                .i32_type()
+                                .const_int(index as u64, false),
+                            self.backend
+                                .context
+                                .append_basic_block(function, "sum.coerce.case"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                self.backend
+                    .builder
+                    .build_switch(source_tag, merge, &cases)
+                    .map_err(compiler_diagnostic)?;
+                for (source_index, alternative) in source_sum.alternatives.iter().enumerate() {
+                    self.backend.builder.position_at_end(cases[source_index].1);
+                    let Some(arm) = arms.get(source_index).and_then(Option::as_ref) else {
+                        // Propagating bindings narrow away their selected
+                        // success tag before widening the residual variants.
+                        self.backend
+                            .builder
+                            .build_unreachable()
+                            .map_err(compiler_diagnostic)?;
+                        continue;
+                    };
+                    let payload = self.backend.extract_sum_alternative(
+                        source_value,
+                        source_sum,
+                        source_index,
+                        span.clone(),
+                    )?;
+                    let target_alternative = &target_sum.alternatives[arm.target];
+                    let payload = self.emit_coercion(
+                        payload.as_any_value_enum(),
+                        alternative,
+                        target_alternative,
+                        &arm.payload,
+                        span,
+                    )?;
+                    self.backend.store_sum_payload(
+                        payload,
+                        target_alternative,
+                        arm.target,
+                        &storage.storage,
+                        span.clone(),
+                    )?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(merge)
+                        .map_err(compiler_diagnostic)?;
+                }
+                self.backend.builder.position_at_end(merge);
+                self.backend.load_sum_storage(&storage, span)
+            }
+        }
     }
 
     fn emit_expression_value(
@@ -1763,9 +1930,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 format!("lowered emitter: {family} is not implemented yet"),
             )
         };
-        if expression.coercion.is_some() {
-            return Err(unimplemented("coercion"));
-        }
         match &expression.kind {
             LoweredExpressionKind::Integer(integer) => Ok(self
                 .backend
@@ -1779,6 +1943,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .into()),
             LoweredExpressionKind::Block(block) => self.emit_block(owner, *block, environment),
             LoweredExpressionKind::Name(name) => {
+                // Legacy `compile_expression_uncoerced`'s `Name` path returns
+                // the unit value for a singleton before any storage read.
+                if name.singleton.is_some() {
+                    return Ok(self.backend.unit_value());
+                }
                 if name.reactive.is_some() {
                     return Err(unimplemented("checked or reactive name"));
                 }
@@ -1810,18 +1979,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend
                     .build_owned_c_string(text, expression.origin.span.clone())
             }
-            LoweredExpressionKind::Access(_) => Err(unimplemented("access")),
-            LoweredExpressionKind::Product(product) if product.fields.is_empty() => {
-                Ok(self.backend.unit_value())
+            LoweredExpressionKind::Access(access) => {
+                self.emit_access(owner, expression, access, environment)
             }
-            // Legacy `compile_product_expression` collapses a one-element
-            // product to its element (the parenthesized-value shape).
-            LoweredExpressionKind::Product(product) if product.fields.len() == 1 => {
-                self.emit_expression(owner, product.fields[0], environment)
+            LoweredExpressionKind::Product(product) => {
+                self.emit_product(owner, expression, product, environment)
             }
-            LoweredExpressionKind::Product(_) => Err(unimplemented("product")),
-            LoweredExpressionKind::RepeatedProduct(_) => Err(unimplemented("repeated product")),
-            LoweredExpressionKind::Satisfies(_) => Err(unimplemented("satisfies")),
+            LoweredExpressionKind::RepeatedProduct(repeated) => {
+                self.emit_repeated_product(owner, expression, repeated, environment)
+            }
+            // Legacy `compile_expression_uncoerced`'s `Satisfies` path is
+            // transparent: emit the operand and let this expression's own
+            // header coercion apply in `emit_expression`.
+            LoweredExpressionKind::Satisfies(satisfies) => {
+                self.emit_expression(owner, satisfies.value, environment)
+            }
             LoweredExpressionKind::Logical(_) => Err(unimplemented("logical")),
             LoweredExpressionKind::Loop(loop_) => {
                 if loop_.drops_body_result || loop_.result_type != CheckedType::Never {
@@ -1880,6 +2052,254 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::Coro(_) => Err(unimplemented("coro")),
             LoweredExpressionKind::Await(_) => Err(unimplemented("await")),
         }
+    }
+
+    /// Stage 5.5 Step 4: one structural access read, mirroring legacy
+    /// `compile_expression_uncoerced`'s `Access` value path: a dereference
+    /// chain of `Ref` payload loads, then the representation, scalar,
+    /// product-element, or bounds-checked slice load.
+    fn emit_access(
+        &mut self,
+        owner: EmissionOwner,
+        expression: &crate::LoweredExpression,
+        access: &crate::LoweredAccess,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = &expression.origin.span;
+        let base = self.emit_expression(owner, access.base, environment)?;
+        if environment.returned {
+            return Ok(self.backend.unit_value());
+        }
+        match &access.kind {
+            crate::LoweredAccessKind::Representation { dereference } => {
+                if dereference.is_empty() {
+                    Ok(base)
+                } else {
+                    self.backend
+                        .load_ref_payloads(base, dereference, span.clone())
+                        .map(|value| value.as_any_value_enum())
+                }
+            }
+            // Legacy returns a scalar access as-is, dereference chain included.
+            crate::LoweredAccessKind::Scalar { .. } => Ok(base),
+            crate::LoweredAccessKind::Product { index, dereference } => {
+                let value = if dereference.is_empty() {
+                    value_as_basic(base)
+                } else {
+                    Some(
+                        self.backend
+                            .load_ref_payloads(base, dereference, span.clone())?,
+                    )
+                };
+                let Some(BasicValueEnum::StructValue(value)) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "element access requires a product value",
+                    ));
+                };
+                self.backend
+                    .builder
+                    .build_extract_value(value, *index as u32, "element")
+                    .map(|value| value.as_any_value_enum())
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))
+            }
+            crate::LoweredAccessKind::Slice { index, dereference } => {
+                let value = if dereference.is_empty() {
+                    value_as_basic(base)
+                } else {
+                    Some(
+                        self.backend
+                            .load_ref_payloads(base, dereference, span.clone())?,
+                    )
+                };
+                let Some(BasicValueEnum::StructValue(reference)) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "slice has an invalid representation",
+                    ));
+                };
+                let pointer = self
+                    .backend
+                    .builder
+                    .build_extract_value(reference, 0, "slice.pointer")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let length = self
+                    .backend
+                    .builder
+                    .build_extract_value(reference, 1, "slice.length")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let position = self.backend.size_type.const_int(*index as u64, false);
+                let element_type = self.backend.compile_type(&expression.value_type)?;
+                let pointer = self.backend.build_index_pointer(
+                    pointer,
+                    position,
+                    length,
+                    element_type,
+                    span.clone(),
+                )?;
+                self.backend
+                    .builder
+                    .build_load(element_type, pointer, "index.value")
+                    .map(|value| value.as_any_value_enum())
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))
+            }
+        }
+    }
+
+    /// Stage 5.5 Step 4: one product construction. Replays `steps` in source
+    /// evaluation order (later writes to a slot override earlier ones, exactly
+    /// as legacy's designated/named-spread fill does), then assembles the
+    /// final `fields` layout through the shared `build_product_value`, whose
+    /// one-element collapse matches legacy `compile_product_expression`.
+    fn emit_product(
+        &mut self,
+        owner: EmissionOwner,
+        expression: &crate::LoweredExpression,
+        product: &crate::LoweredProduct,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = &expression.origin.span;
+        let mut slots: Vec<Option<BasicValueEnum<'context>>> = vec![None; product.fields.len()];
+        for step in &product.steps {
+            let (value, slot, spread) = match step {
+                crate::LoweredProductStep::Positional { expression, slot } => (
+                    self.emit_expression(owner, *expression, environment)?,
+                    Some(*slot),
+                    None,
+                ),
+                crate::LoweredProductStep::Designated {
+                    expression, slot, ..
+                } => (
+                    self.emit_expression(owner, *expression, environment)?,
+                    Some(*slot),
+                    None,
+                ),
+                crate::LoweredProductStep::Default {
+                    expression, slot, ..
+                } => (
+                    self.emit_expression(owner, *expression, environment)?,
+                    Some(*slot),
+                    None,
+                ),
+                crate::LoweredProductStep::PositionalSpread {
+                    expression,
+                    mappings,
+                } => (
+                    self.emit_expression(owner, *expression, environment)?,
+                    None,
+                    Some(
+                        mappings
+                            .iter()
+                            .map(|mapping| (mapping.source, mapping.slot))
+                            .collect::<Vec<_>>(),
+                    ),
+                ),
+                crate::LoweredProductStep::NamedSpread {
+                    expression,
+                    mappings,
+                } => (
+                    self.emit_expression(owner, *expression, environment)?,
+                    None,
+                    Some(
+                        mappings
+                            .iter()
+                            .map(|mapping| (mapping.source, mapping.slot))
+                            .collect::<Vec<_>>(),
+                    ),
+                ),
+            };
+            if environment.returned {
+                return Ok(self.backend.unit_value());
+            }
+            match (slot, spread) {
+                (Some(slot), _) => {
+                    slots[slot] = Some(value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "product element is not a first-class value")
+                    })?);
+                }
+                (None, Some(mappings)) => {
+                    if mappings.is_empty() {
+                        continue;
+                    }
+                    let Some(BasicValueEnum::StructValue(product_value)) = value_as_basic(value)
+                    else {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "product spread operand has an invalid representation",
+                        ));
+                    };
+                    for (source, slot) in mappings {
+                        let element = self
+                            .backend
+                            .builder
+                            .build_extract_value(
+                                product_value,
+                                source as u32,
+                                "product.spread.element",
+                            )
+                            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                        slots[slot] = Some(element);
+                    }
+                }
+                (None, None) => unreachable!("product steps always place or spread"),
+            }
+        }
+        let values = slots
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value.ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        format!("missing product element at position {index}"),
+                    )
+                })
+            })
+            .collect::<CodeGenerationResult<Vec<_>>>()?;
+        Ok(self
+            .backend
+            .build_product_value(&values, span.clone())?
+            .as_any_value_enum())
+    }
+
+    /// Stage 5.5 Step 4: `(value; count)`. Legacy evaluates the element once
+    /// and replicates it across the fixed arity, or returns it directly for
+    /// the collapsed (arity one or symbolic) representation.
+    fn emit_repeated_product(
+        &mut self,
+        owner: EmissionOwner,
+        expression: &crate::LoweredExpression,
+        repeated: &crate::LoweredRepeatedProduct,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let value = self.emit_expression(owner, repeated.expression, environment)?;
+        if environment.returned {
+            return Ok(self.backend.unit_value());
+        }
+        let count = if repeated.collapsed {
+            1
+        } else {
+            match repeated.count {
+                crate::LoweredRepeatCount::Fixed(count) => count,
+                crate::LoweredRepeatCount::Symbolic(_) => 1,
+            }
+        };
+        if count == 1 {
+            return Ok(value);
+        }
+        let value = value_as_basic(value).ok_or_else(|| {
+            Diagnostic::new(
+                expression.origin.span.clone(),
+                "repeated product element has an invalid representation",
+            )
+        })?;
+        let values = vec![value; count];
+        Ok(self
+            .backend
+            .build_product_value(&values, expression.origin.span.clone())?
+            .as_any_value_enum())
     }
 
     /// Stage 5.3/5.4 Step 7: build one first-class callable value. A `Fresh`
@@ -2343,6 +2763,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // evaluation order; `emit_call_cleanup` drops them in reverse.
         let mut cleanups: Vec<(PointerValue<'context>, CheckedType)> = Vec::new();
         let mut invoked = false;
+        // A whole-product argument against a flattened multi-element parameter
+        // records no ABI slot; legacy `compile_arguments` unpacks the single
+        // struct after evaluating it. These values are placed at the end.
+        let mut unplaced: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
         let mut callee_value = None;
         // Legacy extracts `closure.code`/`closure.environment` after the
         // visible arguments and before the hidden resources; the parts are
@@ -2367,7 +2791,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .arguments
                         .get(*argument)
                         .ok_or_else(|| unsupported("call argument"))?;
-                    let slot = record.slot.unwrap_or(0);
                     let value = self.assemble_call_argument(
                         owner,
                         id,
@@ -2379,7 +2802,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         &mut cleanups,
                         &call.origin.span,
                     )?;
-                    place_argument_slot(&mut slots, slot, value, &call.origin.span)?;
+                    match record.slot {
+                        Some(slot) => {
+                            place_argument_slot(&mut slots, slot, value, &call.origin.span)?
+                        }
+                        None => unplaced.push(value),
+                    }
                 }
                 LoweredCallStep::ProductElement {
                     argument,
@@ -2469,6 +2897,27 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         *resource,
                         environment,
                     )?);
+                }
+            }
+        }
+        // Legacy `compile_arguments`' whole-product fallback: one argument
+        // value against a flattened multi-element parameter unpacks the
+        // struct, and against a single slot it is that slot's value.
+        if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
+            let value = unplaced[0];
+            if parameter_count == 1 {
+                slots[0] = Some(value);
+            } else if let BasicMetadataValueEnum::StructValue(product) = value
+                && product.get_type().count_fields() as usize == parameter_count
+            {
+                for index in 0..parameter_count {
+                    slots[index] = Some(
+                        self.backend
+                            .builder
+                            .build_extract_value(product, index as u32, "argument.element")
+                            .map_err(compiler_diagnostic)?
+                            .into(),
+                    );
                 }
             }
         }
@@ -2813,9 +3262,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 // Legacy `compile_indirect_argument_pointer` silently falls
                 // back to a materialized copy when a possibly-place-rooted
                 // borrow is not actually addressable; the mutation path has no
-                // fallback.
+                // fallback. A place kind this substage has not ported yet
+                // stays a diagnostic: silently materializing would emit a
+                // different body than legacy instead of stubbing.
                 Err(error) => {
-                    if record.pass_mode != LoweredArgumentPassMode::BorrowedPointer {
+                    if record.pass_mode != LoweredArgumentPassMode::BorrowedPointer
+                        || is_unimplemented_place(&error)
+                    {
                         return Err(error);
                     }
                 }
@@ -3696,6 +4149,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 /// Stage 5.4 Step 4: store one assembled argument in its final slot, failing
 /// when the slot is out of range or already filled (an internal inconsistency
 /// in the lowered record).
+/// Whether a place-pointer failure is an unported place kind (a construct
+/// family) rather than a genuinely unavailable address. The former must stay
+/// a stub so the differential body comparison never sees a materialized
+/// substitute for legacy's direct pointer.
+fn is_unimplemented_place(diagnostic: &Diagnostic) -> bool {
+    [
+        "temporary place",
+        "dereference place",
+        "product element place",
+        "representation place",
+        "indexed place",
+    ]
+    .iter()
+    .any(|family| diagnostic.message == format!("lowered emitter: {family} is not implemented yet"))
+}
+
 fn place_argument_slot<'context>(
     slots: &mut [Option<BasicMetadataValueEnum<'context>>],
     slot: usize,

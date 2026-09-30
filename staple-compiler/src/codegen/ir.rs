@@ -978,6 +978,60 @@ impl<'program, 'context> Backend<'program, 'context> {
             .as_any_value_enum())
     }
 
+    /// Loads the value reached by following `payloads` (outermost first),
+    /// loading the final payload as well. Stage 5.5 Step 4 shares it with the
+    /// lowered `Ref` access and nominal pattern paths.
+    pub(crate) fn load_ref_payloads(
+        &self,
+        value: inkwell::values::AnyValueEnum<'context>,
+        payloads: &[crate::CheckedType],
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
+        let mut value = value_as_basic(value);
+        for payload in payloads {
+            let Some(inkwell::values::BasicValueEnum::PointerValue(pointer)) = value else {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "Ref value has an invalid representation",
+                ));
+            };
+            let payload_type = self.compile_type(payload)?;
+            value = Some(
+                self.builder
+                    .build_load(payload_type, pointer, "ref.payload")
+                    .map_err(compiler_diagnostic)?,
+            );
+        }
+        value.ok_or_else(|| Diagnostic::new(span, "Ref value has an invalid representation"))
+    }
+
+    /// The address of the payload reached by following `payloads`, leaving
+    /// the final payload in place rather than loading it.
+    pub(crate) fn ref_payload_pointer(
+        &self,
+        value: inkwell::values::AnyValueEnum<'context>,
+        payloads: &[crate::CheckedType],
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let mut pointer = match value_as_basic(value) {
+            Some(inkwell::values::BasicValueEnum::PointerValue(pointer)) => pointer,
+            _ => {
+                return Err(Diagnostic::new(
+                    span,
+                    "Ref value has an invalid representation",
+                ));
+            }
+        };
+        for payload in &payloads[..payloads.len().saturating_sub(1)] {
+            pointer = self
+                .builder
+                .build_load(self.compile_type(payload)?, pointer, "ref.payload")
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+        }
+        Ok(pointer)
+    }
+
     /// Stage 5.5 Step 3: field 0 of a sum representation (the `i32` tag).
     pub(crate) fn build_sum_tag(
         &self,
