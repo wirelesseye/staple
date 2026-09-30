@@ -771,6 +771,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "lowered emitter: parameter destructuring is not implemented yet",
             ));
         }
+        // A nominal destructuring parameter (`Ref left`) binds a payload
+        // symbol whose concrete type differs from the signature slot; real
+        // pattern traversal is 5.5's, so stop before emitting a wrongly typed
+        // binding.
+        for (parameter, logical) in body.parameters.iter().zip(logical_types.iter()) {
+            if &parameter.value_type != *logical {
+                return Err(Diagnostic::new(
+                    body.origin.span.clone(),
+                    "lowered emitter: parameter destructuring is not implemented yet",
+                ));
+            }
+        }
         for (index, parameter) in body.parameters.iter().enumerate() {
             let (value, pointer) = if whole || indirect_mask[index] {
                 let pointer = raw
@@ -1529,69 +1541,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if name.reactive.is_some() {
                     return Err(unimplemented("checked or reactive name"));
                 }
-                // Legacy `compile_symbol_value`'s lookup order: a parameter
-                // pointer is reloaded on every read (the binding's own load
-                // stays behind, unused), then a local, then a binding cell,
-                // then module storage.
-                if let Some(pointer) = environment.parameter_pointers.get(&name.symbol).copied() {
-                    let llvm_type = self.backend.compile_type(&expression.value_type)?;
-                    return self
-                        .backend
-                        .builder
-                        .build_load(llvm_type, pointer, "parameter")
-                        .map(|value| value.as_any_value_enum())
-                        .map_err(compiler_diagnostic);
-                }
-                if let Some(value) = environment.locals.get(&name.symbol) {
-                    return Ok(*value);
-                }
-                if let Some(cell) = environment.binding_cells.get(&name.symbol).copied() {
-                    // Legacy `compile_symbol_value`'s binding-cell arm: build
-                    // the state slot, run the shared check when the read needs
-                    // one, then load the value slot.
-                    let cell_type = self.binding_cell_type(name.symbol)?;
-                    let state_slot = self
-                        .backend
-                        .builder
-                        .build_struct_gep(cell_type, cell, 1, "binding.state")
-                        .map_err(compiler_diagnostic)?;
-                    if name.requires_initialization_check {
-                        self.backend.build_initialization_check(
-                            state_slot,
-                            expression.origin.span.clone(),
-                        )?;
-                    }
-                    let value_slot = self
-                        .backend
-                        .builder
-                        .build_struct_gep(cell_type, cell, 0, "binding.value")
-                        .map_err(compiler_diagnostic)?;
-                    let llvm_type = self.backend.compile_type(&expression.value_type)?;
-                    return self
-                        .backend
-                        .builder
-                        .build_load(llvm_type, value_slot, "binding")
-                        .map(|value| value.as_any_value_enum())
-                        .map_err(compiler_diagnostic);
-                }
-                let global = self
-                    .storage
-                    .get(&name.symbol)
-                    .ok_or_else(|| unimplemented("name"))?;
-                if name.requires_initialization_check
-                    && let Some(state) = self.initialization_states.get(&name.symbol)
-                {
-                    self.backend.build_initialization_check(
-                        state.as_pointer_value(),
-                        expression.origin.span.clone(),
-                    )?;
-                }
-                let llvm_type = self.backend.compile_type(&expression.value_type)?;
-                self.backend
-                    .builder
-                    .build_load(llvm_type, global.as_pointer_value(), "global")
-                    .map(|value| value.as_any_value_enum())
-                    .map_err(compiler_diagnostic)
+                // Legacy `Expression::Name` checks the state whenever the read
+                // requires one or the symbol has mutable storage.
+                self.load_symbol_value(
+                    name.symbol,
+                    name.requires_initialization_check || name.mutable,
+                    &expression.value_type,
+                    &expression.origin.span,
+                    environment,
+                )
             }
             LoweredExpressionKind::Deferred(_) => Err(unimplemented("deferred expression")),
             LoweredExpressionKind::Stage26Deferred(_) => Err(unimplemented("Stage 2.6 expression")),
@@ -1820,8 +1778,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
         };
         let native_extern = matches!(call.target, LoweredCallableTarget::ExternalFunction { .. });
-        let string_constructor = matches!(call.target, LoweredCallableTarget::Constructor { .. })
-            && call.result_type == CheckedType::String;
         // Stage 5.4 Step 4: legacy `compile_intrinsic` and the extern route
         // evaluate arguments through `compile_arguments` (by value), never
         // through an ABI pass mode, so the lowered records' pass modes are
@@ -1912,16 +1868,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .get(*argument)
                         .ok_or_else(|| unsupported("call argument"))?;
                     let slot = record.slot.unwrap_or(0);
-                    let expression = record
-                        .expression
-                        .ok_or_else(|| unsupported("implicit thunk"))?;
                     let value = self.assemble_call_argument(
                         owner,
+                        id,
+                        *argument,
                         record,
-                        expression,
+                        record.expression,
                         by_value_route,
                         environment,
                         &mut cleanups,
+                        &call.origin.span,
                     )?;
                     place_argument_slot(&mut slots, slot, value, &call.origin.span)?;
                 }
@@ -1936,11 +1892,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .ok_or_else(|| unsupported("product argument"))?;
                     let value = self.assemble_call_argument(
                         owner,
+                        id,
+                        *argument,
                         record,
-                        *expression,
+                        Some(*expression),
                         by_value_route,
                         environment,
                         &mut cleanups,
+                        &call.origin.span,
                     )?;
                     place_argument_slot(&mut slots, *slot, value, &call.origin.span)?;
                 }
@@ -1989,16 +1948,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .arguments
                         .get(*argument)
                         .ok_or_else(|| unsupported("default argument"))?;
-                    let expression = record
-                        .expression
-                        .ok_or_else(|| unsupported("implicit thunk"))?;
                     let value = self.assemble_call_argument(
                         owner,
+                        id,
+                        *argument,
                         record,
-                        expression,
+                        record.expression,
                         by_value_route,
                         environment,
                         &mut cleanups,
+                        &call.origin.span,
                     )?;
                     place_argument_slot(&mut slots, *slot, value, &call.origin.span)?;
                 }
@@ -2119,16 +2078,52 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     |value| value.as_any_value_enum(),
                 ))
             }
-            LoweredCallableTarget::Constructor { .. } if string_constructor => {
-                let [BasicMetadataValueEnum::StructValue(value)] = values.as_slice() else {
-                    return Err(unsupported("String constructor representation"));
-                };
-                Ok(value.as_any_value_enum())
+            LoweredCallableTarget::Constructor { recursive, .. } => {
+                let basic = values
+                    .iter()
+                    .map(|value| {
+                        BasicValueEnum::try_from(*value).map_err(|_| {
+                            Diagnostic::new(
+                                call.origin.span.clone(),
+                                "constructor argument is not first-class",
+                            )
+                        })
+                    })
+                    .collect::<CodeGenerationResult<Vec<_>>>()?;
+                if matches!(
+                    recursive,
+                    Some(crate::RecursiveConstruction::ManagedReference)
+                ) {
+                    return self.emit_managed_ref(owner, id, &call, &basic);
+                }
+                self.backend
+                    .build_product_value(&basic, call.origin.span.clone())
+                    .map(|value| value.as_any_value_enum())
             }
-            LoweredCallableTarget::Constructor { .. } => Err(unsupported("constructor call")),
-            LoweredCallableTarget::TraitImplementation { .. } => Err(unsupported("trait call")),
+            // Legacy `compile_call_expression`'s trait branch: a direct call
+            // with a null environment, whatever the evidence recipe says.
+            LoweredCallableTarget::TraitImplementation { .. } => {
+                let LoweredBoundTarget::Instance(instance) = binding else {
+                    return Err(unsupported("trait call binding"));
+                };
+                let function = self
+                    .instances
+                    .get(instance)
+                    .copied()
+                    .ok_or_else(|| unsupported("trait function declaration"))?;
+                self.emit_structural_call(owner, &call, function, &values)
+            }
             LoweredCallableTarget::StructuralTraitMethod { .. } => {
-                Err(unsupported("structural call"))
+                let LoweredBoundTarget::Artifact(ordinal) = binding else {
+                    return Err(unsupported("structural call binding"));
+                };
+                let function = self
+                    .artifacts
+                    .get(ordinal)
+                    .and_then(|functions| functions.first())
+                    .copied()
+                    .ok_or_else(|| unsupported("structural function declaration"))?;
+                self.emit_structural_call(owner, &call, function, &values)
             }
             LoweredCallableTarget::CompilerHelper { .. } => {
                 Err(unsupported("compiler helper call"))
@@ -2158,6 +2153,88 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             ));
         }
         Ok(())
+    }
+
+    /// Legacy `compile_call_expression`'s trait/structural branch: a direct
+    /// call with a null environment (`trait.call`).
+    fn emit_structural_call(
+        &mut self,
+        _owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        function: FunctionValue<'context>,
+        values: &[BasicMetadataValueEnum<'context>],
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let mut arguments = vec![
+            self.backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+                .into(),
+        ];
+        arguments.extend(values.iter().copied());
+        let result = self
+            .backend
+            .builder
+            .build_direct_call(function, &arguments, "trait.call")
+            .map_err(|error| Diagnostic::new(call.origin.span.clone(), error.to_string()))?;
+        Ok(result.try_as_basic_value().basic().map_or_else(
+            || self.backend.unit_value(),
+            |value| value.as_any_value_enum(),
+        ))
+    }
+
+    /// A `ManagedRef` constructor: GC-allocate the payload, store it, and set
+    /// the declared payload finalizer from the call's `RefConstruction`
+    /// artifact use (legacy `build_ref_value`; the finalizer body is 5.6).
+    fn emit_managed_ref(
+        &mut self,
+        owner: EmissionOwner,
+        id: LoweredCallId,
+        call: &crate::LoweredCall,
+        values: &[BasicValueEnum<'context>],
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let CheckedType::Ref(payload) = &call.result_type else {
+            return Err(Diagnostic::new(
+                call.origin.span.clone(),
+                "Ref constructor has an invalid result type",
+            ));
+        };
+        let value = self
+            .backend
+            .build_product_value(values, call.origin.span.clone())?;
+        let payload_type = self.backend.compile_type(payload)?;
+        let size = self.backend.target_data.get_store_size(&payload_type);
+        let pointer = self.backend.build_gc_allocation(
+            self.backend.size_type.const_int(size, false),
+            "ref.allocate",
+            call.origin.span.clone(),
+        )?;
+        self.backend
+            .builder
+            .build_store(pointer, value)
+            .map_err(compiler_diagnostic)?;
+        if let Some(finalizer) = self.ref_construction_finalizer(owner, id) {
+            self.backend.set_gc_finalizer(pointer, finalizer)?;
+        }
+        Ok(pointer.as_any_value_enum())
+    }
+
+    /// The declared payload finalizer for one `Ref` construction, named by the
+    /// call's `RefConstruction` artifact use. A payload that needs no
+    /// finalizer has no use.
+    fn ref_construction_finalizer(
+        &self,
+        owner: EmissionOwner,
+        id: LoweredCallId,
+    ) -> Option<FunctionValue<'context>> {
+        let uses = self.view.artifact_uses(owner)?;
+        let ordinal = uses.iter().find_map(|use_| {
+            (use_.site == crate::ArtifactUseSite::RefConstruction(id)).then_some(use_.artifact)
+        })?;
+        self.artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
     }
 
     /// Legacy `check_symbol_initialization`: check the symbol's binding cell
@@ -2190,14 +2267,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// modes, or the evaluated value materialized according to the recorded
     /// pass mode. Intrinsic routes evaluate by value like legacy
     /// `compile_intrinsic`.
+    #[allow(clippy::too_many_arguments)]
     fn assemble_call_argument(
         &mut self,
         owner: EmissionOwner,
+        call_id: LoweredCallId,
+        record_index: usize,
         record: &LoweredCallArgument,
-        expression: ExpressionId,
+        expression: Option<ExpressionId>,
         by_value_route: bool,
         environment: &mut FunctionEnvironment<'context>,
         cleanups: &mut Vec<(PointerValue<'context>, CheckedType)>,
+        span: &staple_syntax::Span,
     ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
         if record.writeback {
             // Lowering does not record a writeback today; diagnose rather
@@ -2207,6 +2288,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "lowered emitter: call argument writeback is not implemented yet",
             ));
         }
+        let Some(expression) = expression else {
+            // An implicit thunk argument: legacy `compile_adapted_call_argument`
+            // builds the thunk's closure over the current environment.
+            let value =
+                self.build_thunk_closure(owner, call_id, record_index, environment, span)?;
+            return self.pass_computed_argument(record, value, by_value_route, cleanups);
+        };
         if !by_value_route
             && matches!(
                 record.pass_mode,
@@ -2227,6 +2315,162 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
         })?;
         self.pass_computed_argument(record, value, by_value_route, cleanups)
+    }
+
+    /// One implicit thunk argument's closure: the thunk instance's function
+    /// paired with a fresh capture environment built from the current scope.
+    fn build_thunk_closure(
+        &mut self,
+        owner: EmissionOwner,
+        call_id: LoweredCallId,
+        record_index: usize,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let binding = self
+            .view
+            .binding(
+                owner,
+                LoweredBindingSite::CallArgumentThunk {
+                    call: call_id,
+                    argument: record_index,
+                },
+            )
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "implicit thunk argument has no binding")
+            })?;
+        let LoweredBoundTarget::Instance(instance) = binding else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "implicit thunk argument is not bound to an instance",
+            ));
+        };
+        // Legacy `build_closure` installs a GC finalizer when a capture needs
+        // drop. No closure-environment use is recorded for a thunk argument,
+        // so the finalizer body (5.6) cannot be attached yet; fail instead of
+        // building an environment legacy would finalize.
+        if self.instance_capture_needs_finalizer(*instance) {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "lowered emitter: fresh closure environment is not implemented yet",
+            ));
+        }
+        self.build_instance_closure(*instance, environment, span)
+            .map(|closure| closure.into())
+    }
+
+    /// Whether an instance's fresh capture environment needs a GC finalizer,
+    /// legacy `build_capture_environment`'s install gate (a captured value
+    /// that neither carries initialization state nor is borrowed needs drop).
+    fn instance_capture_needs_finalizer(&self, instance: FunctionInstanceId) -> bool {
+        self.view
+            .instance(instance)
+            .and_then(|record| record.body.as_ref())
+            .is_some_and(|body| {
+                body.captures.iter().any(|capture| {
+                    !capture.requires_initialization_state
+                        && !capture.capture.borrowed
+                        && self.view.concrete_needs_drop(&capture.value_type)
+                })
+            })
+    }
+
+    /// Build one instance's closure value over the current environment: the
+    /// catalog function's code pointer and a fresh capture environment filled
+    /// from the instance's capture records (legacy `build_closure`).
+    fn build_instance_closure(
+        &mut self,
+        instance: FunctionInstanceId,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let function = self
+            .instances
+            .get(&instance)
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "closure instance is not declared"))?;
+        let body = self
+            .view
+            .instance(instance)
+            .and_then(|record| record.body.as_ref())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "closure instance has no body"))?;
+        let pointer = self.build_capture_environment_value(body, environment, span)?;
+        self.backend.build_closure_value(function, pointer)
+    }
+
+    /// The capture environment of one instance's body, filled from the current
+    /// scope. Empty captures produce a null pointer (legacy
+    /// `build_capture_environment`). The closure-environment finalizer is
+    /// 5.6's `GcFinalizer`; until then, a capture that legacy would finalize
+    /// is a diagnostic rather than a silently missing finalizer.
+    fn build_capture_environment_value(
+        &mut self,
+        body: &crate::LoweredInstanceBody,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        if body.captures.is_empty() {
+            return Ok(self
+                .backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null());
+        }
+        let fields = body
+            .captures
+            .iter()
+            .map(|capture| self.capture_field_type(capture))
+            .collect::<CodeGenerationResult<Vec<_>>>()?;
+        let environment_type = self.backend.capture_environment_type(&fields);
+        let mut environment_value = environment_type.const_zero();
+        for (index, capture) in body.captures.iter().enumerate() {
+            let stored = self.capture_value(capture, environment, span)?;
+            environment_value = self.backend.insert_capture(
+                environment_value,
+                stored,
+                index as u32,
+                span.clone(),
+            )?;
+        }
+        self.backend
+            .allocate_capture_environment(environment_type, environment_value, span.clone())
+    }
+
+    /// One capture's stored value, mirroring legacy `build_capture_environment`:
+    /// a cell/initialization-state/derived/borrowed capture stores a pointer
+    /// from the current scope; every other capture stores its value.
+    fn capture_value(
+        &mut self,
+        capture: &LoweredInstanceCapture,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let symbol = capture.capture.symbol;
+        if capture.requires_initialization_state || capture.mutable_storage || capture.derived {
+            let pointer = environment
+                .parameter_pointers
+                .get(&symbol)
+                .copied()
+                .or_else(|| environment.binding_cells.get(&symbol).copied())
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "captured binding cell is not available")
+                })?;
+            return Ok(pointer.into());
+        }
+        if capture.capture.borrowed {
+            let pointer = environment
+                .parameter_pointers
+                .get(&symbol)
+                .copied()
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "borrowed parameter storage is not available")
+                })?;
+            return Ok(pointer.into());
+        }
+        let value =
+            self.load_symbol_value(symbol, false, &capture.value_type, span, environment)?;
+        value_as_basic(value)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "captured value is not first-class"))
     }
 
     /// Materialize an already-evaluated value according to its recorded pass
@@ -2670,6 +2914,71 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )?;
         }
         Ok(())
+    }
+
+    /// Legacy `compile_symbol_value`: a parameter pointer is reloaded on every
+    /// read (the binding's own load stays behind, unused), then a local, then
+    /// a binding cell, then module storage.
+    fn load_symbol_value(
+        &mut self,
+        symbol: SymbolId,
+        check_initialization: bool,
+        value_type: &CheckedType,
+        span: &staple_syntax::Span,
+        environment: &FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if let Some(pointer) = environment.parameter_pointers.get(&symbol).copied() {
+            let llvm_type = self.backend.compile_type(value_type)?;
+            return self
+                .backend
+                .builder
+                .build_load(llvm_type, pointer, "parameter")
+                .map(|value| value.as_any_value_enum())
+                .map_err(compiler_diagnostic);
+        }
+        if let Some(value) = environment.locals.get(&symbol) {
+            return Ok(*value);
+        }
+        if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+            // Legacy's binding-cell arm: build the state slot, run the shared
+            // check when the read needs one, then load the value slot.
+            let cell_type = self.binding_cell_type(symbol)?;
+            let state_slot = self
+                .backend
+                .builder
+                .build_struct_gep(cell_type, cell, 1, "binding.state")
+                .map_err(compiler_diagnostic)?;
+            if check_initialization {
+                self.backend
+                    .build_initialization_check(state_slot, span.clone())?;
+            }
+            let value_slot = self
+                .backend
+                .builder
+                .build_struct_gep(cell_type, cell, 0, "binding.value")
+                .map_err(compiler_diagnostic)?;
+            let llvm_type = self.backend.compile_type(value_type)?;
+            return self
+                .backend
+                .builder
+                .build_load(llvm_type, value_slot, "binding")
+                .map(|value| value.as_any_value_enum())
+                .map_err(compiler_diagnostic);
+        }
+        let global = self
+            .storage
+            .get(&symbol)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "symbol storage is not available here"))?;
+        if check_initialization && let Some(state) = self.initialization_states.get(&symbol) {
+            self.backend
+                .build_initialization_check(state.as_pointer_value(), span.clone())?;
+        }
+        let llvm_type = self.backend.compile_type(value_type)?;
+        self.backend
+            .builder
+            .build_load(llvm_type, global.as_pointer_value(), "global")
+            .map(|value| value.as_any_value_enum())
+            .map_err(compiler_diagnostic)
     }
 
     fn emit_intrinsic(

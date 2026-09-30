@@ -291,6 +291,12 @@ impl<'a> EmissionView<'a> {
         self.program.concrete_is_copy(value_type)
     }
 
+    /// The catalog's concrete drop decision for a fully substituted type
+    /// (Stage 5.4 decisions such as the closure-environment finalizer gate).
+    pub(crate) fn concrete_needs_drop(&self, value_type: &crate::CheckedType) -> bool {
+        self.program.concrete_needs_drop(value_type)
+    }
+
     /// The opaque runtime type identity of a fully substituted type, the same
     /// selection `LoweredProgram::runtime_opaque_kind` makes (Stage 5.2 layout
     /// context).
