@@ -4567,7 +4567,6 @@ mod tests {
 
         let mut blocked = 0usize;
         let mut identical = 0usize;
-        let mut unrunnable = 0usize;
         let mut families: HashMap<String, usize> = HashMap::new();
         for program in staple_compiler::differential_corpus() {
             let (source, root) = match program.source {
@@ -4608,40 +4607,38 @@ mod tests {
                     panic!("`{}` should lower: {diagnostics:?}", program.name)
                 });
 
-            // Some corpus programs use an undefined C extern (`inspect`), so
-            // even the legacy emitter cannot link them. They have no runtime
-            // behavior to compare; the in-process harness still compares their
-            // bodies.
-            let Ok(legacy) = compile_link_run(&lowered, Emitter::Legacy, &options) else {
-                unrunnable += 1;
+            // A program whose lowered strict compile fails is blocked: it has
+            // no lowered behavior to run or compare, so the legacy baseline is
+            // not needed (some blocked census programs use undefined C externs
+            // and cannot link even with legacy).
+            let context = Context::create();
+            let Err(diagnostics) =
+                CodeGenerator::with_emitter(&context, Emitter::Lowered).compile_module(&lowered)
+            else {
+                let legacy =
+                    compile_link_run(&lowered, Emitter::Legacy, &options).unwrap_or_else(|error| {
+                        panic!("`{}` should link with legacy: {error}", program.name)
+                    });
+                let lowered_behavior = compile_link_run(&lowered, Emitter::Lowered, &options)
+                    .unwrap_or_else(|error| {
+                        panic!("`{}` should run with lowered: {error}", program.name)
+                    });
+                assert_eq!(
+                    lowered_behavior, legacy,
+                    "`{}` behaves differently under the lowered emitter",
+                    program.name
+                );
+                identical += 1;
                 continue;
             };
-
-            let context = Context::create();
-            match CodeGenerator::with_emitter(&context, Emitter::Lowered).compile_module(&lowered) {
-                Err(diagnostics) => {
-                    blocked += 1;
-                    for diagnostic in &diagnostics {
-                        let family = diagnostic
-                            .message
-                            .strip_prefix("lowered emitter: ")
-                            .and_then(|family| family.strip_suffix(" is not implemented yet"))
-                            .unwrap_or(&diagnostic.message);
-                        *families.entry(family.to_owned()).or_insert(0) += 1;
-                    }
-                }
-                Ok(_) => {
-                    let lowered_behavior = compile_link_run(&lowered, Emitter::Lowered, &options)
-                        .unwrap_or_else(|error| {
-                            panic!("`{}` should run with lowered: {error}", program.name)
-                        });
-                    assert_eq!(
-                        lowered_behavior, legacy,
-                        "`{}` behaves differently under the lowered emitter",
-                        program.name
-                    );
-                    identical += 1;
-                }
+            blocked += 1;
+            for diagnostic in &diagnostics {
+                let family = diagnostic
+                    .message
+                    .strip_prefix("lowered emitter: ")
+                    .and_then(|family| family.strip_suffix(" is not implemented yet"))
+                    .unwrap_or(&diagnostic.message);
+                *families.entry(family.to_owned()).or_insert(0) += 1;
             }
         }
         let mut families = families.into_iter().collect::<Vec<_>>();
@@ -4653,12 +4650,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         eprintln!(
-            "stage 5.3 CLI harness: {blocked} blocked, {identical} identical, {unrunnable} not runnable (top families: {top})"
+            "stage 5.3 CLI harness: {blocked} blocked, {identical} identical (top families: {top})"
         );
         assert_eq!(
-            blocked + identical + unrunnable,
+            blocked + identical,
             staple_compiler::differential_corpus().len(),
-            "every corpus program is blocked, identical, or not runnable"
+            "every corpus program is blocked or identical"
         );
     }
 
