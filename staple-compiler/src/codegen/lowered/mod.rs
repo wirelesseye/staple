@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use inkwell::{
     AddressSpace,
+    basic_block::BasicBlock,
     module::{Linkage, Module as LlvmModule},
     targets::TargetMachine,
     types::BasicTypeEnum,
@@ -32,7 +33,7 @@ use super::{
 };
 use crate::lower::{ArenaId, EmissionOwner};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct FunctionEnvironment<'context> {
     locals: HashMap<SymbolId, AnyValueEnum<'context>>,
     binding_cells: HashMap<SymbolId, PointerValue<'context>>,
@@ -45,6 +46,17 @@ struct FunctionEnvironment<'context> {
     reactive_scopes: Vec<PointerValue<'context>>,
     loops: Vec<(usize, inkwell::basic_block::BasicBlock<'context>)>,
     returned: bool,
+}
+
+impl<'context> FunctionEnvironment<'context> {
+    /// Legacy `FunctionEnvironment::restore_local_state`: match arms and
+    /// logical operands restore the caller's local bindings after a branch.
+    /// Owned-binding state is 5.6 and has no equivalent here.
+    fn restore_local_state(&mut self, snapshot: &Self) {
+        self.locals = snapshot.locals.clone();
+        self.binding_cells = snapshot.binding_cells.clone();
+        self.parameter_pointers = snapshot.parameter_pointers.clone();
+    }
 }
 
 /// One provider's bound resource value. Stage 5.4 reads these when it emits
@@ -654,7 +666,37 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.builder.position_at_end(entry);
         let mut environment = FunctionEnvironment::default();
         self.bind_parameters(id, function, &mut environment)?;
-        let value = self.emit_block(EmissionOwner::Instance(id), root, &mut environment)?;
+        let owner = EmissionOwner::Instance(id);
+        let mut value = self.emit_block(owner, root, &mut environment)?;
+        // Stage 5.5 Step 7: the body block expression's header, which legacy
+        // `compile_expression` applies after the block itself. The moved
+        // symbols release on every path, like legacy.
+        if !environment.returned
+            && let Some(coercion) = &body.body_coercion
+        {
+            let Some(plan) = &body.body_coercion_plan else {
+                return Err(Diagnostic::new(
+                    body.origin.span.clone(),
+                    "lowered emitter: coercion",
+                ));
+            };
+            value = self.emit_coercion(
+                value,
+                &coercion.source,
+                &coercion.target,
+                plan,
+                &body.origin.span,
+            )?;
+        }
+        for symbol in &body.body_moved_symbols {
+            self.store_local_initialization_state(
+                owner,
+                &mut environment,
+                *symbol,
+                0,
+                &body.origin.span,
+            )?;
+        }
         if !environment.returned {
             let result = value_as_basic(value).ok_or_else(|| {
                 Diagnostic::new(
@@ -1754,13 +1796,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredItemKind::PatternBinding(binding) => {
-                if binding.propagating {
-                    return Err(unimplemented("propagating pattern binding"));
-                }
                 // Legacy `compile_item`'s pattern-binding order: state 1,
                 // evaluate, bind, module-global stores, state 2.
                 self.store_pattern_initialization_state(owner, binding.pattern, 1)?;
                 let value = self.emit_expression(owner, binding.value, environment)?;
+                if binding.propagating {
+                    let value = value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(
+                            item.origin.span.clone(),
+                            "destructured value is not first-class",
+                        )
+                    })?;
+                    return self.emit_propagating_binding(owner, &binding, value, environment);
+                }
                 self.bind_pattern(owner, binding.pattern, value, environment)?;
                 self.store_pattern_globals(owner, binding.pattern, environment)?;
                 self.store_pattern_initialization_state(owner, binding.pattern, 2)
@@ -2308,7 +2356,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::Satisfies(satisfies) => {
                 self.emit_expression(owner, satisfies.value, environment)
             }
-            LoweredExpressionKind::Logical(_) => Err(unimplemented("logical")),
+            LoweredExpressionKind::Logical(logical) => {
+                self.emit_logical(owner, expression, logical, environment)
+            }
             LoweredExpressionKind::Loop(loop_) => {
                 if loop_.drops_body_result || loop_.result_type != CheckedType::Never {
                     return Err(unimplemented("loop value or cleanup"));
@@ -2352,7 +2402,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 environment.returned = true;
                 Ok(self.backend.unit_value())
             }
-            LoweredExpressionKind::Match(_) => Err(unimplemented("match")),
+            LoweredExpressionKind::Match(match_) => {
+                self.emit_match(owner, expression, match_, environment)
+            }
             LoweredExpressionKind::Index(index) => {
                 self.emit_index(owner, id, expression, index, environment)
             }
@@ -2616,6 +2668,681 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .backend
             .build_product_value(&values, expression.origin.span.clone())?
             .as_any_value_enum())
+    }
+
+    /// Stage 5.5 Step 7: one `match` expression, mirroring legacy
+    /// `compile_match_expression` exactly: the subject is evaluated once, each
+    /// arm's pattern test runs against the recorded plan, a divergent arm
+    /// contributes no phi input, and the fall-through ends in `unreachable`.
+    fn emit_match(
+        &mut self,
+        owner: EmissionOwner,
+        expression: &crate::LoweredExpression,
+        match_: &crate::LoweredMatch,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = expression.origin.span.clone();
+        let subject = self.emit_expression(owner, match_.subject, environment)?;
+        if environment.returned {
+            return Ok(self.backend.unit_value());
+        }
+        let Some(subject) = value_as_basic(subject) else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "match subject is not first-class",
+            ));
+        };
+        let function = self
+            .backend
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "match is not in a function"))?;
+        let merge_block = self
+            .backend
+            .context
+            .append_basic_block(function, "match.merge");
+        let mut incoming: Vec<(BasicValueEnum<'context>, BasicBlock<'context>)> = Vec::new();
+        let branch_base = environment.clone();
+        let mut continuing_state = None;
+        let mut terminating_state = None;
+        for arm in &match_.arms {
+            environment.restore_local_state(&branch_base);
+            let arm_block = self
+                .backend
+                .context
+                .append_basic_block(function, "match.arm");
+            let failure_block = self
+                .backend
+                .context
+                .append_basic_block(function, "match.next");
+            self.emit_match_pattern_branch(
+                owner,
+                arm.pattern,
+                subject,
+                arm_block,
+                failure_block,
+                environment,
+            )?;
+            self.backend.builder.position_at_end(arm_block);
+            environment.returned = false;
+            let value = self.emit_expression(owner, arm.body, environment)?;
+            if !environment.returned {
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        arm.origin.span.clone(),
+                        "match arm result is not first-class",
+                    )
+                })?;
+                // Legacy `drop_owned_since` here is 5.6; the body guard means
+                // this arm owns nothing.
+                self.backend
+                    .builder
+                    .build_unconditional_branch(merge_block)
+                    .map_err(compiler_diagnostic)?;
+                let predecessor = self
+                    .backend
+                    .builder
+                    .get_insert_block()
+                    .expect("match arm block");
+                incoming.push((value, predecessor));
+                continuing_state = Some(environment.clone());
+            } else {
+                terminating_state = Some(environment.clone());
+            }
+            self.backend.builder.position_at_end(failure_block);
+        }
+        self.backend
+            .builder
+            .build_unreachable()
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(merge_block);
+        if incoming.is_empty() {
+            self.backend
+                .builder
+                .build_unreachable()
+                .map_err(compiler_diagnostic)?;
+            environment.returned = true;
+            if let Some(state) = terminating_state {
+                environment.restore_local_state(&state);
+            }
+            return Ok(self.backend.unit_value());
+        }
+        if let Some(state) = &continuing_state {
+            environment.restore_local_state(state);
+        }
+        environment.returned = false;
+        let result_type = self.backend.compile_type(&expression.value_type)?;
+        Ok(self
+            .backend
+            .build_phi_value(result_type, &incoming, "match.value")?
+            .as_any_value_enum())
+    }
+
+    /// One match arm's conditional test, mirroring legacy
+    /// `compile_match_pattern_branch` branch for branch and name for name.
+    /// Every decision comes from the Step 2 test plan; the emitter only
+    /// builds the blocks, compares, and payload loads around them.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_match_pattern_branch(
+        &mut self,
+        owner: EmissionOwner,
+        pattern_id: PatternId,
+        value: BasicValueEnum<'context>,
+        success: BasicBlock<'context>,
+        failure: BasicBlock<'context>,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let pattern = self
+            .view
+            .pattern(owner, pattern_id)
+            .ok_or_else(|| {
+                Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered pattern")
+            })?
+            .clone();
+        let span = pattern.origin.span.clone();
+        let subject = pattern.test.subject.clone();
+        let sum_of_subject = |span: &staple_syntax::Span| match &subject {
+            CheckedType::Sum(sum) => Ok(sum.clone()),
+            _ => Err(Diagnostic::new(
+                span.clone(),
+                "checked match pattern has a non-sum value",
+            )),
+        };
+        match &pattern.kind {
+            crate::LoweredPatternKind::At {
+                binding,
+                pattern: nested,
+            } => {
+                self.bind_pattern(owner, *binding, value.as_any_value_enum(), environment)?;
+                self.emit_match_pattern_branch(owner, *nested, value, success, failure, environment)
+            }
+            crate::LoweredPatternKind::Binding { .. } => {
+                if pattern.test.identity == crate::LoweredPatternIdentity::Singleton {
+                    // A singleton sum test compares the tag; a singleton
+                    // distinct match succeeds unconditionally.
+                    if let Some(index) = pattern.test.sum_alternative {
+                        let sum = sum_of_subject(&span)?;
+                        let Some(BasicValueEnum::StructValue(sum_value)) =
+                            value_as_basic(value.into())
+                        else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "sum match value has an invalid representation",
+                            ));
+                        };
+                        let _ = sum;
+                        let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
+                        let matches = self.backend.build_sum_tag_compare(
+                            tag,
+                            index,
+                            "match.singleton.tag",
+                        )?;
+                        self.backend
+                            .builder
+                            .build_conditional_branch(matches, success, failure)
+                            .map(|_| ())
+                            .map_err(compiler_diagnostic)
+                    } else {
+                        self.backend
+                            .builder
+                            .build_unconditional_branch(success)
+                            .map(|_| ())
+                            .map_err(compiler_diagnostic)
+                    }
+                } else if let Some(index) = pattern.test.sum_alternative {
+                    let sum = sum_of_subject(&span)?;
+                    let Some(BasicValueEnum::StructValue(sum_value)) = value_as_basic(value.into())
+                    else {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "sum match value has an invalid representation",
+                        ));
+                    };
+                    let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
+                    let selected = self.backend.context.append_basic_block(
+                        success.get_parent().expect("match function"),
+                        "match.typed.selected",
+                    );
+                    let matches =
+                        self.backend
+                            .build_sum_tag_compare(tag, index, "match.typed.tag")?;
+                    self.backend
+                        .builder
+                        .build_conditional_branch(matches, selected, failure)
+                        .map(|_| ())
+                        .map_err(compiler_diagnostic)?;
+                    self.backend.builder.position_at_end(selected);
+                    let payload = self.backend.extract_sum_alternative(
+                        sum_value,
+                        &sum,
+                        index,
+                        span.clone(),
+                    )?;
+                    self.bind_pattern(owner, pattern_id, payload.as_any_value_enum(), environment)?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(success)
+                        .map(|_| ())
+                        .map_err(compiler_diagnostic)
+                } else {
+                    self.bind_pattern(owner, pattern_id, value.as_any_value_enum(), environment)?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(success)
+                        .map(|_| ())
+                        .map_err(compiler_diagnostic)
+                }
+            }
+            crate::LoweredPatternKind::Literal { .. } => {
+                let Some(bytes) = &pattern.test.literal else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "string pattern has no decoded literal",
+                    ));
+                };
+                let Ok(literal) = std::str::from_utf8(bytes) else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "string pattern literal is not UTF-8",
+                    ));
+                };
+                let value = if let Some(index) = pattern.test.sum_alternative {
+                    let sum = sum_of_subject(&span)?;
+                    let Some(BasicValueEnum::StructValue(sum_value)) = value_as_basic(value.into())
+                    else {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "sum match value has an invalid representation",
+                        ));
+                    };
+                    let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
+                    let selected = self.backend.context.append_basic_block(
+                        success.get_parent().expect("match function"),
+                        "match.string.selected",
+                    );
+                    let matches =
+                        self.backend
+                            .build_sum_tag_compare(tag, index, "match.string.tag")?;
+                    self.backend
+                        .builder
+                        .build_conditional_branch(matches, selected, failure)
+                        .map(|_| ())
+                        .map_err(compiler_diagnostic)?;
+                    self.backend.builder.position_at_end(selected);
+                    self.backend
+                        .extract_sum_alternative(sum_value, &sum, index, span.clone())?
+                        .as_any_value_enum()
+                } else {
+                    value.as_any_value_enum()
+                };
+                let Some(BasicValueEnum::StructValue(string)) = value_as_basic(value) else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "string match value has an invalid representation",
+                    ));
+                };
+                self.backend
+                    .build_string_literal_pattern_compare(string, literal, success, failure, span)
+            }
+            crate::LoweredPatternKind::Product { elements, .. } if elements.len() == 1 => self
+                .emit_match_pattern_branch(
+                    owner,
+                    elements[0],
+                    value,
+                    success,
+                    failure,
+                    environment,
+                ),
+            crate::LoweredPatternKind::Product { elements, .. } => {
+                let CheckedType::Product(_) = &subject else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "checked product pattern has a non-product value",
+                    ));
+                };
+                let Some(BasicValueEnum::StructValue(product_value)) = value_as_basic(value.into())
+                else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "product match value has an invalid representation",
+                    ));
+                };
+                if elements.is_empty() {
+                    return self
+                        .backend
+                        .builder
+                        .build_unconditional_branch(success)
+                        .map(|_| ())
+                        .map_err(compiler_diagnostic);
+                }
+                for (index, element_pattern) in elements.iter().enumerate() {
+                    let element = self
+                        .backend
+                        .builder
+                        .build_extract_value(product_value, index as u32, "match.element")
+                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                    let next = if index + 1 == elements.len() {
+                        success
+                    } else {
+                        self.backend.context.append_basic_block(
+                            success.get_parent().expect("match function"),
+                            "match.pattern",
+                        )
+                    };
+                    self.emit_match_pattern_branch(
+                        owner,
+                        *element_pattern,
+                        element,
+                        next,
+                        failure,
+                        environment,
+                    )?;
+                    if next != success {
+                        self.backend.builder.position_at_end(next);
+                    }
+                }
+                Ok(())
+            }
+            crate::LoweredPatternKind::Nominal { argument, .. } => match &subject {
+                CheckedType::String
+                    if pattern.test.identity == crate::LoweredPatternIdentity::String =>
+                {
+                    self.emit_match_pattern_branch(
+                        owner,
+                        *argument,
+                        value,
+                        success,
+                        failure,
+                        environment,
+                    )
+                }
+                CheckedType::Ref(payload)
+                    if pattern.test.identity == crate::LoweredPatternIdentity::Ref =>
+                {
+                    let payload_value = self.backend.load_ref_payloads(
+                        value.as_any_value_enum(),
+                        std::slice::from_ref(payload),
+                        span.clone(),
+                    )?;
+                    self.emit_match_pattern_branch(
+                        owner,
+                        *argument,
+                        payload_value,
+                        success,
+                        failure,
+                        environment,
+                    )
+                }
+                CheckedType::Sum(sum) => {
+                    let Some(index) = pattern.test.sum_alternative else {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "match pattern does not select a sum alternative",
+                        ));
+                    };
+                    let Some(BasicValueEnum::StructValue(sum_value)) = value_as_basic(value.into())
+                    else {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "sum match value has an invalid representation",
+                        ));
+                    };
+                    let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
+                    let selected = self.backend.context.append_basic_block(
+                        success.get_parent().expect("match function"),
+                        "match.selected",
+                    );
+                    let matches =
+                        self.backend
+                            .build_sum_tag_compare(tag, index, "match.tag.matches")?;
+                    self.backend
+                        .builder
+                        .build_conditional_branch(matches, selected, failure)
+                        .map(|_| ())
+                        .map_err(compiler_diagnostic)?;
+                    self.backend.builder.position_at_end(selected);
+                    let payload = self.backend.extract_sum_alternative(
+                        sum_value,
+                        sum,
+                        index,
+                        span.clone(),
+                    )?;
+                    self.emit_match_pattern_branch(
+                        owner,
+                        *argument,
+                        payload,
+                        success,
+                        failure,
+                        environment,
+                    )
+                }
+                CheckedType::Distinct { .. }
+                    if pattern.test.identity == crate::LoweredPatternIdentity::Representation =>
+                {
+                    self.emit_match_pattern_branch(
+                        owner,
+                        *argument,
+                        value,
+                        success,
+                        failure,
+                        environment,
+                    )
+                }
+                _ => Err(Diagnostic::new(
+                    span.clone(),
+                    "checked nominal pattern has an incompatible value",
+                )),
+            },
+            crate::LoweredPatternKind::Wildcard => {
+                self.bind_pattern(owner, pattern_id, value.as_any_value_enum(), environment)?;
+                self.backend
+                    .builder
+                    .build_unconditional_branch(success)
+                    .map(|_| ())
+                    .map_err(compiler_diagnostic)
+            }
+        }
+    }
+
+    /// Stage 5.5 Step 7: a short-circuiting `&&`/`||`, mirroring legacy
+    /// `compile_logical_expression` (the shared tag compare and phi builders).
+    fn emit_logical(
+        &mut self,
+        owner: EmissionOwner,
+        expression: &crate::LoweredExpression,
+        logical: &crate::LoweredLogical,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = expression.origin.span.clone();
+        let left = self.emit_expression(owner, logical.left, environment)?;
+        if environment.returned {
+            return Ok(left);
+        }
+        let Some(left_value) = value_as_basic(left) else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "logical operand is not first-class",
+            ));
+        };
+        let BasicValueEnum::StructValue(left_struct) = left_value else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "`Bool` value has an invalid representation",
+            ));
+        };
+        if !matches!(logical.bool_type, CheckedType::Sum(_)) {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "`&&`/`||` require `Bool` to be a sum type",
+            ));
+        }
+        let tag = self.backend.build_sum_tag(left_struct, "logical.tag")?;
+        let is_true =
+            self.backend
+                .build_sum_tag_compare(tag, logical.true_index, "logical.is_true")?;
+        let function = self
+            .backend
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`&&`/`||` is not in a function"))?;
+        let merge_block = self
+            .backend
+            .context
+            .append_basic_block(function, "logical.merge");
+        let right_block = self
+            .backend
+            .context
+            .append_basic_block(function, "logical.right");
+        let short_circuit_block = self
+            .backend
+            .context
+            .append_basic_block(function, "logical.short_circuit");
+        let (true_target, false_target) = match logical.operator {
+            staple_syntax::LogicalOperator::And => (right_block, short_circuit_block),
+            staple_syntax::LogicalOperator::Or => (short_circuit_block, right_block),
+        };
+        self.backend
+            .builder
+            .build_conditional_branch(is_true, true_target, false_target)
+            .map(|_| ())
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(short_circuit_block);
+        self.backend
+            .builder
+            .build_unconditional_branch(merge_block)
+            .map(|_| ())
+            .map_err(compiler_diagnostic)?;
+        let mut incoming = vec![(left_value, short_circuit_block)];
+        self.backend.builder.position_at_end(right_block);
+        environment.returned = false;
+        let right = self.emit_expression(owner, logical.right, environment)?;
+        if !environment.returned {
+            let right_value = value_as_basic(right).ok_or_else(|| {
+                Diagnostic::new(span.clone(), "logical operand is not first-class")
+            })?;
+            // Legacy `drop_owned_since` here is 5.6; the guard means the right
+            // operand owns nothing.
+            self.backend
+                .builder
+                .build_unconditional_branch(merge_block)
+                .map_err(compiler_diagnostic)?;
+            let predecessor = self
+                .backend
+                .builder
+                .get_insert_block()
+                .expect("logical right block");
+            incoming.push((right_value, predecessor));
+        }
+        self.backend.builder.position_at_end(merge_block);
+        environment.returned = false;
+        let result_type = self.backend.compile_type(&logical.bool_type)?;
+        Ok(self
+            .backend
+            .build_phi_value(result_type, &incoming, "logical.value")?
+            .as_any_value_enum())
+    }
+
+    /// Stage 5.5 Step 7: `let pattern? = value`, mirroring legacy
+    /// `compile_propagating_binding`: test the success tag, return the failure
+    /// value (widened through the recorded plan or extracted as the residual
+    /// variant), then bind the success payload and any `at` bindings.
+    fn emit_propagating_binding(
+        &mut self,
+        owner: EmissionOwner,
+        binding: &crate::LoweredPatternBindingItem,
+        value: BasicValueEnum<'context>,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let span = self
+            .view
+            .pattern(owner, binding.pattern)
+            .map(|pattern| pattern.origin.span.clone())
+            .unwrap_or(staple_syntax::Span::Compiler);
+        let Some(propagation) = &binding.propagation else {
+            return Err(Diagnostic::new(span, "missing checked propagation"));
+        };
+        let CheckedType::Sum(source_sum) = &propagation.source else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "propagation source is not a sum",
+            ));
+        };
+        let BasicValueEnum::StructValue(sum_value) = value else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "propagation source has an invalid representation",
+            ));
+        };
+        let tag = self.backend.build_sum_tag(sum_value, "propagate.tag")?;
+        let success = self.backend.build_sum_tag_compare(
+            tag,
+            propagation.success_index,
+            "propagate.success",
+        )?;
+        let function = self
+            .backend
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "propagation is not inside a function"))?;
+        let success_block = self
+            .backend
+            .context
+            .append_basic_block(function, "propagate.ok");
+        let failure_block = self
+            .backend
+            .context
+            .append_basic_block(function, "propagate.return");
+        self.backend
+            .builder
+            .build_conditional_branch(success, success_block, failure_block)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(failure_block);
+        let failure_value = if propagation.source == propagation.result {
+            sum_value.as_any_value_enum()
+        } else if matches!(propagation.result, CheckedType::Sum(_)) {
+            let Some(plan) = &binding.propagation_plan else {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "propagation coercion has no emission plan",
+                ));
+            };
+            self.emit_coercion(
+                sum_value.as_any_value_enum(),
+                &propagation.source,
+                &propagation.result,
+                plan,
+                &span,
+            )?
+        } else {
+            let index = source_sum
+                .alternatives
+                .iter()
+                .position(|alternative| alternative == &propagation.result)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        span.clone(),
+                        "propagated result is missing its residual variant",
+                    )
+                })?;
+            self.backend
+                .extract_sum_alternative(sum_value, source_sum, index, span.clone())?
+                .as_any_value_enum()
+        };
+        let failure_value = value_as_basic(failure_value)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "propagated result is not first-class"))?;
+        // Legacy `drop_all_owned` here is 5.6; the body guard means nothing is
+        // owned on this path.
+        self.backend
+            .builder
+            .build_return(Some(&failure_value))
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(success_block);
+        let success_value = self.backend.extract_sum_alternative(
+            sum_value,
+            source_sum,
+            propagation.success_index,
+            span.clone(),
+        )?;
+        let mut root = binding.pattern;
+        loop {
+            let Some(record) = self.view.pattern(owner, root).cloned() else {
+                return Err(Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "missing lowered pattern",
+                ));
+            };
+            match record.kind {
+                crate::LoweredPatternKind::At {
+                    binding: at_binding,
+                    pattern,
+                } => {
+                    self.bind_pattern(
+                        owner,
+                        at_binding,
+                        sum_value.as_any_value_enum(),
+                        environment,
+                    )?;
+                    root = pattern;
+                }
+                crate::LoweredPatternKind::Nominal { argument, .. } => {
+                    return self.bind_pattern(
+                        owner,
+                        argument,
+                        success_value.as_any_value_enum(),
+                        environment,
+                    );
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        span,
+                        "checked propagating pattern is nominal",
+                    ));
+                }
+            }
+        }
     }
 
     /// Stage 5.3/5.4 Step 7: build one first-class callable value. A `Fresh`

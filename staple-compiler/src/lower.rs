@@ -2161,6 +2161,11 @@ pub(crate) struct LoweredPatternBindingItem {
     /// Checked propagation metadata, present exactly for propagating
     /// bindings.
     pub propagation: Option<CheckedPropagation>,
+    /// Stage 5.5 Step 7: the failure value's coercion plan when the propagated
+    /// result is itself a sum (`compile_propagating_binding`'s
+    /// `coerce_sum_value` path). `None` when the source is returned unchanged
+    /// or extracted as a residual variant.
+    pub propagation_plan: Option<LoweredCoercionPlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -2248,6 +2253,13 @@ pub(crate) struct LoweredFunction {
     pub body_origin: Origin,
     pub body_syntax: SyntaxId,
     pub body: Option<BlockId>,
+    /// Stage 5.5 Step 7: the body block's own header facts. When the function
+    /// body lowers to `LoweredExpressionKind::Block`, the block expression's
+    /// coercion (and moved symbols) would otherwise be lost by unwrapping it
+    /// to its root block; legacy `compile_expression` applies them.
+    pub body_coercion: Option<CheckedCoercion>,
+    pub body_coercion_plan: Option<LoweredCoercionPlan>,
+    pub body_moved_symbols: Vec<SymbolId>,
     pub class: LoweredFunctionClass,
 }
 
@@ -2996,9 +3008,12 @@ impl LoweredProgram {
         }
         for (function, _) in &pending {
             match self.lower_function_body(module, function) {
-                Ok(body) => {
+                Ok((body, coercion, coercion_plan, moved_symbols)) => {
                     if let Some(entry) = self.functions.get_mut(function.id) {
                         entry.body = Some(body);
+                        entry.body_coercion = coercion;
+                        entry.body_coercion_plan = coercion_plan;
+                        entry.body_moved_symbols = moved_symbols;
                     }
                     if let Some(plan) = self.coroutine_plan_by_thunk.get(&function.id).copied()
                         && let Some(plan) = self.coroutine_plans.get_mut(plan)
@@ -3156,6 +3171,9 @@ impl LoweredProgram {
             parameter_style: function.parameter_style,
             parameter_pattern,
             parameters: pattern_symbols(resolved, &function.pattern),
+            body_coercion: None,
+            body_coercion_plan: None,
+            body_moved_symbols: Vec::new(),
             captures,
             body_origin: origin.clone(),
             body_syntax: body_syntax.id,
@@ -3292,29 +3310,49 @@ impl LoweredProgram {
         &mut self,
         module: &TypedModule,
         function: &ResolvedFunction,
-    ) -> Result<BlockId, Diagnostic> {
+    ) -> Result<
+        (
+            BlockId,
+            Option<CheckedCoercion>,
+            Option<LoweredCoercionPlan>,
+            Vec<SymbolId>,
+        ),
+        Diagnostic,
+    > {
         let owner = ExpressionOwner::Function(function.id);
         let provider_base = self.active_resource_providers.len();
         self.seed_function_providers(module, function);
         let body = self.lower_expression(module, owner, ExpressionContext::Primary, &function.body);
         self.active_resource_providers.truncate(provider_base);
         let body = body?;
+        // Stage 5.5 Step 7: when the body lowers to a block expression, its
+        // header coercion and moved symbols would be lost by unwrapping it to
+        // its root block; they ride back to the caller with the root. A
+        // non-block body keeps its header on the wrapped result expression,
+        // where the emitter applies it.
         if let Some(LoweredExpressionKind::Block(block)) = self
             .expressions
             .get(body)
             .map(|expression| &expression.kind)
         {
-            return Ok(*block);
+            let expression = self.expressions.get(body).expect("lowered body");
+            return Ok((
+                *block,
+                expression.coercion.clone(),
+                expression.coercion_plan.clone(),
+                expression.moved_symbols.clone(),
+            ));
         }
         let syntax = function.body.syntax();
-        Ok(self.blocks.push(LoweredBlock {
+        let root = self.blocks.push(LoweredBlock {
             origin: Origin {
                 syntax: syntax.id,
                 span: syntax.span.clone(),
             },
             items: Vec::new(),
             result: Some(body),
-        }))
+        });
+        Ok((root, None, None, Vec::new()))
     }
 
     /// Lowers every runtime item of a module initializer in source order.
@@ -3471,11 +3509,19 @@ impl LoweredProgram {
                 "cannot lower a propagating binding without checked propagation metadata",
             ));
         }
+        // Stage 5.5 Step 7: the failure path's sum coercion plan.
+        let propagation_plan = propagation.as_ref().and_then(|propagation| {
+            (propagation.source != propagation.result
+                && matches!(propagation.result, CheckedType::Sum(_)))
+            .then(|| LoweredCoercionPlan::plan(&propagation.source, &propagation.result).ok())
+            .flatten()
+        });
         Ok(LoweredPatternBindingItem {
             pattern,
             value,
             propagating,
             propagation,
+            propagation_plan,
         })
     }
 
@@ -9783,6 +9829,38 @@ impl LoweredProgram {
                         binding.value.index(),
                         self.expressions.contains(binding.value),
                     );
+                    // Stage 5.5 Step 7: a propagation whose residual result is
+                    // a sum needs the failure coercion plan.
+                    if let Some(propagation) = &binding.propagation {
+                        let needs_plan = propagation.source != propagation.result
+                            && matches!(propagation.result, CheckedType::Sum(_));
+                        let unresolved =
+                            instance_resolution::unresolved_type_problem(&propagation.source)
+                                .is_some()
+                                || instance_resolution::unresolved_type_problem(
+                                    &propagation.result,
+                                )
+                                .is_some();
+                        match (&binding.propagation_plan, needs_plan) {
+                            (Some(plan), true) => {
+                                match LoweredCoercionPlan::plan(
+                                    &propagation.source,
+                                    &propagation.result,
+                                ) {
+                                    Ok(expected) if *plan == expected => {}
+                                    _ => diagnostics.push(Diagnostic::new(
+                                        item.origin.span.clone(),
+                                        "propagation coercion plan disagrees with its checked types",
+                                    )),
+                                }
+                            }
+                            (None, true) if !unresolved => diagnostics.push(Diagnostic::new(
+                                item.origin.span.clone(),
+                                "propagation coercion has no emission plan",
+                            )),
+                            _ => {}
+                        }
+                    }
                 }
                 LoweredItemKind::Assignment(assignment) => {
                     check(

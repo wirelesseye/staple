@@ -187,6 +187,11 @@ pub(crate) struct LoweredInstanceBody {
     pub captures: Vec<LoweredInstanceCapture>,
     /// The instance-local root block; absent for body-less templates.
     pub root: Option<BlockId>,
+    /// Stage 5.5 Step 7: the body block expression's own coercion header,
+    /// substituted for this instance and applied before the return.
+    pub body_coercion: Option<CheckedCoercion>,
+    pub body_coercion_plan: Option<super::LoweredCoercionPlan>,
+    pub body_moved_symbols: Vec<SymbolId>,
     /// The global Stage 3.3 plan this body owns, when the template is a
     /// coroutine body thunk. The local plan is `plans[0]`.
     pub plan_template: Option<LoweredCoroutinePlanId>,
@@ -253,6 +258,9 @@ impl LoweredInstanceBody {
             parameters: Vec::new(),
             captures: Vec::new(),
             root: None,
+            body_coercion: None,
+            body_coercion_plan: None,
+            body_moved_symbols: Vec::new(),
             plan_template: None,
             function_providers: Vec::new(),
             bindings: BTreeMap::new(),
@@ -668,6 +676,14 @@ impl<'a> BodyCloner<'a> {
             self.clone_plan(plan);
         }
         self.body.root = function.body.map(|block| self.clone_block(block));
+        self.body.body_coercion = function
+            .body_coercion
+            .as_ref()
+            .map(|coercion| self.coercion(coercion));
+        self.body.body_moved_symbols = function.body_moved_symbols.clone();
+        self.body.body_coercion_plan = self.body.body_coercion.as_ref().and_then(|coercion| {
+            super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target).ok()
+        });
         (
             std::mem::take(&mut self.body),
             std::mem::take(&mut self.diagnostics),
@@ -906,6 +922,15 @@ impl<'a> BodyCloner<'a> {
                     .unwrap_or(CheckedType::Error);
                 binding.pattern = self.clone_pattern(binding.pattern, &subject);
                 binding.propagation = binding.propagation.as_ref().map(|p| self.propagation(p));
+                binding.propagation_plan = binding.propagation.as_ref().and_then(|propagation| {
+                    (propagation.source != propagation.result
+                        && matches!(propagation.result, CheckedType::Sum(_)))
+                    .then(|| {
+                        super::LoweredCoercionPlan::plan(&propagation.source, &propagation.result)
+                            .ok()
+                    })
+                    .flatten()
+                });
                 LoweredItemKind::PatternBinding(binding)
             }
             LoweredItemKind::Assignment(mut assignment) => {
@@ -3183,6 +3208,26 @@ impl<'a> BodyValidator<'a> {
             &CheckedType::Function(self.body.signature.clone()),
             "signature",
         );
+        // Stage 5.5 Step 7: a concrete body header coercion needs its plan.
+        if let Some(coercion) = &self.body.body_coercion {
+            self.check_concrete_type(&self.body.origin, &coercion.source, "body coercion source");
+            self.check_concrete_type(&self.body.origin, &coercion.target, "body coercion target");
+            match &self.body.body_coercion_plan {
+                Some(plan) => {
+                    match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+                        Ok(expected) if *plan == expected => {}
+                        _ => self.report(
+                            self.body.origin.span.clone(),
+                            "instance body coercion plan disagrees with its concrete types",
+                        ),
+                    }
+                }
+                None => self.report(
+                    self.body.origin.span.clone(),
+                    "instance body coercion has no emission plan",
+                ),
+            }
+        }
         for bound in &self.body.bounds {
             self.check_bound(&self.body.origin, bound);
         }

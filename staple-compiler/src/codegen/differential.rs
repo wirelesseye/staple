@@ -800,6 +800,13 @@ fn normalize_function(
                 output.push(character);
             }
         }
+        // LLVM pads a block label's `; preds = ...` comment to the widest line
+        // in the function, and the two emitters' pre-normalization names have
+        // different lengths. The padding is not part of the body.
+        if is_label && let Some(index) = output.find(';') {
+            let (head, tail) = output.split_at(index);
+            output = format!("{} {}", head.trim_end(), tail);
+        }
         if output.contains("call void @__staple_gc_register_root") {
             roots.push(output);
         } else {
