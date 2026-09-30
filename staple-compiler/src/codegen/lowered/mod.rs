@@ -2398,7 +2398,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if !matches!(binding, LoweredBoundTarget::Route(_)) {
                     return Err(unsupported("intrinsic call binding"));
                 }
-                self.emit_intrinsic(*intrinsic, &values, call.origin.span.clone())
+                self.emit_intrinsic(
+                    *intrinsic,
+                    &values,
+                    &call.result_type,
+                    call.origin.span.clone(),
+                )
             }
             LoweredCallableTarget::IndirectClosure { .. } => {
                 if !matches!(binding, LoweredBoundTarget::Route(_)) {
@@ -3349,10 +3354,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
+    /// The checked `Bool` representation of a comparison result (legacy
+    /// `compile_bool`).
+    fn build_intrinsic_bool(
+        &self,
+        condition: inkwell::values::IntValue<'context>,
+        result_type: &CheckedType,
+        span: staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let CheckedType::Sum(sum) = result_type else {
+            return Err(Diagnostic::new(span, "comparison result must be Bool"));
+        };
+        if sum.alternatives.len() != 2 {
+            return Err(Diagnostic::new(span, "comparison result must be Bool"));
+        }
+        let sum_type = self.backend.compile_sum_type(sum)?;
+        self.backend.build_bool_value(condition, sum_type, span)
+    }
+
     fn emit_intrinsic(
         &self,
         intrinsic: IntrinsicFunction,
         arguments: &[BasicMetadataValueEnum<'context>],
+        result_type: &CheckedType,
         span: staple_syntax::Span,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let unsupported = |family| {
@@ -3379,10 +3403,68 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_integer_binary(integer, operation, *left, *right)?;
                 Ok(value.as_any_value_enum())
             }
-            IntrinsicFunction::ToString { .. } => Err(unsupported("numeric string conversion")),
-            IntrinsicFunction::IntegerCompare { .. } => Err(unsupported("integer comparison")),
-            IntrinsicFunction::FloatBinary { .. } => Err(unsupported("float arithmetic")),
-            IntrinsicFunction::FloatCompare { .. } => Err(unsupported("float comparison")),
+            IntrinsicFunction::ToString { value: numeric } => {
+                let [argument] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "numeric conversion needs one argument",
+                    ));
+                };
+                // Stage 5.4 Step 9: shared with legacy's conversion core.
+                let argument = BasicValueEnum::try_from(*argument).map_err(|_| {
+                    Diagnostic::new(span.clone(), "numeric conversion requires a numeric value")
+                })?;
+                self.backend
+                    .build_numeric_to_string(numeric, argument, span)
+            }
+            IntrinsicFunction::IntegerCompare { integer, operation } => {
+                let [
+                    BasicMetadataValueEnum::IntValue(left),
+                    BasicMetadataValueEnum::IntValue(right),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "integer comparison operands must be integers",
+                    ));
+                };
+                let condition = self
+                    .backend
+                    .build_integer_compare(integer, operation, *left, *right)?;
+                self.build_intrinsic_bool(condition, result_type, span)
+            }
+            IntrinsicFunction::FloatBinary { float, operation } => {
+                let [
+                    BasicMetadataValueEnum::FloatValue(left),
+                    BasicMetadataValueEnum::FloatValue(right),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "float arithmetic intrinsic operands must be floats",
+                    ));
+                };
+                let value = self
+                    .backend
+                    .build_float_binary(float, operation, *left, *right)?;
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::FloatCompare { float, operation } => {
+                let [
+                    BasicMetadataValueEnum::FloatValue(left),
+                    BasicMetadataValueEnum::FloatValue(right),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "float comparison intrinsic operands must be floats",
+                    ));
+                };
+                let condition = self
+                    .backend
+                    .build_float_compare(float, operation, *left, *right)?;
+                self.build_intrinsic_bool(condition, result_type, span)
+            }
             IntrinsicFunction::StringFromCString => {
                 let [BasicMetadataValueEnum::PointerValue(source)] = arguments else {
                     return Err(Diagnostic::new(
@@ -3410,9 +3492,47 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_string_to_c_string(*string, span)?
                     .as_any_value_enum())
             }
-            IntrinsicFunction::StringAdd => Err(unsupported("string addition")),
-            IntrinsicFunction::SliceLength => Err(unsupported("slice length")),
-            IntrinsicFunction::SliceGetRef => Err(unsupported("slice reference")),
+            IntrinsicFunction::StringAdd => {
+                let [
+                    BasicMetadataValueEnum::StructValue(left),
+                    BasicMetadataValueEnum::StructValue(right),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "string concatenation requires two String values",
+                    ));
+                };
+                self.backend.build_string_add(*left, *right, span)
+            }
+            IntrinsicFunction::SliceLength => {
+                let [BasicMetadataValueEnum::StructValue(slice)] = arguments else {
+                    return Err(Diagnostic::new(span, "length requires a slice"));
+                };
+                self.backend
+                    .build_slice_length(*slice)
+                    .map(|value| value.as_any_value_enum())
+            }
+            IntrinsicFunction::SliceGetRef => {
+                let [
+                    BasicMetadataValueEnum::StructValue(slice),
+                    BasicMetadataValueEnum::IntValue(position),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "get_ref requires a slice and a position",
+                    ));
+                };
+                let CheckedType::Ref(payload) = result_type else {
+                    return Err(Diagnostic::new(span, "unchecked get_ref result"));
+                };
+                let element_type = self.backend.compile_type(payload)?;
+                let pointer =
+                    self.backend
+                        .build_slice_get_ref(*slice, *position, element_type, span)?;
+                Ok(pointer.as_any_value_enum())
+            }
             IntrinsicFunction::BufferWithCapacity => Err(unsupported("buffer allocation")),
             IntrinsicFunction::BufferLength => Err(unsupported("buffer length")),
             IntrinsicFunction::BufferCapacity => Err(unsupported("buffer capacity")),

@@ -22,6 +22,8 @@ Step 7: a `Fresh` callable value builds its capture environment from the closure
 
 Step 8: constructor adapter bodies rebuild the closure parameters with the shared `build_product_value` and return it, or GC-allocate the `ManagedRef` payload and set the planned payload finalizer; extern adapter bodies forward the closure parameters to the foreign symbol under the native signature. Partial mode no longer stubs either family, and both are body-compared like any other artifact. Results: 3062 fully emitted bodies compared (+8), 2452 stubs across 40 families; `constructor adapter artifact` and `extern adapter artifact` reach zero. The only remaining 5.4 first-blockers are the Step 9 numeric/string/slice intrinsics (380 integer comparisons, 152 float arithmetic, 76 float comparisons, 19 each for slice length, slice reference, and string addition).
 
+Step 9: `IntegerCompare`, `FloatBinary`, `FloatCompare`, `ToString`, `StringAdd`, `SliceLength`, and `SliceGetRef` go through the shared Step 2 builders with legacy's SSA names (and `snprintf` through the runtime requirement). Buffers, `RefReplace`, and `Drop` stay 5.6, and the coroutine/reactive/task/completion intrinsics stay 5.8. Results: 3708 fully emitted bodies compared (+646), 1806 stubs across 34 families — **every family owned by 5.4 has zero stubs across the whole corpus**; the remaining backlog is 5.5 (1544), 5.6 (151), 5.7 (7), and 5.8 (104).
+
 ## Starting Point
 
 The lowered emitter (`codegen/lowered/mod.rs`, about 2k lines) declares every catalog entry, emits initializers and `main`, and already emits:
