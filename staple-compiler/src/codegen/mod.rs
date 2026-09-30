@@ -691,6 +691,7 @@ pub(crate) fn legacy_emissions(
             .filter_map(|function| function.get_name().to_str().ok().map(str::to_string))
             .filter(|name| name != "main" && !emitter.legacy_runtime_internal.contains(name))
             .collect(),
+        module_ir: emitter.llvm_module.print_to_string().to_string(),
     })
 }
 
@@ -721,6 +722,8 @@ pub(crate) struct LoweredPartialEmissions {
     pub(crate) function_linkages: HashMap<String, bool>,
     /// Every function the partial module defines (real body or stub).
     pub(crate) defined_functions: HashSet<String>,
+    /// The whole partial module's IR text, for body-level comparison.
+    pub(crate) module_ir: String,
 }
 
 #[cfg(test)]
@@ -760,6 +763,7 @@ pub(crate) fn lowered_partial_emissions(
                 .filter(|function| function.count_basic_blocks() > 0)
                 .filter_map(|function| function.get_name().to_str().ok().map(str::to_owned))
                 .collect(),
+            module_ir: llvm_module.print_to_string().to_string(),
         })
 }
 

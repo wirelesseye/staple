@@ -269,4 +269,7 @@ pub(crate) struct LegacyEmissions {
     /// LLVM linkage keyed by final legacy symbol name (`true` for `Internal`),
     /// for the Stage 5.3 F2 declaration comparison.
     pub(crate) function_linkages: HashMap<String, bool>,
+    /// The finished legacy module's IR text, for body-level comparison
+    /// (Stage 5.3 Step 4 `main`, Stage 5.3 Step 6 functions).
+    pub(crate) module_ir: String,
 }

@@ -6157,6 +6157,70 @@ mod tests {
         );
     }
 
+    /// The trimmed lines of one IR function body, with
+    /// `__staple_gc_register_root` calls sorted to the end: legacy registers
+    /// them in `HashMap` order and the lowered harness registers them in
+    /// symbol order (Stage 5.3 Step 4's one accepted `main` difference).
+    fn normalized_function_body(ir: &str, header: &str) -> Vec<String> {
+        let start = ir
+            .find(header)
+            .unwrap_or_else(|| panic!("missing `{header}`"));
+        let rest = &ir[start..];
+        let end = rest
+            .find("\n}")
+            .unwrap_or_else(|| panic!("unterminated `{header}`"));
+        let mut body = Vec::new();
+        let mut roots = Vec::new();
+        for line in rest[..end].lines() {
+            let line = line.trim();
+            if line.contains("__staple_gc_register_root") {
+                roots.push(line.to_owned());
+            } else {
+                body.push(line.to_owned());
+            }
+        }
+        roots.sort();
+        body.extend(roots);
+        body
+    }
+
+    /// Stage 5.3 Step 4: `main` matches legacy `compile_main_function`
+    /// instruction for instruction, apart from the GC root registrations,
+    /// which legacy orders by `HashMap` and the lowered harness orders by
+    /// symbol.
+    #[test]
+    fn stage_5_3_main_matches_legacy_instruction_for_instruction() {
+        for source in [
+            "",
+            concat!(
+                "use std.core.reference.(Ref)\n",
+                "let counter: Ref I32 = Ref 1\n",
+                "let plain = 2\n",
+                "let pair = (1, 2)\n",
+            ),
+        ] {
+            let module = checked_program(source);
+            let lowered = Lowerer::new().lower(&module).unwrap_or_else(|diagnostics| {
+                panic!("source should lower: {diagnostics:?}\n{source}")
+            });
+            let context = Context::create();
+            let legacy = crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(
+                |diagnostics| {
+                    panic!("the legacy backend should compile: {diagnostics:?}\n{source}")
+                },
+            );
+            let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
+                .unwrap_or_else(|diagnostics| {
+                    panic!("partial lowered emission should verify: {diagnostics:?}\n{source}")
+                });
+            assert_eq!(
+                normalized_function_body(&partial.module_ir, "define i32 @main()"),
+                normalized_function_body(&legacy.module_ir, "define i32 @main()"),
+                "`main` differs from legacy\n{source}"
+            );
+        }
+    }
+
     #[test]
     fn stage_5_1_planned_names_match_legacy_declared_names() {
         let source = concat!(

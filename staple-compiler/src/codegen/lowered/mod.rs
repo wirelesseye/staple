@@ -18,8 +18,9 @@ use crate::{
     LoweredArgumentPassMode, LoweredArtifactPlan, LoweredBindingSite, LoweredBoundTarget,
     LoweredCallArgument, LoweredCallEnvironment, LoweredCallId, LoweredCallStep,
     LoweredCallableAdapter, LoweredCallableTarget, LoweredCallableValueId,
-    LoweredClosureEnvironment, LoweredEntryResourceKind, LoweredExpressionKind, LoweredItemKind,
-    LoweredPatternKind, ModuleId, RuntimeRequirement, SymbolId,
+    LoweredClosureEnvironment, LoweredEntryResourceKind, LoweredExpressionKind,
+    LoweredInstanceCapture, LoweredItemKind, LoweredPatternKind, ModuleId, RuntimeRequirement,
+    SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -624,25 +625,50 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })?
             .into_pointer_value();
         environment.closure_environment = Some(environment_pointer);
+
+        // F7: bind the concrete effect-row resources from the body's
+        // `function_providers`, in row order, keeping each provider's
+        // indirect/borrowed fact. 5.4 resolves `LoweredResourceUse` reads and
+        // call `resource_bindings` against these entries. Legacy binds the
+        // same list from the checked effect row (`bind_function_parameters`).
+        let resource_count = body.signature.effects.resources.len();
+        if body.function_providers.len() != resource_count {
+            return Err(Diagnostic::new(
+                body.origin.span.clone(),
+                "lowered emitter: function resource providers disagree with the effect row",
+            ));
+        }
+        for (position, provider_id) in body.function_providers.iter().enumerate() {
+            let provider = self
+                .view
+                .resource_provider(EmissionOwner::Instance(instance), *provider_id)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        body.origin.span.clone(),
+                        "missing function resource provider",
+                    )
+                })?;
+            let value = parameters.get(1 + position).ok_or_else(|| {
+                Diagnostic::new(
+                    body.origin.span.clone(),
+                    "missing function resource parameter",
+                )
+            })?;
+            environment.resources.push((
+                provider.resource.clone(),
+                value.as_any_value_enum(),
+                provider.indirect,
+            ));
+        }
+
+        // Every capture storage kind, with the same field layout legacy
+        // `build_capture_environment` uses (Stage 4.4's `ClosureEnvironment`
+        // finalizer plan fixes the order).
         if !body.captures.is_empty() {
             let fields = body
                 .captures
                 .iter()
-                .map(|capture| {
-                    if capture.requires_initialization_state
-                        || capture.mutable_storage
-                        || capture.derived
-                        || capture.capture.borrowed
-                    {
-                        Ok(self
-                            .backend
-                            .context
-                            .ptr_type(AddressSpace::default())
-                            .into())
-                    } else {
-                        self.backend.compile_type(&capture.value_type)
-                    }
-                })
+                .map(|capture| self.capture_field_type(capture))
                 .collect::<CodeGenerationResult<Vec<_>>>()?;
             let capture_type = self.backend.context.struct_type(&fields, false);
             let captures = self
@@ -658,18 +684,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_extract_value(captures, index as u32, "capture")
                     .map_err(compiler_diagnostic)?;
                 let symbol = capture.capture.symbol;
-                if capture.requires_initialization_state
-                    || capture.mutable_storage
-                    || capture.derived
-                    || capture.capture.borrowed
-                {
+                if self.capture_stores_pointer(capture) {
                     let pointer = value.into_pointer_value();
-                    if capture.capture.borrowed
-                        || self
-                            .view
-                            .symbol(symbol)
-                            .is_some_and(|s| s.mutated_parameter)
-                    {
+                    if self.capture_is_parameter_pointer(capture) {
                         environment.parameter_pointers.insert(symbol, pointer);
                     } else {
                         environment.binding_cells.insert(symbol, pointer);
@@ -679,7 +696,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
-        let resource_count = body.signature.effects.resources.len();
         let raw = parameters.get(1 + resource_count..).ok_or_else(|| {
             Diagnostic::new(body.origin.span.clone(), "missing function resources")
         })?;
@@ -719,10 +735,69 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .locals
                 .insert(parameter.symbol, value.as_any_value_enum());
             if let Some(pointer) = pointer {
+                // F7/legacy `bind_mutable_parameter_pointers`: a whole or
+                // indirect parameter pointer is the place every mutable read
+                // and write goes through, so it replaces any capture cell
+                // registered for the same symbol.
+                environment.binding_cells.remove(&parameter.symbol);
                 environment
                     .parameter_pointers
                     .insert(parameter.symbol, pointer);
             }
+        }
+        Ok(())
+    }
+
+    /// Whether one capture's environment field is a pointer: a cell,
+    /// initialization-state slot, derived cell, or borrowed parameter storage
+    /// is written and read through its pointer; every other capture (a plain
+    /// value or a `Copy` value) stores the value directly. The rule mirrors
+    /// legacy `build_capture_environment`'s field selection.
+    fn capture_stores_pointer(&self, capture: &LoweredInstanceCapture) -> bool {
+        capture.requires_initialization_state
+            || capture.mutable_storage
+            || capture.derived
+            || capture.capture.borrowed
+    }
+
+    /// Whether a pointer-kind capture's pointer is borrowed parameter storage
+    /// (a mutated or borrowed parameter) rather than a binding cell. Mirrors
+    /// legacy `bind_environment_captures`.
+    fn capture_is_parameter_pointer(&self, capture: &LoweredInstanceCapture) -> bool {
+        capture.capture.borrowed
+            || self
+                .view
+                .symbol(capture.capture.symbol)
+                .is_some_and(|symbol| symbol.mutated_parameter)
+    }
+
+    /// The LLVM field type of one capture, `capture_stores_pointer`'s choice.
+    fn capture_field_type(
+        &self,
+        capture: &LoweredInstanceCapture,
+    ) -> CodeGenerationResult<inkwell::types::BasicTypeEnum<'context>> {
+        if self.capture_stores_pointer(capture) {
+            Ok(self
+                .backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .into())
+        } else {
+            self.backend.compile_type(&capture.value_type)
+        }
+    }
+
+    /// Legacy `store_global_initialization_state`: write a symbol's
+    /// initialization state when it has one, and do nothing otherwise.
+    fn store_initialization_state(&self, symbol: SymbolId, state: u64) -> CodeGenerationResult<()> {
+        if let Some(slot) = self.initialization_states.get(&symbol) {
+            self.backend
+                .builder
+                .build_store(
+                    slot.as_pointer_value(),
+                    self.backend.context.i8_type().const_int(state, false),
+                )
+                .map_err(compiler_diagnostic)?;
         }
         Ok(())
     }
@@ -1001,34 +1076,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if binding.derived || binding.signal || binding.cell {
                     return Err(unimplemented("reactive or cell binding"));
                 }
-                if let Some(symbol) = binding.symbol
-                    && let Some(state) = self.initialization_states.get(&symbol)
-                {
-                    self.backend
-                        .builder
-                        .build_store(
-                            state.as_pointer_value(),
-                            self.backend.context.i8_type().const_int(1, false),
-                        )
-                        .map_err(compiler_diagnostic)?;
-                }
+                // The storage-only part of legacy `compile_top_level_item`:
+                // a generic binding records state 1 then 2 and evaluates
+                // nothing; a valued binding records state 1, evaluates,
+                // stores a module global when the symbol owns one (a nested
+                // local stays in the environment), then records state 2.
                 if binding.generic {
-                    if let Some(symbol) = binding.symbol
-                        && let Some(state) = self.initialization_states.get(&symbol)
-                    {
-                        self.backend
-                            .builder
-                            .build_store(
-                                state.as_pointer_value(),
-                                self.backend.context.i8_type().const_int(2, false),
-                            )
-                            .map_err(compiler_diagnostic)?;
+                    if let Some(symbol) = binding.symbol {
+                        self.store_initialization_state(symbol, 1)?;
+                        self.store_initialization_state(symbol, 2)?;
                     }
                     return Ok(());
                 }
                 let Some(value_id) = binding.value else {
                     return Ok(());
                 };
+                if let Some(symbol) = binding.symbol {
+                    self.store_initialization_state(symbol, 1)?;
+                }
                 let value = self.emit_expression(owner, value_id, environment)?;
                 if let Some(symbol) = binding.symbol {
                     if let Some(global) = self.storage.get(&symbol) {
@@ -1041,15 +1106,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     } else {
                         environment.locals.insert(symbol, value);
                     }
-                    if let Some(state) = self.initialization_states.get(&symbol) {
-                        self.backend
-                            .builder
-                            .build_store(
-                                state.as_pointer_value(),
-                                self.backend.context.i8_type().const_int(2, false),
-                            )
-                            .map_err(compiler_diagnostic)?;
-                    }
+                    self.store_initialization_state(symbol, 2)?;
                 }
                 Ok(())
             }

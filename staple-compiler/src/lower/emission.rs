@@ -156,6 +156,25 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.callable_value(self.program, id)
     }
 
+    /// Resolve an owner's resource provider without exposing either arena
+    /// (Stage 5.3 F7 reads a body's `function_providers` through this).
+    pub(crate) fn resource_provider(
+        &self,
+        owner: EmissionOwner,
+        id: LoweredResourceProviderId,
+    ) -> Option<&'a LoweredResourceProvider> {
+        self.owner(owner)?.resource_provider(self.program, id)
+    }
+
+    /// Resolve an owner's resource use without exposing either arena.
+    pub(crate) fn resource_use(
+        &self,
+        owner: EmissionOwner,
+        id: LoweredResourceUseId,
+    ) -> Option<&'a LoweredResourceUse> {
+        self.owner(owner)?.resource_use(self.program, id)
+    }
+
     pub(crate) fn binding(
         &self,
         owner: EmissionOwner,
