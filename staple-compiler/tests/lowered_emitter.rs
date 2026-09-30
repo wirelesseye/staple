@@ -97,11 +97,11 @@ fn partial_emission_stubs_unsupported_sites_and_verifies() {
         .expect("partial emission should verify");
     assert!(ir.contains("@llvm.trap"), "stub bodies call llvm.trap");
     assert!(
-        report
-            .stubbed()
-            .iter()
-            .any(|stub| stub.name() == "first"
-                && stub.diagnostic().message.contains("discarded result cleanup")),
+        report.stubbed().iter().any(|stub| stub.name() == "first"
+            && stub
+                .diagnostic()
+                .message
+                .contains("discarded result cleanup")),
         "the unsupported `first` body is stubbed: {:?}",
         report.stubbed()
     );

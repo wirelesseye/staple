@@ -4038,6 +4038,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
+        // Legacy `compile_call_expression`'s constructor branch compiles its
+        // single argument whole and never runs the flattened ABI argument
+        // path, so a constructor's slot count is its record count.
+        if matches!(call.target, LoweredCallableTarget::Constructor { .. }) {
+            parameter_count = call.arguments.len();
+        }
         let mut slots: Vec<Option<BasicMetadataValueEnum<'context>>> = vec![None; parameter_count];
         // Hidden effect-row resource arguments, in row order. Legacy evaluates
         // its visible arguments first and appends the hidden ones, then passes
