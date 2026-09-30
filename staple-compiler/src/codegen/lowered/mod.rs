@@ -1635,6 +1635,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
+    /// Stage 5.3/5.4 Step 7: build one first-class callable value. A `Fresh`
+    /// environment is built from the closure plan's captures (legacy
+    /// `build_closure`), `Stored` loads the existing closure from the function
+    /// binding's local, cell, or module storage, `Current` reuses the
+    /// enclosing environment, and the `Constructor`/`External` adapters call
+    /// their declared artifact with a null environment.
     fn emit_callable_value(
         &mut self,
         owner: EmissionOwner,
@@ -1653,63 +1659,43 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 format!("lowered emitter: {family} is not implemented yet"),
             )
         };
+        // Legacy `compile_symbol_value` runs the symbol's initialization check
+        // before producing the closure value.
         if callable.requires_initialization_check
-            || callable.adapter != LoweredCallableAdapter::None
+            && let Some(symbol) = self.callable_symbol(callable)
         {
-            return Err(unsupported("callable adapter or initialization check"));
+            self.check_symbol_initialization(environment, symbol, &callable.origin.span)?;
         }
-        // A `Stored` closure is an existing value: legacy `compile_symbol_value`
-        // loads it from the function binding symbol's storage. Rebuilding the
-        // closure inline would print the same call but a different body.
-        if matches!(
-            callable.closure.as_ref().map(|plan| plan.environment),
-            Some(LoweredClosureEnvironment::Stored)
-        ) {
-            let LoweredCallableTarget::DirectFunction { function, .. } = &callable.target else {
-                return Err(unsupported("stored closure"));
-            };
-            let Some(global) = self
-                .function_symbols
-                .get(function)
-                .and_then(|symbol| self.storage.get(symbol).copied())
-            else {
-                return Err(unsupported("stored closure storage"));
-            };
-            let closure = self
-                .backend
-                .builder
-                .build_load(
-                    self.backend.closure_type(),
-                    global.as_pointer_value(),
-                    "global",
-                )
-                .map_err(compiler_diagnostic)?;
-            return Ok(closure.as_any_value_enum());
-        }
-        let pointer = match callable.closure.as_ref().map(|plan| plan.environment) {
-            Some(LoweredClosureEnvironment::Fresh) => {
-                return Err(unsupported("fresh closure environment"));
-            }
-            Some(LoweredClosureEnvironment::Stored) => {
-                return Err(unsupported("stored closure"));
-            }
-            Some(LoweredClosureEnvironment::Current) => environment
-                .closure_environment
-                .ok_or_else(|| unsupported("current closure environment"))?,
-            Some(LoweredClosureEnvironment::None) | None => self
-                .backend
-                .context
-                .ptr_type(AddressSpace::default())
-                .const_null(),
-        };
         let binding = self
             .view
-            .binding(owner, LoweredBindingSite::CallableValue(id))
-            .ok_or_else(|| unsupported("callable binding"))?;
+            .binding(owner, LoweredBindingSite::CallableValue(id));
+        // Constructor and extern adapter values use the declared adapter
+        // artifact (legacy `ensure_constructor_adapter` and `closure_codes`);
+        // both carry a null environment.
+        if matches!(
+            callable.adapter,
+            LoweredCallableAdapter::Constructor | LoweredCallableAdapter::External
+        ) {
+            let code = self.callable_artifact_code(
+                binding,
+                &callable.origin.span,
+                "callable adapter binding",
+            )?;
+            return self
+                .backend
+                .build_closure_value(
+                    code,
+                    self.backend
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .const_null(),
+                )
+                .map(|closure| closure.as_any_value_enum());
+        }
         let code = match &callable.target {
             LoweredCallableTarget::DirectFunction { .. }
             | LoweredCallableTarget::TraitImplementation { .. } => {
-                let LoweredBoundTarget::Instance(instance) = binding else {
+                let Some(LoweredBoundTarget::Instance(instance)) = binding else {
                     return Err(unsupported("callable instance binding"));
                 };
                 self.instances
@@ -1719,16 +1705,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             LoweredCallableTarget::Constructor { .. }
             | LoweredCallableTarget::StructuralTraitMethod { .. }
-            | LoweredCallableTarget::ExternalFunction { .. } => {
-                let LoweredBoundTarget::Artifact(ordinal) = binding else {
-                    return Err(unsupported("callable artifact binding"));
-                };
-                self.artifacts
-                    .get(ordinal)
-                    .and_then(|values| values.first())
-                    .copied()
-                    .ok_or_else(|| unsupported("callable artifact declaration"))?
-            }
+            | LoweredCallableTarget::ExternalFunction { .. } => self.callable_artifact_code(
+                binding,
+                &callable.origin.span,
+                "callable artifact binding",
+            )?,
             LoweredCallableTarget::IndirectClosure { callee } => {
                 return self.emit_expression(owner, *callee, environment);
             }
@@ -1739,25 +1720,231 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 return Err(unsupported("compiler helper callable value"));
             }
         };
-        let mut closure = self.backend.closure_type().const_zero();
-        closure = self
-            .backend
-            .builder
-            .build_insert_value(
-                closure,
-                code.as_global_value().as_pointer_value(),
-                0,
-                "closure.code",
+        let pointer = match &callable.closure {
+            Some(closure) => match closure.environment {
+                LoweredClosureEnvironment::Fresh => {
+                    let pointer = self.build_closure_environment_value(
+                        closure,
+                        environment,
+                        &callable.origin.span,
+                    )?;
+                    // Legacy installs the closure-environment finalizer exactly
+                    // when the recorded use exists; its body is 5.6.
+                    if let Some(finalizer) = self.closure_environment_finalizer(owner, id) {
+                        self.backend.set_gc_finalizer(pointer, finalizer)?;
+                    }
+                    pointer
+                }
+                LoweredClosureEnvironment::Stored => {
+                    return self.load_stored_closure(callable, environment);
+                }
+                LoweredClosureEnvironment::Current => environment
+                    .closure_environment
+                    .ok_or_else(|| unsupported("current closure environment"))?,
+                LoweredClosureEnvironment::None => self
+                    .backend
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .const_null(),
+            },
+            None => self
+                .backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null(),
+        };
+        self.backend
+            .build_closure_value(code, pointer)
+            .map(|closure| closure.as_any_value_enum())
+    }
+
+    /// The catalog symbol whose initialization state a callable value checks.
+    fn callable_symbol(&self, callable: &crate::LoweredCallableValue) -> Option<SymbolId> {
+        match &callable.target {
+            LoweredCallableTarget::DirectFunction { function, .. } => {
+                self.function_symbols.get(function).copied()
+            }
+            LoweredCallableTarget::TraitImplementation {
+                function: Some(function),
+                ..
+            } => self.function_symbols.get(function).copied(),
+            LoweredCallableTarget::ExternalFunction { symbol }
+            | LoweredCallableTarget::Constructor { symbol, .. }
+            | LoweredCallableTarget::Intrinsic { symbol, .. } => Some(*symbol),
+            _ => callable
+                .closure
+                .as_ref()
+                .and_then(|closure| self.function_symbols.get(&closure.function).copied()),
+        }
+    }
+
+    /// The declared function of one callable value's artifact binding.
+    fn callable_artifact_code(
+        &self,
+        binding: Option<&LoweredBoundTarget>,
+        span: &staple_syntax::Span,
+        family: &str,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        let Some(LoweredBoundTarget::Artifact(ordinal)) = binding else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                format!("lowered emitter: {family} is not implemented yet"),
+            ));
+        };
+        self.artifacts
+            .get(ordinal)
+            .and_then(|values| values.first())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing callable artifact declaration"))
+    }
+
+    /// A `Stored` callable value is an existing closure: legacy
+    /// `compile_symbol_value` loads it from the function binding symbol's
+    /// local, binding cell, or module storage.
+    fn load_stored_closure(
+        &mut self,
+        callable: &crate::LoweredCallableValue,
+        environment: &FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let unsupported = |family| {
+            Diagnostic::new(
+                callable.origin.span.clone(),
+                format!("lowered emitter: {family} is not implemented yet"),
             )
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        closure = self
-            .backend
+        };
+        let LoweredCallableTarget::DirectFunction { function, .. } = &callable.target else {
+            return Err(unsupported("stored closure"));
+        };
+        let Some(symbol) = self.function_symbols.get(function).copied() else {
+            return Err(unsupported("stored closure storage"));
+        };
+        let closure_type = self.backend.closure_type();
+        if let Some(value) = environment.locals.get(&symbol) {
+            return Ok(*value);
+        }
+        if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+            let cell_type = self.binding_cell_type(symbol)?;
+            let slot = self
+                .backend
+                .builder
+                .build_struct_gep(cell_type, cell, 0, "binding.value")
+                .map_err(compiler_diagnostic)?;
+            return self
+                .backend
+                .builder
+                .build_load(closure_type, slot, "binding")
+                .map(|value| value.as_any_value_enum())
+                .map_err(compiler_diagnostic);
+        }
+        let Some(global) = self.storage.get(&symbol).copied() else {
+            return Err(unsupported("stored closure storage"));
+        };
+        self.backend
             .builder
-            .build_insert_value(closure, pointer, 1, "closure.environment")
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        Ok(closure.as_any_value_enum())
+            .build_load(closure_type, global.as_pointer_value(), "global")
+            .map(|value| value.as_any_value_enum())
+            .map_err(compiler_diagnostic)
+    }
+
+    /// The declared closure-environment finalizer of one callable value, named
+    /// by the value's `ClosureEnvironment` artifact use. A closure with no
+    /// droppable capture has no use.
+    fn closure_environment_finalizer(
+        &self,
+        owner: EmissionOwner,
+        id: LoweredCallableValueId,
+    ) -> Option<FunctionValue<'context>> {
+        let uses = self.view.artifact_uses(owner)?;
+        let ordinal = uses.iter().find_map(|use_| {
+            (use_.site == crate::ArtifactUseSite::ClosureEnvironment(id)).then_some(use_.artifact)
+        })?;
+        self.artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+    }
+
+    /// The capture environment of one closure plan, filled from the current
+    /// scope. Empty captures produce a null pointer (legacy
+    /// `build_capture_environment`).
+    fn build_closure_environment_value(
+        &mut self,
+        closure: &crate::LoweredClosureConstruction,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        if closure.captures.is_empty() {
+            return Ok(self
+                .backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null());
+        }
+        let fields = closure
+            .captures
+            .iter()
+            .map(|capture| {
+                if capture.access == crate::LoweredCaptureAccess::ByValue {
+                    self.backend.compile_type(&capture.value_type)
+                } else {
+                    Ok(self
+                        .backend
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .into())
+                }
+            })
+            .collect::<CodeGenerationResult<Vec<_>>>()?;
+        let environment_type = self.backend.capture_environment_type(&fields);
+        let mut environment_value = environment_type.const_zero();
+        for (index, capture) in closure.captures.iter().enumerate() {
+            let stored = self.closure_capture_value(capture, environment, span)?;
+            environment_value = self.backend.insert_capture(
+                environment_value,
+                stored,
+                index as u32,
+                span.clone(),
+            )?;
+        }
+        self.backend
+            .allocate_capture_environment(environment_type, environment_value, span.clone())
+    }
+
+    /// One closure capture's stored value, mirroring legacy
+    /// `build_capture_environment`: a shared cell or borrowed capture stores a
+    /// pointer from the current scope; a by-value capture stores its value.
+    fn closure_capture_value(
+        &mut self,
+        capture: &crate::LoweredClosureCapture,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        use crate::LoweredCaptureAccess;
+        let symbol = capture.capture.symbol;
+        let pointer = match capture.access {
+            LoweredCaptureAccess::SharedCell => environment
+                .parameter_pointers
+                .get(&symbol)
+                .copied()
+                .or_else(|| environment.binding_cells.get(&symbol).copied()),
+            LoweredCaptureAccess::Borrowed => environment.parameter_pointers.get(&symbol).copied(),
+            LoweredCaptureAccess::ByValue => None,
+        };
+        match capture.access {
+            LoweredCaptureAccess::SharedCell | LoweredCaptureAccess::Borrowed => {
+                let pointer = pointer.ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "closure capture storage is not available")
+                })?;
+                Ok(pointer.into())
+            }
+            LoweredCaptureAccess::ByValue => {
+                let value =
+                    self.load_symbol_value(symbol, false, &capture.value_type, span, environment)?;
+                value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "captured value is not first-class")
+                })
+            }
+        }
     }
 
     fn emit_call(
