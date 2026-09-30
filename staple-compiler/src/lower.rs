@@ -31,7 +31,7 @@ mod cleanup_artifacts;
 mod coroutine_artifacts;
 mod emission;
 mod extern_artifacts;
-mod graph_validation;
+pub(crate) mod graph_validation;
 mod initializer_bindings;
 mod instance_body;
 mod instance_resolution;

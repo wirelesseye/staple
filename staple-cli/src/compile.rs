@@ -801,7 +801,10 @@ pub(crate) fn fmt_usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{EmitKind, Mode, Outcome, TemporaryArtifact, compile, parse_options, run};
+    use super::{
+        EmitKind, Mode, Options, Outcome, TemporaryArtifact, compile, executable_extension,
+        format_diagnostics, link_executable, parse_options, run,
+    };
     use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
     use std::process::Command;
@@ -4539,5 +4542,147 @@ mod tests {
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
         assert!(status.success(), "string-add executable returned {status}");
+    }
+    /// Stage 5.3 Step 6 CLI harness: compile, link, and run every corpus
+    /// program with both emitters and compare stdout and exit status. A
+    /// program whose lowered compile fails in strict mode is reported as
+    /// blocked with the family histogram rather than failed. After F1 no
+    /// corpus program is expected to run strictly in 5.3.
+    #[cfg(unix)]
+    #[test]
+    fn stage_5_3_cli_differential_harness_compares_or_reports_blocked() {
+        use std::collections::HashMap;
+        use std::path::Path;
+
+        use inkwell::context::Context;
+        use staple_compiler::{
+            CodeGenerator, DifferentialSource, Emitter, Lowerer, NameResolver, ProgramLoader,
+            TypeChecker,
+        };
+
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = workspace_root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")])
+            .expect("corpus link options should parse");
+
+        let mut blocked = 0usize;
+        let mut identical = 0usize;
+        let mut unrunnable = 0usize;
+        let mut families: HashMap<String, usize> = HashMap::new();
+        for program in staple_compiler::differential_corpus() {
+            let (source, root) = match program.source {
+                DifferentialSource::Inline(source) => {
+                    (source.to_owned(), workspace_root.to_path_buf())
+                }
+                DifferentialSource::File(path) => {
+                    let full = workspace_root.join(path);
+                    let source = std::fs::read_to_string(&full)
+                        .unwrap_or_else(|error| panic!("`{path}` should read: {error}"));
+                    let root = full
+                        .parent()
+                        .expect("a corpus file has a parent directory")
+                        .to_path_buf();
+                    (source, root)
+                }
+            };
+            let loaded = ProgramLoader::new()
+                .with_standard_library_root(&standard_library)
+                .load_source(&source, &root)
+                .unwrap_or_else(|diagnostics| {
+                    panic!("`{}` should load: {diagnostics:?}", program.name)
+                });
+            let resolved =
+                NameResolver::new()
+                    .resolve_program(loaded)
+                    .unwrap_or_else(|diagnostics| {
+                        panic!("`{}` should resolve: {diagnostics:?}", program.name)
+                    });
+            let checked = TypeChecker::new()
+                .check(resolved)
+                .unwrap_or_else(|diagnostics| {
+                    panic!("`{}` should type check: {diagnostics:?}", program.name)
+                });
+            let lowered = Lowerer::new()
+                .lower(&checked)
+                .unwrap_or_else(|diagnostics| {
+                    panic!("`{}` should lower: {diagnostics:?}", program.name)
+                });
+
+            // Some corpus programs use an undefined C extern (`inspect`), so
+            // even the legacy emitter cannot link them. They have no runtime
+            // behavior to compare; the in-process harness still compares their
+            // bodies.
+            let Ok(legacy) = compile_link_run(&lowered, Emitter::Legacy, &options) else {
+                unrunnable += 1;
+                continue;
+            };
+
+            let context = Context::create();
+            match CodeGenerator::with_emitter(&context, Emitter::Lowered).compile_module(&lowered) {
+                Err(diagnostics) => {
+                    blocked += 1;
+                    for diagnostic in &diagnostics {
+                        let family = diagnostic
+                            .message
+                            .strip_prefix("lowered emitter: ")
+                            .and_then(|family| family.strip_suffix(" is not implemented yet"))
+                            .unwrap_or(&diagnostic.message);
+                        *families.entry(family.to_owned()).or_insert(0) += 1;
+                    }
+                }
+                Ok(_) => {
+                    let lowered_behavior = compile_link_run(&lowered, Emitter::Lowered, &options)
+                        .unwrap_or_else(|error| {
+                            panic!("`{}` should run with lowered: {error}", program.name)
+                        });
+                    assert_eq!(
+                        lowered_behavior, legacy,
+                        "`{}` behaves differently under the lowered emitter",
+                        program.name
+                    );
+                    identical += 1;
+                }
+            }
+        }
+        let mut families = families.into_iter().collect::<Vec<_>>();
+        families.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        let top = families
+            .iter()
+            .take(6)
+            .map(|(family, count)| format!("{count} {family}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "stage 5.3 CLI harness: {blocked} blocked, {identical} identical, {unrunnable} not runnable (top families: {top})"
+        );
+        assert_eq!(
+            blocked + identical + unrunnable,
+            staple_compiler::differential_corpus().len(),
+            "every corpus program is blocked, identical, or not runnable"
+        );
+    }
+
+    /// Compile one lowered program with `emitter`, emit an object, link it, run
+    /// it, and return `(exit code, stdout)`.
+    #[cfg(unix)]
+    fn compile_link_run(
+        lowered: &staple_compiler::LoweredModule,
+        emitter: staple_compiler::Emitter,
+        options: &Options,
+    ) -> Result<(Option<i32>, String), String> {
+        let object = TemporaryArtifact::new("differential-object", "o");
+        let executable = TemporaryArtifact::new("differential-executable", executable_extension());
+        let context = inkwell::context::Context::create();
+        staple_compiler::CodeGenerator::with_emitter(&context, emitter)
+            .emit_object(lowered, object.path(), None)
+            .map_err(format_diagnostics)?;
+        link_executable(object.path(), executable.path(), options)?;
+        let output = Command::new(executable.path())
+            .output()
+            .map_err(|error| format!("could not run `{}`: {error}", executable.path().display()))?;
+        Ok((
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ))
     }
 }

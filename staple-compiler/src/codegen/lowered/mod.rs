@@ -47,6 +47,10 @@ pub(super) struct LoweredEmitter<'program, 'context> {
     instances: HashMap<FunctionInstanceId, FunctionValue<'context>>,
     artifacts: HashMap<ArtifactOrdinal, Vec<FunctionValue<'context>>>,
     externs: HashMap<SymbolId, FunctionValue<'context>>,
+    /// The declared binding symbol of each function template. A `Stored`
+    /// callable value loads its closure from that symbol's storage, mirroring
+    /// legacy `compile_symbol_value`.
+    function_symbols: HashMap<crate::FunctionId, SymbolId>,
     storage: HashMap<SymbolId, GlobalValue<'context>>,
     initialization_states: HashMap<SymbolId, GlobalValue<'context>>,
     signal_metadata: HashMap<SymbolId, GlobalValue<'context>>,
@@ -66,6 +70,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             instances: HashMap::new(),
             artifacts: HashMap::new(),
             externs: HashMap::new(),
+            function_symbols: HashMap::new(),
             storage: HashMap::new(),
             initialization_states: HashMap::new(),
             signal_metadata: HashMap::new(),
@@ -143,6 +148,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.declare_required_runtime_symbols()?;
 
         self.declare_externs()?;
+        for (id, function) in self.view.functions() {
+            if let Some(symbol) = function.binding_symbol {
+                self.function_symbols.entry(id).or_insert(symbol);
+            }
+        }
         self.declare_instances()?;
         self.declare_artifacts()?;
         self.declare_storage()?;
@@ -1246,13 +1256,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if name.requires_initialization_check || name.reactive.is_some() {
                     return Err(unimplemented("checked or reactive name"));
                 }
+                // Legacy `compile_symbol_value`'s lookup order: a parameter
+                // pointer is reloaded on every read (the binding's own load
+                // stays behind, unused), then a local, then a binding cell,
+                // then module storage.
+                if let Some(pointer) = environment.parameter_pointers.get(&name.symbol).copied() {
+                    let llvm_type = self.backend.compile_type(&expression.value_type)?;
+                    return self
+                        .backend
+                        .builder
+                        .build_load(llvm_type, pointer, "parameter")
+                        .map(|value| value.as_any_value_enum())
+                        .map_err(compiler_diagnostic);
+                }
                 if let Some(value) = environment.locals.get(&name.symbol) {
                     return Ok(*value);
                 }
-                if environment.binding_cells.contains_key(&name.symbol)
-                    || environment.parameter_pointers.contains_key(&name.symbol)
-                {
-                    return Err(unimplemented("cell or parameter pointer read"));
+                if environment.binding_cells.contains_key(&name.symbol) {
+                    return Err(unimplemented("binding cell read"));
                 }
                 let global = self
                     .storage
@@ -1365,24 +1386,41 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         {
             return Err(unsupported("callable adapter or initialization check"));
         }
+        // A `Stored` closure is an existing value: legacy `compile_symbol_value`
+        // loads it from the function binding symbol's storage. Rebuilding the
+        // closure inline would print the same call but a different body.
+        if matches!(
+            callable.closure.as_ref().map(|plan| plan.environment),
+            Some(LoweredClosureEnvironment::Stored)
+        ) {
+            let LoweredCallableTarget::DirectFunction { function, .. } = &callable.target else {
+                return Err(unsupported("stored closure"));
+            };
+            let Some(global) = self
+                .function_symbols
+                .get(function)
+                .and_then(|symbol| self.storage.get(symbol).copied())
+            else {
+                return Err(unsupported("stored closure storage"));
+            };
+            let closure = self
+                .backend
+                .builder
+                .build_load(
+                    self.backend.closure_type(),
+                    global.as_pointer_value(),
+                    "global",
+                )
+                .map_err(compiler_diagnostic)?;
+            return Ok(closure.as_any_value_enum());
+        }
         let pointer = match callable.closure.as_ref().map(|plan| plan.environment) {
             Some(LoweredClosureEnvironment::Fresh) => {
                 return Err(unsupported("fresh closure environment"));
             }
-            Some(LoweredClosureEnvironment::Stored) => match &callable.target {
-                LoweredCallableTarget::DirectFunction { function, .. }
-                    if self
-                        .view
-                        .function(*function)
-                        .is_some_and(|template| template.captures.is_empty()) =>
-                {
-                    self.backend
-                        .context
-                        .ptr_type(AddressSpace::default())
-                        .const_null()
-                }
-                _ => return Err(unsupported("stored closure")),
-            },
+            Some(LoweredClosureEnvironment::Stored) => {
+                return Err(unsupported("stored closure"));
+            }
             Some(LoweredClosureEnvironment::Current) => environment
                 .closure_environment
                 .ok_or_else(|| unsupported("current closure environment"))?,

@@ -523,7 +523,7 @@ impl LoweredProgram {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::{Path, PathBuf};
 
     use inkwell::context::Context;
@@ -4953,10 +4953,10 @@ mod tests {
     /// What one census run accounted for, by legacy origin and by the
     /// explained differences.
     #[derive(Debug, Default)]
-    struct CensusCoverage {
-        origins: std::collections::BTreeSet<&'static str>,
-        functions: usize,
-        explained: std::collections::BTreeSet<&'static str>,
+    pub(crate) struct CensusCoverage {
+        pub(crate) origins: std::collections::BTreeSet<&'static str>,
+        pub(crate) functions: usize,
+        pub(crate) explained: std::collections::BTreeSet<&'static str>,
     }
 
     impl CensusCoverage {
@@ -4969,7 +4969,7 @@ mod tests {
 
     /// Stage 5.3 Step 3: one legacy-defined function's catalog mapping.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum LegacyCatalogEntry {
+    pub(crate) enum LegacyCatalogEntry {
         /// A source-function instance.
         Instance(FunctionInstanceId),
         /// A generated artifact function. A coroutine pair maps to its
@@ -4988,7 +4988,7 @@ mod tests {
 
     /// Which planned name of an artifact one legacy function uses.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum ArtifactSlot {
+    pub(crate) enum ArtifactSlot {
         Single,
         Resume,
         Cleanup,
@@ -4999,25 +4999,29 @@ mod tests {
     /// the catalog entry that plans it, the explained negatives, and the
     /// entries reachable only through a syntax-aliased coroutine.
     #[derive(Debug, Default)]
-    struct CensusMapping {
+    pub(crate) struct CensusMapping {
         /// `(legacy final name, catalog entry)` for every mapped legacy
         /// function. `main` and the UTF-8 validator are included; an eager but
         /// unused extern adapter is explained instead.
-        mapped: Vec<(String, LegacyCatalogEntry)>,
-        instances: HashSet<FunctionInstanceId>,
-        artifacts: HashSet<ArtifactOrdinal>,
+        pub(crate) mapped: Vec<(String, LegacyCatalogEntry)>,
+        /// Every mapped legacy function, including the specialization
+        /// duplicates that resolve to an already-mapped eager instance. The
+        /// body comparison uses this to rename legacy call targets.
+        pub(crate) symbol_names: std::collections::HashMap<String, LegacyCatalogEntry>,
+        pub(crate) instances: HashSet<FunctionInstanceId>,
+        pub(crate) artifacts: HashSet<ArtifactOrdinal>,
         /// Lowered entries legacy never emitted because their coroutine pair
         /// was syntax-aliased to another instantiation. The lowered module
         /// does define them.
-        aliased_instances: HashSet<FunctionInstanceId>,
-        aliased_artifacts: HashSet<ArtifactOrdinal>,
-        coverage: CensusCoverage,
-        unexplained: Vec<String>,
+        pub(crate) aliased_instances: HashSet<FunctionInstanceId>,
+        pub(crate) aliased_artifacts: HashSet<ArtifactOrdinal>,
+        pub(crate) coverage: CensusCoverage,
+        pub(crate) unexplained: Vec<String>,
     }
 
     /// Whether one coroutine pair plan's body syntax is a syntax legacy
     /// emitted for another instantiation (Stage 4.5's syntax-keyed cache).
-    fn aliased_coroutine_pair(
+    pub(crate) fn aliased_coroutine_pair(
         program: &crate::LoweredProgram,
         legacy: &crate::codegen::LegacyEmissions,
         plan: &crate::CoroutineCodesPlan,
@@ -5041,7 +5045,7 @@ mod tests {
     /// to an explained negative reason. The reverse checks stay in
     /// [`assert_census`]; the Stage 5.3 declaration comparison consumes the
     /// mapping directly.
-    fn census_mapping(
+    pub(crate) fn census_mapping(
         lowered: &crate::LoweredModule,
         legacy: &crate::codegen::LegacyEmissions,
     ) -> CensusMapping {
@@ -5062,6 +5066,7 @@ mod tests {
         // is skipped (its linkage differs only because legacy emitted the
         // body twice).
         let mut eager_instances = HashSet::new();
+        let mut duplicate_names = Vec::new();
         let mut coverage = CensusCoverage::default();
         let mut unexplained = Vec::new();
 
@@ -5151,7 +5156,10 @@ mod tests {
                         .instance_for_legacy_specialization(*function, function_type, substitutions)
                         .map(|instance| {
                             instances.insert(instance);
-                            if !eager_instances.contains(&instance) {
+                            if eager_instances.contains(&instance) {
+                                duplicate_names
+                                    .push((name.clone(), LegacyCatalogEntry::Instance(instance)));
+                            } else {
                                 mapped.push((name.clone(), LegacyCatalogEntry::Instance(instance)));
                             }
                         })
@@ -5420,7 +5428,16 @@ mod tests {
             }
         }
 
+        // Every mapped legacy function name, including the specialization
+        // duplicates collapsed onto an eager instance, so the body comparison
+        // can rename legacy call targets to their planned names.
+        let mut symbol_names = mapped
+            .iter()
+            .map(|(name, entry)| (name.clone(), *entry))
+            .collect::<std::collections::HashMap<_, _>>();
+        symbol_names.extend(duplicate_names);
         mapping.mapped = mapped;
+        mapping.symbol_names = symbol_names;
         mapping.instances = instances;
         mapping.artifacts = artifacts;
         mapping.aliased_instances = aliased_instances;
@@ -5850,6 +5867,154 @@ mod tests {
         assert_eq!(compared_initializers, lowered.program.initializers.len());
     }
 
+    /// The planned emitted name (or names) of one mapped catalog entry.
+    pub(crate) fn planned_names_for(
+        view: crate::EmissionView<'_>,
+        entry: &LegacyCatalogEntry,
+    ) -> Vec<String> {
+        match entry {
+            LegacyCatalogEntry::Instance(instance) => vec![
+                view.planned_name(*instance)
+                    .expect("mapped instance has a planned name")
+                    .to_owned(),
+            ],
+            LegacyCatalogEntry::Artifact { ordinal, slot } => match slot {
+                ArtifactSlot::Single => vec![
+                    view.planned_artifact_name(*ordinal)
+                        .expect("mapped artifact has a planned name")
+                        .to_owned(),
+                ],
+                ArtifactSlot::Resume | ArtifactSlot::Cleanup => {
+                    let (resume, cleanup) = view
+                        .planned_coroutine_pair_names(*ordinal)
+                        .expect("a coroutine pair has both planned names");
+                    if *slot == ArtifactSlot::Resume {
+                        vec![resume]
+                    } else {
+                        vec![cleanup]
+                    }
+                }
+            },
+            LegacyCatalogEntry::Initializer(module) => vec![format!(
+                "__staple_init_m{}",
+                view.module(*module).expect("module metadata").symbol_prefix
+            )],
+            LegacyCatalogEntry::Main => vec!["main".to_owned()],
+            LegacyCatalogEntry::Utf8Validator => vec!["__staple_is_valid_utf8".to_owned()],
+        }
+    }
+
+    /// Stage 5.3 Step 3's declaration parity check for one already-lowered
+    /// program (the differential harness calls this too): the partial defined
+    /// set must equal the mapped legacy set plus `main`, the UTF-8 validator,
+    /// and the syntax-aliased entries, and every mapped pair must have
+    /// identical LLVM types and linkage.
+    pub(crate) fn assert_declaration_parity(
+        label: &str,
+        lowered: &crate::LoweredModule,
+        legacy: &crate::codegen::LegacyEmissions,
+        partial: &crate::codegen::LoweredPartialEmissions,
+    ) -> CensusMapping {
+        let mapping = census_mapping(lowered, legacy);
+        assert!(
+            mapping.unexplained.is_empty(),
+            "the census left functions unaccounted:\n{}\n{label}",
+            mapping.unexplained.join("\n")
+        );
+        let program = &lowered.program;
+
+        let runtime = crate::lower::worklist::runtime_module_symbols();
+        let lowered_defined = partial
+            .defined_functions
+            .iter()
+            .filter(|name| !runtime.contains(*name))
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        let mut expected_defined = HashSet::new();
+        for (legacy_name, entry) in &mapping.mapped {
+            let legacy_type = legacy
+                .function_types
+                .get(legacy_name)
+                .unwrap_or_else(|| panic!("legacy `{legacy_name}` has no module type"));
+            let legacy_linkage = legacy.function_linkages[legacy_name];
+            for planned in planned_names_for(lowered.program(), entry) {
+                let lowered_type = partial.function_types.get(&planned).unwrap_or_else(|| {
+                    panic!(
+                        "the lowered module does not declare `{planned}` for legacy `{legacy_name}`\n{label}"
+                    )
+                });
+                assert_eq!(
+                    lowered_type, legacy_type,
+                    "LLVM type differs for legacy `{legacy_name}` -> `{planned}`\n{label}"
+                );
+                assert_eq!(
+                    partial.function_linkages[&planned], legacy_linkage,
+                    "linkage differs for legacy `{legacy_name}` -> `{planned}`\n{label}"
+                );
+                expected_defined.insert(planned);
+            }
+        }
+
+        // Entries reachable only through a syntax-aliased coroutine are
+        // additionally defined by the lowered module; legacy aliased them
+        // away. Coroutine body thunks are compiled inside `resume`, so their
+        // instance has no ordinary function (mirroring `declare_instances`).
+        for instance in &mapping.aliased_instances {
+            let record = program
+                .instances
+                .get(*instance)
+                .expect("aliased instance is interned");
+            let is_coroutine_body = program
+                .functions
+                .get(record.template)
+                .is_some_and(|template| template.class.coroutine_body);
+            if record.body.is_some() && !is_coroutine_body {
+                expected_defined.insert(
+                    program
+                        .planned_name(*instance)
+                        .expect("aliased instance has a planned name")
+                        .to_owned(),
+                );
+            }
+        }
+        for ordinal in &mapping.aliased_artifacts {
+            let Some(record) = program
+                .artifacts
+                .iter()
+                .find(|(_, artifact)| artifact.ordinal == *ordinal)
+                .map(|(_, artifact)| artifact)
+            else {
+                continue;
+            };
+            match record.plan.as_ref() {
+                Some(LoweredArtifactPlan::DropGlue(_)) | None => {}
+                Some(LoweredArtifactPlan::CoroutineCodes(_)) => {
+                    let (resume, cleanup) = lowered
+                        .program()
+                        .planned_coroutine_pair_names(*ordinal)
+                        .expect("a coroutine pair has both planned names");
+                    expected_defined.insert(resume);
+                    expected_defined.insert(cleanup);
+                }
+                Some(_) => {
+                    expected_defined.insert(
+                        program
+                            .planned_artifact_name(*ordinal)
+                            .expect("aliased artifact has a planned name")
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            lowered_defined, expected_defined,
+            "the partial lowered defined set differs from the census mapping\n{label}"
+        );
+        mapping
+    }
+
     /// Stage 5.3 Step 3 (F2, F10): over the Stage 4.7 census corpus plus a
     /// fixture using every artifact family, the partial lowered module defines
     /// exactly the functions the census maps -- plus `main`, the UTF-8
@@ -5985,142 +6150,7 @@ mod tests {
                 .unwrap_or_else(|diagnostics| {
                     panic!("partial lowered emission should verify: {diagnostics:?}\n{source}")
                 });
-            let mapping = census_mapping(&lowered, &legacy);
-            assert!(
-                mapping.unexplained.is_empty(),
-                "the census left functions unaccounted:\n{}\n{source}",
-                mapping.unexplained.join("\n")
-            );
-            let program = &lowered.program;
-
-            let planned_names_for = |entry: &LegacyCatalogEntry| -> Vec<String> {
-                match entry {
-                    LegacyCatalogEntry::Instance(instance) => vec![
-                        program
-                            .planned_name(*instance)
-                            .expect("mapped instance has a planned name")
-                            .to_owned(),
-                    ],
-                    LegacyCatalogEntry::Artifact { ordinal, slot } => match slot {
-                        ArtifactSlot::Single => vec![
-                            program
-                                .planned_artifact_name(*ordinal)
-                                .expect("mapped artifact has a planned name")
-                                .to_owned(),
-                        ],
-                        ArtifactSlot::Resume | ArtifactSlot::Cleanup => {
-                            let (resume, cleanup) = program
-                                .planned_coroutine_pair_names(*ordinal)
-                                .expect("a coroutine pair has both planned names");
-                            if *slot == ArtifactSlot::Resume {
-                                vec![resume]
-                            } else {
-                                vec![cleanup]
-                            }
-                        }
-                    },
-                    LegacyCatalogEntry::Initializer(module) => vec![format!(
-                        "__staple_init_m{}",
-                        program
-                            .modules
-                            .get(*module)
-                            .expect("module metadata")
-                            .symbol_prefix
-                    )],
-                    LegacyCatalogEntry::Main => vec!["main".to_owned()],
-                    LegacyCatalogEntry::Utf8Validator => vec!["__staple_is_valid_utf8".to_owned()],
-                }
-            };
-
-            let runtime = crate::lower::worklist::runtime_module_symbols();
-            let lowered_defined = partial
-                .defined_functions
-                .iter()
-                .filter(|name| !runtime.contains(*name))
-                .cloned()
-                .collect::<HashSet<_>>();
-
-            let mut expected_defined = HashSet::new();
-            for (legacy_name, entry) in &mapping.mapped {
-                let legacy_type = legacy
-                    .function_types
-                    .get(legacy_name)
-                    .unwrap_or_else(|| panic!("legacy `{legacy_name}` has no module type"));
-                let legacy_linkage = legacy.function_linkages[legacy_name];
-                for planned in planned_names_for(entry) {
-                    let lowered_type = partial.function_types.get(&planned).unwrap_or_else(|| {
-                        panic!(
-                            "the lowered module does not declare `{planned}` for legacy `{legacy_name}`\n{source}"
-                        )
-                    });
-                    assert_eq!(
-                        lowered_type, legacy_type,
-                        "LLVM type differs for legacy `{legacy_name}` -> `{planned}`\n{source}"
-                    );
-                    assert_eq!(
-                        partial.function_linkages[&planned], legacy_linkage,
-                        "linkage differs for legacy `{legacy_name}` -> `{planned}`\n{source}"
-                    );
-                    expected_defined.insert(planned);
-                }
-            }
-
-            // Entries reachable only through a syntax-aliased coroutine are
-            // additionally defined by the lowered module; legacy aliased them
-            // away. Coroutine body thunks are compiled inside `resume`, so
-            // their instance has no ordinary function (mirroring
-            // `declare_instances`).
-            for instance in &mapping.aliased_instances {
-                let record = program
-                    .instances
-                    .get(*instance)
-                    .expect("aliased instance is interned");
-                let is_coroutine_body = program
-                    .functions
-                    .get(record.template)
-                    .is_some_and(|template| template.class.coroutine_body);
-                if record.body.is_some() && !is_coroutine_body {
-                    expected_defined.insert(
-                        program
-                            .planned_name(*instance)
-                            .expect("aliased instance has a planned name")
-                            .to_owned(),
-                    );
-                }
-            }
-            for ordinal in &mapping.aliased_artifacts {
-                let Some(record) = program
-                    .artifacts
-                    .iter()
-                    .find(|(_, artifact)| artifact.ordinal == *ordinal)
-                    .map(|(_, artifact)| artifact)
-                else {
-                    continue;
-                };
-                match record.plan.as_ref() {
-                    Some(LoweredArtifactPlan::DropGlue(_)) | None => {}
-                    Some(LoweredArtifactPlan::CoroutineCodes(_)) => {
-                        let (resume, cleanup) = program
-                            .planned_coroutine_pair_names(*ordinal)
-                            .expect("a coroutine pair has both planned names");
-                        expected_defined.insert(resume);
-                        expected_defined.insert(cleanup);
-                    }
-                    Some(_) => {
-                        expected_defined.insert(
-                            program
-                                .planned_artifact_name(*ordinal)
-                                .expect("aliased artifact has a planned name")
-                                .to_owned(),
-                        );
-                    }
-                }
-            }
-
-            assert_eq!(
-                lowered_defined, expected_defined,
-                "the partial lowered defined set differs from the census mapping\n{source}"
-            );
+            let mapping = assert_declaration_parity(source, &lowered, &legacy, &partial);
             assert!(
                 !partial.report.stubbed().is_empty(),
                 "the partial report records the standard library's unported bodies\n{source}"

@@ -32,12 +32,16 @@ use staple_syntax::{
 };
 
 mod abi;
+mod differential;
 mod ir;
 mod layout;
 #[cfg(test)]
 mod legacy_recorder;
 mod lowered;
 mod runtime;
+
+#[doc(hidden)]
+pub use differential::{DifferentialProgram, DifferentialSource, differential_corpus};
 
 use abi::{flattened_parameter_types, mutation_parameter_mask};
 use ir::value_as_basic;
@@ -637,6 +641,12 @@ pub(crate) fn legacy_emissions(
     emitter
         .run(&target_machine)
         .map_err(|diagnostic| vec![diagnostic])?;
+    emitter.llvm_module.verify().map_err(|message| {
+        vec![Diagnostic::new(
+            Span::Compiler,
+            format!("invalid legacy LLVM module: {message}"),
+        )]
+    })?;
     Ok(LegacyEmissions {
         specializations: emitter.specialization_queue.clone(),
         constructor_adapters: emitter.legacy_constructor_adapters.clone(),
