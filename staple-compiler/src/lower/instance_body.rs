@@ -1145,6 +1145,8 @@ impl<'a> BodyCloner<'a> {
                 index.dispatch = self.dispatch(&index.dispatch);
                 index.arguments = index.arguments.iter().map(|ty| self.ty(ty)).collect();
                 index.method_type = index.method_type.as_ref().map(|ty| self.function_type(ty));
+                index.base_place = index.base_place.map(|place| self.clone_place(place));
+                index.index_place = index.index_place.map(|place| self.clone_place(place));
                 index.evidence = self.evidence(&index.evidence);
                 LoweredExpressionKind::Index(index)
             }
@@ -3476,6 +3478,12 @@ impl<'a> BodyValidator<'a> {
             LoweredExpressionKind::Index(index) => {
                 self.visit_expression(index.base);
                 self.visit_expression(index.index);
+                if let Some(place) = index.base_place {
+                    self.visit_place(place);
+                }
+                if let Some(place) = index.index_place {
+                    self.visit_place(place);
+                }
                 for argument in &index.arguments {
                     self.check_concrete_type(&origin, argument, "index argument");
                 }

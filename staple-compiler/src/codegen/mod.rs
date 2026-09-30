@@ -47,6 +47,7 @@ pub use differential::{
 use abi::{flattened_parameter_types, mutation_parameter_mask, variadic_argument_count_matches};
 use ir::value_as_basic;
 use layout::LayoutContext;
+use layout::strip_place_wrappers;
 use layout::{
     COMPLETION_CANCEL_ENV, COMPLETION_CANCEL_FN, COMPLETION_FLAGS, COMPLETION_SCHEDULER,
     COMPLETION_STATE_COMPLETED, COMPLETION_VALUE, CORO_CAPTURE_ENV, CORO_CHILD, CORO_CLEANUP_FN,
@@ -11445,15 +11446,6 @@ fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
         }
         CheckedType::CPointer { pointee } => checked_type_contains_ref(pointee),
         _ => false,
-    }
-}
-
-fn strip_place_wrappers(mut value_type: CheckedType) -> CheckedType {
-    loop {
-        match value_type {
-            CheckedType::Distinct { representation, .. } => value_type = *representation,
-            other => return other,
-        }
     }
 }
 

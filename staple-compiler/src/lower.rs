@@ -1523,6 +1523,12 @@ pub(crate) struct LoweredIndex {
     pub base_temporary: bool,
     /// The index operand is materialized into a temporary for a mutation.
     pub index_temporary: bool,
+    /// Stage 5.5 Step 5: the base operand's place when it has one. Legacy
+    /// `compile_indirect_argument_pointer` reuses a place pointer for a
+    /// mutation or borrowed pass and materializes a temporary otherwise.
+    pub base_place: Option<PlaceId>,
+    /// The index operand's place when it has one.
+    pub index_place: Option<PlaceId>,
     /// The single validated evidence recipe for the `Index` dispatch.
     pub evidence: TraitEvidence,
 }
@@ -5674,8 +5680,8 @@ impl LoweredProgram {
             })?;
         let method_type =
             module.instantiated_trait_method_type(trait_id, &arguments, dispatch.method);
-        let base_place = expression_has_place_root(module.resolved(), &index.value);
-        let index_place = expression_has_place_root(module.resolved(), &index.index);
+        let base_is_place = expression_has_place_root(module.resolved(), &index.value);
+        let index_is_place = expression_has_place_root(module.resolved(), &index.index);
         let mut whole_temporary = false;
         let mut base_temporary = false;
         let mut index_temporary = false;
@@ -5683,12 +5689,24 @@ impl LoweredProgram {
             for target in method_type.mutations.iter().chain(&method_type.moves) {
                 match target {
                     CheckedMutation::Whole => whole_temporary = true,
-                    CheckedMutation::Element(0) => base_temporary |= !base_place,
-                    CheckedMutation::Element(1) => index_temporary |= !index_place,
+                    CheckedMutation::Element(0) => base_temporary |= !base_is_place,
+                    CheckedMutation::Element(1) => index_temporary |= !index_is_place,
                     CheckedMutation::Element(_) => {}
                 }
             }
         }
+        // Stage 5.5 Step 5: record the operand places so emission can reuse
+        // them without re-deriving `expression_has_place_root`.
+        let base_place = if base_is_place {
+            self.lower_place(module, owner, context, &index.value).ok()
+        } else {
+            None
+        };
+        let index_place = if index_is_place {
+            self.lower_place(module, owner, context, &index.index).ok()
+        } else {
+            None
+        };
         let evidence = self.evidence_for_dispatch(
             module,
             owner,
@@ -5708,6 +5726,8 @@ impl LoweredProgram {
             whole_temporary,
             base_temporary,
             index_temporary,
+            base_place,
+            index_place,
             evidence,
         })
     }
@@ -9351,6 +9371,38 @@ impl LoweredProgram {
                             ));
                         }
                     }
+                    for place in [index.base_place, index.index_place].into_iter().flatten() {
+                        if !self.places.contains(place) {
+                            diagnostics.push(invalid_reference(
+                                &expression.origin,
+                                "index",
+                                "place",
+                                place.index(),
+                            ));
+                        }
+                    }
+                    // The operand temporary facts must agree with the recorded
+                    // places and the method's mutation/move marks.
+                    if let Some(method_type) = &index.method_type {
+                        let place_marked = |element: usize| {
+                            method_type
+                                .mutations
+                                .iter()
+                                .chain(&method_type.moves)
+                                .any(|mutation| *mutation == CheckedMutation::Element(element))
+                        };
+                        for (element, temporary, place) in [
+                            (0, index.base_temporary, index.base_place),
+                            (1, index.index_temporary, index.index_place),
+                        ] {
+                            if temporary != (place_marked(element) && place.is_none()) {
+                                diagnostics.push(Diagnostic::new(
+                                    expression.origin.span.clone(),
+                                    "index operand temporary fact disagrees with its place",
+                                ));
+                            }
+                        }
+                    }
                     if self
                         .trait_methods
                         .get(index.dispatch.method)
@@ -10627,6 +10679,12 @@ impl LoweredProgram {
             LoweredExpressionKind::Index(index) => {
                 self.visit_owned_expression(index.base, reached);
                 self.visit_owned_expression(index.index, reached);
+                if let Some(place) = index.base_place {
+                    self.visit_owned_place(place, reached);
+                }
+                if let Some(place) = index.index_place {
+                    self.visit_owned_place(place, reached);
+                }
             }
             LoweredExpressionKind::StringTemplate(template) => {
                 for part in &template.parts {

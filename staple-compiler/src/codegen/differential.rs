@@ -233,6 +233,7 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     ("resolver cancel", "5.8"),
     ("resolver complete", "5.8"),
     ("scheduler", "5.8"),
+    ("signal notify", "5.8"),
     ("snapshot", "5.8"),
     ("spawn", "5.8"),
     ("Stage 2.6 expression", "5.8"),
@@ -515,9 +516,7 @@ static CORPUS: [DifferentialProgram; 28] = [
             concat!(
                 "type MoveOnly = ctor I32\n",
                 "impl !Copy MoveOnly {}\n",
-                // The `mut` parameter's body cannot assign yet (assignment is
-                // a 5.5 item), so `bump` only carries the by-address effect.
-                "def bump: mut I32 -> () = mut target => ()\n",
+                "def bump: mut I32 -> () = mut target => { target = target + 1 }\n",
                 "def borrow: MoveOnly -> I32 = value => 1\n",
                 "def exercise: I32 -> I32 = seed => {\n",
                 "    let mut total = seed\n",
@@ -615,28 +614,25 @@ static CORPUS: [DifferentialProgram; 28] = [
         inline(
             "resources_with",
             concat!(
-                "type Counter = ctor I32\n",
+                "pub type Counter = pub ctor (value: I32)\n",
                 "def get: () ->{Counter} I32 = () => 1\n",
                 "def forward: () ->{Counter} I32 = () => get ()\n",
-                "def value_of: Counter -> I32 = counter => 1\n",
+                "def value_of: Counter -> I32 = counter => counter.value\n",
                 "def read: () ->{Counter} I32 = () => value_of (resource Counter)\n",
-                // The assignment target is a 5.5 place, so `bump` is not a
-                // focus function; the `with mut` provider is still exercised
-                // at the initializer level.
+                // A resource assignment place through a `with mut` provider.
                 "def bump: () ->{mut Counter} () = () => {\n",
-                "    let value = resource Counter\n",
-                "    let _ = value\n",
+                "    (resource Counter).value = 1\n",
                 "}\n",
                 "def run: I32 -> I32 = seed => {\n",
-                "    let counter = Counter seed\n",
+                "    let counter = Counter (value: seed)\n",
                 "    with Counter = counter { forward () + read () }\n",
                 "}\n",
-                "let mut shared = Counter 0\n",
+                "let mut shared = Counter (value: 0)\n",
                 "with mut Counter = shared { bump () }\n",
             ),
             "5.4",
         ),
-        &["get", "forward", "value_of", "read", "run"],
+        &["get", "forward", "value_of", "read", "run", "bump"],
     ),
     emits(
         inline(

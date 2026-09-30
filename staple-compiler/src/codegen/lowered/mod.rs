@@ -6,6 +6,7 @@ use inkwell::{
     AddressSpace,
     module::{Linkage, Module as LlvmModule},
     targets::TargetMachine,
+    types::BasicTypeEnum,
     values::{
         AnyValue, AnyValueEnum, BasicMetadataValueEnum, BasicValueEnum, FunctionValue, GlobalValue,
         PointerValue,
@@ -1624,7 +1625,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value = self.emit_expression(owner, binding.value, environment)?;
                 self.bind_pattern(owner, binding.pattern, value, environment)
             }
-            LoweredItemKind::Assignment(_) => Err(unimplemented("assignment")),
+            LoweredItemKind::Assignment(assignment) => {
+                self.emit_assignment(owner, id, &assignment, environment)
+            }
             LoweredItemKind::Break(_) => Err(unimplemented("break")),
             LoweredItemKind::Continue(item) => {
                 let Some((_, header)) = environment
@@ -1717,7 +1720,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered expression")
             })?
             .clone();
-        let value = self.emit_expression_value(owner, &expression, environment)?;
+        let value = self.emit_expression_value(owner, id, &expression, environment)?;
         // Legacy `compile_expression`: a diverged body releases moved
         // ownership and returns without coercing.
         if environment.returned {
@@ -1921,6 +1924,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     fn emit_expression_value(
         &mut self,
         owner: EmissionOwner,
+        id: ExpressionId,
         expression: &crate::LoweredExpression,
         environment: &mut FunctionEnvironment<'context>,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
@@ -2039,7 +2043,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(self.backend.unit_value())
             }
             LoweredExpressionKind::Match(_) => Err(unimplemented("match")),
-            LoweredExpressionKind::Index(_) => Err(unimplemented("index")),
+            LoweredExpressionKind::Index(index) => {
+                self.emit_index(owner, id, expression, index, environment)
+            }
             LoweredExpressionKind::StringTemplate(_) => Err(unimplemented("string template")),
             LoweredExpressionKind::Call(call) => self.emit_call(owner, *call, environment),
             LoweredExpressionKind::CallableValue(callable) => {
@@ -3584,17 +3590,478 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         )
                     })
             }
-            // 5.5 extends `emit_place_pointer` for these place kinds.
-            crate::LoweredPlaceKind::Temporary { .. } => Err(unsupported("temporary place")),
-            crate::LoweredPlaceKind::Dereference { .. } => Err(unsupported("dereference place")),
-            crate::LoweredPlaceKind::ProductElement { .. } => {
-                Err(unsupported("product element place"))
+            // Stage 5.5 Step 5: a non-place base materialized so it can be
+            // mutated (legacy `compile_mutation_argument_pointer`).
+            crate::LoweredPlaceKind::Temporary { expression } => {
+                let value = self.emit_expression(owner, *expression, environment)?;
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(place.origin.span.clone(), "argument is not storable")
+                })?;
+                let llvm_type = self.backend.compile_type(&place.value_type)?;
+                self.backend.build_argument_temporary(
+                    value,
+                    llvm_type,
+                    "mutation.temporary",
+                    place.origin.span.clone(),
+                )
             }
-            crate::LoweredPlaceKind::Representation { .. } => {
-                Err(unsupported("representation place"))
+            // A `Ref` payload chain: legacy `ref_payload_pointer` leaves the
+            // final payload address in place.
+            crate::LoweredPlaceKind::Dereference {
+                reference,
+                dereference,
+            } => {
+                let value = self.emit_expression(owner, *reference, environment)?;
+                self.backend
+                    .ref_payload_pointer(value, dereference, place.origin.span.clone())
             }
+            crate::LoweredPlaceKind::ProductElement { base, index, slice } => {
+                let base_place = self.view.place(owner, *base).ok_or_else(|| {
+                    Diagnostic::new(place.origin.span.clone(), "missing base place")
+                })?;
+                if *slice {
+                    // Legacy evaluates the slice value, then loads its pointer
+                    // and length and bounds-checks the fixed index.
+                    let value = match &base_place.kind {
+                        crate::LoweredPlaceKind::Symbol { symbol }
+                        | crate::LoweredPlaceKind::CapturedCell { symbol } => {
+                            let check = self.view.symbol(*symbol).is_some_and(|symbol| {
+                                symbol.requires_initialization_check || symbol.mutable_storage
+                            });
+                            self.load_symbol_value(
+                                owner,
+                                *symbol,
+                                check,
+                                &base_place.value_type,
+                                &place.origin.span,
+                                environment,
+                            )?
+                        }
+                        _ => {
+                            let pointer = self.emit_place_pointer(owner, *base, environment)?;
+                            let llvm_type = self.backend.compile_type(&base_place.value_type)?;
+                            self.backend
+                                .builder
+                                .build_load(llvm_type, pointer, "slice.place.value")
+                                .map(|value| value.as_any_value_enum())
+                                .map_err(compiler_diagnostic)?
+                        }
+                    };
+                    let Some(BasicValueEnum::StructValue(reference)) = value_as_basic(value) else {
+                        return Err(Diagnostic::new(
+                            place.origin.span.clone(),
+                            "invalid slice place",
+                        ));
+                    };
+                    let pointer = self
+                        .backend
+                        .builder
+                        .build_extract_value(reference, 0, "place.pointer")
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value();
+                    let length = self
+                        .backend
+                        .builder
+                        .build_extract_value(reference, 1, "place.length")
+                        .map_err(compiler_diagnostic)?
+                        .into_int_value();
+                    let position = self.backend.size_type.const_int(*index as u64, false);
+                    let out = self
+                        .backend
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::UGE,
+                            position,
+                            length,
+                            "place.out_of_bounds",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    self.backend.build_trap_if(out, place.origin.span.clone())?;
+                    let element_type = self.backend.compile_type(&place.value_type)?;
+                    return unsafe {
+                        self.backend.builder.build_gep(
+                            element_type,
+                            pointer,
+                            &[position],
+                            "place.element",
+                        )
+                    }
+                    .map_err(compiler_diagnostic);
+                }
+                // Legacy checks a mutable symbol base's initialization before
+                // projecting a field.
+                if let crate::LoweredPlaceKind::Symbol { symbol } = &base_place.kind
+                    && self
+                        .view
+                        .symbol(*symbol)
+                        .is_some_and(|symbol| symbol.mutable_storage)
+                {
+                    self.check_symbol_initialization(
+                        owner,
+                        environment,
+                        *symbol,
+                        &place.origin.span,
+                    )?;
+                }
+                let pointer = self.emit_place_pointer(owner, *base, environment)?;
+                let container_type =
+                    super::layout::strip_place_wrappers(base_place.value_type.clone());
+                let BasicTypeEnum::StructType(container_llvm) =
+                    self.backend.compile_type(&container_type)?
+                else {
+                    return Err(Diagnostic::new(
+                        place.origin.span.clone(),
+                        "access place is not a product",
+                    ));
+                };
+                self.backend
+                    .builder
+                    .build_struct_gep(container_llvm, pointer, *index as u32, "place.field")
+                    .map_err(compiler_diagnostic)
+            }
+            // A distinct representation read is the base place itself.
+            crate::LoweredPlaceKind::Representation { base } => {
+                self.emit_place_pointer(owner, *base, environment)
+            }
+            // An indexed place is an assignment target dispatched through
+            // `MutateIndex`, never a pointer.
             crate::LoweredPlaceKind::Indexed { .. } => Err(unsupported("indexed place")),
         }
+    }
+
+    /// Stage 5.5 Step 5: one assignment item. An indexed target dispatches
+    /// through `MutateIndex`; every other target stores through its place
+    /// pointer, with the E2 replaced-value hook, the initialization-state
+    /// writeback, and the signal-notification diagnostic in legacy's order.
+    fn emit_assignment(
+        &mut self,
+        owner: EmissionOwner,
+        id: crate::ItemId,
+        assignment: &crate::LoweredAssignmentItem,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let place = self
+            .view
+            .place(owner, assignment.target)
+            .ok_or_else(|| Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered place"))?
+            .clone();
+        if matches!(place.kind, crate::LoweredPlaceKind::Indexed { .. }) {
+            return self.emit_mutate_index_assignment(owner, id, assignment, &place, environment);
+        }
+        let span = place.origin.span.clone();
+        let pointer = self.emit_place_pointer(owner, assignment.target, environment)?;
+        let value = self.emit_expression(owner, assignment.value, environment)?;
+        if environment.returned {
+            return Ok(());
+        }
+        let value = value_as_basic(value)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "assigned value is not storable"))?;
+        // E2: diagnose the replaced value's cleanup only when the owner has
+        // the site's artifact-use record; otherwise legacy drops nothing.
+        if assignment.drop_previous {
+            self.emit_drop_site(owner, crate::ArtifactUseSite::ReplacedValue(id))?;
+        }
+        self.backend
+            .builder
+            .build_store(pointer, value)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        if let Some(symbol) = assignment.initialization_symbol {
+            self.store_local_initialization_state(owner, environment, symbol, 2, &span)?;
+            self.store_initialization_state(symbol, 2)?;
+        }
+        if assignment.signal_notify.is_some() {
+            return Err(Diagnostic::new(
+                span,
+                "lowered emitter: signal notify is not implemented yet",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Stage 5.5 Step 5: `base[index] = value`, mirroring legacy
+    /// `compile_mutate_index_assignment`: the `IndexedAssignment` binding names
+    /// the `MutateIndex` instance (or structural artifact), the base is a
+    /// place pointer or a materialized mutation temporary, and the call passes
+    /// the base, position, and replacement after the null environment.
+    fn emit_mutate_index_assignment(
+        &mut self,
+        owner: EmissionOwner,
+        id: crate::ItemId,
+        assignment: &crate::LoweredAssignmentItem,
+        place: &crate::LoweredPlace,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let span = place.origin.span.clone();
+        let crate::LoweredPlaceKind::Indexed { base, index } = &place.kind else {
+            unreachable!("indexed assignment is dispatched for an indexed place")
+        };
+        let binding = self
+            .view
+            .binding(owner, crate::LoweredBindingSite::IndexedAssignment(id))
+            .ok_or_else(|| Diagnostic::new(span.clone(), "indexed assignment has no binding"))?;
+        let function = match binding {
+            crate::LoweredBoundTarget::Instance(instance) => {
+                self.instances.get(instance).copied().ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "MutateIndex instance is not declared")
+                })?
+            }
+            crate::LoweredBoundTarget::Artifact(ordinal) => self
+                .artifacts
+                .get(ordinal)
+                .and_then(|functions| functions.first())
+                .copied()
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "MutateIndex artifact is not declared")
+                })?,
+            _ => {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "indexed assignment is not bound to a function",
+                ));
+            }
+        };
+        // Legacy compiles the base pointer first, then the position, then the
+        // replacement.
+        let base_place = self.view.place(owner, *base).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "missing indexed assignment base place")
+        })?;
+        let base_temporary = matches!(base_place.kind, crate::LoweredPlaceKind::Temporary { .. });
+        let base_type = base_place.value_type.clone();
+        let pointer = self.emit_place_pointer(owner, *base, environment)?;
+        let position = self.emit_expression(owner, *index, environment)?;
+        if environment.returned {
+            return Ok(());
+        }
+        let replacement = self.emit_expression(owner, assignment.value, environment)?;
+        if environment.returned {
+            return Ok(());
+        }
+        let position = value_as_basic(position).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "MutateIndex position is not first-class")
+        })?;
+        let replacement = value_as_basic(replacement).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "MutateIndex replacement is not first-class")
+        })?;
+        let arguments = [
+            self.backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+                .into(),
+            pointer.into(),
+            position.into(),
+            replacement.into(),
+        ];
+        self.backend
+            .builder
+            .build_direct_call(function, &arguments, "mutate_index.call")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        // Legacy `drop_mutation_temporaries` drops the materialized base when
+        // its type needs drop; that cleanup is Stage 5.6.
+        if base_temporary && self.view.concrete_needs_drop(&base_type) {
+            return Err(Diagnostic::new(
+                span,
+                "lowered emitter: call argument cleanup is not implemented yet",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Stage 5.5 Step 5: one `base[index]` read through the `Index` binding.
+    /// The operand ABI mask decides a place pointer, a mutation temporary, or a
+    /// borrowed temporary; the call is `index.call` with the null environment
+    /// and the hidden resources first, exactly as legacy
+    /// `compile_index_expression`.
+    fn emit_index(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        expression: &crate::LoweredExpression,
+        index: &crate::LoweredIndex,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = expression.origin.span.clone();
+        let unsupported = |family| {
+            Diagnostic::new(
+                span.clone(),
+                format!("lowered emitter: {family} is not implemented yet"),
+            )
+        };
+        let binding = self
+            .view
+            .binding(owner, crate::LoweredBindingSite::Index(id))
+            .ok_or_else(|| unsupported("index binding"))?;
+        let function = match binding {
+            crate::LoweredBoundTarget::Instance(instance) => self
+                .instances
+                .get(instance)
+                .copied()
+                .ok_or_else(|| unsupported("index instance declaration"))?,
+            // A structural `Index` method's body is Stage 5.7; the declared
+            // artifact is called like any other function.
+            crate::LoweredBoundTarget::Artifact(ordinal) => self
+                .artifacts
+                .get(ordinal)
+                .and_then(|functions| functions.first())
+                .copied()
+                .ok_or_else(|| unsupported("index artifact declaration"))?,
+            _ => return Err(unsupported("index binding")),
+        };
+        let Some(method_type) = &index.method_type else {
+            return Err(unsupported("index method type"));
+        };
+        if !method_type.effects.resources.is_empty() {
+            return Err(unsupported("index resources"));
+        }
+        let base_type = self
+            .view
+            .expression(owner, index.base)
+            .map(|expression| expression.value_type.clone())
+            .ok_or_else(|| unsupported("index base"))?;
+        let index_type = self
+            .view
+            .expression(owner, index.index)
+            .map(|expression| expression.value_type.clone())
+            .ok_or_else(|| unsupported("index position"))?;
+        let types = flattened_parameter_types(&method_type.parameter);
+        let mut mask = self.backend.indirect_parameter_mask(method_type);
+        let mutation_mask =
+            super::abi::mutation_parameter_mask(types.len(), &method_type.mutations);
+        let move_mask = super::abi::mutation_parameter_mask(types.len(), &method_type.moves);
+        if types.len() == 2 {
+            for (element, actual) in [&base_type, &index_type].into_iter().enumerate() {
+                if !mutation_mask[element] && !move_mask[element] {
+                    mask[element] = !self.view.concrete_is_copy(actual);
+                }
+            }
+        }
+        let mut temporaries: Vec<(PointerValue<'context>, CheckedType)> = Vec::new();
+        let mut values: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
+        if !mask.iter().any(|indirect| *indirect) {
+            for operand in [index.base, index.index] {
+                let value = self.emit_expression(owner, operand, environment)?;
+                if environment.returned {
+                    return Ok(self.backend.unit_value());
+                }
+                values.push(
+                    value_as_basic(value)
+                        .ok_or_else(|| unsupported("index argument"))?
+                        .into(),
+                );
+            }
+        } else if index.whole_temporary {
+            let mut elements = Vec::with_capacity(2);
+            for operand in [index.base, index.index] {
+                let value = self.emit_expression(owner, operand, environment)?;
+                if environment.returned {
+                    return Ok(self.backend.unit_value());
+                }
+                elements.push(value_as_basic(value).ok_or_else(|| unsupported("index argument"))?);
+            }
+            let product = self.backend.build_product_value(&elements, span.clone())?;
+            let llvm_type = self.backend.compile_type(&method_type.parameter)?;
+            let pointer = self.backend.build_argument_temporary(
+                product,
+                llvm_type,
+                "mutation.temporary",
+                span.clone(),
+            )?;
+            temporaries.push((pointer, method_type.parameter.as_ref().clone()));
+            values.push(pointer.into());
+        } else {
+            for (element, operand) in [(0usize, index.base), (1usize, index.index)] {
+                if element >= types.len() {
+                    break;
+                }
+                let place = if element == 0 {
+                    index.base_place
+                } else {
+                    index.index_place
+                };
+                if mask[element] {
+                    if mutation_mask[element] {
+                        if let Some(place) = place {
+                            let pointer = self.emit_place_pointer(owner, place, environment)?;
+                            values.push(pointer.into());
+                        } else {
+                            let value = self.emit_expression(owner, operand, environment)?;
+                            if environment.returned {
+                                return Ok(self.backend.unit_value());
+                            }
+                            let value = value_as_basic(value)
+                                .ok_or_else(|| unsupported("index argument"))?;
+                            let llvm_type = self.backend.compile_type(&types[element])?;
+                            let pointer = self.backend.build_argument_temporary(
+                                value,
+                                llvm_type,
+                                "mutation.temporary",
+                                span.clone(),
+                            )?;
+                            temporaries.push((pointer, types[element].clone()));
+                            values.push(pointer.into());
+                        }
+                    } else {
+                        let pointer = match place {
+                            Some(place) => self.emit_place_pointer(owner, place, environment).ok(),
+                            None => None,
+                        };
+                        match pointer {
+                            Some(pointer) => values.push(pointer.into()),
+                            None => {
+                                let value = self.emit_expression(owner, operand, environment)?;
+                                if environment.returned {
+                                    return Ok(self.backend.unit_value());
+                                }
+                                let value = value_as_basic(value)
+                                    .ok_or_else(|| unsupported("index argument"))?;
+                                let llvm_type = self.backend.compile_type(&types[element])?;
+                                let pointer = self.backend.build_argument_temporary(
+                                    value,
+                                    llvm_type,
+                                    "borrow.temporary",
+                                    span.clone(),
+                                )?;
+                                values.push(pointer.into());
+                            }
+                        }
+                    }
+                } else {
+                    let value = self.emit_expression(owner, operand, environment)?;
+                    if environment.returned {
+                        return Ok(self.backend.unit_value());
+                    }
+                    values.push(
+                        value_as_basic(value)
+                            .ok_or_else(|| unsupported("index argument"))?
+                            .into(),
+                    );
+                }
+            }
+        }
+        let mut arguments = vec![
+            self.backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+                .into(),
+        ];
+        arguments.extend(values);
+        let result = self
+            .backend
+            .builder
+            .build_direct_call(function, &arguments, "index.call")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "Index result is not first-class"))?;
+        // Mutation temporaries are dropped in reverse order by legacy
+        // `drop_mutation_temporaries`; that cleanup is Stage 5.6.
+        for (_, value_type) in temporaries.iter().rev() {
+            if self.view.concrete_needs_drop(value_type) {
+                return Err(unsupported("call argument cleanup"));
+            }
+        }
+        Ok(result.as_any_value_enum())
     }
 
     /// Materialize an indirect call's `closure.code`/`closure.environment`

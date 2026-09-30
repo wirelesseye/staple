@@ -2502,6 +2502,12 @@ impl<'a> ParameterCollector<'a> {
                 self.family("expression.index");
                 self.collect_expression(index.base);
                 self.collect_expression(index.index);
+                if let Some(place) = index.base_place {
+                    self.collect_place(place);
+                }
+                if let Some(place) = index.index_place {
+                    self.collect_place(place);
+                }
                 for argument in &index.arguments {
                     self.collect_type(argument);
                 }

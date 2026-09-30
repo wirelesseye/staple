@@ -632,3 +632,14 @@ mod tests {
         }
     }
 }
+
+/// Stage 5.5 Step 5: strips `Distinct` wrappers from a place's container type
+/// before projecting a product field, shared by both emitters' place pointers.
+pub(crate) fn strip_place_wrappers(mut value_type: crate::CheckedType) -> crate::CheckedType {
+    loop {
+        match value_type {
+            crate::CheckedType::Distinct { representation, .. } => value_type = *representation,
+            other => return other,
+        }
+    }
+}
