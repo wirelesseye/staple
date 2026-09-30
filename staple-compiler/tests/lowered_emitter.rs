@@ -75,16 +75,18 @@ fn partial_emission_empty_program_verifies() {
 /// with the stub/histogram report.
 #[test]
 fn partial_emission_stubs_unsupported_sites_and_verifies() {
+    // Stage 5.4 Step 3 emits string literals, so the stub fixture uses string
+    // templates, which stay a 5.5 diagnostic.
     let lowered = prepare(concat!(
-        "def first: () -> String = () => \"a\"\n",
-        "def second: () -> String = () => \"b\"\n",
+        "def first: I32 -> String = value => \"first ${value:?}\"\n",
+        "def second: I32 -> String = value => \"second ${value:?}\"\n",
         "type Point = ctor (I32, I32)\n",
         "let point: Point = Point (1, 2)\n",
         "let make: () -> ((I32, I32) -> Point) = () => Point\n",
         "let pair = (1, 2)\n",
         "let shown = \"pair: ${pair:?}\"\n",
-        "let one = first ()\n",
-        "let two = second ()\n",
+        "let one = first 1\n",
+        "let two = second 2\n",
     ));
     let context = Context::create();
     let (ir, report) = CodeGenerator::with_emitter(&context, Emitter::Lowered)
@@ -115,8 +117,8 @@ fn partial_emission_stubs_unsupported_sites_and_verifies() {
         report
             .family_histogram()
             .iter()
-            .any(|(family, count)| family == "string" && *count >= 2),
-        "the histogram counts the string family: {:?}",
+            .any(|(family, count)| family == "string template" && *count >= 2),
+        "the histogram counts the string-template family: {:?}",
         report.family_histogram()
     );
     assert!(

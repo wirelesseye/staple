@@ -571,18 +571,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// skipped (Contract 2). Every collected record has drop glue (the
     /// collector only records types that need drop), and a cell-storage record
     /// is dropped through its cell state, so either fact makes the body 5.6's.
+    ///
+    /// Step 3 extends the same guard to a captured binding cell whose value
+    /// needs drop: legacy attaches a GC finalizer to the cell, which is 5.6's
+    /// `GcFinalizer` work, and emitting the cell without it would silently
+    /// change behavior.
     fn guard_owned_bindings(
         &self,
         owner: EmissionOwner,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
-        let Some(bindings) = self.view.owned_bindings(owner) else {
-            return Ok(());
-        };
-        if bindings
-            .iter()
-            .any(|record| record.glue.is_some() || matches!(record.storage, OwnedStorage::Cell))
-        {
+        let owned = self.view.owned_bindings(owner).is_some_and(|bindings| {
+            bindings
+                .iter()
+                .any(|record| record.glue.is_some() || matches!(record.storage, OwnedStorage::Cell))
+        });
+        let cell_finalizer = self.view.artifact_uses(owner).is_some_and(|uses| {
+            uses.iter()
+                .any(|use_| matches!(use_.site, crate::ArtifactUseSite::CellFinalizer(_)))
+        });
+        if owned || cell_finalizer {
             return Err(Diagnostic::new(
                 span.clone(),
                 "lowered emitter: owned binding cleanup is not implemented yet",
@@ -853,6 +861,99 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )
                 .map_err(compiler_diagnostic)?;
         }
+        Ok(())
+    }
+
+    /// Legacy `compile_binding_cell_type` for a plain (non-signal, non-derived)
+    /// cell: `{value, state}`. Signal and derived cells carry a third metadata
+    /// field and are 5.8 diagnostics, so they never reach this helper.
+    fn binding_cell_type(
+        &self,
+        symbol: SymbolId,
+    ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
+        let record = self.view.symbol(symbol).ok_or_else(|| {
+            Diagnostic::new(staple_syntax::Span::Compiler, "missing binding cell symbol")
+        })?;
+        let value_type = self.backend.compile_type(&record.value_type)?;
+        Ok(self
+            .backend
+            .context
+            .struct_type(&[value_type, self.backend.context.i8_type().into()], false))
+    }
+
+    /// Legacy `allocate_binding_cell` for a symbol without reactive storage:
+    /// allocate the cell (GC when some function captures it, else the stack),
+    /// initialize its state byte to 0, and bind it in the environment. Drop
+    /// tracking and the captured-cell finalizer are 5.6, and the Step 1 guard
+    /// stops a body whose cell would need either.
+    fn allocate_binding_cell(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+            return Ok(cell);
+        }
+        let cell_type = self.binding_cell_type(symbol)?;
+        // Legacy `captured_cell_symbols`: a cell is GC-allocated exactly when
+        // some function captures it.
+        let captured = self
+            .view
+            .symbol(symbol)
+            .is_some_and(|record| record.captured && (record.mutable_storage || record.derived));
+        let cell = if captured {
+            self.backend.build_gc_allocation(
+                self.backend
+                    .size_type
+                    .const_int(self.backend.target_data.get_store_size(&cell_type), false),
+                "binding.cell",
+                span.clone(),
+            )?
+        } else {
+            self.backend
+                .builder
+                .build_alloca(cell_type, "binding.cell")
+                .map_err(compiler_diagnostic)?
+        };
+        let state = self
+            .backend
+            .builder
+            .build_struct_gep(cell_type, cell, 1, "binding.state")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.backend
+            .builder
+            .build_store(state, self.backend.context.i8_type().const_zero())
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        environment.binding_cells.insert(symbol, cell);
+        Ok(cell)
+    }
+
+    /// Legacy `store_local_initialization_state`: write a cell-backed symbol's
+    /// state byte, and do nothing when the symbol has no cell.
+    fn store_local_initialization_state(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        state: u64,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let Some(cell) = environment.binding_cells.get(&symbol).copied() else {
+            return Ok(());
+        };
+        let cell_type = self.binding_cell_type(symbol)?;
+        let state_slot = self
+            .backend
+            .builder
+            .build_struct_gep(cell_type, cell, 1, "binding.state")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.backend
+            .builder
+            .build_store(
+                state_slot,
+                self.backend.context.i8_type().const_int(state, false),
+            )
+            .map_err(compiler_diagnostic)?;
         Ok(())
     }
 
@@ -1172,7 +1273,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if binding.compile_time_only {
                     return Ok(());
                 }
-                if binding.derived || binding.signal || binding.cell {
+                if binding.derived || binding.signal {
                     return Err(unimplemented("reactive or cell binding"));
                 }
                 // The storage-only part of legacy `compile_top_level_item`:
@@ -1182,6 +1283,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 // local stays in the environment), then records state 2.
                 if binding.generic {
                     if let Some(symbol) = binding.symbol {
+                        self.store_local_initialization_state(
+                            environment,
+                            symbol,
+                            1,
+                            &item.origin.span,
+                        )?;
+                        self.store_local_initialization_state(
+                            environment,
+                            symbol,
+                            2,
+                            &item.origin.span,
+                        )?;
                         self.store_initialization_state(symbol, 1)?;
                         self.store_initialization_state(symbol, 2)?;
                     }
@@ -1191,21 +1304,51 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Ok(());
                 };
                 if let Some(symbol) = binding.symbol {
+                    if binding.cell {
+                        // Legacy `compile_item` allocates the cell before the
+                        // state-1 store and the value evaluation.
+                        self.allocate_binding_cell(environment, symbol, &item.origin.span)?;
+                    }
+                    self.store_local_initialization_state(
+                        environment,
+                        symbol,
+                        1,
+                        &item.origin.span,
+                    )?;
                     self.store_initialization_state(symbol, 1)?;
                 }
                 let value = self.emit_expression(owner, value_id, environment)?;
                 if let Some(symbol) = binding.symbol {
-                    if let Some(global) = self.storage.get(&symbol) {
+                    if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+                        let cell_type = self.binding_cell_type(symbol)?;
+                        let slot = self
+                            .backend
+                            .builder
+                            .build_struct_gep(cell_type, cell, 0, "binding.value")
+                            .map_err(compiler_diagnostic)?;
+                        let value =
+                            value_as_basic(value).ok_or_else(|| unimplemented("binding value"))?;
+                        self.backend
+                            .builder
+                            .build_store(slot, value)
+                            .map_err(compiler_diagnostic)?;
+                        self.store_local_initialization_state(
+                            environment,
+                            symbol,
+                            2,
+                            &item.origin.span,
+                        )?;
+                    } else if let Some(global) = self.storage.get(&symbol) {
                         let value =
                             value_as_basic(value).ok_or_else(|| unimplemented("binding value"))?;
                         self.backend
                             .builder
                             .build_store(global.as_pointer_value(), value)
                             .map_err(compiler_diagnostic)?;
+                        self.store_initialization_state(symbol, 2)?;
                     } else {
                         environment.locals.insert(symbol, value);
                     }
-                    self.store_initialization_state(symbol, 2)?;
                 }
                 Ok(())
             }
@@ -1321,16 +1464,38 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered expression")
             })?
             .clone();
+        let value = self.emit_expression_value(owner, &expression, environment)?;
+        // Legacy `compile_expression`'s `release_moved_ownership`: clear the
+        // initialization state of every symbol the expression moved out of a
+        // binding cell. The live-flag store for an owned droppable value is
+        // 5.6; the Step 1 guard already stopped bodies that own one.
+        for symbol in &expression.moved_symbols {
+            self.store_local_initialization_state(
+                environment,
+                *symbol,
+                0,
+                &expression.origin.span,
+            )?;
+        }
+        Ok(value)
+    }
+
+    fn emit_expression_value(
+        &mut self,
+        owner: EmissionOwner,
+        expression: &crate::LoweredExpression,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let unimplemented = |family| {
             Diagnostic::new(
                 expression.origin.span.clone(),
                 format!("lowered emitter: {family} is not implemented yet"),
             )
         };
-        if expression.coercion.is_some() || !expression.moved_symbols.is_empty() {
+        if expression.coercion.is_some() {
             return Err(unimplemented("coercion or move"));
         }
-        match expression.kind {
+        match &expression.kind {
             LoweredExpressionKind::Integer(integer) => Ok(self
                 .backend
                 .compile_integer_type(integer.integer_type)
@@ -1341,9 +1506,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .compile_float_type(float.float_type)
                 .const_float(float.value)
                 .into()),
-            LoweredExpressionKind::Block(block) => self.emit_block(owner, block, environment),
+            LoweredExpressionKind::Block(block) => self.emit_block(owner, *block, environment),
             LoweredExpressionKind::Name(name) => {
-                if name.requires_initialization_check || name.reactive.is_some() {
+                if name.reactive.is_some() {
                     return Err(unimplemented("checked or reactive name"));
                 }
                 // Legacy `compile_symbol_value`'s lookup order: a parameter
@@ -1362,13 +1527,47 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if let Some(value) = environment.locals.get(&name.symbol) {
                     return Ok(*value);
                 }
-                if environment.binding_cells.contains_key(&name.symbol) {
-                    return Err(unimplemented("binding cell read"));
+                if let Some(cell) = environment.binding_cells.get(&name.symbol).copied() {
+                    // Legacy `compile_symbol_value`'s binding-cell arm: build
+                    // the state slot, run the shared check when the read needs
+                    // one, then load the value slot.
+                    let cell_type = self.binding_cell_type(name.symbol)?;
+                    let state_slot = self
+                        .backend
+                        .builder
+                        .build_struct_gep(cell_type, cell, 1, "binding.state")
+                        .map_err(compiler_diagnostic)?;
+                    if name.requires_initialization_check {
+                        self.backend.build_initialization_check(
+                            state_slot,
+                            expression.origin.span.clone(),
+                        )?;
+                    }
+                    let value_slot = self
+                        .backend
+                        .builder
+                        .build_struct_gep(cell_type, cell, 0, "binding.value")
+                        .map_err(compiler_diagnostic)?;
+                    let llvm_type = self.backend.compile_type(&expression.value_type)?;
+                    return self
+                        .backend
+                        .builder
+                        .build_load(llvm_type, value_slot, "binding")
+                        .map(|value| value.as_any_value_enum())
+                        .map_err(compiler_diagnostic);
                 }
                 let global = self
                     .storage
                     .get(&name.symbol)
                     .ok_or_else(|| unimplemented("name"))?;
+                if name.requires_initialization_check
+                    && let Some(state) = self.initialization_states.get(&name.symbol)
+                {
+                    self.backend.build_initialization_check(
+                        state.as_pointer_value(),
+                        expression.origin.span.clone(),
+                    )?;
+                }
                 let llvm_type = self.backend.compile_type(&expression.value_type)?;
                 self.backend
                     .builder
@@ -1378,7 +1577,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             LoweredExpressionKind::Deferred(_) => Err(unimplemented("deferred expression")),
             LoweredExpressionKind::Stage26Deferred(_) => Err(unimplemented("Stage 2.6 expression")),
-            LoweredExpressionKind::String(_) => Err(unimplemented("string")),
+            LoweredExpressionKind::String(string) => {
+                // Stage 5.4 Step 3: the literal core is shared with legacy.
+                self.backend
+                    .build_string_literal(&string.value, expression.origin.span.clone())
+                    .map(|value| value.as_any_value_enum())
+            }
             LoweredExpressionKind::CString(string) => {
                 let text =
                     std::str::from_utf8(&string.bytes[..string.bytes.len() - 1]).map_err(|_| {
@@ -1442,9 +1646,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::Match(_) => Err(unimplemented("match")),
             LoweredExpressionKind::Index(_) => Err(unimplemented("index")),
             LoweredExpressionKind::StringTemplate(_) => Err(unimplemented("string template")),
-            LoweredExpressionKind::Call(call) => self.emit_call(owner, call, environment),
+            LoweredExpressionKind::Call(call) => self.emit_call(owner, *call, environment),
             LoweredExpressionKind::CallableValue(callable) => {
-                self.emit_callable_value(owner, callable, environment)
+                self.emit_callable_value(owner, *callable, environment)
             }
             LoweredExpressionKind::Resource(_) => Err(unimplemented("resource")),
             LoweredExpressionKind::With(_) => Err(unimplemented("with")),
@@ -1618,9 +1822,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if !call.mutations.is_empty() {
             return Err(unsupported("call mutation argument"));
         }
-        if !c_string_conversion && !string_constructor && !call.moves.is_empty() {
-            return Err(unsupported("call moved ownership"));
-        }
+        // `call.moves` marks parameter slots whose ownership the callee takes.
+        // The moved symbols' release (5.4 Step 3) rides on the argument
+        // expressions' `moved_symbols`; the markers themselves only affect the
+        // pass modes Step 4 reads, so no separate diagnostic is needed here.
         if call.c_string_temporary && !native_extern {
             return Err(unsupported("call C-string temporary"));
         }

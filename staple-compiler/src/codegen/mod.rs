@@ -4117,22 +4117,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Expression::String(string) => {
                 let value = staple_syntax::string_literal::decode(&string.literal)
                     .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
-                let source = self
-                    .builder
-                    .build_global_string_ptr(&value, "string")
-                    .map_err(|error| {
-                        Diagnostic::new(string.syntax.span.clone(), error.to_string())
-                    })?
-                    .as_pointer_value();
-                let length = self.size_type.const_int(value.len() as u64, false);
-                let pointer =
-                    self.build_gc_allocation(length, "string.data", string.syntax.span.clone())?;
-                self.builder
-                    .build_memcpy(pointer, 1, source, 1, length)
-                    .map_err(|error| {
-                        Diagnostic::new(string.syntax.span.clone(), error.to_string())
-                    })?;
-                self.build_string_value(pointer, length, string.syntax.span.clone())
+                // The literal core is shared with the lowered emitter (5.4 Step 3).
+                self.build_string_literal(&value, string.syntax.span.clone())
                     .map(|value| value.as_any_value_enum())
             }
             Expression::StringTemplate(template) => {

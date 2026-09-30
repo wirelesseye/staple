@@ -256,6 +256,27 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(pointer.as_any_value_enum())
     }
 
+    /// Legacy's String literal: copy a global byte string to a GC allocation
+    /// and build the `{pointer, length}` value. Shared by both emitters (5.4
+    /// Step 3); the caller decodes the literal text.
+    pub(crate) fn build_string_literal(
+        &self,
+        value: &str,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let source = self
+            .builder
+            .build_global_string_ptr(value, "string")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .as_pointer_value();
+        let length = self.size_type.const_int(value.len() as u64, false);
+        let pointer = self.build_gc_allocation(length, "string.data", span.clone())?;
+        self.builder
+            .build_memcpy(pointer, 1, source, 1, length)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.build_string_value(pointer, length, span)
+    }
+
     /// Legacy `build_string_value`: the `{pointer, length}` slice value.
     pub(crate) fn build_string_value(
         &self,
