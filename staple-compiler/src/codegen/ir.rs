@@ -977,6 +977,347 @@ impl<'program, 'context> Backend<'program, 'context> {
             .build_string_value(pointer, length, span)?
             .as_any_value_enum())
     }
+
+    /// Stage 5.5 Step 3: field 0 of a sum representation (the `i32` tag).
+    pub(crate) fn build_sum_tag(
+        &self,
+        value: inkwell::values::StructValue<'context>,
+        name: &str,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        self.builder
+            .build_extract_value(value, 0, name)
+            .map(|value| value.into_int_value())
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Stage 5.5 Step 3: compare a sum tag against one alternative index.
+    pub(crate) fn build_sum_tag_compare(
+        &self,
+        tag: inkwell::values::IntValue<'context>,
+        index: usize,
+        name: &str,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        self.builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                self.context.i32_type().const_int(index as u64, false),
+                name,
+            )
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Stage 5.5 Step 3: the alloca a sum coercion stores its result into,
+    /// with the tag/payload projection legacy `coerce_sum_value` builds.
+    pub(crate) fn begin_sum_storage(
+        &self,
+        sum: &crate::CheckedSumType,
+        span: &Span,
+    ) -> CodeGenerationResult<SumStorageSlot<'context>> {
+        let llvm_type = self.compile_sum_type(sum)?;
+        let slot = self
+            .builder
+            .build_alloca(llvm_type, "sum.target")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_store(slot, llvm_type.const_zero())
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let tag = self
+            .builder
+            .build_struct_gep(llvm_type, slot, 0, "sum.target.tag")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let payload = self
+            .builder
+            .build_struct_gep(llvm_type, slot, 1, "sum.target.payload")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let payload_type = llvm_type
+            .get_field_type_at_index(1)
+            .expect("sum payload field");
+        let alignment = self.target_data.get_abi_alignment(&payload_type);
+        Ok(SumStorageSlot {
+            llvm_type,
+            slot,
+            storage: super::layout::SumStorage {
+                tag,
+                payload,
+                alignment,
+            },
+        })
+    }
+
+    /// Stage 5.5 Step 3: load the finished sum value out of its storage slot.
+    pub(crate) fn load_sum_storage(
+        &self,
+        storage: &SumStorageSlot<'context>,
+        span: &Span,
+    ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
+        self.builder
+            .build_load(storage.llvm_type, storage.slot, "sum.value")
+            .map(|value| value.as_any_value_enum())
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))
+    }
+
+    /// Stage 5.5 Step 3: legacy `store_sum_payload`'s core — write the tag and
+    /// memcpy the alternative into the payload field.
+    pub(crate) fn store_sum_payload(
+        &self,
+        value: inkwell::values::AnyValueEnum<'context>,
+        value_type: &crate::CheckedType,
+        index: usize,
+        storage: &super::layout::SumStorage<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        self.builder
+            .build_store(
+                storage.tag,
+                self.context.i32_type().const_int(index as u64, false),
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let source_type = self.compile_type(value_type)?;
+        let source_value = value_as_basic(value).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "sum alternative is not a first-class value")
+        })?;
+        let source_slot = self
+            .builder
+            .build_alloca(source_type, "sum.source")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_store(source_slot, source_value)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let size = self
+            .size_type
+            .const_int(self.target_data.get_store_size(&source_type), false);
+        self.builder
+            .build_memcpy(
+                storage.payload,
+                storage.alignment,
+                source_slot,
+                self.target_data.get_abi_alignment(&source_type),
+                size,
+            )
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(())
+    }
+
+    /// Stage 5.5 Step 3: legacy `extract_sum_alternative`'s core — memcpy the
+    /// payload out and reinterpret it as the alternative type.
+    pub(crate) fn extract_sum_alternative(
+        &self,
+        value: inkwell::values::StructValue<'context>,
+        sum: &crate::CheckedSumType,
+        index: usize,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
+        let sum_type = self.compile_sum_type(sum)?;
+        let sum_slot = self
+            .builder
+            .build_alloca(sum_type, "sum.extract.source")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_store(sum_slot, value)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let payload = self
+            .builder
+            .build_struct_gep(sum_type, sum_slot, 1, "sum.extract.payload")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let payload_type = sum_type
+            .get_field_type_at_index(1)
+            .expect("sum payload field");
+        let alternative = sum.alternatives.get(index).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "sum alternative index is out of bounds")
+        })?;
+        let alternative_type = self.compile_type(alternative)?;
+        let alternative_slot = self
+            .builder
+            .build_alloca(alternative_type, "sum.extract.value")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_memcpy(
+                alternative_slot,
+                self.target_data.get_abi_alignment(&alternative_type),
+                payload,
+                self.target_data.get_abi_alignment(&payload_type),
+                self.size_type
+                    .const_int(self.target_data.get_store_size(&alternative_type), false),
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_load(alternative_type, alternative_slot, "sum.extract.result")
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    /// Stage 5.5 Step 3: legacy `coerce_slice_ref_value`'s core — build a
+    /// `{pointer, length}` slice from a fixed-reference pointer.
+    pub(crate) fn build_slice_ref_value(
+        &self,
+        pointer: inkwell::values::PointerValue<'context>,
+        length: usize,
+    ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
+        let mut result = self.slice_type().const_zero();
+        result = self
+            .builder
+            .build_insert_value(result, pointer, 0, "slice.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        result = self
+            .builder
+            .build_insert_value(
+                result,
+                self.size_type.const_int(length as u64, false),
+                1,
+                "slice.length",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        Ok(result.as_any_value_enum())
+    }
+
+    /// Stage 5.5 Step 3: legacy `compile_string_literal_pattern_branch`'s core
+    /// — compare the string fields against a literal with a length check and
+    /// `memcmp`, branching to `success` or `failure`.
+    pub(crate) fn build_string_literal_pattern_compare(
+        &self,
+        value: inkwell::values::StructValue<'context>,
+        literal: &str,
+        success: inkwell::basic_block::BasicBlock<'context>,
+        failure: inkwell::basic_block::BasicBlock<'context>,
+        _span: Span,
+    ) -> CodeGenerationResult<()> {
+        let pointer = self
+            .builder
+            .build_extract_value(value, 0, "match.string.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let length = self
+            .builder
+            .build_extract_value(value, 1, "match.string.length")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let expected_length = self.size_type.const_int(literal.len() as u64, false);
+        let length_matches = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                length,
+                expected_length,
+                "match.string.length_matches",
+            )
+            .map_err(compiler_diagnostic)?;
+        let compare = self.context.append_basic_block(
+            success.get_parent().expect("match function"),
+            "match.string.compare",
+        );
+        self.builder
+            .build_conditional_branch(length_matches, compare, failure)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(compare);
+        let expected = self
+            .builder
+            .build_global_string_ptr(literal, "match.string.literal")
+            .map_err(compiler_diagnostic)?
+            .as_pointer_value();
+        let memcmp_type = self.context.i32_type().fn_type(
+            &[
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.size_type.into(),
+            ],
+            false,
+        );
+        let memcmp = self.declare_named_function("memcmp", memcmp_type);
+        let comparison = self
+            .builder
+            .build_direct_call(
+                memcmp,
+                &[pointer.into(), expected.into(), expected_length.into()],
+                "match.string.bytes",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let matches = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                comparison,
+                self.context.i32_type().const_zero(),
+                "match.string.matches",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(matches, success, failure)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// Stage 5.5 Step 3: the literal half of legacy
+    /// `compile_formatter_write_literal` once the target function is bound:
+    /// allocate a `String` from the literal and call `Formatter.write`.
+    pub(crate) fn build_formatter_write_literal(
+        &self,
+        function: inkwell::values::FunctionValue<'context>,
+        formatter: inkwell::values::BasicValueEnum<'context>,
+        literal: &str,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let source = self
+            .builder
+            .build_global_string_ptr(literal, "debug.literal")
+            .map_err(compiler_diagnostic)?
+            .as_pointer_value();
+        let length = self.size_type.const_int(literal.len() as u64, false);
+        let pointer = self.build_gc_allocation(length, "debug.literal.data", span.clone())?;
+        self.builder
+            .build_memcpy(pointer, 1, source, 1, length)
+            .map_err(compiler_diagnostic)?;
+        let string = self.build_string_value(pointer, length, span)?;
+        self.builder
+            .build_direct_call(
+                function,
+                &[
+                    self.context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into(),
+                    formatter.into(),
+                    string.into(),
+                ],
+                "formatter.write",
+            )
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// Stage 5.5 Step 3: the type-independent phi core legacy uses for logical
+    /// short-circuits and match merges.
+    pub(crate) fn build_phi_value(
+        &self,
+        result_type: inkwell::types::BasicTypeEnum<'context>,
+        incoming: &[(
+            inkwell::values::BasicValueEnum<'context>,
+            inkwell::basic_block::BasicBlock<'context>,
+        )],
+        name: &str,
+    ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
+        let phi = self
+            .builder
+            .build_phi(result_type, name)
+            .map_err(compiler_diagnostic)?;
+        let incoming = incoming
+            .iter()
+            .map(|(value, block)| (value as &dyn inkwell::values::BasicValue<'context>, *block))
+            .collect::<Vec<_>>();
+        phi.add_incoming(&incoming);
+        Ok(phi.as_basic_value())
+    }
+}
+
+/// Stage 5.5 Step 3: a sum-coercion storage slot and its tag/payload views.
+pub(crate) struct SumStorageSlot<'context> {
+    pub llvm_type: inkwell::types::StructType<'context>,
+    pub slot: inkwell::values::PointerValue<'context>,
+    pub storage: super::layout::SumStorage<'context>,
 }
 
 pub(crate) fn value_as_basic(

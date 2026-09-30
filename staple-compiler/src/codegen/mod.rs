@@ -4538,32 +4538,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .cloned()
             .ok_or_else(|| Diagnostic::new(span.clone(), "Formatter.write has no checked type"))?;
         let function = self.ensure_function_specialization(function_id, &function_type)?;
-        let source = self
-            .builder
-            .build_global_string_ptr(literal, "debug.literal")
-            .map_err(compiler_diagnostic)?
-            .as_pointer_value();
-        let length = self.size_type.const_int(literal.len() as u64, false);
-        let pointer = self.build_gc_allocation(length, "debug.literal.data", span.clone())?;
-        self.builder
-            .build_memcpy(pointer, 1, source, 1, length)
-            .map_err(compiler_diagnostic)?;
-        let string = self.build_string_value(pointer, length, span)?;
-        self.builder
-            .build_direct_call(
-                function,
-                &[
-                    self.context
-                        .ptr_type(AddressSpace::default())
-                        .const_null()
-                        .into(),
-                    formatter.into(),
-                    string.into(),
-                ],
-                "formatter.write",
-            )
-            .map_err(compiler_diagnostic)?;
-        Ok(())
+        self.build_formatter_write_literal(function, formatter, literal, span)
     }
 
     fn compile_string_template(
@@ -5467,20 +5442,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .ok_or_else(|| {
                 Diagnostic::new(logical.syntax.span.clone(), "`Bool` has no `True` alternative")
             })?;
-        let tag = self
-            .builder
-            .build_extract_value(left_struct, 0, "logical.tag")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let is_true = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                tag,
-                self.context.i32_type().const_int(true_index as u64, false),
-                "logical.is_true",
-            )
-            .map_err(compiler_diagnostic)?;
+        let tag = self.build_sum_tag(left_struct, "logical.tag")?;
+        let is_true = self.build_sum_tag_compare(tag, true_index, "logical.is_true")?;
 
         let function = self
             .builder
@@ -5542,16 +5505,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder.position_at_end(merge_block);
         environment.did_return = false;
         let result_type = self.compile_type(&bool_type)?;
-        let phi = self
-            .builder
-            .build_phi(result_type, "logical.value")
-            .map_err(compiler_diagnostic)?;
-        let incoming_refs = incoming
-            .iter()
-            .map(|(value, block)| (value as &dyn BasicValue<'context>, *block))
-            .collect::<Vec<_>>();
-        phi.add_incoming(&incoming_refs);
-        Ok(phi.as_basic_value().as_any_value_enum())
+        Ok(self
+            .build_phi_value(result_type, &incoming, "logical.value")?
+            .as_any_value_enum())
     }
 
     fn compile_match_expression(
@@ -5658,16 +5614,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 )
             })?;
         let result_type = self.compile_type(&result)?;
-        let phi = self
-            .builder
-            .build_phi(result_type, "match.value")
-            .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?;
-        let incoming = incoming
-            .iter()
-            .map(|(value, block)| (value as &dyn BasicValue<'context>, *block))
-            .collect::<Vec<_>>();
-        phi.add_incoming(&incoming);
-        Ok(phi.as_basic_value().as_any_value_enum())
+        Ok(self
+            .build_phi_value(result_type, &incoming, "match.value")?
+            .as_any_value_enum())
     }
 
     fn compile_match_pattern_branch(
@@ -5727,20 +5676,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                                 "sum match value has an invalid representation",
                             ));
                         };
-                        let tag = self
-                            .builder
-                            .build_extract_value(sum_value, 0, "match.tag")
-                            .map_err(compiler_diagnostic)?
-                            .into_int_value();
-                        let matches = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::EQ,
-                                tag,
-                                self.context.i32_type().const_int(index as u64, false),
-                                "match.singleton.tag",
-                            )
-                            .map_err(compiler_diagnostic)?;
+                        let tag = self.build_sum_tag(sum_value, "match.tag")?;
+                        let matches =
+                            self.build_sum_tag_compare(tag, index, "match.singleton.tag")?;
                         self.builder
                             .build_conditional_branch(matches, success, failure)
                             .map_err(compiler_diagnostic)?;
@@ -5793,24 +5731,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "sum match value has an invalid representation",
                     ));
                 };
-                let tag = self
-                    .builder
-                    .build_extract_value(sum_value, 0, "match.tag")
-                    .map_err(compiler_diagnostic)?
-                    .into_int_value();
+                let tag = self.build_sum_tag(sum_value, "match.tag")?;
                 let selected_block = self.context.append_basic_block(
                     success.get_parent().expect("match function"),
                     "match.typed.selected",
                 );
-                let matches = self
-                    .builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::EQ,
-                        tag,
-                        self.context.i32_type().const_int(index as u64, false),
-                        "match.typed.tag",
-                    )
-                    .map_err(compiler_diagnostic)?;
+                let matches = self.build_sum_tag_compare(tag, index, "match.typed.tag")?;
                 self.builder
                     .build_conditional_branch(matches, selected_block, failure)
                     .map_err(compiler_diagnostic)?;
@@ -5866,24 +5792,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                                 "sum match value has an invalid representation",
                             ));
                         };
-                        let tag = self
-                            .builder
-                            .build_extract_value(sum_value, 0, "match.tag")
-                            .map_err(compiler_diagnostic)?
-                            .into_int_value();
+                        let tag = self.build_sum_tag(sum_value, "match.tag")?;
                         let selected = self.context.append_basic_block(
                             success.get_parent().expect("match function"),
                             "match.string.selected",
                         );
-                        let matches = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::EQ,
-                                tag,
-                                self.context.i32_type().const_int(index as u64, false),
-                                "match.string.tag",
-                            )
-                            .map_err(compiler_diagnostic)?;
+                        let matches = self.build_sum_tag_compare(tag, index, "match.string.tag")?;
                         self.builder
                             .build_conditional_branch(matches, selected, failure)
                             .map_err(compiler_diagnostic)?;
@@ -6050,26 +5964,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             "sum match value has an invalid representation",
                         ));
                     };
-                    let tag = self
-                        .builder
-                        .build_extract_value(sum_value, 0, "match.tag")
-                        .map_err(|error| {
-                            Diagnostic::new(pattern.syntax.span.clone(), error.to_string())
-                        })?
-                        .into_int_value();
+                    let tag = self.build_sum_tag(sum_value, "match.tag")?;
                     let selected = self.context.append_basic_block(
                         success.get_parent().expect("match function"),
                         "match.selected",
                     );
-                    let matches = self
-                        .builder
-                        .build_int_compare(
-                            inkwell::IntPredicate::EQ,
-                            tag,
-                            self.context.i32_type().const_int(index as u64, false),
-                            "match.tag.matches",
-                        )
-                        .map_err(compiler_diagnostic)?;
+                    let matches = self.build_sum_tag_compare(tag, index, "match.tag.matches")?;
                     self.builder
                         .build_conditional_branch(matches, selected, failure)
                         .map_err(compiler_diagnostic)?;
@@ -6137,76 +6037,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<()> {
         let BasicValueEnum::StructValue(string) = value else {
             return Err(Diagnostic::new(
-                span,
+                span.clone(),
                 "string match value has an invalid representation",
             ));
         };
-        let pointer = self
-            .builder
-            .build_extract_value(string, 0, "match.string.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let length = self
-            .builder
-            .build_extract_value(string, 1, "match.string.length")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let expected_length = self.size_type.const_int(literal.len() as u64, false);
-        let length_matches = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                length,
-                expected_length,
-                "match.string.length_matches",
-            )
-            .map_err(compiler_diagnostic)?;
-        let compare = self.context.append_basic_block(
-            success.get_parent().expect("match function"),
-            "match.string.compare",
-        );
-        self.builder
-            .build_conditional_branch(length_matches, compare, failure)
-            .map_err(compiler_diagnostic)?;
-        self.builder.position_at_end(compare);
-        let expected = self
-            .builder
-            .build_global_string_ptr(literal, "match.string.literal")
-            .map_err(compiler_diagnostic)?
-            .as_pointer_value();
-        let memcmp_type = self.context.i32_type().fn_type(
-            &[
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.size_type.into(),
-            ],
-            false,
-        );
-        let memcmp = self.declare_named_function("memcmp", memcmp_type);
-        let comparison = self
-            .builder
-            .build_direct_call(
-                memcmp,
-                &[pointer.into(), expected.into(), expected_length.into()],
-                "match.string.bytes",
-            )
-            .map_err(compiler_diagnostic)?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        let matches = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                comparison,
-                self.context.i32_type().const_zero(),
-                "match.string.matches",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_conditional_branch(matches, success, failure)
-            .map_err(compiler_diagnostic)?;
-        Ok(())
+        self.build_string_literal_pattern_compare(string, literal, success, failure, span)
     }
 
     fn coerce_sum_value(
@@ -6219,31 +6054,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let CheckedType::Sum(target_sum) = target else {
             return Err(Diagnostic::new(span, "invalid sum coercion target"));
         };
-        let target_type = self.compile_sum_type(target_sum)?;
-        let target_slot = self
-            .builder
-            .build_alloca(target_type, "sum.target")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.builder
-            .build_store(target_slot, target_type.const_zero())
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let target_tag = self
-            .builder
-            .build_struct_gep(target_type, target_slot, 0, "sum.target.tag")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let target_payload = self
-            .builder
-            .build_struct_gep(target_type, target_slot, 1, "sum.target.payload")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let target_payload_type = target_type
-            .get_field_type_at_index(1)
-            .expect("sum payload field");
-        let target_alignment = self.target_data.get_abi_alignment(&target_payload_type);
-        let storage = SumStorage {
-            tag: target_tag,
-            payload: target_payload,
-            alignment: target_alignment,
-        };
+        let target = self.begin_sum_storage(target_sum, &span)?;
+        let storage = &target.storage;
 
         match source {
             CheckedType::Sum(source_sum) => {
@@ -6255,11 +6067,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(span.clone(), "sum value has an invalid representation")
                     })?;
-                let source_tag = self
-                    .builder
-                    .build_extract_value(source_value, 0, "sum.source.tag")
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-                    .into_int_value();
+                let source_tag = self.build_sum_tag(source_value, "sum.source.tag")?;
                 let function = self
                     .builder
                     .get_insert_block()
@@ -6311,7 +6119,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         payload,
                         target_alternative,
                         target_index,
-                        &storage,
+                        storage,
                         span.clone(),
                     )?;
                     self.builder
@@ -6332,53 +6140,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     })?;
                 let target_alternative = &target_sum.alternatives[index];
                 let value = self.coerce_value(value, source, target_alternative, span.clone())?;
-                self.store_sum_payload(value, target_alternative, index, &storage, span.clone())?;
+                self.store_sum_payload(value, target_alternative, index, storage, span.clone())?;
             }
         }
-        self.builder
-            .build_load(target_type, target_slot, "sum.value")
-            .map(|value| value.as_any_value_enum())
-            .map_err(|error| Diagnostic::new(span, error.to_string()))
-    }
-
-    fn store_sum_payload(
-        &mut self,
-        value: AnyValueEnum<'context>,
-        value_type: &CheckedType,
-        index: usize,
-        storage: &SumStorage<'context>,
-        span: Span,
-    ) -> CodeGenerationResult<()> {
-        self.builder
-            .build_store(
-                storage.tag,
-                self.context.i32_type().const_int(index as u64, false),
-            )
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let source_type = self.compile_type(value_type)?;
-        let source_value = value_as_basic(value).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "sum alternative is not a first-class value")
-        })?;
-        let source_slot = self
-            .builder
-            .build_alloca(source_type, "sum.source")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.builder
-            .build_store(source_slot, source_value)
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let size = self
-            .size_type
-            .const_int(self.target_data.get_store_size(&source_type), false);
-        self.builder
-            .build_memcpy(
-                storage.payload,
-                storage.alignment,
-                source_slot,
-                self.target_data.get_abi_alignment(&source_type),
-                size,
-            )
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        Ok(())
+        self.load_sum_storage(&target, &span)
     }
 
     fn coerce_value(
@@ -6413,51 +6178,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 format!("unsupported runtime coercion from `{source}` to `{target}`"),
             ))
         }
-    }
-
-    fn extract_sum_alternative(
-        &mut self,
-        value: inkwell::values::StructValue<'context>,
-        sum: &crate::CheckedSumType,
-        index: usize,
-        span: Span,
-    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
-        let sum_type = self.compile_sum_type(sum)?;
-        let sum_slot = self
-            .builder
-            .build_alloca(sum_type, "sum.extract.source")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.builder
-            .build_store(sum_slot, value)
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let payload = self
-            .builder
-            .build_struct_gep(sum_type, sum_slot, 1, "sum.extract.payload")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let payload_type = sum_type
-            .get_field_type_at_index(1)
-            .expect("sum payload field");
-        let alternative = sum.alternatives.get(index).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "sum alternative index is out of bounds")
-        })?;
-        let alternative_type = self.compile_type(alternative)?;
-        let alternative_slot = self
-            .builder
-            .build_alloca(alternative_type, "sum.extract.value")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.builder
-            .build_memcpy(
-                alternative_slot,
-                self.target_data.get_abi_alignment(&alternative_type),
-                payload,
-                self.target_data.get_abi_alignment(&payload_type),
-                self.size_type
-                    .const_int(self.target_data.get_store_size(&alternative_type), false),
-            )
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.builder
-            .build_load(alternative_type, alternative_slot, "sum.extract.result")
-            .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
     fn compile_c_string_macro(
@@ -6738,23 +6458,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "invalid fixed reference representation",
             ));
         };
-        let mut result = self.slice_type().const_zero();
-        result = self
-            .builder
-            .build_insert_value(result, pointer, 0, "slice.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        result = self
-            .builder
-            .build_insert_value(
-                result,
-                self.size_type.const_int(length as u64, false),
-                1,
-                "slice.length",
-            )
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        Ok(result.as_any_value_enum())
+        self.build_slice_ref_value(pointer, length)
     }
 
     fn compile_index_expression(

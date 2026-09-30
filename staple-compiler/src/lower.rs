@@ -22,7 +22,7 @@ use crate::{
     FunctionId, IntegerType, IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction,
     ResolvedModule, SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId,
     TypeParameterId, TypedModule, contains_type_parameter, infer_type_parameters,
-    select_sum_alternative,
+    select_sum_alternative, slice_ref_length,
 };
 
 mod artifact_closure;
@@ -565,9 +565,9 @@ pub(crate) enum LoweredCoercionPlan {
     /// The representation is unchanged: `source == target`, a string literal
     /// set widened to `String` or another set, or `NumberLiteral` to `USize`.
     Identity,
-    /// `Ref T` to `Slice T`: build the slice from the pointer and the checked
-    /// length.
-    SliceRef,
+    /// `Ref (T; N)` to `Slice T`: build the slice from the pointer and the
+    /// checked element count `N`.
+    SliceRef { length: usize },
     /// Inject a non-sum value into one alternative of the target sum.
     SumInject {
         alternative: usize,
@@ -617,7 +617,9 @@ impl LoweredCoercionPlan {
             (source, target),
             (CheckedType::Ref(_), CheckedType::Slice(_))
         ) {
-            return Ok(LoweredCoercionPlan::SliceRef);
+            let length = slice_ref_length(source, target)
+                .ok_or_else(|| format!("invalid slice coercion from `{source}` to `{target}`"))?;
+            return Ok(LoweredCoercionPlan::SliceRef { length });
         }
         let CheckedType::Sum(target_sum) = target else {
             return Err(format!(
@@ -19024,13 +19026,17 @@ mod tests {
             .expressions
             .iter()
             .find_map(|(_, expression)| match &expression.coercion_plan {
-                Some(LoweredCoercionPlan::SliceRef) => Some(expression),
+                Some(LoweredCoercionPlan::SliceRef { length }) => Some((expression, *length)),
                 _ => None,
             })
             .expect("slice-ref plan");
-        let coercion = slice_plan.coercion.as_ref().expect("slice coercion");
+        let coercion = slice_plan.0.coercion.as_ref().expect("slice coercion");
         assert!(matches!(coercion.source, CheckedType::Ref(_)));
         assert!(matches!(coercion.target, CheckedType::Slice(_)));
+        assert_eq!(
+            slice_plan.1,
+            slice_ref_length(&coercion.source, &coercion.target).expect("fixed reference length")
+        );
 
         // Patterns: the literal payload is decoded, the sum alternatives match
         // the checked positions, and the nominal identities are recorded.
