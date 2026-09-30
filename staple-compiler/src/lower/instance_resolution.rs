@@ -2699,6 +2699,7 @@ impl<'a> ParameterCollector<'a> {
         };
         self.family("pattern");
         self.collect_type(&pattern.value_type);
+        self.collect_type(&pattern.test.subject);
         match &pattern.kind {
             LoweredPatternKind::Wildcard => {}
             LoweredPatternKind::Binding { symbol, .. } => {

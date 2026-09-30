@@ -660,7 +660,9 @@ impl<'a> BodyCloner<'a> {
                 }
             })
             .collect();
-        self.body.parameter_pattern = self.clone_pattern(function.parameter_pattern);
+        let parameter_subject = self.body.signature.parameter.as_ref().clone();
+        self.body.parameter_pattern =
+            self.clone_pattern(function.parameter_pattern, &parameter_subject);
         self.seed_function_providers(template);
         if let Some(plan) = self.program.coroutine_plan_by_thunk.get(&template).copied() {
             self.clone_plan(plan);
@@ -895,8 +897,14 @@ impl<'a> BodyCloner<'a> {
                 LoweredItemKind::Binding(binding)
             }
             LoweredItemKind::PatternBinding(mut binding) => {
-                binding.pattern = self.clone_pattern(binding.pattern);
                 binding.value = self.clone_expression(binding.value);
+                let subject = self
+                    .body
+                    .expressions
+                    .get(binding.value)
+                    .map(|value| value.value_type.clone())
+                    .unwrap_or(CheckedType::Error);
+                binding.pattern = self.clone_pattern(binding.pattern, &subject);
                 binding.propagation = binding.propagation.as_ref().map(|p| self.propagation(p));
                 LoweredItemKind::PatternBinding(binding)
             }
@@ -1124,8 +1132,9 @@ impl<'a> BodyCloner<'a> {
             LoweredExpressionKind::Match(mut match_) => {
                 match_.subject = self.clone_expression(match_.subject);
                 match_.source = self.ty(&match_.source);
+                let subject = match_.source.clone();
                 for arm in &mut match_.arms {
-                    arm.pattern = self.clone_pattern(arm.pattern);
+                    arm.pattern = self.clone_pattern(arm.pattern, &subject);
                     arm.body = self.clone_expression(arm.body);
                 }
                 LoweredExpressionKind::Match(match_)
@@ -1162,15 +1171,33 @@ impl<'a> BodyCloner<'a> {
                 LoweredExpressionKind::Await(self.clone_await(await_))
             }
         };
+        let coercion = expression
+            .coercion
+            .as_ref()
+            .map(|coercion| self.coercion(coercion));
+        // Stage 5.5 E1: recompute the coercion plan from the substituted types,
+        // like the other concrete-sensitive derived facts. A concrete pair
+        // legacy rejects is a diagnostic, never a silently missing plan.
+        let coercion_plan = match &coercion {
+            Some(coercion) => {
+                match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+                    Ok(plan) => Some(plan),
+                    Err(message) => {
+                        self.diagnostics
+                            .push(Diagnostic::new(origin.span.clone(), message));
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
         let new = self.body.expressions.push(LoweredExpression {
             key: expression.key,
             origin: origin.clone(),
             value_type: self.ty(&expression.value_type),
             effects: self.effects(&expression.effects),
-            coercion: expression
-                .coercion
-                .as_ref()
-                .map(|coercion| self.coercion(coercion)),
+            coercion,
+            coercion_plan,
             moved_symbols: expression.moved_symbols,
             kind,
         });
@@ -1284,7 +1311,12 @@ impl<'a> BodyCloner<'a> {
         new
     }
 
-    fn clone_pattern(&mut self, id: PatternId) -> PatternId {
+    /// Clones one pattern and recomputes its Stage 5.5 E1 test plan against
+    /// the substituted subject type the use site supplies. Child subjects come
+    /// from the same plan decisions legacy passes down, so the concrete
+    /// element/payload/representation plans agree with the tag compares that
+    /// will guard them.
+    fn clone_pattern(&mut self, id: PatternId, subject: &CheckedType) -> PatternId {
         if let Some(new) = self.patterns.get(&id) {
             return *new;
         }
@@ -1294,7 +1326,54 @@ impl<'a> BodyCloner<'a> {
                 origin: Origin::compiler(),
                 value_type: CheckedType::Error,
                 kind: LoweredPatternKind::Wildcard,
+                test: super::LoweredPatternTestPlan::undecided(CheckedType::Error),
             });
+        };
+        let concrete_subject = self.ty(subject);
+        let value_type = self.ty(&pattern.value_type);
+        let shape = super::pattern_plan_shape_from_kind(&pattern.kind);
+        let string_representation = self.program.semantic_ids.string_representation.clone();
+        let (test, child_subjects) = match super::pattern_test_plan(
+            &concrete_subject,
+            &value_type,
+            &shape,
+            &|id| self.program.types.get(id).and_then(|meta| meta.builtin),
+            string_representation.as_ref(),
+        ) {
+            Ok(result) => result,
+            Err(message) => {
+                if super::instance_resolution::unresolved_type_problem(&concrete_subject).is_none()
+                    && super::instance_resolution::unresolved_type_problem(&value_type).is_none()
+                {
+                    self.diagnostics
+                        .push(Diagnostic::new(pattern.origin.span.clone(), message));
+                }
+                (
+                    super::LoweredPatternTestPlan::undecided(concrete_subject.clone()),
+                    Vec::new(),
+                )
+            }
+        };
+        let child_ids = match &pattern.kind {
+            LoweredPatternKind::Product { elements, .. } => elements.clone(),
+            LoweredPatternKind::Nominal { argument, .. } => vec![*argument],
+            LoweredPatternKind::At { binding, pattern } => vec![*binding, *pattern],
+            LoweredPatternKind::Wildcard
+            | LoweredPatternKind::Binding { .. }
+            | LoweredPatternKind::Literal { .. } => Vec::new(),
+        };
+        let child_subject = |index: usize, child: PatternId, cloner: &Self| {
+            child_subjects
+                .get(index)
+                .cloned()
+                .or_else(|| {
+                    cloner
+                        .program
+                        .patterns
+                        .get(child)
+                        .map(|pattern| cloner.ty(&pattern.value_type))
+                })
+                .unwrap_or(CheckedType::Error)
         };
         let kind = match pattern.kind {
             LoweredPatternKind::Wildcard => LoweredPatternKind::Wildcard,
@@ -1309,39 +1388,53 @@ impl<'a> BodyCloner<'a> {
                 mutable,
                 moved,
             },
-            LoweredPatternKind::Product {
-                elements,
-                mutable,
-                moved,
-            } => LoweredPatternKind::Product {
-                elements: elements
+            LoweredPatternKind::Product { mutable, moved, .. } => {
+                let elements = child_ids
                     .iter()
-                    .map(|element| self.clone_pattern(*element))
-                    .collect(),
-                mutable,
-                moved,
-            },
+                    .enumerate()
+                    .map(|(index, element)| {
+                        let element_subject = child_subject(index, *element, self);
+                        self.clone_pattern(*element, &element_subject)
+                    })
+                    .collect();
+                LoweredPatternKind::Product {
+                    elements,
+                    mutable,
+                    moved,
+                }
+            }
             LoweredPatternKind::Nominal {
                 target,
                 name,
                 moved,
-                argument,
-            } => LoweredPatternKind::Nominal {
-                target,
-                name,
-                moved,
-                argument: self.clone_pattern(argument),
-            },
+                ..
+            } => {
+                let argument = child_ids[0];
+                let argument_subject = child_subject(0, argument, self);
+                let argument = self.clone_pattern(argument, &argument_subject);
+                LoweredPatternKind::Nominal {
+                    target,
+                    name,
+                    moved,
+                    argument,
+                }
+            }
             LoweredPatternKind::Literal { literal } => LoweredPatternKind::Literal { literal },
-            LoweredPatternKind::At { binding, pattern } => LoweredPatternKind::At {
-                binding: self.clone_pattern(binding),
-                pattern: self.clone_pattern(pattern),
-            },
+            LoweredPatternKind::At { .. } => {
+                let binding = child_ids[0];
+                let binding_subject = child_subject(0, binding, self);
+                let binding = self.clone_pattern(binding, &binding_subject);
+                let inner = child_ids[1];
+                let inner_subject = child_subject(1, inner, self);
+                let pattern = self.clone_pattern(inner, &inner_subject);
+                LoweredPatternKind::At { binding, pattern }
+            }
         };
         let new = self.body.patterns.push(LoweredPattern {
             origin: pattern.origin,
-            value_type: self.ty(&pattern.value_type),
+            value_type,
             kind,
+            test,
         });
         self.patterns.insert(id, new);
         new
@@ -1373,6 +1466,7 @@ impl<'a> BodyCloner<'a> {
             value_type: CheckedType::Error,
             effects: CheckedEffectSet::default(),
             coercion: None,
+            coercion_plan: None,
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Deferred(super::DeferredExpressionFamily::Callable),
         })
@@ -3270,6 +3364,32 @@ impl<'a> BodyValidator<'a> {
         if let Some(coercion) = &expression.coercion {
             self.check_concrete_type(&origin, &coercion.source, "coercion source");
             self.check_concrete_type(&origin, &coercion.target, "coercion target");
+            // Stage 5.5 E1: a concrete coercion must carry the plan
+            // materialization recomputed, and it must agree with a fresh
+            // computation.
+            match &expression.coercion_plan {
+                Some(plan) => {
+                    match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+                        Ok(expected) if *plan == expected => {}
+                        Ok(_) | Err(_) => self.report(
+                            origin.span.clone(),
+                            "instance coercion plan disagrees with its concrete source and target",
+                        ),
+                    }
+                }
+                None => {
+                    if super::instance_resolution::unresolved_type_problem(&coercion.source)
+                        .is_none()
+                        && super::instance_resolution::unresolved_type_problem(&coercion.target)
+                            .is_none()
+                    {
+                        self.report(
+                            origin.span.clone(),
+                            "instance coercion has no emission plan",
+                        );
+                    }
+                }
+            }
         }
         match &expression.kind {
             LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::Stage26Deferred(_) => {
@@ -3430,6 +3550,57 @@ impl<'a> BodyValidator<'a> {
             return;
         };
         self.check_concrete_type(&pattern.origin, &pattern.value_type, "pattern type");
+        self.check_concrete_type(
+            &pattern.origin,
+            &pattern.test.subject,
+            "pattern subject type",
+        );
+        // Stage 5.5 E1: the concrete plan must equal a fresh computation, and
+        // every nested pattern must be connected to the subject this plan
+        // supplies. Placeholder-bearing subjects (coroutine thunk arguments)
+        // stay deferred.
+        let unresolved = |value_type: &CheckedType| {
+            super::instance_resolution::unresolved_type_problem(value_type).is_some()
+        };
+        if !unresolved(&pattern.test.subject) && !unresolved(&pattern.value_type) {
+            let shape = super::pattern_plan_shape_from_kind(&pattern.kind);
+            match super::pattern_test_plan(
+                &pattern.test.subject,
+                &pattern.value_type,
+                &shape,
+                &|id| self.program.types.get(id).and_then(|meta| meta.builtin),
+                self.program.semantic_ids.string_representation.as_ref(),
+            ) {
+                Ok((expected, child_subjects)) => {
+                    if expected != pattern.test {
+                        self.report(
+                            pattern.origin.span.clone(),
+                            "instance pattern test plan disagrees with its concrete subject and shape",
+                        );
+                    }
+                    let child_ids: Vec<PatternId> = match &pattern.kind {
+                        LoweredPatternKind::Product { elements, .. } => elements.clone(),
+                        LoweredPatternKind::Nominal { argument, .. } => vec![*argument],
+                        LoweredPatternKind::At { binding, pattern } => vec![*binding, *pattern],
+                        LoweredPatternKind::Wildcard
+                        | LoweredPatternKind::Binding { .. }
+                        | LoweredPatternKind::Literal { .. } => Vec::new(),
+                    };
+                    for (child, subject) in child_ids.iter().zip(&child_subjects) {
+                        let Some(child) = self.body.patterns.get(*child) else {
+                            continue;
+                        };
+                        if !unresolved(&child.test.subject) && child.test.subject != *subject {
+                            self.report(
+                                child.origin.span.clone(),
+                                "instance pattern subject disagrees with its parent plan",
+                            );
+                        }
+                    }
+                }
+                Err(message) => self.report(pattern.origin.span.clone(), message),
+            }
+        }
         match &pattern.kind {
             LoweredPatternKind::Wildcard
             | LoweredPatternKind::Binding { .. }

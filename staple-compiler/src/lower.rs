@@ -22,6 +22,7 @@ use crate::{
     FunctionId, IntegerType, IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction,
     ResolvedModule, SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId,
     TypeParameterId, TypedModule, contains_type_parameter, infer_type_parameters,
+    select_sum_alternative,
 };
 
 mod artifact_closure;
@@ -545,8 +546,129 @@ pub(crate) struct LoweredExpression {
     pub value_type: CheckedType,
     pub effects: CheckedEffectSet,
     pub coercion: Option<CheckedCoercion>,
+    /// Stage 5.5 E1: the recursive plan legacy `coerce_value` executes for
+    /// `coercion`. `None` exactly when `coercion` is `None`; a template whose
+    /// types still contain declared parameters leaves the plan absent, and
+    /// materialization recomputes it from the substituted types.
+    pub coercion_plan: Option<LoweredCoercionPlan>,
     pub moved_symbols: Vec<SymbolId>,
     pub kind: LoweredExpressionKind,
+}
+
+/// Stage 5.5 E1: the checked emission plan for one expression coercion,
+/// computed during lowering with the checker's `select_sum_alternative` rule
+/// so the emitter never re-selects an alternative. The variants are exactly
+/// the branches of legacy `coerce_value`/`coerce_sum_value`: every other
+/// source/target pair is a lowering diagnostic.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LoweredCoercionPlan {
+    /// The representation is unchanged: `source == target`, a string literal
+    /// set widened to `String` or another set, or `NumberLiteral` to `USize`.
+    Identity,
+    /// `Ref T` to `Slice T`: build the slice from the pointer and the checked
+    /// length.
+    SliceRef,
+    /// Inject a non-sum value into one alternative of the target sum.
+    SumInject {
+        alternative: usize,
+        payload: Box<LoweredCoercionPlan>,
+    },
+    /// Widen every alternative of a source sum into the target sum, one arm
+    /// per source alternative in source order. `None` is a source alternative
+    /// with no target; legacy reaches it only through a propagating binding
+    /// that narrowed the success tag first and emits `unreachable`.
+    SumWiden {
+        arms: Vec<Option<LoweredSumWidenArm>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoweredSumWidenArm {
+    /// The target sum alternative the source alternative widens into.
+    pub target: usize,
+    pub payload: Box<LoweredCoercionPlan>,
+}
+
+impl LoweredCoercionPlan {
+    /// Computes the plan for `source` → `target` with the same rule legacy
+    /// `coerce_value` uses. Returns a diagnostic message for a pair legacy
+    /// rejects; a template whose types still contain declared parameters
+    /// leaves the plan absent at the call site instead of failing.
+    pub(crate) fn plan(source: &CheckedType, target: &CheckedType) -> Result<Self, String> {
+        // Legacy `compile_expression` emits `unreachable` for a `Never` source
+        // before any coercion runs, so the plan is never executed.
+        if source == &CheckedType::Never {
+            return Ok(LoweredCoercionPlan::Identity);
+        }
+        if source == target
+            || matches!(
+                (source, target),
+                (CheckedType::StringLiteralSet(_), CheckedType::String)
+                    | (
+                        CheckedType::StringLiteralSet(_),
+                        CheckedType::StringLiteralSet(_)
+                    )
+                    | (CheckedType::NumberLiteral(_), CheckedType::USize)
+            )
+        {
+            return Ok(LoweredCoercionPlan::Identity);
+        }
+        if matches!(
+            (source, target),
+            (CheckedType::Ref(_), CheckedType::Slice(_))
+        ) {
+            return Ok(LoweredCoercionPlan::SliceRef);
+        }
+        let CheckedType::Sum(target_sum) = target else {
+            return Err(format!(
+                "unsupported runtime coercion from `{source}` to `{target}`"
+            ));
+        };
+        match source {
+            CheckedType::Sum(source_sum) => {
+                let mut arms = Vec::with_capacity(source_sum.alternatives.len());
+                for alternative in &source_sum.alternatives {
+                    let index =
+                        select_sum_alternative(alternative, &target_sum.alternatives).map_err(
+                            |()| {
+                                format!(
+                                    "coercion alternative `{alternative}` matches more than one alternative of `{target}`"
+                                )
+                            },
+                        )?;
+                    match index {
+                        Some(index) => {
+                            let target_alternative = &target_sum.alternatives[index];
+                            arms.push(Some(LoweredSumWidenArm {
+                                target: index,
+                                payload: Box::new(Self::plan(alternative, target_alternative)?),
+                            }));
+                        }
+                        None => arms.push(None),
+                    }
+                }
+                Ok(LoweredCoercionPlan::SumWiden { arms })
+            }
+            _ => {
+                let index = select_sum_alternative(source, &target_sum.alternatives)
+                    .map_err(|()| {
+                        format!(
+                            "coercion source `{source}` matches more than one alternative of `{target}`"
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        format!(
+                            "sum injection target is missing a unique source alternative for `{source}`"
+                        )
+                    })?;
+                let target_alternative = &target_sum.alternatives[index];
+                Ok(LoweredCoercionPlan::SumInject {
+                    alternative: index,
+                    payload: Box::new(Self::plan(source, target_alternative)?),
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1618,6 +1740,282 @@ pub(crate) struct LoweredPattern {
     pub origin: Origin,
     pub value_type: CheckedType,
     pub kind: LoweredPatternKind,
+    /// Stage 5.5 E1: the checked test plan legacy `compile_match_pattern_branch`
+    /// computes. Lowering records the decision; the emitter only reads it.
+    pub test: LoweredPatternTestPlan,
+}
+
+/// Stage 5.5 E1: the checked test decisions for one pattern. A template whose
+/// subject or patterns still contain declared parameters leaves the decisions
+/// undecided (`None` / `LoweredPatternIdentity::None`); materialization
+/// recomputes the plan from the substituted types like the other Stage 3.4
+/// derived facts, and the instance-body validator requires it to agree.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoweredPatternTestPlan {
+    /// The checked type of the value the pattern is tested against. For a
+    /// top-level match arm this is `LoweredMatch::source`; nested patterns get
+    /// their element, payload, or representation type from the parent plan.
+    pub subject: CheckedType,
+    /// The sum alternative a tag compare selects, when the subject is a sum
+    /// and this pattern selects exactly one alternative.
+    pub sum_alternative: Option<usize>,
+    /// The nominal identity this pattern tests; `None` when the pattern is
+    /// structural or the plan is undecided.
+    pub identity: LoweredPatternIdentity,
+    /// The decoded bytes of a string-literal pattern.
+    pub literal: Option<Vec<u8>>,
+}
+
+impl LoweredPatternTestPlan {
+    /// An undecided plan for a template whose types still contain declared
+    /// parameters. Materialization replaces it with the concrete decisions.
+    pub(crate) fn undecided(subject: CheckedType) -> Self {
+        LoweredPatternTestPlan {
+            subject,
+            sum_alternative: None,
+            identity: LoweredPatternIdentity::None,
+            literal: None,
+        }
+    }
+}
+
+/// The nominal identity a pattern test uses. Legacy `compile_match_pattern_branch`
+/// selects each branch by asking the resolver for a builtin or singleton
+/// identity; lowering records the answer here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredPatternIdentity {
+    /// No identity test at this level: a structural pattern, a plain binding,
+    /// or a sum-alternative test whose tag compare is already recorded.
+    None,
+    /// A `String` nominal destructure over a subject of builtin `String`.
+    String,
+    /// A `Ref` nominal destructure; the emitter loads the payload.
+    Ref,
+    /// A distinct representation destructure where the subject is the distinct
+    /// type itself.
+    Representation,
+    /// A singleton name pattern (`True`, `False`, or a declared singleton).
+    Singleton,
+}
+
+/// The plan-relevant shape of a syntax pattern, captured before its children
+/// are lowered so the plan can be computed without the arena records.
+#[derive(Debug, Clone)]
+enum PatternPlanShape {
+    Structural,
+    At,
+    Binding { singleton: Option<TypeId> },
+    Product { elements: usize },
+    Nominal { target: Option<TypeId> },
+    Literal { literal: String },
+}
+
+/// Computes a pattern's test plan against the subject type the site supplies,
+/// mirroring legacy `compile_match_pattern_branch`'s decision order. The child
+/// subjects are returned in syntax order (At: binding then inner pattern;
+/// Product: element order; Nominal: the single argument) so the caller
+/// recurses with exactly the types legacy passes down.
+fn pattern_test_plan(
+    subject: &CheckedType,
+    value_type: &CheckedType,
+    shape: &PatternPlanShape,
+    builtin_of: &dyn Fn(TypeId) -> Option<BuiltinType>,
+    string_representation: Option<&CheckedType>,
+) -> Result<(LoweredPatternTestPlan, Vec<CheckedType>), String> {
+    let mut plan = LoweredPatternTestPlan {
+        subject: subject.clone(),
+        sum_alternative: None,
+        identity: LoweredPatternIdentity::None,
+        literal: None,
+    };
+    let mut children = Vec::new();
+    match shape {
+        PatternPlanShape::Structural => {}
+        PatternPlanShape::At => {
+            children.push(subject.clone());
+            children.push(subject.clone());
+        }
+        PatternPlanShape::Binding {
+            singleton: Some(singleton),
+        } => {
+            plan.identity = LoweredPatternIdentity::Singleton;
+            match subject {
+                CheckedType::Sum(sum) => {
+                    plan.sum_alternative = Some(
+                        sum.alternatives
+                            .iter()
+                            .position(|alternative| {
+                                matches!(
+                                    alternative,
+                                    CheckedType::Distinct { id, .. } if id == singleton
+                                )
+                            })
+                            .ok_or_else(|| {
+                                "singleton pattern does not select a sum alternative".to_owned()
+                            })?,
+                    );
+                }
+                CheckedType::Distinct { id, .. } if id == singleton => {}
+                _ => {
+                    return Err("checked singleton pattern has an incompatible value".to_owned());
+                }
+            }
+        }
+        PatternPlanShape::Binding { singleton: None } => {
+            if let CheckedType::Sum(sum) = subject
+                && value_type != subject
+            {
+                plan.sum_alternative = Some(
+                    sum.alternatives
+                        .iter()
+                        .position(|alternative| alternative == value_type)
+                        .ok_or_else(|| {
+                            "typed match pattern does not select a sum alternative".to_owned()
+                        })?,
+                );
+            }
+        }
+        PatternPlanShape::Product { elements } => {
+            if *elements == 1 {
+                children.push(subject.clone());
+            } else if *elements > 1 {
+                let CheckedType::Product(product) = subject else {
+                    return Err("checked product pattern has a non-product value".to_owned());
+                };
+                if product.elements.len() != *elements {
+                    return Err(
+                        "checked product pattern does not match its value layout".to_owned()
+                    );
+                }
+                children.extend(
+                    product
+                        .elements
+                        .iter()
+                        .map(|element| element.value_type.clone()),
+                );
+            }
+        }
+        PatternPlanShape::Nominal { target } => match subject {
+            CheckedType::String
+                if target
+                    .and_then(|target| builtin_of(target))
+                    .is_some_and(|builtin| builtin == BuiltinType::String) =>
+            {
+                plan.identity = LoweredPatternIdentity::String;
+                let representation = string_representation.ok_or_else(|| {
+                    "standard library String representation was not checked".to_owned()
+                })?;
+                children.push(representation.clone());
+            }
+            CheckedType::Ref(payload)
+                if target
+                    .and_then(|target| builtin_of(target))
+                    .is_some_and(|builtin| builtin == BuiltinType::Ref) =>
+            {
+                plan.identity = LoweredPatternIdentity::Ref;
+                children.push(payload.as_ref().clone());
+            }
+            CheckedType::Sum(sum) => {
+                let expected = target.ok_or_else(|| "unresolved match pattern".to_owned())?;
+                let index = sum
+                    .alternatives
+                    .iter()
+                    .position(|alternative| {
+                        matches!(alternative, CheckedType::Distinct { id, .. } if *id == expected)
+                    })
+                    .ok_or_else(|| "match pattern does not select a sum alternative".to_owned())?;
+                plan.sum_alternative = Some(index);
+                let CheckedType::Distinct { representation, .. } = &sum.alternatives[index] else {
+                    return Err("checked sum alternative is not a distinct type".to_owned());
+                };
+                children.push(representation.as_ref().clone());
+            }
+            CheckedType::Distinct {
+                id, representation, ..
+            } if *target == Some(*id) => {
+                plan.identity = LoweredPatternIdentity::Representation;
+                children.push(representation.as_ref().clone());
+            }
+            _ => {
+                return Err("checked nominal pattern has an incompatible value".to_owned());
+            }
+        },
+        PatternPlanShape::Literal { literal } => {
+            let text = staple_syntax::string_literal::decode(literal)
+                .map_err(|message| message.to_owned())?;
+            plan.literal = Some(text.clone().into_bytes());
+            match subject {
+                CheckedType::String | CheckedType::StringLiteralSet(_) => {}
+                CheckedType::Sum(sum) => {
+                    plan.sum_alternative = Some(
+                        sum.alternatives
+                            .iter()
+                            .position(|alternative| match alternative {
+                                CheckedType::String => true,
+                                CheckedType::StringLiteralSet(values) => values.contains(&text),
+                                _ => false,
+                            })
+                            .ok_or_else(|| {
+                                "checked sum has no string literal alternative".to_owned()
+                            })?,
+                    );
+                }
+                _ => {
+                    return Err("checked string pattern has an incompatible value".to_owned());
+                }
+            }
+        }
+    }
+    Ok((plan, children))
+}
+
+/// The plan-relevant shape of a lowered pattern, used when materialization
+/// recomputes a concrete plan from the instance-local kind.
+fn pattern_plan_shape_from_kind(kind: &LoweredPatternKind) -> PatternPlanShape {
+    match kind {
+        LoweredPatternKind::Wildcard => PatternPlanShape::Structural,
+        LoweredPatternKind::Binding { singleton, .. } => PatternPlanShape::Binding {
+            singleton: *singleton,
+        },
+        LoweredPatternKind::Product { elements, .. } => PatternPlanShape::Product {
+            elements: elements.len(),
+        },
+        LoweredPatternKind::Nominal { target, .. } => PatternPlanShape::Nominal { target: *target },
+        LoweredPatternKind::Literal { literal } => PatternPlanShape::Literal {
+            literal: literal.clone(),
+        },
+        LoweredPatternKind::At { .. } => PatternPlanShape::At,
+    }
+}
+
+/// The plan-relevant shape of a syntax pattern, or a diagnostic when the
+/// resolver has no fact the shape needs (a singleton/target type).
+fn pattern_plan_shape(
+    resolved: &ResolvedModule,
+    pattern: &Pattern,
+) -> Result<PatternPlanShape, Diagnostic> {
+    Ok(match pattern {
+        Pattern::Wildcard(_) => PatternPlanShape::Structural,
+        Pattern::Binding(binding) => PatternPlanShape::Binding {
+            singleton: resolved.type_for_pattern(binding.syntax.id),
+        },
+        Pattern::Product(product) => PatternPlanShape::Product {
+            elements: product.elements.len(),
+        },
+        Pattern::Nominal(nominal) => PatternPlanShape::Nominal {
+            target: resolved.type_for_pattern(nominal.syntax.id),
+        },
+        Pattern::StringLiteral(literal) => PatternPlanShape::Literal {
+            literal: literal.literal.clone(),
+        },
+        Pattern::At(_) => PatternPlanShape::At,
+        Pattern::Splice(splice) => {
+            return Err(Diagnostic::new(
+                splice.syntax.span.clone(),
+                "unexpanded pattern splice reached lowering",
+            ));
+        }
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -3050,8 +3448,13 @@ impl LoweredProgram {
         context: ExpressionContext,
         binding: &staple_syntax::PatternBinding,
     ) -> Result<LoweredPatternBindingItem, Diagnostic> {
-        let pattern = self.lower_pattern(module, &binding.pattern)?;
         let value = self.lower_expression(module, owner, context, &binding.value)?;
+        let value_type = self
+            .expressions
+            .get(value)
+            .map(|value| value.value_type.clone())
+            .unwrap_or(CheckedType::Never);
+        let pattern = self.lower_pattern(module, &binding.pattern, &value_type)?;
         let propagating = binding.kind == staple_syntax::PatternBindingKind::Propagating;
         let propagation = module.propagation_for(binding.syntax.id).cloned();
         if propagating && propagation.is_none() {
@@ -3955,7 +4358,7 @@ impl LoweredProgram {
             .type_of_pattern(function.pattern.syntax().id)
             .is_some()
         {
-            return self.lower_pattern(module, &function.pattern);
+            return self.lower_pattern(module, &function.pattern, signature.parameter.as_ref());
         }
         let Pattern::Product(product) = &function.pattern else {
             return Err(Diagnostic::new(
@@ -3981,15 +4384,18 @@ impl LoweredProgram {
                 mutable: product.mutable,
                 moved: product.moved,
             },
+            test: LoweredPatternTestPlan::undecided(signature.parameter.as_ref().clone()),
         }))
     }
 
-    /// Lowers a checked pattern recursively, recording bound symbols and
-    /// singleton targets.
+    /// Lowers a checked pattern recursively, recording bound symbols,
+    /// singleton targets, and the Stage 5.5 E1 test plan against the subject
+    /// type the use site supplies.
     fn lower_pattern(
         &mut self,
         module: &TypedModule,
         pattern: &Pattern,
+        subject: &CheckedType,
     ) -> Result<PatternId, Diagnostic> {
         let syntax = pattern.syntax();
         let Some(value_type) = module.type_of_pattern(syntax.id).cloned() else {
@@ -3999,6 +4405,39 @@ impl LoweredProgram {
             ));
         };
         let resolved = module.resolved();
+        let shape = pattern_plan_shape(resolved, pattern)?;
+        let (test, child_subjects) = match pattern_test_plan(
+            subject,
+            &value_type,
+            &shape,
+            &|id| resolved.builtin_type(id),
+            module.string_representation(),
+        ) {
+            Ok(result) => result,
+            Err(message) => {
+                // A template whose subject still contains declared parameters
+                // cannot decide the plan; materialization recomputes it once
+                // the types are concrete. A concrete subject that legacy
+                // rejects is a lowering diagnostic.
+                if instance_resolution::unresolved_type_problem(subject).is_some()
+                    || instance_resolution::unresolved_type_problem(&value_type).is_some()
+                {
+                    (
+                        LoweredPatternTestPlan::undecided(subject.clone()),
+                        Vec::new(),
+                    )
+                } else {
+                    return Err(Diagnostic::new(syntax.span.clone(), message));
+                }
+            }
+        };
+        let child_subject = |index: usize, child: &Pattern| {
+            child_subjects
+                .get(index)
+                .cloned()
+                .or_else(|| module.type_of_pattern(child.syntax().id).cloned())
+                .unwrap_or(CheckedType::Error)
+        };
         let kind = match pattern {
             Pattern::Wildcard(_) => LoweredPatternKind::Wildcard,
             Pattern::Binding(binding) => LoweredPatternKind::Binding {
@@ -4009,8 +4448,9 @@ impl LoweredProgram {
             },
             Pattern::Product(product) => {
                 let mut elements = Vec::with_capacity(product.elements.len());
-                for element in &product.elements {
-                    elements.push(self.lower_pattern(module, element)?);
+                for (index, element) in product.elements.iter().enumerate() {
+                    let element_subject = child_subject(index, element);
+                    elements.push(self.lower_pattern(module, element, &element_subject)?);
                 }
                 LoweredPatternKind::Product {
                     elements,
@@ -4022,15 +4462,20 @@ impl LoweredProgram {
                 target: resolved.type_for_pattern(syntax.id),
                 name: nominal.name.clone(),
                 moved: nominal.moved,
-                argument: self.lower_pattern(module, &nominal.argument)?,
+                argument: {
+                    let argument_subject = child_subject(0, &nominal.argument);
+                    self.lower_pattern(module, &nominal.argument, &argument_subject)?
+                },
             },
             Pattern::StringLiteral(literal) => LoweredPatternKind::Literal {
                 literal: literal.literal.clone(),
             },
             Pattern::At(at) => {
-                let binding =
-                    self.lower_pattern(module, &Pattern::Binding(at.binding.as_ref().clone()))?;
-                let pattern = self.lower_pattern(module, &at.pattern)?;
+                let binding_pattern = Pattern::Binding(at.binding.as_ref().clone());
+                let binding_subject = child_subject(0, &binding_pattern);
+                let binding = self.lower_pattern(module, &binding_pattern, &binding_subject)?;
+                let inner_subject = child_subject(1, &at.pattern);
+                let pattern = self.lower_pattern(module, &at.pattern, &inner_subject)?;
                 LoweredPatternKind::At { binding, pattern }
             }
             Pattern::Splice(splice) => {
@@ -4047,6 +4492,7 @@ impl LoweredProgram {
             },
             value_type,
             kind,
+            test,
         }))
     }
 
@@ -4108,6 +4554,21 @@ impl LoweredProgram {
             .cloned()
             .unwrap_or_default();
         let coercion = module.coercion_for(syntax.id).cloned();
+        let coercion_plan = match &coercion {
+            Some(coercion) => match LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+                Ok(plan) => Some(plan),
+                Err(message) => {
+                    if instance_resolution::unresolved_type_problem(&coercion.source).is_some()
+                        || instance_resolution::unresolved_type_problem(&coercion.target).is_some()
+                    {
+                        None
+                    } else {
+                        return Err(Diagnostic::new(syntax.span.clone(), message));
+                    }
+                }
+            },
+            None => None,
+        };
         let mut moved_symbols = module.moved_symbols(syntax.id).collect::<Vec<_>>();
         moved_symbols.sort_by_key(|symbol| symbol.0);
         let kind = match disposition {
@@ -4129,6 +4590,7 @@ impl LoweredProgram {
             value_type,
             effects,
             coercion,
+            coercion_plan,
             moved_symbols,
             kind,
         });
@@ -5307,7 +5769,7 @@ impl LoweredProgram {
         };
         let mut arms = Vec::with_capacity(match_.arms.len());
         for arm in &match_.arms {
-            let pattern = self.lower_pattern(module, &arm.pattern)?;
+            let pattern = self.lower_pattern(module, &arm.pattern, &checked.source)?;
             let body = self.lower_expression(module, owner, context, &arm.body)?;
             arms.push(LoweredMatchArm {
                 origin: Origin {
@@ -9135,6 +9597,7 @@ impl LoweredProgram {
                     }
                 }
             }
+            self.validate_pattern_test_plan(pattern, &mut diagnostics);
         }
         for (_, place) in self.places.iter() {
             match &place.kind {
@@ -10603,6 +11066,32 @@ impl LoweredProgram {
         let Some(coercion) = &expression.coercion else {
             return;
         };
+        // Stage 5.5 E1: a plan must exist once the coercion types are
+        // concrete, and it must equal a fresh computation from the recorded
+        // source and target. Templates whose types still contain declared
+        // parameters may leave it absent until materialization.
+        match &expression.coercion_plan {
+            Some(plan) => match LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+                Ok(expected) if *plan == expected => {}
+                Ok(_) => diagnostics.push(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "expression coercion plan disagrees with its checked source and target",
+                )),
+                Err(message) => {
+                    diagnostics.push(Diagnostic::new(expression.origin.span.clone(), message))
+                }
+            },
+            None => {
+                if instance_resolution::unresolved_type_problem(&coercion.source).is_none()
+                    && instance_resolution::unresolved_type_problem(&coercion.target).is_none()
+                {
+                    diagnostics.push(Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "expression coercion has no emission plan",
+                    ));
+                }
+            }
+        }
         if !matches!(expression.key.context, ExpressionContext::Primary) {
             return;
         }
@@ -10640,6 +11129,60 @@ impl LoweredProgram {
                     coercion.source, child.value_type
                 ),
             ));
+        }
+    }
+
+    /// Stage 5.5 E1: a pattern's test plan must equal a fresh computation from
+    /// its recorded subject and kind, and every nested pattern must be
+    /// connected to the subject its parent plan supplies. Templates whose
+    /// types still contain parameters are recomputed at materialization.
+    fn validate_pattern_test_plan(
+        &self,
+        pattern: &LoweredPattern,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let unresolved = |value_type: &CheckedType| {
+            instance_resolution::unresolved_type_problem(value_type).is_some()
+        };
+        if unresolved(&pattern.test.subject) || unresolved(&pattern.value_type) {
+            return;
+        }
+        let shape = pattern_plan_shape_from_kind(&pattern.kind);
+        match pattern_test_plan(
+            &pattern.test.subject,
+            &pattern.value_type,
+            &shape,
+            &|id| self.types.get(id).and_then(|meta| meta.builtin),
+            self.semantic_ids.string_representation.as_ref(),
+        ) {
+            Ok((expected, child_subjects)) => {
+                if expected != pattern.test {
+                    diagnostics.push(Diagnostic::new(
+                        pattern.origin.span.clone(),
+                        "pattern test plan disagrees with its checked subject and shape",
+                    ));
+                }
+                let child_ids: Vec<PatternId> = match &pattern.kind {
+                    LoweredPatternKind::Product { elements, .. } => elements.clone(),
+                    LoweredPatternKind::Nominal { argument, .. } => vec![*argument],
+                    LoweredPatternKind::At { binding, pattern } => vec![*binding, *pattern],
+                    LoweredPatternKind::Wildcard
+                    | LoweredPatternKind::Binding { .. }
+                    | LoweredPatternKind::Literal { .. } => Vec::new(),
+                };
+                for (child, subject) in child_ids.iter().zip(&child_subjects) {
+                    let Some(child) = self.patterns.get(*child) else {
+                        continue;
+                    };
+                    if !unresolved(&child.test.subject) && child.test.subject != *subject {
+                        diagnostics.push(Diagnostic::new(
+                            child.origin.span.clone(),
+                            "nested pattern test plan subject disagrees with its parent",
+                        ));
+                    }
+                }
+            }
+            Err(message) => diagnostics.push(Diagnostic::new(pattern.origin.span.clone(), message)),
         }
     }
 
@@ -13137,11 +13680,13 @@ mod tests {
             origin: Origin::compiler(),
             value_type: CheckedType::I32,
             kind: LoweredPatternKind::Wildcard,
+            test: LoweredPatternTestPlan::undecided(CheckedType::I32),
         });
         let second = patterns.push(LoweredPattern {
             origin: Origin::compiler(),
             value_type: CheckedType::I64,
             kind: LoweredPatternKind::Wildcard,
+            test: LoweredPatternTestPlan::undecided(CheckedType::I64),
         });
         assert_eq!(first.index(), 0);
         assert_eq!(second.index(), 1);
@@ -15095,6 +15640,7 @@ mod tests {
                 value_type: CheckedType::Never,
                 effects: CheckedEffectSet::default(),
                 coercion: None,
+                coercion_plan: None,
                 moved_symbols: Vec::new(),
                 kind: LoweredExpressionKind::Deferred(family),
             });
@@ -15211,6 +15757,7 @@ mod tests {
             value_type: CheckedType::I32,
             effects: CheckedEffectSet::default(),
             coercion: None,
+            coercion_plan: None,
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Block(BlockId::from_index(4)),
         });
@@ -17284,6 +17831,7 @@ mod tests {
             value_type: CheckedType::I32,
             effects: CheckedEffectSet::default(),
             coercion: None,
+            coercion_plan: None,
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable),
         });
@@ -18395,6 +18943,225 @@ mod tests {
     }
 
     #[test]
+    fn stage_5_5_coercion_and_pattern_plans_match_checked_decisions() {
+        let module = checked_program(concat!(
+            "use std.slice.Slice\n",
+            "type Ok T = ctor T\n",
+            "type IOError = ctor String\n",
+            "type Other = ctor String\n",
+            "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
+            "def widen: () -> Ok I32 | IOError | Other = () => read()\n",
+            "let injected: Ok I32 | IOError = Ok (41)\n",
+            "let slice: Slice I32 = Ref 8\n",
+            "def describe = (value: String) => match value {\n",
+            "  \"literal\" => 1,\n",
+            "  text => 2,\n",
+            "}\n",
+            "def pick = (value: Ok I32 | IOError) => match value {\n",
+            "  Ok payload => payload,\n",
+            "  other => 0,\n",
+            "}\n",
+            "def invert = (flag: Bool) => match flag {\n",
+            "  True => 1,\n",
+            "  False => 0,\n",
+            "}\n",
+            "def singleton: True -> I32 = True => 0\n",
+            "def borrowed: Ref I32 -> I32 = (Ref inner) => inner\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty(), "{:?}", program.validate());
+
+        // Coercions: every recorded plan is recomputable and the variants name
+        // the same alternatives `select_sum_alternative` selects.
+        let widen = expression_body(&program, "widen");
+        let coercion = widen.coercion.as_ref().expect("widen coercion");
+        let plan = widen.coercion_plan.as_ref().expect("widen plan");
+        let LoweredCoercionPlan::SumWiden { arms } = plan else {
+            panic!("sum widening should lower to SumWiden: {plan:?}");
+        };
+        let CheckedType::Sum(source_sum) = &coercion.source else {
+            panic!("widen source should be a sum");
+        };
+        let CheckedType::Sum(target_sum) = &coercion.target else {
+            panic!("widen target should be a sum");
+        };
+        assert_eq!(arms.len(), source_sum.alternatives.len());
+        for (index, alternative) in source_sum.alternatives.iter().enumerate() {
+            let expected = select_sum_alternative(alternative, &target_sum.alternatives)
+                .expect("unique widening")
+                .expect("widen alternative");
+            let arm = arms[index].as_ref().expect("widen arm");
+            assert_eq!(arm.target, expected);
+            assert_eq!(*arm.payload, LoweredCoercionPlan::Identity);
+        }
+
+        let (injected_id, injected) = program
+            .expressions
+            .iter()
+            .find(|(_, expression)| {
+                matches!(
+                    (&expression.value_type, &expression.coercion_plan),
+                    (
+                        CheckedType::Sum(_),
+                        Some(LoweredCoercionPlan::SumInject { .. })
+                    )
+                )
+            })
+            .expect("sum injection plan");
+        let LoweredCoercionPlan::SumInject {
+            alternative,
+            payload,
+        } = injected.coercion_plan.as_ref().expect("injection plan")
+        else {
+            unreachable!()
+        };
+        assert_eq!(*alternative, 0);
+        assert_eq!(**payload, LoweredCoercionPlan::Identity);
+
+        let slice_plan = program
+            .expressions
+            .iter()
+            .find_map(|(_, expression)| match &expression.coercion_plan {
+                Some(LoweredCoercionPlan::SliceRef) => Some(expression),
+                _ => None,
+            })
+            .expect("slice-ref plan");
+        let coercion = slice_plan.coercion.as_ref().expect("slice coercion");
+        assert!(matches!(coercion.source, CheckedType::Ref(_)));
+        assert!(matches!(coercion.target, CheckedType::Slice(_)));
+
+        // Patterns: the literal payload is decoded, the sum alternatives match
+        // the checked positions, and the nominal identities are recorded.
+        let describe = expression_body(&program, "describe");
+        let LoweredExpressionKind::Match(match_) = &describe.kind else {
+            panic!("describe should be a match");
+        };
+        let literal_id = match_.arms[0].pattern;
+        let literal = lowered_pattern(&program, literal_id);
+        assert_eq!(literal.test.subject, CheckedType::String);
+        assert_eq!(literal.test.literal.as_deref(), Some(&b"literal"[..]));
+        assert_eq!(literal.test.sum_alternative, None);
+        assert_eq!(literal.test.identity, LoweredPatternIdentity::None);
+
+        let pick = expression_body(&program, "pick");
+        let LoweredExpressionKind::Match(match_) = &pick.kind else {
+            panic!("pick should be a match");
+        };
+        let CheckedType::Sum(sum) = &match_.source else {
+            panic!("pick subject should be a sum");
+        };
+        let ok = lowered_pattern(&program, match_.arms[0].pattern);
+        let LoweredPatternKind::Nominal {
+            target: Some(target),
+            ..
+        } = &ok.kind
+        else {
+            panic!("`Ok payload` should be nominal");
+        };
+        let expected = sum
+            .alternatives
+            .iter()
+            .position(
+                |alternative| matches!(alternative, CheckedType::Distinct { id, .. } if id == target),
+            )
+            .expect("Ok alternative");
+        assert_eq!(ok.test.sum_alternative, Some(expected));
+        assert_eq!(ok.test.identity, LoweredPatternIdentity::None);
+        let catch_all = lowered_pattern(&program, match_.arms[1].pattern);
+        assert_eq!(catch_all.test.sum_alternative, None);
+        assert_eq!(catch_all.value_type, match_.source);
+
+        let invert = expression_body(&program, "invert");
+        let LoweredExpressionKind::Match(match_) = &invert.kind else {
+            panic!("invert should be a match");
+        };
+        let CheckedType::Sum(bool_sum) = &match_.source else {
+            panic!("Bool should be a sum");
+        };
+        for arm in &match_.arms {
+            let pattern = lowered_pattern(&program, arm.pattern);
+            let LoweredPatternKind::Binding {
+                singleton: Some(singleton),
+                ..
+            } = &pattern.kind
+            else {
+                panic!("`True`/`False` should lower to singleton bindings");
+            };
+            assert_eq!(pattern.test.identity, LoweredPatternIdentity::Singleton);
+            let expected = bool_sum
+                .alternatives
+                .iter()
+                .position(|alternative| {
+                    matches!(alternative, CheckedType::Distinct { id, .. } if id == singleton)
+                })
+                .expect("singleton alternative");
+            assert_eq!(pattern.test.sum_alternative, Some(expected));
+        }
+
+        let (_, borrowed) = lowered_function(&program, "borrowed");
+        let product = lowered_pattern(&program, borrowed.parameter_pattern);
+        let LoweredPatternKind::Product { elements, .. } = &product.kind else {
+            panic!("borrowed parameter should be a product");
+        };
+        let ref_pattern_id = elements[0];
+        let ref_pattern = lowered_pattern(&program, ref_pattern_id);
+        assert_eq!(ref_pattern.test.identity, LoweredPatternIdentity::Ref);
+        let LoweredPatternKind::Nominal { argument, .. } = &ref_pattern.kind else {
+            panic!("`Ref inner` should be nominal");
+        };
+        assert_eq!(
+            lowered_pattern(&program, *argument).test.subject,
+            CheckedType::I32
+        );
+
+        // Validation catches a corrupted plan, a wrong nested subject, and a
+        // missing concrete plan.
+        let mut corrupted = program.clone();
+        corrupted.expressions.values[injected_id.index()].coercion_plan =
+            Some(LoweredCoercionPlan::Identity);
+        assert!(
+            corrupted
+                .validate()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("coercion plan disagrees"))
+        );
+
+        let mut corrupted = program.clone();
+        corrupted.patterns.values[literal_id.index()].test.literal = Some(b"wrong".to_vec());
+        assert!(
+            corrupted
+                .validate()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("pattern test plan disagrees"))
+        );
+
+        let mut corrupted = program.clone();
+        corrupted.expressions.values[injected_id.index()].coercion_plan = None;
+        assert!(
+            corrupted
+                .validate()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("coercion has no emission plan"))
+        );
+
+        let mut corrupted = program.clone();
+        let LoweredPatternKind::Nominal { argument, .. } =
+            &corrupted.patterns.values[ref_pattern_id.index()].kind
+        else {
+            unreachable!()
+        };
+        let argument = *argument;
+        corrupted.patterns.values[argument.index()].test.subject = CheckedType::String;
+        assert!(corrupted.validate().iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("nested pattern test plan subject disagrees")
+        }));
+    }
+
+    #[test]
     fn validator_rejects_orphaned_and_misdepth_loop_exits() {
         let module = checked_program("def value: () -> () = () => { loop { break }; () }\n");
         let mut program = LoweredProgram::default();
@@ -19412,6 +20179,7 @@ mod tests {
             value_type: CheckedType::I32,
             effects: CheckedEffectSet::default(),
             coercion: None,
+            coercion_plan: None,
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Name(LoweredName {
                 symbol: SymbolId(0),
