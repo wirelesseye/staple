@@ -2180,7 +2180,10 @@ mod tests {
     fn recv(connection: &Connection) -> Message {
         connection
             .receiver
-            .recv_timeout(Duration::from_secs(5))
+            // Only a guard against a hung server: each response re-analyzes
+            // the standard library, which takes well over 5 seconds when the
+            // workspace suite runs alongside parallel builds.
+            .recv_timeout(Duration::from_secs(60))
             .unwrap()
     }
 

@@ -894,7 +894,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .view
             .owner_symbol_type(owner, symbol)
             .cloned()
-            .unwrap_or(CheckedType::Error);
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    format!(
+                        "binding cell symbol {} has no concrete type in its owner",
+                        symbol.0
+                    ),
+                )
+            })?;
         let value_type = self.backend.compile_type(&value_type)?;
         Ok(self
             .backend
@@ -1628,7 +1636,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         match pattern.kind {
             LoweredPatternKind::Wildcard => {
-                if !self.view.concrete_is_copy(&pattern.value_type) {
+                // Lowering records a `WildcardDiscard` use exactly when the
+                // discarded value needs drop; the drop body is 5.6. The
+                // emitter reads the record instead of re-deciding from the
+                // type (Contract 1).
+                let discards = self.view.artifact_uses(owner).is_some_and(|uses| {
+                    uses.iter()
+                        .any(|use_| use_.site == crate::ArtifactUseSite::WildcardDiscard(id))
+                });
+                if discards {
                     return Err(unsupported("wildcard cleanup"));
                 }
                 Ok(())
@@ -1876,6 +1892,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             callable.adapter,
             LoweredCallableAdapter::Constructor | LoweredCallableAdapter::External
         ) {
+            // Legacy `compile_symbol_value` resolves a parameter pointer, a
+            // local (including a captured closure value), or a binding cell
+            // before it falls back to the adapter code: a thunk that captures
+            // an extern value calls the captured closure, not a rebuilt one.
+            if let Some(symbol) = self.callable_symbol(callable)
+                && (environment.parameter_pointers.contains_key(&symbol)
+                    || environment.locals.contains_key(&symbol)
+                    || environment.binding_cells.contains_key(&symbol))
+            {
+                let value_type = CheckedType::Function(callable.function_type.clone());
+                let span = callable.origin.span.clone();
+                return self.load_symbol_value(
+                    owner,
+                    symbol,
+                    false,
+                    &value_type,
+                    &span,
+                    environment,
+                );
+            }
             let code = if callable.adapter == LoweredCallableAdapter::External {
                 // An extern value keeps a `Route` binding; its adapter is
                 // named by the `ExternAdapterValue` artifact use.
@@ -2081,10 +2117,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         owner: EmissionOwner,
         id: LoweredCallableValueId,
     ) -> Option<FunctionValue<'context>> {
+        self.site_finalizer(owner, crate::ArtifactUseSite::ClosureEnvironment(id))
+    }
+
+    /// The declared finalizer function one artifact use site names, if the
+    /// owner recorded that use. Lowering decides whether a finalizer is
+    /// installed; the emitter only reads the use (Contract 1).
+    fn site_finalizer(
+        &self,
+        owner: EmissionOwner,
+        site: crate::ArtifactUseSite,
+    ) -> Option<FunctionValue<'context>> {
         let uses = self.view.artifact_uses(owner)?;
-        let ordinal = uses.iter().find_map(|use_| {
-            (use_.site == crate::ArtifactUseSite::ClosureEnvironment(id)).then_some(use_.artifact)
-        })?;
+        let ordinal = uses
+            .iter()
+            .find_map(|use_| (use_.site == site).then_some(use_.artifact))?;
         self.artifacts
             .get(&ordinal)
             .and_then(|functions| functions.first())
@@ -2784,46 +2831,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "implicit thunk argument is not bound to an instance",
             ));
         };
-        // Legacy `build_closure` installs a GC finalizer when a capture needs
-        // drop. No closure-environment use is recorded for a thunk argument,
-        // so the finalizer body (5.6) cannot be attached yet; fail instead of
-        // building an environment legacy would finalize.
-        if self.instance_capture_needs_finalizer(*instance) {
-            return Err(Diagnostic::new(
-                span.clone(),
-                "lowered emitter: fresh closure environment is not implemented yet",
-            ));
-        }
-        self.build_instance_closure(owner, *instance, environment, span)
-            .map(|closure| closure.into())
-    }
-
-    /// Whether an instance's fresh capture environment needs a GC finalizer,
-    /// legacy `build_capture_environment`'s install gate (a captured value
-    /// that neither carries initialization state nor is borrowed needs drop).
-    fn instance_capture_needs_finalizer(&self, instance: FunctionInstanceId) -> bool {
-        self.view
-            .instance(instance)
-            .and_then(|record| record.body.as_ref())
-            .is_some_and(|body| {
-                body.captures.iter().any(|capture| {
-                    !capture.requires_initialization_state
-                        && !capture.capture.borrowed
-                        && self.view.concrete_needs_drop(&capture.value_type)
-                })
-            })
-    }
-
-    /// Build one instance's closure value over the current environment: the
-    /// catalog function's code pointer and a fresh capture environment filled
-    /// from the instance's capture records (legacy `build_closure`).
-    fn build_instance_closure(
-        &mut self,
-        owner: EmissionOwner,
-        instance: FunctionInstanceId,
-        environment: &FunctionEnvironment<'context>,
-        span: &staple_syntax::Span,
-    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let instance = *instance;
         let function = self
             .instances
             .get(&instance)
@@ -2835,7 +2843,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .and_then(|record| record.body.as_ref())
             .ok_or_else(|| Diagnostic::new(span.clone(), "closure instance has no body"))?;
         let pointer = self.build_capture_environment_value(owner, body, environment, span)?;
-        self.backend.build_closure_value(function, pointer)
+        // Legacy `build_closure` installs the environment finalizer exactly
+        // when lowering recorded the thunk argument's environment use (the
+        // finalizer body is 5.6).
+        if let Some(finalizer) = self.site_finalizer(
+            owner,
+            crate::ArtifactUseSite::ThunkArgumentEnvironment {
+                call: call_id,
+                argument: record_index,
+            },
+        ) {
+            self.backend.set_gc_finalizer(pointer, finalizer)?;
+        }
+        self.backend
+            .build_closure_value(function, pointer)
+            .map(|closure| closure.into())
     }
 
     /// The capture environment of one instance's body, filled from the current

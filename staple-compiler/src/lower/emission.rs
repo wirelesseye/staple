@@ -291,12 +291,6 @@ impl<'a> EmissionView<'a> {
         self.program.concrete_is_copy(value_type)
     }
 
-    /// The catalog's concrete drop decision for a fully substituted type
-    /// (Stage 5.4 decisions such as the closure-environment finalizer gate).
-    pub(crate) fn concrete_needs_drop(&self, value_type: &crate::CheckedType) -> bool {
-        self.program.concrete_needs_drop(value_type)
-    }
-
     /// The opaque runtime type identity of a fully substituted type, the same
     /// selection `LoweredProgram::runtime_opaque_kind` makes (Stage 5.2 layout
     /// context).
@@ -390,16 +384,18 @@ impl<'a> EmissionView<'a> {
 
     /// The concrete type of one owner-local symbol under the owner's
     /// substitutions: a binding item or binding pattern, a parameter, or a
-    /// capture of the owner's body, else the program catalog's declared type
-    /// (module symbols and initializer symbols, which are concrete already).
+    /// capture of the owner's body. An initializer's symbols take the program
+    /// catalog's declared type, which is concrete. An instance never falls
+    /// back to the catalog: a generic template's symbol keeps its template
+    /// type there, so a symbol missing from the body is `None`, not a type
+    /// that may still hold a parameter.
     pub(crate) fn owner_symbol_type(
         &self,
         owner: EmissionOwner,
         symbol: SymbolId,
     ) -> Option<&'a crate::CheckedType> {
-        if let EmissionOwner::Instance(id) = owner
-            && let Some(body) = self.instance_body(id)
-        {
+        if let EmissionOwner::Instance(id) = owner {
+            let body = self.instance_body(id)?;
             if let Some(value_type) = body.binding_symbol_type(symbol) {
                 return Some(value_type);
             }
@@ -410,13 +406,11 @@ impl<'a> EmissionView<'a> {
             {
                 return Some(&parameter.value_type);
             }
-            if let Some(capture) = body
+            return body
                 .captures
                 .iter()
                 .find(|capture| capture.capture.symbol == symbol)
-            {
-                return Some(&capture.value_type);
-            }
+                .map(|capture| &capture.value_type);
         }
         self.symbol(symbol).map(|symbol| &symbol.value_type)
     }

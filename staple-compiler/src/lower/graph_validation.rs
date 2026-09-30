@@ -2203,6 +2203,7 @@ pub(crate) mod tests {
             ArtifactUseSite::OwnedBinding(_) => "owned",
             ArtifactUseSite::CellFinalizer(_) => "cell",
             ArtifactUseSite::ClosureEnvironment(_) => "closure",
+            ArtifactUseSite::ThunkArgumentEnvironment { .. } => "thunk-argument-environment",
             ArtifactUseSite::RefConstruction(_) => "ref",
             ArtifactUseSite::DropIntrinsic(_) => "drop-intrinsic",
             ArtifactUseSite::CStringConversion(_) => "cstring-conversion",
@@ -2315,6 +2316,11 @@ pub(crate) mod tests {
                 "  () => inspect cell\n",
                 "}\n",
                 "def closure_env: move CString -> (() -> I32) = move value => () => inspect value\n",
+                // An implicit thunk argument whose closure captures a droppable
+                // value: legacy `build_closure` installs the same finalizer as
+                // a fresh callable value (`ThunkArgumentEnvironment`).
+                "def evaluate: (() -> I32) -> I32 = callback => callback ()\n",
+                "def thunk_env: move CString -> I32 = move value => evaluate { inspect value }\n",
                 "type Owned = ctor I32\n",
                 "impl Drop Owned { def drop = Owned value => () }\n",
                 "impl Clone Owned { def clone = Owned value => Owned value }\n",
@@ -2324,6 +2330,7 @@ pub(crate) mod tests {
                 "let a = make_ref ()\n",
                 "let b = cell_finalizer ()\n",
                 "let c = closure_env (c_string \"e\")\n",
+                "let t = thunk_env (c_string \"t\")\n",
                 "let d = make_buffer ()\n",
             ),
             concat!(
@@ -2389,6 +2396,7 @@ pub(crate) mod tests {
             "owned",
             "cell",
             "closure",
+            "thunk-argument-environment",
             "ref",
             "drop-intrinsic",
             "cstring-conversion",

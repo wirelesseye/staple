@@ -263,7 +263,7 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 27] = [
+static CORPUS: [DifferentialProgram; 28] = [
     inline("empty", "", "5.3"),
     inline(
         "integer_arithmetic",
@@ -572,6 +572,10 @@ static CORPUS: [DifferentialProgram; 27] = [
                 "    puts: CString -> I32\n",
                 "}\n",
                 "def call_extern: CString -> I32 = value => puts value\n",
+                // An extern used as a closure value inside a function (the
+                // `ExternAdapterValue` adapter), not only in an initializer.
+                "def extern_value: () -> (CString -> I32) = () => puts\n",
+                "let adapter = extern_value ()\n",
                 "let owned = c_string \"staple\\n\"\n",
                 "let first = call_extern owned\n",
                 "let second = puts (c_string \"again\\n\")\n",
@@ -579,7 +583,7 @@ static CORPUS: [DifferentialProgram; 27] = [
             ),
             "5.4",
         ),
-        &["call_extern"],
+        &["call_extern", "extern_value"],
     ),
     emits(
         inline(
@@ -590,6 +594,11 @@ static CORPUS: [DifferentialProgram; 27] = [
                 "impl Drop Resource { def drop = Resource value => () }\n",
                 "def make: I32 -> Point = x => Point (x, x)\n",
                 "def call_make: I32 -> Point = x => make x\n",
+                // A managed `Ref` construction inside a function, so the
+                // payload-finalizer path is a focus body, not only an
+                // initializer.
+                "def make_ref: I32 -> Ref Resource = x => Ref (Resource x)\n",
+                "let made = make_ref 5\n",
                 "let point = Point (1, 2)\n",
                 "let reference: Ref Resource = Ref (Resource 1)\n",
                 "let make_point: () -> ((I32, I32) -> Point) = () => Point\n",
@@ -598,7 +607,7 @@ static CORPUS: [DifferentialProgram; 27] = [
             ),
             "5.4",
         ),
-        &["make", "call_make"],
+        &["make", "call_make", "make_ref"],
     ),
     emits(
         inline(
@@ -655,6 +664,28 @@ static CORPUS: [DifferentialProgram; 27] = [
             "combine",
             "bytes_length",
         ],
+    ),
+    emits(
+        inline(
+            "thunk_arguments",
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" {\n",
+                "    puts: CString -> I32\n",
+                "}\n",
+                "def evaluate: (() -> I32) -> I32 = callback => callback ()\n",
+                "def thunk_plain: I32 -> I32 = value => evaluate { value + 1 }\n",
+                // The thunk captures an owned `CString`, so lowering records a
+                // `ThunkArgumentEnvironment` finalizer use. `thunk_env` owns
+                // its moved parameter, so the owned-binding guard stubs it
+                // until 5.6; it joins the focus list then.
+                "def thunk_env: move CString -> I32 = move value => evaluate { puts value }\n",
+                "let first = thunk_plain 1\n",
+                "let second = thunk_env (c_string \"thunk\\n\")\n",
+            ),
+            "5.4",
+        ),
+        &["evaluate", "thunk_plain"],
     ),
 ];
 

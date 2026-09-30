@@ -982,6 +982,15 @@ impl<'a> LoweredWalker<'a> {
                     {
                         self.walk_expression(expression)?;
                     }
+                    // A reactive intrinsic's callback thunk is the
+                    // `ReactiveCallbackEnvironment` site (Stage 4.5); every
+                    // other implicit thunk argument builds its closure here.
+                    if let Some(thunk) =
+                        arguments.get(*argument).and_then(|argument| argument.thunk)
+                        && !matches!(target, super::LoweredCallableTarget::Intrinsic { .. })
+                    {
+                        self.thunk_argument_environment(id, *argument, thunk, &origin)?;
+                    }
                 }
                 super::LoweredCallStep::Resource { .. } | super::LoweredCallStep::Invoke => {}
             }
@@ -1138,6 +1147,114 @@ impl<'a> LoweredWalker<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Requests the closure-environment finalizer of one implicit thunk
+    /// argument. Legacy builds the thunk's closure over the current scope when
+    /// the argument evaluates (`compile_adapted_call_argument` →
+    /// `build_closure`) and installs the finalizer under the same gate as a
+    /// fresh callable value: a non-empty environment with some capture that
+    /// neither requires initialization state nor is borrowed and needs drop.
+    /// The captures are the thunk instance's concrete captures.
+    fn thunk_argument_environment(
+        &mut self,
+        call: super::LoweredCallId,
+        argument: usize,
+        thunk: crate::FunctionId,
+        origin: &Origin,
+    ) -> WalkResult {
+        let thunk_instance = match self.owner {
+            OwnerArenas::Instance(body) => body
+                .binding(super::LoweredBindingSite::CallArgumentThunk { call, argument })
+                .and_then(|binding| match binding {
+                    super::LoweredBoundTarget::Instance(instance) => Some(*instance),
+                    _ => None,
+                }),
+            OwnerArenas::Initializer(_) => None,
+        };
+        let thunk_instance = match thunk_instance {
+            Some(instance) => instance,
+            None => {
+                // Initializer thunk arguments resolve the thunk's instance the
+                // same way Stage 3.3 does (root target, template signature).
+                let Some(function_type) = self
+                    .program
+                    .functions
+                    .get(thunk)
+                    .map(|function| function.signature.clone())
+                else {
+                    return Err(vec![Diagnostic::new(
+                        origin.span.clone(),
+                        "implicit thunk argument has no lowered template".to_string(),
+                    )]);
+                };
+                let request = InstanceResolutionRequest {
+                    function: thunk,
+                    origin: origin.clone(),
+                    function_type,
+                    substitutions: super::CallSubstitutions::default(),
+                    evidence: None,
+                    target: InstanceResolutionTarget::Root,
+                };
+                let resolved = self
+                    .program
+                    .resolve_instance_request(&request)
+                    .map_err(|diagnostic| vec![diagnostic])?;
+                let Some(ordinal) = self.program.specializations.instance_ordinal(&resolved.key)
+                else {
+                    return Err(vec![Diagnostic::new(
+                        origin.span.clone(),
+                        "initializer thunk argument instance was never interned".to_string(),
+                    )]);
+                };
+                super::FunctionInstanceId::from_index(ordinal.index())
+            }
+        };
+        let Some(record) = self.program.instances.get(thunk_instance) else {
+            return Err(vec![Diagnostic::new(
+                origin.span.clone(),
+                "thunk argument instance has no catalog record".to_string(),
+            )]);
+        };
+        let Some(body) = record.body.as_ref() else {
+            return Err(vec![Diagnostic::new(
+                origin.span.clone(),
+                "thunk argument instance has no materialized body".to_string(),
+            )]);
+        };
+        let gate = body.captures.iter().any(|capture| {
+            !capture.requires_initialization_state
+                && !capture.capture.borrowed
+                && self.program.concrete_needs_drop(&capture.value_type)
+        });
+        if !gate {
+            return Ok(());
+        }
+        let captures = body
+            .captures
+            .iter()
+            .map(|capture| CanonicalType::concrete(&capture.value_type, origin))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|diagnostic| vec![diagnostic])?;
+        let capture_types = body
+            .captures
+            .iter()
+            .map(|capture| capture.value_type.clone())
+            .collect();
+        let ordinal = record.ordinal;
+        self.visitor.finalizer_site(
+            ArtifactUseSite::ThunkArgumentEnvironment { call, argument },
+            GcFinalizerKey::ClosureEnvironment {
+                closure: ordinal,
+                captures,
+            },
+            GcFinalizerPlan::ClosureEnvironment {
+                closure: thunk_instance,
+                captures: capture_types,
+                drops: None,
+            },
+            origin,
+        )
     }
 
     fn walk_callable_value(

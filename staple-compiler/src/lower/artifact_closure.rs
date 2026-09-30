@@ -115,6 +115,14 @@ pub(crate) enum ArtifactUseSite {
     CellFinalizer(SymbolId),
     /// A closure environment's finalizer.
     ClosureEnvironment(LoweredCallableValueId),
+    /// An implicit thunk argument's closure environment finalizer. Legacy
+    /// builds the thunk's closure over the current scope when it evaluates the
+    /// argument (`compile_adapted_call_argument` → `build_closure`), and
+    /// installs the finalizer under the same gate as a fresh callable value.
+    ThunkArgumentEnvironment {
+        call: LoweredCallId,
+        argument: usize,
+    },
     /// A managed `Ref` allocation's payload finalizer.
     RefConstruction(LoweredCallId),
     /// The `Drop` intrinsic's argument drop.
@@ -1618,6 +1626,17 @@ impl LoweredProgram {
             ArtifactUseSite::CStringTemporary(id) => {
                 if !call(id) {
                     report("call", id.index());
+                }
+            }
+            ArtifactUseSite::ThunkArgumentEnvironment { call: id, argument } => {
+                let thunk_argument = match site_owner {
+                    UseSiteOwner::Instance(body) => body.call(id),
+                    UseSiteOwner::Initializer(_) => self.calls.get(id),
+                }
+                .and_then(|record| record.arguments.get(argument))
+                .is_some_and(|record| record.thunk.is_some());
+                if !thunk_argument {
+                    report("thunk argument of call", id.index());
                 }
             }
             ArtifactUseSite::WildcardDiscard(id) => {

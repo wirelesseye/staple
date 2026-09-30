@@ -4,7 +4,7 @@ This is the separate plan the Stage 5.4 section of [STAGE_5_LLVM_MIGRATION_BREAK
 
 Line references are against `71be158` and will drift; re-locate code by function name.
 
-**Status:** Steps 1–2 landed.
+**Status:** Complete. All ten steps landed, and the revised gate is met. A post-gate review then fixed the gaps listed under **Post-gate review fixes** at the end of this plan.
 
 Step 1: the mixed `call resources, mutation, or cleanup` bucket is split into `call resources`, `call initialization check`, `call mutation argument`, `call moved ownership`, `call C-string temporary`, and `reactive call` (the old 722 split exactly as 617/62/2/2/0/39). `codegen/differential.rs` now owns the `(family, owning substage)` table, the in-process harness fails on an unclassified family and prints stub totals per owning substage, and `DifferentialProgram::emits` plus the focus assertion are in place for the Step 10 corpus entries. A body-level owned-binding guard makes any body that owns a droppable binding fail with `owned binding cleanup` (5.6) before its root block is emitted. Baseline after Step 1: 2278 fully emitted bodies compared (unchanged), 3236 stubs across 40 families, now 1912 (5.4), 1167 (5.5), 43 (5.6), 7 (5.7), 107 (5.8). The guard newly stubs four bodies that previously reported `coercion or move`; no previously fully emitted body was affected.
 
@@ -225,3 +225,22 @@ Step 1 → Step 2 → Step 3 → Step 4 → Step 5 ─┐
 - Step 3 comes before Step 4, because mutation arguments need binding cells.
 - Once Step 3 lands, Steps 4, 6, 7, and 9 touch different match arms and can proceed in parallel. Step 5 needs Step 4's argument assembly for hidden arguments. Step 8 needs Step 7's adapter values.
 - None of the steps needs a separate plan file. Steps 4 (arguments) and 7 (closures) carry the most ABI risk and should land as several small commits, each re-running the in-process harness.
+
+## Post-gate review fixes
+
+- **Implicit-thunk closure finalizers are recorded in lowering (Contract 1).** Legacy builds an implicit thunk argument's closure through `build_closure`, which installs a GC finalizer under the same gate as a fresh callable value. The Stage 4.4 scanner recorded `ClosureEnvironment` uses only for callable values, so the 5.4 emitter had re-derived the gate with `concrete_needs_drop`. The fix:
+  - `ArtifactUseSite::ThunkArgumentEnvironment { call, argument }` is requested at the argument step of every non-intrinsic call (a reactive intrinsic's callback thunk keeps `ReactiveCallbackEnvironment`). Its closure instance comes from the `CallArgumentThunk` binding, or from the Stage 3.3 recipe in initializers, and its key uses the thunk instance's concrete captures.
+  - The emitter installs the finalizer only when that use exists.
+  - `EmissionView::concrete_needs_drop` and `instance_capture_needs_finalizer` are gone.
+
+  The Stage 4.4 legacy comparison gained a `thunk_env` fixture, compares its finalizers in both directions, and requires the new site.
+- **Extern and constructor values read an in-scope binding first.** The new `thunk_arguments` corpus entry exposed a parity bug: inside a thunk that captures `puts`, legacy calls the captured closure, while the emitter rebuilt an adapter closure. The adapter path now follows legacy `compile_symbol_value`'s order: parameter pointer, local (including captures), binding cell, and only then the adapter.
+- **Wider focus coverage.**
+  - `constructors` gains `make_ref`, a managed `Ref` construction inside a function.
+  - `extern_values` gains `extern_value`, an extern closure value inside a function.
+  - A new `thunk_arguments` entry focuses `evaluate` and `thunk_plain`.
+  - The remaining shapes are follow-ups in the breakdown's 5.5 and 5.6 sections.
+- **`owner_symbol_type` no longer falls back to the catalog for an instance.** A symbol missing from an instance body is `None` (a diagnostic at the cell), never the template's type.
+- **Wildcard cleanup reads the `WildcardDiscard` use** instead of `concrete_is_copy`. `concrete_is_copy` remains only in `LayoutContext`'s ABI decisions.
+- **The LSP protocol test's receive timeout is 60 seconds**, a hang guard that no longer fails under parallel builds.
+- **Results:** 28 corpus programs; 5822 fully emitted bodies match legacy; 2240 stubs (5.5: 1903, 5.6: 208, 5.7: 7, 5.8: 122); every 5.4-owned family is still at zero.
