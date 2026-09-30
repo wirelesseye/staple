@@ -263,7 +263,7 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 19] = [
+static CORPUS: [DifferentialProgram; 27] = [
     inline("empty", "", "5.3"),
     inline(
         "integer_arithmetic",
@@ -463,6 +463,198 @@ static CORPUS: [DifferentialProgram; 19] = [
         "example_game_loop",
         "staple-compiler/examples/game_loop/main.sta",
         "5.3",
+    ),
+    // Stage 5.4: calls, callable values, closures, resources, and intrinsics.
+    // Each entry names the functions its `emits` list must fully emit; the
+    // program as a whole stays `MayBeBlocked` for the later substages'
+    // constructs.
+    emits(
+        inline(
+            "calls_generic",
+            concat!(
+                "def identity: <T> move T -> T = move value => value\n",
+                "def first: <T where Copy T> T -> T = value => value\n",
+                "let one = identity 41\n",
+                "let text = identity \"hello\"\n",
+                "let two = first 2\n",
+                "let total = one + two\n",
+            ),
+            "5.4",
+        ),
+        &["identity", "first"],
+    ),
+    emits(
+        inline(
+            "calls_curried_defaults",
+            concat!(
+                // `sum3` and `pair_of` destructure their parameters and build
+                // products (5.5), so only the callers that exercise defaults,
+                // spreads, and designated elements are focus functions.
+                "def sum3: (I32, b: I32 = 2, c: I32 = 3) -> I32 = (a, b, c) => a + b + c\n",
+                "def pair_of: (I32, I32) -> (I32, I32) = (left, right) => (left, right)\n",
+                "def total: () -> I32 = () => sum3 (1, .c: 9)\n",
+                "def spread: (I32, I32) -> I32 = (left, right) => {\n",
+                "    let pair = pair_of (left, right)\n",
+                "    sum3 (1, ...pair)\n",
+                "}\n",
+                "def curried: I32 -> I32 -> I32 = a => b => a + b\n",
+                "let value = total ()\n",
+                "let spread_value = spread (4, 5)\n",
+                "let make = curried 1\n",
+                "let curried_value = make 2\n",
+            ),
+            "5.4",
+        ),
+        &["total", "spread", "curried"],
+    ),
+    emits(
+        inline(
+            "calls_mutation",
+            concat!(
+                "type MoveOnly = ctor I32\n",
+                "impl !Copy MoveOnly {}\n",
+                // The `mut` parameter's body cannot assign yet (assignment is
+                // a 5.5 item), so `bump` only carries the by-address effect.
+                "def bump: mut I32 -> () = mut target => ()\n",
+                "def borrow: MoveOnly -> I32 = value => 1\n",
+                "def exercise: I32 -> I32 = seed => {\n",
+                "    let mut total = seed\n",
+                "    bump total\n",
+                "    bump (seed + 1)\n",
+                "    let value = MoveOnly 2\n",
+                "    total + borrow value + borrow (MoveOnly 3)\n",
+                "}\n",
+                "let result = exercise 1\n",
+            ),
+            "5.4",
+        ),
+        &["bump", "borrow", "exercise"],
+    ),
+    emits(
+        inline(
+            "closures_captures",
+            concat!(
+                "type MoveOnly = ctor I32\n",
+                "impl !Copy MoveOnly {}\n",
+                // A `move T` parameter cannot be moved into a nested closure
+                // (the checker rejects moving out of the borrowed parameter
+                // storage), so the value-capture case uses a `Copy` bound; the
+                // move-into-closure shape is covered by `extern_values` and
+                // `constructors`.
+                "def keeper: <T where Copy T> T -> (() -> T) = value => () => value\n",
+                "def counter: <T where Copy T> T -> (() -> T) = start => {\n",
+                "    let mut total = start\n",
+                "    let current = () => total\n",
+                "    current\n",
+                "}\n",
+                "def reader: <T> (() -> T) -> T = callback => callback ()\n",
+                "def consume: MoveOnly -> I32 = value => 1\n",
+                "def borrowed: MoveOnly -> I32 = value => {\n",
+                "    let peek = () => consume value\n",
+                "    peek ()\n",
+                "}\n",
+                "let held = keeper 7\n",
+                "let counted = counter 0\n",
+                "let first = reader held\n",
+                "let second = reader counted\n",
+                "let third = borrowed (MoveOnly 4)\n",
+            ),
+            "5.4",
+        ),
+        &["keeper", "counter", "reader", "borrowed", "consume"],
+    ),
+    emits(
+        inline(
+            "extern_values",
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "extern \"c\" {\n",
+                "    puts: CString -> I32\n",
+                "}\n",
+                "def call_extern: CString -> I32 = value => puts value\n",
+                "let owned = c_string \"staple\\n\"\n",
+                "let first = call_extern owned\n",
+                "let second = puts (c_string \"again\\n\")\n",
+                "let as_value = puts\n",
+            ),
+            "5.4",
+        ),
+        &["call_extern"],
+    ),
+    emits(
+        inline(
+            "constructors",
+            concat!(
+                "type Point = ctor (I32, I32)\n",
+                "type Resource = ctor I32\n",
+                "impl Drop Resource { def drop = Resource value => () }\n",
+                "def make: I32 -> Point = x => Point (x, x)\n",
+                "def call_make: I32 -> Point = x => make x\n",
+                "let point = Point (1, 2)\n",
+                "let reference: Ref Resource = Ref (Resource 1)\n",
+                "let make_point: () -> ((I32, I32) -> Point) = () => Point\n",
+                "let point_value = make_point ()\n",
+                "let second = point_value (3, 4)\n",
+            ),
+            "5.4",
+        ),
+        &["make", "call_make"],
+    ),
+    emits(
+        inline(
+            "resources_with",
+            concat!(
+                "type Counter = ctor I32\n",
+                "def get: () ->{Counter} I32 = () => 1\n",
+                "def forward: () ->{Counter} I32 = () => get ()\n",
+                "def value_of: Counter -> I32 = counter => 1\n",
+                "def read: () ->{Counter} I32 = () => value_of (resource Counter)\n",
+                // The assignment target is a 5.5 place, so `bump` is not a
+                // focus function; the `with mut` provider is still exercised
+                // at the initializer level.
+                "def bump: () ->{mut Counter} () = () => {\n",
+                "    let value = resource Counter\n",
+                "    let _ = value\n",
+                "}\n",
+                "def run: I32 -> I32 = seed => {\n",
+                "    let counter = Counter seed\n",
+                "    with Counter = counter { forward () + read () }\n",
+                "}\n",
+                "let mut shared = Counter 0\n",
+                "with mut Counter = shared { bump () }\n",
+            ),
+            "5.4",
+        ),
+        &["get", "forward", "value_of", "read", "run"],
+    ),
+    emits(
+        inline(
+            "numeric_intrinsics",
+            concat!(
+                "use std.slice.Slice\n",
+                "use std.string.ToString\n",
+                "def integers: (I32, I32) -> I32 = (left, right) => left + right * left - right / left\n",
+                "def compare: (I32, I32) -> Bool = (left, right) => left < right\n",
+                "def floats: (F64, F64) -> F64 = (left, right) => left * right + left / right\n",
+                "def float_compare: (F32, F32) -> Bool = (left, right) => left >= right\n",
+                "def describe: I32 -> String = value => ToString.to_string value\n",
+                "def combine: (String, String) -> String = (left, right) => left + right\n",
+                "def bytes_length: String -> USize = text => Slice.length (String.bytes text)\n",
+                "let first = describe 41\n",
+                "let second = combine (\"staple\", \"!\")\n",
+                "let third = bytes_length second\n",
+            ),
+            "5.4",
+        ),
+        &[
+            "integers",
+            "compare",
+            "floats",
+            "float_compare",
+            "describe",
+            "combine",
+            "bytes_length",
+        ],
     ),
 ];
 
@@ -773,8 +965,15 @@ mod tests {
             total_stubs += partial.report.stubbed().len();
             for (family, count) in partial.report.family_histogram() {
                 let owner = super::family_owner(family).unwrap_or_else(|| {
+                    let detail = partial
+                        .report
+                        .stubbed()
+                        .iter()
+                        .find(|stub| stub.diagnostic().message == *family)
+                        .map(|stub| format!("{:?} ({})", stub.diagnostic(), stub.name()))
+                        .unwrap_or_else(|| family.clone());
                     panic!(
-                        "`{}` stubbed family `{family}`, which is not in the ownership table",
+                        "`{}` stubbed family `{family}`, which is not in the ownership table: {detail}",
                         program.name
                     )
                 });
@@ -836,8 +1035,8 @@ mod tests {
             .report
             .stubbed()
             .iter()
-            .map(|stub| stub.name().to_owned())
-            .collect::<HashSet<_>>();
+            .map(|stub| (stub.name().to_owned(), format!("{:?}", stub.diagnostic())))
+            .collect::<HashMap<_, _>>();
         let mut matched = 0;
         for (id, instance) in view.instances() {
             let Some(function) = view.function(instance.template) else {
@@ -851,10 +1050,13 @@ mod tests {
                 .planned_name(id)
                 .expect("a materialized instance has a planned name");
             assert!(
-                !stubbed.contains(name),
-                "`{}`: focus instance `{name}` ({}) is stubbed",
+                !stubbed.contains_key(name),
+                "`{}`: focus instance `{name}` ({}) is stubbed: {}",
                 program.name,
-                function.name
+                function.name,
+                stubbed
+                    .get(name)
+                    .expect("stubbed instance has a diagnostic")
             );
             assert!(
                 compared.contains(name),

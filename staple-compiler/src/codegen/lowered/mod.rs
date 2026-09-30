@@ -884,12 +884,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// field and are 5.8 diagnostics, so they never reach this helper.
     fn binding_cell_type(
         &self,
+        owner: EmissionOwner,
         symbol: SymbolId,
     ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
-        let record = self.view.symbol(symbol).ok_or_else(|| {
-            Diagnostic::new(staple_syntax::Span::Compiler, "missing binding cell symbol")
-        })?;
-        let value_type = self.backend.compile_type(&record.value_type)?;
+        // A generic body's local symbol keeps its template type in the symbol
+        // catalog; the owner's concrete binding/parameter/capture record is
+        // authoritative.
+        let value_type = self
+            .view
+            .owner_symbol_type(owner, symbol)
+            .cloned()
+            .unwrap_or(CheckedType::Error);
+        let value_type = self.backend.compile_type(&value_type)?;
         Ok(self
             .backend
             .context
@@ -903,6 +909,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// stops a body whose cell would need either.
     fn allocate_binding_cell(
         &mut self,
+        owner: EmissionOwner,
         environment: &mut FunctionEnvironment<'context>,
         symbol: SymbolId,
         span: &staple_syntax::Span,
@@ -910,7 +917,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
             return Ok(cell);
         }
-        let cell_type = self.binding_cell_type(symbol)?;
+        let cell_type = self.binding_cell_type(owner, symbol)?;
         // Legacy `captured_cell_symbols`: a cell is GC-allocated exactly when
         // some function captures it.
         let captured = self
@@ -948,6 +955,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// state byte, and do nothing when the symbol has no cell.
     fn store_local_initialization_state(
         &self,
+        owner: EmissionOwner,
         environment: &FunctionEnvironment<'context>,
         symbol: SymbolId,
         state: u64,
@@ -956,7 +964,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let Some(cell) = environment.binding_cells.get(&symbol).copied() else {
             return Ok(());
         };
-        let cell_type = self.binding_cell_type(symbol)?;
+        let cell_type = self.binding_cell_type(owner, symbol)?;
         let state_slot = self
             .backend
             .builder
@@ -1478,12 +1486,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if binding.generic {
                     if let Some(symbol) = binding.symbol {
                         self.store_local_initialization_state(
+                            owner,
                             environment,
                             symbol,
                             1,
                             &item.origin.span,
                         )?;
                         self.store_local_initialization_state(
+                            owner,
                             environment,
                             symbol,
                             2,
@@ -1501,9 +1511,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     if binding.cell {
                         // Legacy `compile_item` allocates the cell before the
                         // state-1 store and the value evaluation.
-                        self.allocate_binding_cell(environment, symbol, &item.origin.span)?;
+                        self.allocate_binding_cell(owner, environment, symbol, &item.origin.span)?;
                     }
                     self.store_local_initialization_state(
+                        owner,
                         environment,
                         symbol,
                         1,
@@ -1514,7 +1525,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value = self.emit_expression(owner, value_id, environment)?;
                 if let Some(symbol) = binding.symbol {
                     if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
-                        let cell_type = self.binding_cell_type(symbol)?;
+                        let cell_type = self.binding_cell_type(owner, symbol)?;
                         let slot = self
                             .backend
                             .builder
@@ -1527,6 +1538,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .build_store(slot, value)
                             .map_err(compiler_diagnostic)?;
                         self.store_local_initialization_state(
+                            owner,
                             environment,
                             symbol,
                             2,
@@ -1682,6 +1694,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // 5.6; the Step 1 guard already stopped bodies that own one.
         for symbol in &expression.moved_symbols {
             self.store_local_initialization_state(
+                owner,
                 environment,
                 *symbol,
                 0,
@@ -1725,6 +1738,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 // Legacy `Expression::Name` checks the state whenever the read
                 // requires one or the symbol has mutable storage.
                 self.load_symbol_value(
+                    owner,
                     name.symbol,
                     name.requires_initialization_check || name.mutable,
                     &expression.value_type,
@@ -1752,6 +1766,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::Access(_) => Err(unimplemented("access")),
             LoweredExpressionKind::Product(product) if product.fields.is_empty() => {
                 Ok(self.backend.unit_value())
+            }
+            // Legacy `compile_product_expression` collapses a one-element
+            // product to its element (the parenthesized-value shape).
+            LoweredExpressionKind::Product(product) if product.fields.len() == 1 => {
+                self.emit_expression(owner, product.fields[0], environment)
             }
             LoweredExpressionKind::Product(_) => Err(unimplemented("product")),
             LoweredExpressionKind::RepeatedProduct(_) => Err(unimplemented("repeated product")),
@@ -1845,7 +1864,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if callable.requires_initialization_check
             && let Some(symbol) = self.callable_symbol(callable)
         {
-            self.check_symbol_initialization(environment, symbol, &callable.origin.span)?;
+            self.check_symbol_initialization(owner, environment, symbol, &callable.origin.span)?;
         }
         let binding = self
             .view
@@ -1857,11 +1876,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             callable.adapter,
             LoweredCallableAdapter::Constructor | LoweredCallableAdapter::External
         ) {
-            let code = self.callable_artifact_code(
-                binding,
-                &callable.origin.span,
-                "callable adapter binding",
-            )?;
+            let code = if callable.adapter == LoweredCallableAdapter::External {
+                // An extern value keeps a `Route` binding; its adapter is
+                // named by the `ExternAdapterValue` artifact use.
+                self.extern_adapter_code(owner, id)
+                    .ok_or_else(|| unsupported("callable adapter binding"))?
+            } else {
+                self.callable_artifact_code(
+                    binding,
+                    &callable.origin.span,
+                    "callable adapter binding",
+                )?
+            };
             return self
                 .backend
                 .build_closure_value(
@@ -1905,6 +1931,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             Some(closure) => match closure.environment {
                 LoweredClosureEnvironment::Fresh => {
                     let pointer = self.build_closure_environment_value(
+                        owner,
                         closure,
                         environment,
                         &callable.origin.span,
@@ -1917,7 +1944,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     pointer
                 }
                 LoweredClosureEnvironment::Stored => {
-                    return self.load_stored_closure(callable, environment);
+                    return self.load_stored_closure(owner, callable, environment);
                 }
                 LoweredClosureEnvironment::Current => environment
                     .closure_environment
@@ -1959,6 +1986,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
+    /// The declared adapter of one extern callable value, named by the
+    /// value's `ExternAdapterValue` artifact use (the binding stays a
+    /// `Route`, because the foreign symbol keeps its non-source route).
+    fn extern_adapter_code(
+        &self,
+        owner: EmissionOwner,
+        id: LoweredCallableValueId,
+    ) -> Option<FunctionValue<'context>> {
+        let uses = self.view.artifact_uses(owner)?;
+        let ordinal = uses.iter().find_map(|use_| {
+            (use_.site == crate::ArtifactUseSite::ExternAdapterValue(id)).then_some(use_.artifact)
+        })?;
+        self.artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+    }
+
     /// The declared function of one callable value's artifact binding.
     fn callable_artifact_code(
         &self,
@@ -1984,6 +2029,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// local, binding cell, or module storage.
     fn load_stored_closure(
         &mut self,
+        owner: EmissionOwner,
         callable: &crate::LoweredCallableValue,
         environment: &FunctionEnvironment<'context>,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
@@ -2004,7 +2050,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(*value);
         }
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
-            let cell_type = self.binding_cell_type(symbol)?;
+            let cell_type = self.binding_cell_type(owner, symbol)?;
             let slot = self
                 .backend
                 .builder
@@ -2050,6 +2096,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// `build_capture_environment`).
     fn build_closure_environment_value(
         &mut self,
+        owner: EmissionOwner,
         closure: &crate::LoweredClosureConstruction,
         environment: &FunctionEnvironment<'context>,
         span: &staple_syntax::Span,
@@ -2079,7 +2126,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let environment_type = self.backend.capture_environment_type(&fields);
         let mut environment_value = environment_type.const_zero();
         for (index, capture) in closure.captures.iter().enumerate() {
-            let stored = self.closure_capture_value(capture, environment, span)?;
+            let stored = self.closure_capture_value(owner, capture, environment, span)?;
             environment_value = self.backend.insert_capture(
                 environment_value,
                 stored,
@@ -2096,6 +2143,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// pointer from the current scope; a by-value capture stores its value.
     fn closure_capture_value(
         &mut self,
+        owner: EmissionOwner,
         capture: &crate::LoweredClosureCapture,
         environment: &FunctionEnvironment<'context>,
         span: &staple_syntax::Span,
@@ -2119,8 +2167,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(pointer.into())
             }
             LoweredCaptureAccess::ByValue => {
-                let value =
-                    self.load_symbol_value(symbol, false, &capture.value_type, span, environment)?;
+                let value = self.load_symbol_value(
+                    owner,
+                    symbol,
+                    false,
+                    &capture.value_type,
+                    span,
+                    environment,
+                )?;
                 value_as_basic(value).ok_or_else(|| {
                     Diagnostic::new(span.clone(), "captured value is not first-class")
                 })
@@ -2161,7 +2215,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // Legacy checks the callee symbol's initialization before evaluating
         // any argument.
         for symbol in &call.initialization_checks {
-            self.check_symbol_initialization(environment, *symbol, &call.origin.span)?;
+            self.check_symbol_initialization(owner, environment, *symbol, &call.origin.span)?;
         }
         // A whole-mutation call passes one pointer whatever the logical
         // parameter's flattened arity (`compile_closure_function_type`).
@@ -2615,12 +2669,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// one, and do nothing otherwise.
     fn check_symbol_initialization(
         &self,
+        owner: EmissionOwner,
         environment: &FunctionEnvironment<'context>,
         symbol: SymbolId,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
-            let cell_type = self.binding_cell_type(symbol)?;
+            let cell_type = self.binding_cell_type(owner, symbol)?;
             let state = self
                 .backend
                 .builder
@@ -2675,7 +2730,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
             && let Some(place) = record.place
         {
-            return Ok(self.emit_place_pointer(owner, place, environment)?.into());
+            match self.emit_place_pointer(owner, place, environment) {
+                Ok(pointer) => return Ok(pointer.into()),
+                // Legacy `compile_indirect_argument_pointer` silently falls
+                // back to a materialized copy when a possibly-place-rooted
+                // borrow is not actually addressable; the mutation path has no
+                // fallback.
+                Err(error) => {
+                    if record.pass_mode != LoweredArgumentPassMode::BorrowedPointer {
+                        return Err(error);
+                    }
+                }
+            }
         }
         let value = self.emit_expression(owner, expression, environment)?;
         let value = value_as_basic(value).ok_or_else(|| {
@@ -2728,7 +2794,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "lowered emitter: fresh closure environment is not implemented yet",
             ));
         }
-        self.build_instance_closure(*instance, environment, span)
+        self.build_instance_closure(owner, *instance, environment, span)
             .map(|closure| closure.into())
     }
 
@@ -2753,6 +2819,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// from the instance's capture records (legacy `build_closure`).
     fn build_instance_closure(
         &mut self,
+        owner: EmissionOwner,
         instance: FunctionInstanceId,
         environment: &FunctionEnvironment<'context>,
         span: &staple_syntax::Span,
@@ -2767,7 +2834,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .instance(instance)
             .and_then(|record| record.body.as_ref())
             .ok_or_else(|| Diagnostic::new(span.clone(), "closure instance has no body"))?;
-        let pointer = self.build_capture_environment_value(body, environment, span)?;
+        let pointer = self.build_capture_environment_value(owner, body, environment, span)?;
         self.backend.build_closure_value(function, pointer)
     }
 
@@ -2778,6 +2845,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// is a diagnostic rather than a silently missing finalizer.
     fn build_capture_environment_value(
         &mut self,
+        owner: EmissionOwner,
         body: &crate::LoweredInstanceBody,
         environment: &FunctionEnvironment<'context>,
         span: &staple_syntax::Span,
@@ -2797,7 +2865,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let environment_type = self.backend.capture_environment_type(&fields);
         let mut environment_value = environment_type.const_zero();
         for (index, capture) in body.captures.iter().enumerate() {
-            let stored = self.capture_value(capture, environment, span)?;
+            let stored = self.capture_value(owner, capture, environment, span)?;
             environment_value = self.backend.insert_capture(
                 environment_value,
                 stored,
@@ -2814,6 +2882,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// from the current scope; every other capture stores its value.
     fn capture_value(
         &mut self,
+        owner: EmissionOwner,
         capture: &LoweredInstanceCapture,
         environment: &FunctionEnvironment<'context>,
         span: &staple_syntax::Span,
@@ -2841,7 +2910,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(pointer.into());
         }
         let value =
-            self.load_symbol_value(symbol, false, &capture.value_type, span, environment)?;
+            self.load_symbol_value(owner, symbol, false, &capture.value_type, span, environment)?;
         value_as_basic(value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "captured value is not first-class"))
     }
@@ -2949,7 +3018,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Ok(pointer);
                 }
                 if let Some(cell) = environment.binding_cells.get(symbol).copied() {
-                    let cell_type = self.binding_cell_type(*symbol)?;
+                    let cell_type = self.binding_cell_type(owner, *symbol)?;
                     return self
                         .backend
                         .builder
@@ -2969,7 +3038,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(place.origin.span.clone(), "captured cell is not available")
                     })?;
-                let cell_type = self.binding_cell_type(*symbol)?;
+                let cell_type = self.binding_cell_type(owner, *symbol)?;
                 self.backend
                     .builder
                     .build_struct_gep(cell_type, cell, 0, "binding.value")
@@ -3294,6 +3363,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// a binding cell, then module storage.
     fn load_symbol_value(
         &mut self,
+        owner: EmissionOwner,
         symbol: SymbolId,
         check_initialization: bool,
         value_type: &CheckedType,
@@ -3315,7 +3385,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
             // Legacy's binding-cell arm: build the state slot, run the shared
             // check when the read needs one, then load the value slot.
-            let cell_type = self.binding_cell_type(symbol)?;
+            let cell_type = self.binding_cell_type(owner, symbol)?;
             let state_slot = self
                 .backend
                 .builder

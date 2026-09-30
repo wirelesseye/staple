@@ -388,6 +388,39 @@ impl<'a> EmissionView<'a> {
             .map(LoweredInstanceBody::captures)
     }
 
+    /// The concrete type of one owner-local symbol under the owner's
+    /// substitutions: a binding item or binding pattern, a parameter, or a
+    /// capture of the owner's body, else the program catalog's declared type
+    /// (module symbols and initializer symbols, which are concrete already).
+    pub(crate) fn owner_symbol_type(
+        &self,
+        owner: EmissionOwner,
+        symbol: SymbolId,
+    ) -> Option<&'a crate::CheckedType> {
+        if let EmissionOwner::Instance(id) = owner
+            && let Some(body) = self.instance_body(id)
+        {
+            if let Some(value_type) = body.binding_symbol_type(symbol) {
+                return Some(value_type);
+            }
+            if let Some(parameter) = body
+                .parameters
+                .iter()
+                .find(|parameter| parameter.symbol == symbol)
+            {
+                return Some(&parameter.value_type);
+            }
+            if let Some(capture) = body
+                .captures
+                .iter()
+                .find(|capture| capture.capture.symbol == symbol)
+            {
+                return Some(&capture.value_type);
+            }
+        }
+        self.symbol(symbol).map(|symbol| &symbol.value_type)
+    }
+
     /// The ordered parameters of one instance body.
     pub(crate) fn instance_parameters(
         &self,
