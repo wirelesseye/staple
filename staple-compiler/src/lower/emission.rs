@@ -148,6 +148,15 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.pattern(self.program, id)
     }
 
+    /// Resolve an owner's place (Stage 5.4 Step 4's `emit_place_pointer`).
+    pub(crate) fn place(
+        &self,
+        owner: EmissionOwner,
+        id: PlaceId,
+    ) -> Option<&'a super::LoweredPlace> {
+        self.owner(owner)?.place(self.program, id)
+    }
+
     pub(crate) fn callable_value(
         &self,
         owner: EmissionOwner,

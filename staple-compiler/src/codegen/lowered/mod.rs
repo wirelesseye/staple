@@ -7,7 +7,8 @@ use inkwell::{
     module::{Linkage, Module as LlvmModule},
     targets::TargetMachine,
     values::{
-        AnyValue, AnyValueEnum, BasicMetadataValueEnum, FunctionValue, GlobalValue, PointerValue,
+        AnyValue, AnyValueEnum, BasicMetadataValueEnum, BasicValueEnum, FunctionValue, GlobalValue,
+        PointerValue,
     },
 };
 
@@ -1465,6 +1466,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })?
             .clone();
         let value = self.emit_expression_value(owner, &expression, environment)?;
+        // Legacy `compile_expression`'s divergence handling: an expression of
+        // type `Never` (or one coerced from `Never`) ends the block. Order
+        // matches legacy: the `unreachable` comes first, then the moved-
+        // ownership release.
+        let diverges = !environment.returned
+            && (expression.value_type == CheckedType::Never
+                || expression
+                    .coercion
+                    .as_ref()
+                    .is_some_and(|coercion| coercion.source == CheckedType::Never));
+        if diverges {
+            self.backend
+                .builder
+                .build_unreachable()
+                .map_err(compiler_diagnostic)?;
+            environment.returned = true;
+        }
         // Legacy `compile_expression`'s `release_moved_ownership`: clear the
         // initialization state of every symbol the expression moved out of a
         // binding cell. The live-flag store for an owned droppable value is
@@ -1799,52 +1817,45 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 format!("lowered emitter: {family} is not implemented yet"),
             )
         };
-        let c_string_conversion = matches!(
-            call.target,
-            LoweredCallableTarget::Intrinsic {
-                intrinsic: IntrinsicFunction::StringFromCString
-                    | IntrinsicFunction::StringToCString,
-                ..
-            }
-        );
         let native_extern = matches!(call.target, LoweredCallableTarget::ExternalFunction { .. });
         let string_constructor = matches!(call.target, LoweredCallableTarget::Constructor { .. })
             && call.result_type == CheckedType::String;
-        // Stage 5.4 Step 1 splits the old mixed bucket into one family per
-        // recorded fact, so the harness can attribute each stub to the
-        // substage that owns the construct.
+        // Stage 5.4 Step 4: legacy `compile_intrinsic` and the extern route
+        // evaluate arguments through `compile_arguments` (by value), never
+        // through an ABI pass mode, so the lowered records' pass modes are
+        // ignored there. (A variadic extern's extra parameter slots can even
+        // record an indirect mode for the variadic tail, which legacy never
+        // materializes.)
+        let by_value_route =
+            matches!(call.target, LoweredCallableTarget::Intrinsic { .. }) || native_extern;
+        // Step 5 owns hidden resource arguments; 5.8 owns reactive calls.
         if !call.resource_bindings.is_empty() {
             return Err(unsupported("call resources"));
-        }
-        if !call.initialization_checks.is_empty() {
-            return Err(unsupported("call initialization check"));
-        }
-        if !call.mutations.is_empty() {
-            return Err(unsupported("call mutation argument"));
-        }
-        // `call.moves` marks parameter slots whose ownership the callee takes.
-        // The moved symbols' release (5.4 Step 3) rides on the argument
-        // expressions' `moved_symbols`; the markers themselves only affect the
-        // pass modes Step 4 reads, so no separate diagnostic is needed here.
-        if call.c_string_temporary && !native_extern {
-            return Err(unsupported("call C-string temporary"));
         }
         if call.reactive.is_some() {
             return Err(unsupported("reactive call"));
         }
-        if native_extern
-            && matches!(
-                call.function_type.parameter.as_ref(),
-                CheckedType::Product(product) if product.variadic
-            )
-        {
-            // Legacy routes variadic extern arguments through
-            // `compile_arguments(.., is_var_arg)`; 5.4 ports that handling.
-            return Err(unsupported("variadic extern call"));
+        // Legacy checks the callee symbol's initialization before evaluating
+        // any argument.
+        for symbol in &call.initialization_checks {
+            self.check_symbol_initialization(environment, *symbol, &call.origin.span)?;
         }
-        let mut parameter_count = flattened_parameter_types(&call.function_type.parameter).len();
-        if matches!(call.function_type.parameter.as_ref(), CheckedType::Product(product) if product.variadic)
+        // A whole-mutation call passes one pointer whatever the logical
+        // parameter's flattened arity (`compile_closure_function_type`).
+        let mut parameter_count = if call
+            .function_type
+            .mutations
+            .contains(&CheckedMutation::Whole)
         {
+            1
+        } else {
+            flattened_parameter_types(&call.function_type.parameter).len()
+        };
+        let variadic = matches!(
+            call.function_type.parameter.as_ref(),
+            CheckedType::Product(product) if product.variadic
+        );
+        if variadic {
             for step in &call.steps {
                 let slot = match step {
                     LoweredCallStep::Argument { argument } => call
@@ -1853,9 +1864,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .and_then(|argument| argument.slot),
                     LoweredCallStep::ProductElement { slot, .. }
                     | LoweredCallStep::Default { slot, .. } => Some(*slot),
+                    LoweredCallStep::ProductSpread { mappings, .. } => {
+                        mappings.iter().map(|mapping| mapping.slot).max()
+                    }
+                    LoweredCallStep::NamedProductSpread { mappings, .. } => {
+                        mappings.iter().map(|mapping| mapping.slot).max()
+                    }
                     LoweredCallStep::Callee { .. }
-                    | LoweredCallStep::ProductSpread { .. }
-                    | LoweredCallStep::NamedProductSpread { .. }
                     | LoweredCallStep::Resource { .. }
                     | LoweredCallStep::Invoke => None,
                 };
@@ -1865,40 +1880,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let mut slots: Vec<Option<BasicMetadataValueEnum<'context>>> = vec![None; parameter_count];
+        // Mutation temporaries whose value needs drop after the call, in
+        // evaluation order; `emit_call_cleanup` drops them in reverse.
+        let mut cleanups: Vec<(PointerValue<'context>, CheckedType)> = Vec::new();
         let mut invoked = false;
         let mut callee_value = None;
         for step in &call.steps {
-            let (slot, expression) = match step {
-                LoweredCallStep::Argument { argument } => {
-                    let record = call
-                        .arguments
-                        .get(*argument)
-                        .ok_or_else(|| unsupported("call argument"))?;
-                    let slot = record
-                        .slot
-                        .ok_or_else(|| unsupported("materialized argument"))?;
-                    let expression = record
-                        .expression
-                        .ok_or_else(|| unsupported("implicit thunk"))?;
-                    if let Some(family) = call_argument_diagnostic(record, c_string_conversion) {
-                        return Err(unsupported(family));
-                    }
-                    (slot, expression)
-                }
-                LoweredCallStep::ProductElement {
-                    argument,
-                    slot,
-                    expression,
-                } => {
-                    let record = call
-                        .arguments
-                        .get(*argument)
-                        .ok_or_else(|| unsupported("product argument"))?;
-                    if let Some(family) = call_argument_diagnostic(record, c_string_conversion) {
-                        return Err(unsupported(family));
-                    }
-                    (*slot, *expression)
-                }
+            match step {
                 LoweredCallStep::Invoke => {
                     invoked = true;
                     break;
@@ -1911,34 +1899,126 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     callee_value = Some(closure);
                     continue;
                 }
-                LoweredCallStep::ProductSpread { .. } => {
-                    return Err(unsupported("product spread call"));
+                LoweredCallStep::Argument { argument } => {
+                    let record = call
+                        .arguments
+                        .get(*argument)
+                        .ok_or_else(|| unsupported("call argument"))?;
+                    let slot = record.slot.unwrap_or(0);
+                    let expression = record
+                        .expression
+                        .ok_or_else(|| unsupported("implicit thunk"))?;
+                    let value = self.assemble_call_argument(
+                        owner,
+                        record,
+                        expression,
+                        by_value_route,
+                        environment,
+                        &mut cleanups,
+                    )?;
+                    place_argument_slot(&mut slots, slot, value, &call.origin.span)?;
                 }
-                LoweredCallStep::NamedProductSpread { .. } => {
-                    return Err(unsupported("named spread call"));
+                LoweredCallStep::ProductElement {
+                    argument,
+                    slot,
+                    expression,
+                } => {
+                    let record = call
+                        .arguments
+                        .get(*argument)
+                        .ok_or_else(|| unsupported("product argument"))?;
+                    let value = self.assemble_call_argument(
+                        owner,
+                        record,
+                        *expression,
+                        by_value_route,
+                        environment,
+                        &mut cleanups,
+                    )?;
+                    place_argument_slot(&mut slots, *slot, value, &call.origin.span)?;
                 }
-                LoweredCallStep::Default { .. } => return Err(unsupported("default argument")),
-                LoweredCallStep::Resource { .. } => return Err(unsupported("resource argument")),
-            };
-            let value = self.emit_expression(owner, expression, environment)?;
-            let value = value_as_basic(value).ok_or_else(|| unsupported("call argument value"))?;
-            let destination = slots
-                .get_mut(slot)
-                .ok_or_else(|| unsupported("call argument slot"))?;
-            if destination.is_some() {
-                return Err(unsupported("duplicate argument slot"));
+                LoweredCallStep::ProductSpread {
+                    expression,
+                    mappings,
+                    ..
+                } => {
+                    let mappings = mappings
+                        .iter()
+                        .map(|mapping| (mapping.source, mapping.slot))
+                        .collect::<Vec<_>>();
+                    self.emit_spread_arguments(
+                        owner,
+                        &call,
+                        *expression,
+                        &mappings,
+                        by_value_route,
+                        environment,
+                        &mut cleanups,
+                        &mut slots,
+                    )?;
+                }
+                LoweredCallStep::NamedProductSpread {
+                    expression,
+                    mappings,
+                    ..
+                } => {
+                    let mappings = mappings
+                        .iter()
+                        .map(|mapping| (mapping.source, mapping.slot))
+                        .collect::<Vec<_>>();
+                    self.emit_spread_arguments(
+                        owner,
+                        &call,
+                        *expression,
+                        &mappings,
+                        by_value_route,
+                        environment,
+                        &mut cleanups,
+                        &mut slots,
+                    )?;
+                }
+                LoweredCallStep::Default { argument, slot, .. } => {
+                    let record = call
+                        .arguments
+                        .get(*argument)
+                        .ok_or_else(|| unsupported("default argument"))?;
+                    let expression = record
+                        .expression
+                        .ok_or_else(|| unsupported("implicit thunk"))?;
+                    let value = self.assemble_call_argument(
+                        owner,
+                        record,
+                        expression,
+                        by_value_route,
+                        environment,
+                        &mut cleanups,
+                    )?;
+                    place_argument_slot(&mut slots, *slot, value, &call.origin.span)?;
+                }
+                LoweredCallStep::Resource { .. } => {
+                    return Err(unsupported("resource argument"));
+                }
             }
-            *destination = Some(value.into());
         }
         if !invoked || slots.iter().any(Option::is_none) {
             return Err(unsupported("incomplete call"));
         }
         let values = slots.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+        // A non-extern C-string temporary is the first visible argument
+        // (legacy's `scoped_c_string_temporary` check).
+        let cleanup_c_string = if !native_extern && call.c_string_temporary {
+            match values.first() {
+                Some(BasicMetadataValueEnum::PointerValue(pointer)) => Some(*pointer),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let binding = self
             .view
             .binding(owner, LoweredBindingSite::Call(id))
             .ok_or_else(|| unsupported("call binding"))?;
-        match &call.target {
+        let result = match &call.target {
             LoweredCallableTarget::DirectFunction {
                 environment: route, ..
             } => {
@@ -2050,6 +2130,275 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredCallableTarget::CompilerHelper { .. } => {
                 Err(unsupported("compiler helper call"))
             }
+        };
+        let value = result?;
+        self.emit_call_cleanup(&cleanups, cleanup_c_string, &call.origin.span)?;
+        Ok(value)
+    }
+
+    /// Stage 5.4 Step 4: the post-call cleanup hook. Legacy drops mutation
+    /// temporaries in reverse argument order (only when their value needs
+    /// drop) and then frees a non-extern call's C-string temporary. The
+    /// signature and placement are final for 5.6, which fills in the drop
+    /// bodies; until then any recorded cleanup remains a 5.6 diagnostic
+    /// instead of being silently skipped.
+    fn emit_call_cleanup(
+        &mut self,
+        temporaries: &[(PointerValue<'context>, CheckedType)],
+        c_string: Option<PointerValue<'context>>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        if !temporaries.is_empty() || c_string.is_some() {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "lowered emitter: call argument cleanup is not implemented yet",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Legacy `check_symbol_initialization`: check the symbol's binding cell
+    /// state when it has a cell, else the module global's state when it has
+    /// one, and do nothing otherwise.
+    fn check_symbol_initialization(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+            let cell_type = self.binding_cell_type(symbol)?;
+            let state = self
+                .backend
+                .builder
+                .build_struct_gep(cell_type, cell, 1, "binding.state")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+            return self.backend.build_initialization_check(state, span.clone());
+        }
+        if let Some(state) = self.initialization_states.get(&symbol) {
+            return self
+                .backend
+                .build_initialization_check(state.as_pointer_value(), span.clone());
+        }
+        Ok(())
+    }
+
+    /// One call argument's value: a place-backed pointer for the pointer pass
+    /// modes, or the evaluated value materialized according to the recorded
+    /// pass mode. Intrinsic routes evaluate by value like legacy
+    /// `compile_intrinsic`.
+    fn assemble_call_argument(
+        &mut self,
+        owner: EmissionOwner,
+        record: &LoweredCallArgument,
+        expression: ExpressionId,
+        by_value_route: bool,
+        environment: &mut FunctionEnvironment<'context>,
+        cleanups: &mut Vec<(PointerValue<'context>, CheckedType)>,
+    ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
+        if record.writeback {
+            // Lowering does not record a writeback today; diagnose rather
+            // than silently dropping the write-back the record demands.
+            return Err(Diagnostic::new(
+                staple_syntax::Span::Compiler,
+                "lowered emitter: call argument writeback is not implemented yet",
+            ));
+        }
+        if !by_value_route
+            && matches!(
+                record.pass_mode,
+                LoweredArgumentPassMode::BorrowedPointer | LoweredArgumentPassMode::MutablePlace
+            )
+            && let Some(place) = record.place
+        {
+            return Ok(self.emit_place_pointer(owner, place, environment)?.into());
+        }
+        let value = self.emit_expression(owner, expression, environment)?;
+        let value = value_as_basic(value).ok_or_else(|| {
+            Diagnostic::new(
+                self.view
+                    .expression(owner, expression)
+                    .map(|record| record.origin.span.clone())
+                    .unwrap_or(staple_syntax::Span::Compiler),
+                "call argument is not a first-class value",
+            )
+        })?;
+        self.pass_computed_argument(record, value, by_value_route, cleanups)
+    }
+
+    /// Materialize an already-evaluated value according to its recorded pass
+    /// mode. Spread elements are evaluated once, so they cannot re-evaluate
+    /// their expression; their placements never have a source place.
+    fn pass_computed_argument(
+        &self,
+        record: &LoweredCallArgument,
+        value: BasicValueEnum<'context>,
+        by_value_route: bool,
+        cleanups: &mut Vec<(PointerValue<'context>, CheckedType)>,
+    ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
+        if by_value_route || record.pass_mode == LoweredArgumentPassMode::Value {
+            return Ok(value.into());
+        }
+        let llvm_type = self.backend.compile_type(&record.expected)?;
+        match record.pass_mode {
+            LoweredArgumentPassMode::Value => Ok(value.into()),
+            LoweredArgumentPassMode::BorrowedPointer
+            | LoweredArgumentPassMode::MaterializedTemporary => Ok(self
+                .backend
+                .build_argument_temporary(
+                    value,
+                    llvm_type,
+                    "borrow.temporary",
+                    staple_syntax::Span::Compiler,
+                )?
+                .into()),
+            LoweredArgumentPassMode::MutablePlace => {
+                let pointer = self.backend.build_argument_temporary(
+                    value,
+                    llvm_type,
+                    "mutation.temporary",
+                    staple_syntax::Span::Compiler,
+                )?;
+                if record.drops_after_call {
+                    cleanups.push((pointer, record.expected.clone()));
+                }
+                Ok(pointer.into())
+            }
+        }
+    }
+
+    /// One spread step: evaluate the operand once and extract each mapped
+    /// element into its destination slot per the slot's recorded pass mode.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_spread_arguments(
+        &mut self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        expression: ExpressionId,
+        mappings: &[(usize, usize)],
+        by_value_route: bool,
+        environment: &mut FunctionEnvironment<'context>,
+        cleanups: &mut Vec<(PointerValue<'context>, CheckedType)>,
+        slots: &mut [Option<BasicMetadataValueEnum<'context>>],
+    ) -> CodeGenerationResult<()> {
+        let value = self.emit_expression(owner, expression, environment)?;
+        let Some(BasicValueEnum::StructValue(product)) = value_as_basic(value) else {
+            return Err(Diagnostic::new(
+                call.origin.span.clone(),
+                "product spread operand has an invalid representation",
+            ));
+        };
+        for (source, slot) in mappings {
+            let record = call.arguments.get(*slot).ok_or_else(|| {
+                Diagnostic::new(call.origin.span.clone(), "missing spread argument record")
+            })?;
+            let element = self
+                .backend
+                .builder
+                .build_extract_value(product, *source as u32, "product.spread.element")
+                .map_err(compiler_diagnostic)?;
+            let passed = self.pass_computed_argument(record, element, by_value_route, cleanups)?;
+            place_argument_slot(slots, *slot, passed, &call.origin.span)?;
+        }
+        Ok(())
+    }
+
+    /// Stage 5.4 Step 4: the place pointer of a symbol-rooted place. Legacy
+    /// `compile_place_pointer`'s lookup order (parameter pointer, then binding
+    /// cell, then module global) with the recorded provider for a resource
+    /// place. Every other place kind is 5.5's and extends this function; there
+    /// is no second place emitter.
+    fn emit_place_pointer(
+        &mut self,
+        owner: EmissionOwner,
+        id: crate::PlaceId,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let place = self.view.place(owner, id).ok_or_else(|| {
+            Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered place")
+        })?;
+        let unsupported = |family| {
+            Diagnostic::new(
+                place.origin.span.clone(),
+                format!("lowered emitter: {family} is not implemented yet"),
+            )
+        };
+        match &place.kind {
+            crate::LoweredPlaceKind::Symbol { symbol } => {
+                if let Some(pointer) = environment.parameter_pointers.get(symbol).copied() {
+                    return Ok(pointer);
+                }
+                if let Some(cell) = environment.binding_cells.get(symbol).copied() {
+                    let cell_type = self.binding_cell_type(*symbol)?;
+                    return self
+                        .backend
+                        .builder
+                        .build_struct_gep(cell_type, cell, 0, "binding.value")
+                        .map_err(compiler_diagnostic);
+                }
+                if let Some(global) = self.storage.get(symbol).copied() {
+                    return Ok(global.as_pointer_value());
+                }
+                Err(unsupported("place"))
+            }
+            crate::LoweredPlaceKind::CapturedCell { symbol } => {
+                let cell = environment
+                    .binding_cells
+                    .get(symbol)
+                    .copied()
+                    .ok_or_else(|| {
+                        Diagnostic::new(place.origin.span.clone(), "captured cell is not available")
+                    })?;
+                let cell_type = self.binding_cell_type(*symbol)?;
+                self.backend
+                    .builder
+                    .build_struct_gep(cell_type, cell, 0, "binding.value")
+                    .map_err(compiler_diagnostic)
+            }
+            crate::LoweredPlaceKind::Resource { use_ } => {
+                let use_record = self.view.resource_use(owner, *use_).ok_or_else(|| {
+                    Diagnostic::new(place.origin.span.clone(), "missing resource use")
+                })?;
+                let provider = use_record.provider.ok_or_else(|| {
+                    Diagnostic::new(
+                        place.origin.span.clone(),
+                        "resource place has no selected provider",
+                    )
+                })?;
+                let bound = environment.resources.get(&provider).ok_or_else(|| {
+                    Diagnostic::new(
+                        place.origin.span.clone(),
+                        format!(
+                            "resource `{}` is not available",
+                            use_record.resource.value_type
+                        ),
+                    )
+                })?;
+                if !bound.indirect {
+                    return Err(Diagnostic::new(
+                        place.origin.span.clone(),
+                        format!("resource `{}` is not mutable", bound.resource.value_type),
+                    ));
+                }
+                value_as_basic(bound.value)
+                    .map(|value| value.into_pointer_value())
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            place.origin.span.clone(),
+                            "resource address is not first-class",
+                        )
+                    })
+            }
+            // 5.5 extends `emit_place_pointer` for these place kinds.
+            crate::LoweredPlaceKind::Temporary { .. } => Err(unsupported("temporary place")),
+            crate::LoweredPlaceKind::Dereference { .. } => Err(unsupported("dereference place")),
+            crate::LoweredPlaceKind::ProductElement { .. } => {
+                Err(unsupported("product element place"))
+            }
+            crate::LoweredPlaceKind::Representation { .. } => {
+                Err(unsupported("representation place"))
+            }
+            crate::LoweredPlaceKind::Indexed { .. } => Err(unsupported("indexed place")),
         }
     }
 
@@ -2154,30 +2503,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 }
 
-/// Stage 5.3 F5: the argument-record facts the supported call routes can
-/// compile. Legacy's intrinsic conversions (`StringFromCString`/
-/// `StringToCString`) evaluate their argument expression directly, so the
-/// recorded pass mode is unused there; every other supported route passes each
-/// argument by value in its ABI slot. A materialized argument, a writeback, or
-/// a post-call cleanup has no legacy treatment on these routes and stays a
-/// diagnostic instead of being silently skipped (Contract 2).
-fn call_argument_diagnostic(
-    record: &LoweredCallArgument,
-    c_string_conversion: bool,
-) -> Option<&'static str> {
-    if record.writeback {
-        return Some("call argument writeback");
+/// Stage 5.4 Step 4: store one assembled argument in its final slot, failing
+/// when the slot is out of range or already filled (an internal inconsistency
+/// in the lowered record).
+fn place_argument_slot<'context>(
+    slots: &mut [Option<BasicMetadataValueEnum<'context>>],
+    slot: usize,
+    value: BasicMetadataValueEnum<'context>,
+    span: &staple_syntax::Span,
+) -> CodeGenerationResult<()> {
+    let Some(destination) = slots.get_mut(slot) else {
+        return Err(Diagnostic::new(
+            span.clone(),
+            "lowered emitter: call argument slot is out of range",
+        ));
+    };
+    if destination.is_some() {
+        return Err(Diagnostic::new(
+            span.clone(),
+            "lowered emitter: duplicate call argument slot",
+        ));
     }
-    if record.drops_after_call {
-        return Some("call argument cleanup");
-    }
-    if record.temporary {
-        return Some("materialized call argument");
-    }
-    if !c_string_conversion && record.pass_mode != LoweredArgumentPassMode::Value {
-        return Some("call argument pass mode");
-    }
-    None
+    *destination = Some(value);
+    Ok(())
 }
 
 /// Replaces every use of one instruction's result with a poison value of the
