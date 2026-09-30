@@ -25,6 +25,24 @@ pub enum DifferentialSource {
     File(&'static str),
 }
 
+/// What the CLI harness requires of one corpus program.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DifferentialExpectation {
+    /// The program declares a C symbol no library defines (the census
+    /// programs' `inspect`), so it can never link or run under either
+    /// emitter. The CLI harness only checks that both emitters compile it
+    /// (or that the lowered emitter reports it blocked).
+    CompileOnly,
+    /// The lowered emitter may still report the program blocked (strict
+    /// emission fails); once it compiles, it must behave exactly like legacy.
+    MayBeBlocked,
+    /// The program must compile strictly and behave exactly like legacy. A
+    /// substage flips an entry to this once the program first runs, so it can
+    /// never regress to blocked (the ratchet the 5.6 runnable gate relies on).
+    MustRun,
+}
+
 /// One differential corpus program.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
@@ -34,6 +52,8 @@ pub struct DifferentialProgram {
     pub source: DifferentialSource,
     /// The substage that added the entry.
     pub substage: &'static str,
+    /// What the CLI harness requires of the program.
+    pub expectation: DifferentialExpectation,
 }
 
 const fn inline(
@@ -45,6 +65,7 @@ const fn inline(
         name,
         source: DifferentialSource::Inline(source),
         substage,
+        expectation: DifferentialExpectation::MayBeBlocked,
     }
 }
 
@@ -57,20 +78,28 @@ const fn file(
         name,
         source: DifferentialSource::File(path),
         substage,
+        expectation: DifferentialExpectation::MayBeBlocked,
     }
+}
+
+/// Marks a corpus entry as unlinkable under either emitter.
+const fn compile_only(mut program: DifferentialProgram) -> DifferentialProgram {
+    program.expectation = DifferentialExpectation::CompileOnly;
+    program
 }
 
 /// Stage 5.3's differential corpus: the empty program, a non-generic
 /// integer-arithmetic program, a two-module program with module globals and
 /// initialization state, the Stage 4.7 census programs plus an
-/// every-artifact-family fixture, and `staple-compiler/examples/*.sta`
-/// (excluding `macros.sta`, which fails during lowering).
+/// every-artifact-family fixture, `staple-compiler/examples/*.sta` (excluding
+/// `macros.sta`, which fails during lowering), and the two-module `game_loop`
+/// example.
 #[doc(hidden)]
 pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 18] = [
+static CORPUS: [DifferentialProgram; 19] = [
     inline("empty", "", "5.3"),
     inline(
         "integer_arithmetic",
@@ -131,7 +160,7 @@ static CORPUS: [DifferentialProgram; 18] = [
         ),
         "5.3",
     ),
-    inline(
+    compile_only(inline(
         "census_cleanup",
         concat!(
             "use std.cinterop.(CString, c_string)\n",
@@ -150,8 +179,8 @@ static CORPUS: [DifferentialProgram; 18] = [
             "let counted = counter ()\n",
         ),
         "5.3",
-    ),
-    inline(
+    )),
+    compile_only(inline(
         "census_coroutines_and_runners",
         concat!(
             "use std.coroutine.*\n",
@@ -175,8 +204,8 @@ static CORPUS: [DifferentialProgram; 18] = [
             "let doubled = flag + flag\n",
         ),
         "5.3",
-    ),
-    inline(
+    )),
+    compile_only(inline(
         "all_artifact_families",
         concat!(
             "use std.coroutine.*\n",
@@ -213,7 +242,7 @@ static CORPUS: [DifferentialProgram; 18] = [
             "let doubled = flag + flag\n",
         ),
         "5.3",
-    ),
+    )),
     file(
         "example_c_interop",
         "staple-compiler/examples/c_interop.sta",
@@ -264,6 +293,13 @@ static CORPUS: [DifferentialProgram; 18] = [
         "staple-compiler/examples/types_and_matching.sta",
         "5.3",
     ),
+    // A two-module program: `main.sta` resolves `use game.*` against its own
+    // directory.
+    file(
+        "example_game_loop",
+        "staple-compiler/examples/game_loop/main.sta",
+        "5.3",
+    ),
 ];
 
 /// Extract every `define`d function body from one module's IR text, keyed by
@@ -299,16 +335,44 @@ fn module_functions(ir: &str) -> HashMap<String, Vec<String>> {
     functions
 }
 
+/// Every module-level constant (`@name = ... constant ...`), keyed by name,
+/// with its definition after `=`. LLVM numbers constants such as
+/// `@c_string.literal.3` in creation order, which differs between the two
+/// emitters, so a body comparison must compare what a referenced constant
+/// holds, never its name.
+#[cfg(test)]
+fn module_constants(ir: &str) -> HashMap<String, String> {
+    let mut constants = HashMap::new();
+    for line in ir.lines() {
+        let Some(rest) = line.strip_prefix('@') else {
+            continue;
+        };
+        let Some((name, definition)) = rest.split_once(" = ") else {
+            continue;
+        };
+        if definition.contains(" constant ") || definition.starts_with("constant ") {
+            constants.insert(name.trim_matches('"').to_owned(), definition.to_owned());
+        }
+    }
+    constants
+}
+
 #[cfg(test)]
 fn identifier_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '$' | '.' | '_' | '-')
 }
 
 /// Normalize one function body for comparison: rename `@` symbols through
-/// `renames`, canonicalize `%` locals and block labels in order of first
-/// appearance, and sort `__staple_gc_register_root` calls to the end.
+/// `renames`, replace a reference to a module constant with that constant's
+/// definition from `constants` (the body's own module), canonicalize `%`
+/// locals and block labels in order of first appearance, and sort
+/// `__staple_gc_register_root` calls to the end.
 #[cfg(test)]
-fn normalize_function(lines: &[String], renames: &HashMap<String, String>) -> Vec<String> {
+fn normalize_function(
+    lines: &[String],
+    renames: &HashMap<String, String>,
+    constants: &HashMap<String, String>,
+) -> Vec<String> {
     let mut locals: HashMap<String, String> = HashMap::new();
     let mut body = Vec::new();
     let mut roots = Vec::new();
@@ -348,7 +412,7 @@ fn normalize_function(lines: &[String], renames: &HashMap<String, String>) -> Ve
                     output.push_str(&canonical_name(&mut locals, &token));
                 } else {
                     output.push('@');
-                    output.push_str(&canonical_symbol(&token, renames));
+                    output.push_str(&canonical_symbol(&token, renames, constants));
                 }
             } else {
                 output.push(character);
@@ -373,9 +437,18 @@ fn normalize_function(lines: &[String], renames: &HashMap<String, String>) -> Ve
 /// backend uses `unique_global_name`'s `.global.<symbol>`; both denote the
 /// same catalog symbol.
 #[cfg(test)]
-fn canonical_symbol(token: &str, renames: &HashMap<String, String>) -> String {
+fn canonical_symbol(
+    token: &str,
+    renames: &HashMap<String, String>,
+    constants: &HashMap<String, String>,
+) -> String {
     if let Some(planned) = renames.get(token) {
         return planned.clone();
+    }
+    // A constant compares by content: two emitters number the same literal
+    // differently, and a stripped `.N` alone would equate different literals.
+    if let Some(definition) = constants.get(token) {
+        return format!("constant{{{definition}}}");
     }
     if let Some(index) = token.rfind(".global.")
         && token[index + ".global.".len()..]
@@ -416,8 +489,8 @@ mod tests {
     use crate::{LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker};
 
     use super::{
-        DifferentialProgram, DifferentialSource, differential_corpus, module_functions,
-        normalize_function,
+        DifferentialProgram, DifferentialSource, differential_corpus, module_constants,
+        module_functions, normalize_function,
     };
 
     fn workspace_root() -> &'static Path {
@@ -465,6 +538,40 @@ mod tests {
         Lowerer::new()
             .lower(&module)
             .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}\n{source}"))
+    }
+
+    /// A constant reference compares by the constant's content: the same
+    /// literal under different LLVM numbering matches, a different literal
+    /// under the same stripped name does not.
+    #[test]
+    fn normalization_compares_constants_by_content() {
+        let body = |constant: &str| {
+            vec![
+                "define void @f() {".to_owned(),
+                format!("  %0 = call ptr @use(ptr @{constant})"),
+                "  ret void".to_owned(),
+                "}".to_owned(),
+            ]
+        };
+        let legacy = module_constants(concat!(
+            "@c_string.literal = private unnamed_addr constant [3 x i8] c\"hi\\00\", align 1\n",
+            "@c_string.literal.1 = private unnamed_addr constant [3 x i8] c\"no\\00\", align 1\n",
+        ));
+        let lowered = module_constants(concat!(
+            "@c_string.literal.4 = private unnamed_addr constant [3 x i8] c\"hi\\00\", align 1\n",
+            "@c_string.literal.5 = private unnamed_addr constant [3 x i8] c\"xx\\00\", align 1\n",
+        ));
+        let renames = HashMap::new();
+        assert_eq!(
+            normalize_function(&body("c_string.literal"), &renames, &legacy),
+            normalize_function(&body("c_string.literal.4"), &renames, &lowered),
+            "the same literal under different numbering matches"
+        );
+        assert_ne!(
+            normalize_function(&body("c_string.literal.1"), &renames, &legacy),
+            normalize_function(&body("c_string.literal.5"), &renames, &lowered),
+            "a different literal must not match after `.N` stripping"
+        );
     }
 
     /// Stage 5.3 Step 6: over the whole corpus, verify both emitted modules,
@@ -549,6 +656,8 @@ mod tests {
             .collect::<HashSet<_>>();
         let legacy_functions = module_functions(&legacy.module_ir);
         let lowered_functions = module_functions(&partial.module_ir);
+        let legacy_constants = module_constants(&legacy.module_ir);
+        let lowered_constants = module_constants(&partial.module_ir);
 
         let mut compared = 0;
         for (legacy_name, entry) in &mapping.mapped {
@@ -562,8 +671,8 @@ mod tests {
                 let lowered_body = lowered_functions.get(&planned).unwrap_or_else(|| {
                     panic!("the lowered module has no body for `{planned}` ({label})")
                 });
-                let expected = normalize_function(legacy_body, &renames);
-                let actual = normalize_function(lowered_body, &renames);
+                let expected = normalize_function(legacy_body, &renames, &legacy_constants);
+                let actual = normalize_function(lowered_body, &renames, &lowered_constants);
                 assert_eq!(
                     actual, expected,
                     "normalized body differs for legacy `{legacy_name}` -> `{planned}` ({label})"

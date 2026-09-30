@@ -16,8 +16,10 @@ The legacy backend is also nondeterministic in coroutine frame field
 assignment, so one program can normalize to several variants. Each binary
 therefore compiles each program `--runs` times, and the comparison is between
 the *sets* of variants. Sampling can miss a rare variant, so sets that differ
-but share a variant are reported as `OVERLAP` (re-run with more `--runs`)
-rather than `DIFF`; only disjoint sets are a definite difference.
+but share a variant are reported as `OVERLAP`, and disjoint sets where either
+side produced more than one variant (or `--runs` is 1) as `INCONCLUSIVE`; both
+mean "re-run with more `--runs`". Only disjoint sets of one stable variant
+each are a definite `DIFF`.
 
 Example:
 
@@ -113,6 +115,18 @@ def main() -> int:
         if old_keys & new_keys:
             print(
                 f"{program}: OVERLAP (old {sorted(old_keys)}, new {sorted(new_keys)}); "
+                "re-run with more --runs"
+            )
+            failed = True
+            continue
+        if len(old_keys) > 1 or len(new_keys) > 1 or arguments.runs < 2:
+            # A nondeterministic program (or a single run) can sample disjoint
+            # subsets of the same variant set, as `coroutines.sta` does at 3
+            # runs out of its 4 variants. Only a disagreement between two
+            # stable single variants is a definite difference.
+            print(
+                f"{program}: INCONCLUSIVE (old {sorted(old_keys)}, new {sorted(new_keys)}); "
+                "the program is nondeterministic or was compiled once, "
                 "re-run with more --runs"
             )
             failed = True

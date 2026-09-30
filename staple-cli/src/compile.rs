@@ -4544,10 +4544,16 @@ mod tests {
         assert!(status.success(), "string-add executable returned {status}");
     }
     /// Stage 5.3 Step 6 CLI harness: compile, link, and run every corpus
-    /// program with both emitters and compare stdout and exit status. A
-    /// program whose lowered compile fails in strict mode is reported as
-    /// blocked with the family histogram rather than failed. After F1 no
-    /// corpus program is expected to run strictly in 5.3.
+    /// program with both emitters and compare stdout and exit status. Each
+    /// program's `DifferentialExpectation` decides what is required:
+    /// - `CompileOnly` programs cannot link under either emitter, so only
+    ///   compilation is checked (legacy must compile; lowered may be blocked);
+    /// - `MayBeBlocked` programs are reported blocked with the family
+    ///   histogram while strict lowered emission fails, and must behave
+    ///   identically once it succeeds;
+    /// - `MustRun` programs must compile strictly and behave identically, so a
+    ///   program that once ran can never regress to blocked.
+    /// After F1 no corpus program is expected to run strictly in 5.3.
     #[cfg(unix)]
     #[test]
     fn stage_5_3_cli_differential_harness_compares_or_reports_blocked() {
@@ -4556,8 +4562,8 @@ mod tests {
 
         use inkwell::context::Context;
         use staple_compiler::{
-            CodeGenerator, DifferentialSource, Emitter, Lowerer, NameResolver, ProgramLoader,
-            TypeChecker,
+            CodeGenerator, DifferentialExpectation, DifferentialSource, Emitter, Lowerer,
+            NameResolver, ProgramLoader, TypeChecker,
         };
 
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -4567,6 +4573,7 @@ mod tests {
 
         let mut blocked = 0usize;
         let mut identical = 0usize;
+        let mut compile_only = 0usize;
         let mut families: HashMap<String, usize> = HashMap::new();
         for program in staple_compiler::differential_corpus() {
             let (source, root) = match program.source {
@@ -4607,14 +4614,27 @@ mod tests {
                     panic!("`{}` should lower: {diagnostics:?}", program.name)
                 });
 
+            let context = Context::create();
+            let strict =
+                CodeGenerator::with_emitter(&context, Emitter::Lowered).compile_module(&lowered);
+            if program.expectation == DifferentialExpectation::CompileOnly {
+                // Unlinkable under either emitter: legacy must compile it, and
+                // the lowered emitter either compiles it or reports it blocked.
+                CodeGenerator::with_emitter(&context, Emitter::Legacy)
+                    .compile_module(&lowered)
+                    .unwrap_or_else(|diagnostics| {
+                        panic!(
+                            "`{}` should compile with legacy: {diagnostics:?}",
+                            program.name
+                        )
+                    });
+                compile_only += 1;
+                continue;
+            }
             // A program whose lowered strict compile fails is blocked: it has
             // no lowered behavior to run or compare, so the legacy baseline is
-            // not needed (some blocked census programs use undefined C externs
-            // and cannot link even with legacy).
-            let context = Context::create();
-            let Err(diagnostics) =
-                CodeGenerator::with_emitter(&context, Emitter::Lowered).compile_module(&lowered)
-            else {
+            // not needed.
+            let Err(diagnostics) = strict else {
                 let legacy =
                     compile_link_run(&lowered, Emitter::Legacy, &options).unwrap_or_else(|error| {
                         panic!("`{}` should link with legacy: {error}", program.name)
@@ -4631,6 +4651,12 @@ mod tests {
                 identical += 1;
                 continue;
             };
+            assert_ne!(
+                program.expectation,
+                DifferentialExpectation::MustRun,
+                "`{}` must run under the lowered emitter but is blocked: {diagnostics:?}",
+                program.name
+            );
             blocked += 1;
             for diagnostic in &diagnostics {
                 let family = diagnostic
@@ -4650,12 +4676,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         eprintln!(
-            "stage 5.3 CLI harness: {blocked} blocked, {identical} identical (top families: {top})"
+            "stage 5.3 CLI harness: {blocked} blocked, {identical} identical, {compile_only} compile-only (top families: {top})"
         );
         assert_eq!(
-            blocked + identical,
+            blocked + identical + compile_only,
             staple_compiler::differential_corpus().len(),
-            "every corpus program is blocked or identical"
+            "every corpus program is blocked, identical, or compile-only"
         );
     }
 

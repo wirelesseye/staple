@@ -166,6 +166,31 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.resource_provider(self.program, id)
     }
 
+    /// The entry providers one module initializer installs, in the order of
+    /// `LoweredInitializer::resources`. Lowering seeds them into the program
+    /// arena as `EntryParameter` providers owned by the initializer's module,
+    /// in exactly that order, so the emitter binds each entry resource to the
+    /// provider its `LoweredResourceUse` records name. `None` when the count
+    /// disagrees with the initializer's resources.
+    pub(crate) fn initializer_entry_providers(
+        &self,
+        initializer: InitializerId,
+    ) -> Option<Vec<LoweredResourceProviderId>> {
+        let record = self.program.initializers.get(initializer)?;
+        let owner = super::ExpressionOwner::Module(record.module);
+        let providers = self
+            .program
+            .resource_providers
+            .iter()
+            .filter(|(_, provider)| {
+                provider.owner == owner
+                    && provider.kind == super::LoweredProviderOriginKind::EntryParameter
+            })
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        (providers.len() == record.resources.len()).then_some(providers)
+    }
+
     /// Resolve an owner's resource use without exposing either arena.
     pub(crate) fn resource_use(
         &self,
@@ -754,5 +779,41 @@ mod tests {
             .is_none(),
             "an unknown owner has no records"
         );
+    }
+
+    /// Entry resources bind to the exact `EntryParameter` providers lowering
+    /// seeded, in resource order, so the emitter never selects a provider by
+    /// type.
+    #[test]
+    fn initializer_entry_providers_follow_the_entry_resources() {
+        let lowered = lower("use std.io.println\nprintln \"hi\"\n");
+        let view = lowered.program();
+        let (entry, record) = view
+            .initializers()
+            .find(|(_, initializer)| initializer.executable_entry)
+            .expect("an entry initializer");
+        assert!(!record.resources.is_empty(), "the entry installs resources");
+        let providers = view
+            .initializer_entry_providers(entry)
+            .expect("one provider per entry resource");
+        for (resource, provider) in record.resources.iter().zip(&providers) {
+            let provider = view
+                .resource_provider(EmissionOwner::Initializer(entry), *provider)
+                .expect("the provider resolves in the initializer's arena");
+            assert_eq!(provider.resource, resource.resource);
+            assert_eq!(
+                provider.kind,
+                super::super::LoweredProviderOriginKind::EntryParameter
+            );
+        }
+        for (id, _) in view.initializers() {
+            if id != entry {
+                assert_eq!(
+                    view.initializer_entry_providers(id)
+                        .map(|providers| providers.len()),
+                    view.initializer(id).map(|record| record.resources.len()),
+                );
+            }
+        }
     }
 }

@@ -19,7 +19,7 @@ use crate::{
     LoweredCallEnvironment, LoweredCallId, LoweredCallStep, LoweredCallableAdapter,
     LoweredCallableTarget, LoweredCallableValueId, LoweredClosureEnvironment,
     LoweredEntryResourceKind, LoweredExpressionKind, LoweredInstanceCapture, LoweredItemKind,
-    LoweredPatternKind, ModuleId, RuntimeRequirement, SymbolId,
+    LoweredPatternKind, LoweredResourceProviderId, ModuleId, RuntimeRequirement, SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -35,10 +35,24 @@ struct FunctionEnvironment<'context> {
     binding_cells: HashMap<SymbolId, PointerValue<'context>>,
     parameter_pointers: HashMap<SymbolId, PointerValue<'context>>,
     closure_environment: Option<PointerValue<'context>>,
-    resources: Vec<(CheckedResource, AnyValueEnum<'context>, bool)>,
+    /// The resource value each active provider supplies, keyed by the
+    /// provider a `LoweredResourceUse` names. The emitter never selects a
+    /// provider by type; lowering already recorded the selection.
+    resources: HashMap<LoweredResourceProviderId, BoundResource<'context>>,
     reactive_scopes: Vec<PointerValue<'context>>,
     loops: Vec<(usize, inkwell::basic_block::BasicBlock<'context>)>,
     returned: bool,
+}
+
+/// One provider's bound resource value. Stage 5.4 reads these when it emits
+/// `LoweredResourceUse` reads and call `resource_bindings`.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct BoundResource<'context> {
+    resource: CheckedResource,
+    value: AnyValueEnum<'context>,
+    /// Reads pass through a pointer (`LoweredResourceProvider::indirect`).
+    indirect: bool,
 }
 
 pub(super) struct LoweredEmitter<'program, 'context> {
@@ -663,11 +677,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "missing function resource parameter",
                 )
             })?;
-            environment.resources.push((
-                provider.resource.clone(),
-                value.as_any_value_enum(),
-                provider.indirect,
-            ));
+            environment.resources.insert(
+                *provider_id,
+                BoundResource {
+                    resource: provider.resource.clone(),
+                    value: value.as_any_value_enum(),
+                    indirect: provider.indirect,
+                },
+            );
         }
 
         // Every capture storage kind, with the same field layout legacy
@@ -821,7 +838,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         let mut environment = FunctionEnvironment::default();
-        for resource in &initializer.resources {
+        let providers = self.view.initializer_entry_providers(id).ok_or_else(|| {
+            Diagnostic::new(
+                initializer.origin.span.clone(),
+                "lowered emitter: entry resource providers disagree with the initializer resources",
+            )
+        })?;
+        for (resource, provider_id) in initializer.resources.iter().zip(providers) {
+            let provider = self
+                .view
+                .resource_provider(EmissionOwner::Initializer(id), provider_id)
+                .ok_or_else(|| {
+                    Diagnostic::new(initializer.origin.span.clone(), "missing entry provider")
+                })?;
+            if provider.resource != resource.resource {
+                return Err(Diagnostic::new(
+                    initializer.origin.span.clone(),
+                    "lowered emitter: entry provider disagrees with its entry resource",
+                ));
+            }
+            let indirect = provider.indirect;
             match resource.kind {
                 LoweredEntryResourceKind::Io => {
                     let ty = self.backend.compile_type(&resource.resource.value_type)?;
@@ -834,11 +870,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .builder
                         .build_store(slot, ty.const_zero())
                         .map_err(compiler_diagnostic)?;
-                    environment.resources.push((
-                        resource.resource.clone(),
-                        slot.as_any_value_enum(),
-                        true,
-                    ));
+                    environment.resources.insert(
+                        provider_id,
+                        BoundResource {
+                            resource: resource.resource.clone(),
+                            value: slot.as_any_value_enum(),
+                            indirect,
+                        },
+                    );
                 }
                 LoweredEntryResourceKind::Reactive => {
                     let scope = self
@@ -862,11 +901,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             )
                         })?
                         .into_pointer_value();
-                    environment.resources.push((
-                        resource.resource.clone(),
-                        scope.as_any_value_enum(),
-                        false,
-                    ));
+                    environment.resources.insert(
+                        provider_id,
+                        BoundResource {
+                            resource: resource.resource.clone(),
+                            value: scope.as_any_value_enum(),
+                            indirect,
+                        },
+                    );
                     environment.reactive_scopes.push(scope);
                 }
             }
@@ -955,10 +997,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// keeps its declaration, name, type, and linkage, so the declaration
     /// census still sees it.
     fn emit_stub_body(&self, function: FunctionValue<'context>) {
-        // The failed body's blocks are deleted so the stub is the only body.
-        // The builder is immediately repositioned, and no deleted value is
-        // reused afterwards.
-        for block in function.get_basic_blocks() {
+        // The failed body's blocks are removed so the stub is the only body.
+        // Uses are detached first (every result is replaced by poison, then
+        // every instruction is erased) so no deleted value is still used by an
+        // instruction in another block, whatever order the uses appear in.
+        // Deleting blocks with live cross-block uses trips LLVM's assertions.
+        let blocks = function.get_basic_blocks();
+        for block in &blocks {
+            let mut instruction = block.get_first_instruction();
+            while let Some(current) = instruction {
+                detach_uses(current);
+                instruction = current.get_next_instruction();
+            }
+        }
+        for block in &blocks {
+            while let Some(instruction) = block.get_first_instruction() {
+                debug_assert!(
+                    instruction.get_first_use().is_none(),
+                    "a failed-body instruction is still used while the stub replaces it"
+                );
+                instruction.erase_from_basic_block();
+            }
+        }
+        for block in blocks {
             unsafe {
                 block
                     .delete()
@@ -1871,6 +1932,30 @@ fn call_argument_diagnostic(
         return Some("call argument pass mode");
     }
     None
+}
+
+/// Replaces every use of one instruction's result with a poison value of the
+/// same type, so the instruction can be erased while other instructions of
+/// the failed body still refer to it. inkwell classifies an instruction by its
+/// result type (a phi is an `IntValue`, `PointerValue`, …), so these arms
+/// cover every value-producing instruction; void instructions have no uses.
+fn detach_uses(instruction: inkwell::values::InstructionValue<'_>) {
+    use inkwell::values::AnyValueEnum as Value;
+    if instruction.get_first_use().is_none() {
+        return;
+    }
+    match instruction.as_any_value_enum() {
+        Value::IntValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
+        Value::FloatValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
+        Value::PointerValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
+        Value::StructValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
+        Value::ArrayValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
+        Value::VectorValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
+        Value::ScalableVectorValue(value) => {
+            value.replace_all_uses_with(value.get_type().get_poison())
+        }
+        _ => {}
+    }
 }
 
 /// The final LLVM name of a declared function, used by the partial-mode stub

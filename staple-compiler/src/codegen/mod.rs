@@ -41,7 +41,9 @@ mod lowered;
 mod runtime;
 
 #[doc(hidden)]
-pub use differential::{DifferentialProgram, DifferentialSource, differential_corpus};
+pub use differential::{
+    DifferentialExpectation, DifferentialProgram, DifferentialSource, differential_corpus,
+};
 
 use abi::{flattened_parameter_types, mutation_parameter_mask};
 use ir::value_as_basic;
