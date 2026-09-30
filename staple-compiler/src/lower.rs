@@ -3452,6 +3452,20 @@ impl LoweredProgram {
         Ok(Some(self.items.push(LoweredItem { origin, kind })))
     }
 
+    /// Legacy `bind_pattern_value`'s cell rule: a mutable (or
+    /// initialization-checked) symbol without module storage gets a binding
+    /// cell; a mutated parameter arrives as a caller-provided pointer instead.
+    fn symbol_requires_cell(&self, module: &TypedModule, symbol: SymbolId) -> bool {
+        if module.is_mutated_parameter(symbol) {
+            return false;
+        }
+        let has_global = self
+            .symbols
+            .get(symbol)
+            .is_some_and(|symbol| symbol.has_global);
+        !has_global && capture_requires_cell(module, symbol)
+    }
+
     fn lower_binding_item(
         &mut self,
         module: &TypedModule,
@@ -3482,7 +3496,7 @@ impl LoweredProgram {
             derived: module.is_derived_symbol(symbol),
             signal: resolved.is_signal_symbol(symbol),
             reactive,
-            cell: symbol_requires_cell(module, symbol),
+            cell: self.symbol_requires_cell(module, symbol),
             requires_initialization_check: resolved.requires_initialization_state(symbol),
         })
     }
@@ -4282,7 +4296,7 @@ impl LoweredProgram {
             ));
         };
         if let Some(symbol) = module.symbol_for(syntax.id) {
-            let kind = if symbol_requires_cell(module, symbol) {
+            let kind = if self.symbol_requires_cell(module, symbol) {
                 LoweredPlaceKind::CapturedCell { symbol }
             } else {
                 LoweredPlaceKind::Symbol { symbol }
@@ -12544,12 +12558,6 @@ fn capture_requires_cell(module: &TypedModule, symbol: SymbolId) -> bool {
 /// than direct storage. Mutable/derived/initialization-checked locals and
 /// captures use cells; module symbols live in global storage and mutated
 /// parameters arrive as caller-provided pointers.
-fn symbol_requires_cell(module: &TypedModule, symbol: SymbolId) -> bool {
-    if module.resolved().is_module_symbol(symbol) || module.is_mutated_parameter(symbol) {
-        return false;
-    }
-    capture_requires_cell(module, symbol)
-}
 
 /// Collects binding symbols from a resolved pattern in source order, matching
 /// how destructuring patterns bind symbols. Used for function parameters and

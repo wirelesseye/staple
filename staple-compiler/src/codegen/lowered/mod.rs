@@ -44,7 +44,7 @@ struct FunctionEnvironment<'context> {
     /// provider by type; lowering already recorded the selection.
     resources: HashMap<LoweredResourceProviderId, BoundResource<'context>>,
     reactive_scopes: Vec<PointerValue<'context>>,
-    loops: Vec<(usize, inkwell::basic_block::BasicBlock<'context>)>,
+    loops: Vec<LoopContext<'context>>,
     returned: bool,
 }
 
@@ -68,6 +68,18 @@ struct BoundResource<'context> {
     value: AnyValueEnum<'context>,
     /// Reads pass through a pointer (`LoweredResourceProvider::indirect`).
     indirect: bool,
+}
+
+/// Stage 5.5 Step 8: one active loop's context. Legacy
+/// `LoopCodegenContext` carries the header, exit, cleanup marks, and the
+/// break-value phi inputs; the lowered emitter has no owned bindings (5.6),
+/// so only the first, second, and last are needed.
+#[derive(Clone)]
+struct LoopContext<'context> {
+    depth: usize,
+    header: BasicBlock<'context>,
+    exit: BasicBlock<'context>,
+    incoming: Vec<(BasicValueEnum<'context>, BasicBlock<'context>)>,
 }
 
 pub(super) struct LoweredEmitter<'program, 'context> {
@@ -1816,19 +1828,56 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredItemKind::Assignment(assignment) => {
                 self.emit_assignment(owner, id, &assignment, environment)
             }
-            LoweredItemKind::Break(_) => Err(unimplemented("break")),
+            LoweredItemKind::Break(break_item) => {
+                let value = if let Some(expression) = break_item.value {
+                    let value = self.emit_expression(owner, expression, environment)?;
+                    if environment.returned {
+                        return Ok(());
+                    }
+                    value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(
+                            item.origin.span.clone(),
+                            "loop result is not a first-class value",
+                        )
+                    })?
+                } else {
+                    value_as_basic(self.backend.unit_value()).expect("unit is a basic value")
+                };
+                let Some(context) = environment
+                    .loops
+                    .iter_mut()
+                    .rev()
+                    .find(|context| context.depth == break_item.loop_depth)
+                else {
+                    return Err(unimplemented("break target"));
+                };
+                let exit = context.exit;
+                self.backend
+                    .builder
+                    .build_unconditional_branch(exit)
+                    .map_err(compiler_diagnostic)?;
+                let predecessor = self
+                    .backend
+                    .builder
+                    .get_insert_block()
+                    .expect("break block");
+                context.incoming.push((value, predecessor));
+                environment.returned = true;
+                Ok(())
+            }
             LoweredItemKind::Continue(item) => {
-                let Some((_, header)) = environment
+                let Some(header) = environment
                     .loops
                     .iter()
                     .rev()
-                    .find(|(depth, _)| *depth == item.loop_depth)
+                    .find(|context| context.depth == item.loop_depth)
+                    .map(|context| context.header)
                 else {
                     return Err(unimplemented("continue target"));
                 };
                 self.backend
                     .builder
-                    .build_unconditional_branch(*header)
+                    .build_unconditional_branch(header)
                     .map_err(compiler_diagnostic)?;
                 environment.returned = true;
                 Ok(())
@@ -2360,47 +2409,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.emit_logical(owner, expression, logical, environment)
             }
             LoweredExpressionKind::Loop(loop_) => {
-                if loop_.drops_body_result || loop_.result_type != CheckedType::Never {
-                    return Err(unimplemented("loop value or cleanup"));
-                }
-                let function = self
-                    .backend
-                    .builder
-                    .get_insert_block()
-                    .and_then(|block| block.get_parent())
-                    .ok_or_else(|| {
-                        Diagnostic::new(expression.origin.span.clone(), "loop is not in a function")
-                    })?;
-                let header = self
-                    .backend
-                    .context
-                    .append_basic_block(function, "loop.body");
-                let exit = self
-                    .backend
-                    .context
-                    .append_basic_block(function, "loop.exit");
-                self.backend
-                    .builder
-                    .build_unconditional_branch(header)
-                    .map_err(compiler_diagnostic)?;
-                self.backend.builder.position_at_end(header);
-                environment.loops.push((loop_.depth, header));
-                environment.returned = false;
-                self.emit_block(owner, loop_.body, environment)?;
-                if !environment.returned {
-                    self.backend
-                        .builder
-                        .build_unconditional_branch(header)
-                        .map_err(compiler_diagnostic)?;
-                }
-                environment.loops.pop();
-                self.backend.builder.position_at_end(exit);
-                self.backend
-                    .builder
-                    .build_unreachable()
-                    .map_err(compiler_diagnostic)?;
-                environment.returned = true;
-                Ok(self.backend.unit_value())
+                self.emit_loop(owner, id, expression, loop_, environment)
             }
             LoweredExpressionKind::Match(match_) => {
                 self.emit_match(owner, expression, match_, environment)
@@ -2667,6 +2676,81 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(self
             .backend
             .build_product_value(&values, expression.origin.span.clone())?
+            .as_any_value_enum())
+    }
+
+    /// Stage 5.5 Step 8: one `loop`, mirroring legacy
+    /// `compile_loop_expression`. A body that finishes normally drops its
+    /// (discarded) result through the E2 hook and takes the back edge; breaks
+    /// contribute `loop.value` phi inputs; a loop no `break` reaches ends in
+    /// `unreachable`.
+    fn emit_loop(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        expression: &crate::LoweredExpression,
+        loop_: &crate::LoweredLoop,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = expression.origin.span.clone();
+        let function = self
+            .backend
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "loop is not in a function"))?;
+        let header = self
+            .backend
+            .context
+            .append_basic_block(function, "loop.body");
+        let exit = self
+            .backend
+            .context
+            .append_basic_block(function, "loop.exit");
+        self.backend
+            .builder
+            .build_unconditional_branch(header)
+            .map(|_| ())
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(header);
+        environment.loops.push(LoopContext {
+            depth: loop_.depth,
+            header,
+            exit,
+            incoming: Vec::new(),
+        });
+        environment.returned = false;
+        let _ = self.emit_block(owner, loop_.body, environment)?;
+        if !environment.returned {
+            // E2: a discarded loop body result needs its drop only when the
+            // owner has the site's artifact-use record (the drop body is 5.6).
+            if loop_.drops_body_result {
+                self.emit_drop_site(owner, crate::ArtifactUseSite::LoopBodyResult(id))?;
+            }
+            self.backend
+                .builder
+                .build_unconditional_branch(header)
+                .map(|_| ())
+                .map_err(compiler_diagnostic)?;
+        }
+        let context = environment
+            .loops
+            .pop()
+            .expect("loop code generation context");
+        self.backend.builder.position_at_end(exit);
+        if context.incoming.is_empty() {
+            self.backend
+                .builder
+                .build_unreachable()
+                .map_err(compiler_diagnostic)?;
+            environment.returned = true;
+            return Ok(self.backend.unit_value());
+        }
+        environment.returned = false;
+        let result_type = self.backend.compile_type(&loop_.result_type)?;
+        Ok(self
+            .backend
+            .build_phi_value(result_type, &context.incoming, "loop.value")?
             .as_any_value_enum())
     }
 
