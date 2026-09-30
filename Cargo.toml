@@ -2,3 +2,10 @@
 resolver = "3"
 members = ["staple-cli", "staple-compiler", "staple-project", "staple-syntax"]
 default-members = ["staple-cli"]
+
+# Tests compile the whole standard library through every compiler phase, so an
+# unoptimized test build spends most of the suite in debug-mode compiler code.
+# `opt-level = 1` makes one full compile about 4x faster while keeping debug
+# assertions and overflow checks on.
+[profile.test]
+opt-level = 1
