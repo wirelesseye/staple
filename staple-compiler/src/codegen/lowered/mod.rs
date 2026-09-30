@@ -107,6 +107,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(|diagnostic| vec![diagnostic])?;
         let mut diagnostics = Vec::new();
         self.emit_instance_bodies(&mut diagnostics);
+        self.emit_artifact_bodies(&mut diagnostics);
         self.emit_initializers(&mut diagnostics);
         if let Err(diagnostic) = self.emit_main() {
             diagnostics.push(diagnostic);
@@ -133,6 +134,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(|diagnostic| vec![diagnostic])?;
         let mut report = LoweredEmissionReport::default();
         self.emit_instance_bodies_partial(&mut report);
+        self.emit_artifact_bodies_partial(&mut report);
         self.emit_artifact_stubs(&mut report);
         self.emit_initializers_partial(&mut report);
         self.emit_main().map_err(|diagnostic| vec![diagnostic])?;
@@ -1103,6 +1105,185 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 diagnostic,
             );
         }
+    }
+
+    /// Stage 5.4 Step 8: one artifact family that is a call shim. A
+    /// constructor adapter rebuilds its product (or GC-allocates the managed
+    /// reference and sets the planned payload finalizer); an extern adapter
+    /// forwards the closure parameters to the foreign symbol. Every other
+    /// family is left to `emit_artifact_stubs`.
+    fn emit_artifact_body(&mut self, ordinal: ArtifactOrdinal) -> CodeGenerationResult<()> {
+        let Some(artifact) = self.view.artifact(ordinal) else {
+            return Ok(());
+        };
+        let Some(plan) = artifact.plan.as_ref() else {
+            return Ok(());
+        };
+        match plan {
+            LoweredArtifactPlan::ConstructorAdapter(plan) => {
+                self.emit_constructor_adapter_body(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::ExternAdapter(plan) => {
+                self.emit_extern_adapter_body(ordinal, plan, &artifact.origin.span)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Strict: attempt every adapter body, collecting one diagnostic per
+    /// failure.
+    fn emit_artifact_bodies(&mut self, diagnostics: &mut Vec<Diagnostic>) {
+        for (_, artifact) in self.view.artifacts() {
+            if !matches!(
+                artifact.plan,
+                Some(LoweredArtifactPlan::ConstructorAdapter(_))
+                    | Some(LoweredArtifactPlan::ExternAdapter(_))
+            ) {
+                continue;
+            }
+            if let Err(diagnostic) = self.emit_artifact_body(artifact.ordinal) {
+                diagnostics.push(diagnostic);
+            }
+        }
+    }
+
+    /// Partial: attempt every adapter body and stub the failed ones.
+    fn emit_artifact_bodies_partial(&mut self, report: &mut LoweredEmissionReport) {
+        for (_, artifact) in self.view.artifacts() {
+            let Some(plan) = artifact.plan.as_ref() else {
+                continue;
+            };
+            if !matches!(
+                plan,
+                LoweredArtifactPlan::ConstructorAdapter(_) | LoweredArtifactPlan::ExternAdapter(_)
+            ) {
+                continue;
+            }
+            let ordinal = artifact.ordinal;
+            let Err(diagnostic) = self.emit_artifact_body(ordinal) else {
+                continue;
+            };
+            let Some(functions) = self.artifacts.get(&ordinal) else {
+                continue;
+            };
+            for function in functions.clone() {
+                self.emit_stub_body(function);
+                report.push_stub(
+                    function_name(function),
+                    LoweredCatalogEntry::Artifact(ordinal.index()),
+                    diagnostic.clone(),
+                );
+            }
+        }
+    }
+
+    /// Legacy `ensure_constructor_adapter`'s body: rebuild the product from
+    /// the closure parameters (after the environment) and return it, or
+    /// GC-allocate it as a `Ref` payload with the planned finalizer.
+    fn emit_constructor_adapter_body(
+        &mut self,
+        ordinal: ArtifactOrdinal,
+        plan: &crate::ConstructorAdapterPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let function = self
+            .artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing constructor adapter declaration")
+            })?;
+        let entry = self.backend.context.append_basic_block(function, "entry");
+        self.backend.builder.position_at_end(entry);
+        let parameters = function.get_params();
+        let value = self
+            .backend
+            .build_product_value(&parameters[1..], span.clone())?;
+        let result = match &plan.construction {
+            crate::ConstructorConstruction::Value { .. } => value,
+            crate::ConstructorConstruction::ManagedRef {
+                payload, finalizer, ..
+            } => {
+                let payload_type = self.backend.compile_type(payload)?;
+                let size = self.backend.target_data.get_store_size(&payload_type);
+                let pointer = self.backend.build_gc_allocation(
+                    self.backend.size_type.const_int(size, false),
+                    "ref.allocate",
+                    span.clone(),
+                )?;
+                self.backend
+                    .builder
+                    .build_store(pointer, value)
+                    .map_err(compiler_diagnostic)?;
+                if let Some(planned) = finalizer
+                    && let Some(finalizer_ordinal) = planned.artifact
+                {
+                    let finalizer = self
+                        .artifacts
+                        .get(&finalizer_ordinal)
+                        .and_then(|functions| functions.first())
+                        .copied()
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "missing payload finalizer declaration")
+                        })?;
+                    self.backend.set_gc_finalizer(pointer, finalizer)?;
+                }
+                pointer.into()
+            }
+            crate::ConstructorConstruction::Unexpanded => {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "constructor adapter plan was never expanded",
+                ));
+            }
+        };
+        self.backend
+            .builder
+            .build_return(Some(&result))
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// Legacy `declare_external_functions`'s adapter body: forward the closure
+    /// parameters (after the environment) to the foreign symbol.
+    fn emit_extern_adapter_body(
+        &mut self,
+        ordinal: ArtifactOrdinal,
+        plan: &crate::ExternAdapterPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let function = self
+            .artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing extern adapter declaration"))?;
+        let foreign =
+            self.externs.get(&plan.symbol).copied().ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing foreign symbol declaration")
+            })?;
+        let entry = self.backend.context.append_basic_block(function, "entry");
+        self.backend.builder.position_at_end(entry);
+        let arguments = function
+            .get_params()
+            .into_iter()
+            .skip(1)
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        let call = self
+            .backend
+            .builder
+            .build_direct_call(foreign, &arguments, "extern.call")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let result = call.try_as_basic_value().basic().ok_or_else(|| {
+            Diagnostic::new(span.clone(), "extern adapter result is not first-class")
+        })?;
+        self.backend
+            .builder
+            .build_return(Some(&result))
+            .map_err(compiler_diagnostic)?;
+        Ok(())
     }
 
     /// Partial: every artifact function still without a body belongs to a
