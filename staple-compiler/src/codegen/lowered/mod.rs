@@ -24,10 +24,10 @@ use crate::{
 
 use super::abi::flattened_parameter_types;
 use super::{
-    Backend, CodeGenerationResult, Diagnostic, LayoutContext, compiler_diagnostic,
-    ir::value_as_basic,
+    Backend, CodeGenerationResult, Diagnostic, LayoutContext, LoweredCatalogEntry,
+    LoweredEmissionReport, compiler_diagnostic, ir::value_as_basic,
 };
-use crate::lower::EmissionOwner;
+use crate::lower::{ArenaId, EmissionOwner};
 
 #[derive(Default)]
 struct FunctionEnvironment<'context> {
@@ -74,21 +74,53 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
+    /// Strict emission: every body is attempted even after an earlier one
+    /// fails, so the returned diagnostic list covers every unsupported body
+    /// (F8). The module is only verified when no body failed; a module with
+    /// failed bodies is never returned.
     pub(super) fn compile(
         mut self,
         target_machine: &TargetMachine,
-    ) -> CodeGenerationResult<LlvmModule<'context>> {
-        self.declare_program(target_machine)?;
-        self.emit_instance_bodies()?;
-        self.emit_initializers()?;
-        self.emit_main()?;
-        self.backend.llvm_module.verify().map_err(|message| {
-            Diagnostic::new(
-                staple_syntax::Span::Compiler,
-                format!("invalid LLVM module: {message}"),
-            )
-        })?;
+    ) -> Result<LlvmModule<'context>, Vec<Diagnostic>> {
+        self.declare_program(target_machine)
+            .map_err(|diagnostic| vec![diagnostic])?;
+        let mut diagnostics = Vec::new();
+        self.emit_instance_bodies(&mut diagnostics);
+        self.emit_initializers(&mut diagnostics);
+        if let Err(diagnostic) = self.emit_main() {
+            diagnostics.push(diagnostic);
+        }
+        if !diagnostics.is_empty() {
+            return Err(diagnostics);
+        }
+        self.backend
+            .llvm_module
+            .verify()
+            .map_err(|message| vec![invalid_module_diagnostic(message)])?;
         Ok(self.backend.llvm_module)
+    }
+
+    /// Partial emission (Stage 5.3 Step 2): attempt every body, stub the ones
+    /// that fail, stub every artifact whose family has no body emitter yet,
+    /// and collect the report. `main` is never stubbed. The returned module
+    /// always passes LLVM verification.
+    pub(super) fn compile_partial(
+        mut self,
+        target_machine: &TargetMachine,
+    ) -> Result<(LlvmModule<'context>, LoweredEmissionReport), Vec<Diagnostic>> {
+        self.declare_program(target_machine)
+            .map_err(|diagnostic| vec![diagnostic])?;
+        let mut report = LoweredEmissionReport::default();
+        self.emit_instance_bodies_partial(&mut report);
+        self.emit_artifact_stubs(&mut report);
+        self.emit_initializers_partial(&mut report);
+        self.emit_main().map_err(|diagnostic| vec![diagnostic])?;
+        report.finish();
+        self.backend
+            .llvm_module
+            .verify()
+            .map_err(|message| vec![invalid_module_diagnostic(message)])?;
+        Ok((self.backend.llvm_module, report))
     }
 
     fn declare_program(&mut self, target_machine: &TargetMachine) -> CodeGenerationResult<()> {
@@ -506,36 +538,68 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    fn emit_instance_bodies(&mut self) -> CodeGenerationResult<()> {
-        for (id, instance) in self.view.instances() {
-            let Some(body) = instance.body.as_ref() else {
+    /// One instance body, or `Ok(())` when the instance declares nothing
+    /// emittable (no materialized body, no declaration, or no root block).
+    fn emit_instance_body(&mut self, id: FunctionInstanceId) -> CodeGenerationResult<()> {
+        let Some(body) = self
+            .view
+            .instance(id)
+            .and_then(|record| record.body.as_ref())
+        else {
+            return Ok(());
+        };
+        let Some(function) = self.instances.get(&id).copied() else {
+            return Ok(());
+        };
+        let Some(root) = body.root else {
+            return Ok(());
+        };
+        let entry = self.backend.context.append_basic_block(function, "entry");
+        self.backend.builder.position_at_end(entry);
+        let mut environment = FunctionEnvironment::default();
+        self.bind_parameters(id, function, &mut environment)?;
+        let value = self.emit_block(EmissionOwner::Instance(id), root, &mut environment)?;
+        if !environment.returned {
+            let result = value_as_basic(value).ok_or_else(|| {
+                Diagnostic::new(
+                    body.origin.span.clone(),
+                    "function result is not a first-class value",
+                )
+            })?;
+            self.backend
+                .builder
+                .build_return(Some(&result))
+                .map_err(compiler_diagnostic)?;
+        }
+        Ok(())
+    }
+
+    /// Strict: attempt every instance body, collecting one diagnostic per
+    /// failure (F8).
+    fn emit_instance_bodies(&mut self, diagnostics: &mut Vec<Diagnostic>) {
+        for (id, _) in self.view.instances() {
+            if let Err(diagnostic) = self.emit_instance_body(id) {
+                diagnostics.push(diagnostic);
+            }
+        }
+    }
+
+    /// Partial: attempt every instance body and stub the failed ones.
+    fn emit_instance_bodies_partial(&mut self, report: &mut LoweredEmissionReport) {
+        for (id, _) in self.view.instances() {
+            let Err(diagnostic) = self.emit_instance_body(id) else {
                 continue;
             };
             let Some(function) = self.instances.get(&id).copied() else {
                 continue;
             };
-            let Some(root) = body.root else {
-                continue;
-            };
-            let entry = self.backend.context.append_basic_block(function, "entry");
-            self.backend.builder.position_at_end(entry);
-            let mut environment = FunctionEnvironment::default();
-            self.bind_parameters(id, function, &mut environment)?;
-            let value = self.emit_block(EmissionOwner::Instance(id), root, &mut environment)?;
-            if !environment.returned {
-                let result = value_as_basic(value).ok_or_else(|| {
-                    Diagnostic::new(
-                        body.origin.span.clone(),
-                        "function result is not a first-class value",
-                    )
-                })?;
-                self.backend
-                    .builder
-                    .build_return(Some(&result))
-                    .map_err(compiler_diagnostic)?;
-            }
+            self.emit_stub_body(function);
+            report.push_stub(
+                function_name(function),
+                LoweredCatalogEntry::Instance(id.index()),
+                diagnostic,
+            );
         }
-        Ok(())
     }
 
     fn bind_parameters(
@@ -661,84 +725,181 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    fn emit_initializers(&mut self) -> CodeGenerationResult<()> {
-        for (id, initializer) in self.view.initializers() {
-            let function = self.initializers[&id];
-            let entry = self.backend.context.append_basic_block(function, "entry");
-            self.backend.builder.position_at_end(entry);
-            let mut environment = FunctionEnvironment::default();
-            for resource in &initializer.resources {
-                match resource.kind {
-                    LoweredEntryResourceKind::Io => {
-                        let ty = self.backend.compile_type(&resource.resource.value_type)?;
-                        let slot = self
-                            .backend
-                            .builder
-                            .build_alloca(ty, "io.resource")
-                            .map_err(compiler_diagnostic)?;
-                        self.backend
-                            .builder
-                            .build_store(slot, ty.const_zero())
-                            .map_err(compiler_diagnostic)?;
-                        environment.resources.push((
-                            resource.resource.clone(),
-                            slot.as_any_value_enum(),
-                            true,
-                        ));
-                    }
-                    LoweredEntryResourceKind::Reactive => {
-                        let scope = self
-                            .backend
-                            .build_reactive_runtime_call(
-                                "__staple_reactive_scope_create",
-                                &[],
-                                Some(
-                                    self.backend
-                                        .context
-                                        .ptr_type(AddressSpace::default())
-                                        .into(),
-                                ),
-                                "reactive.scope",
+    /// One module initializer body: entry IO/reactive resources, the lowered
+    /// body, then reactive-scope disposal and return.
+    fn emit_initializer_body(&mut self, id: InitializerId) -> CodeGenerationResult<()> {
+        let function = self.initializers[&id];
+        let initializer = self.view.initializer(id).ok_or_else(|| {
+            Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered initializer")
+        })?;
+        let entry = self.backend.context.append_basic_block(function, "entry");
+        self.backend.builder.position_at_end(entry);
+        let mut environment = FunctionEnvironment::default();
+        for resource in &initializer.resources {
+            match resource.kind {
+                LoweredEntryResourceKind::Io => {
+                    let ty = self.backend.compile_type(&resource.resource.value_type)?;
+                    let slot = self
+                        .backend
+                        .builder
+                        .build_alloca(ty, "io.resource")
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_store(slot, ty.const_zero())
+                        .map_err(compiler_diagnostic)?;
+                    environment.resources.push((
+                        resource.resource.clone(),
+                        slot.as_any_value_enum(),
+                        true,
+                    ));
+                }
+                LoweredEntryResourceKind::Reactive => {
+                    let scope = self
+                        .backend
+                        .build_reactive_runtime_call(
+                            "__staple_reactive_scope_create",
+                            &[],
+                            Some(
+                                self.backend
+                                    .context
+                                    .ptr_type(AddressSpace::default())
+                                    .into(),
+                            ),
+                            "reactive.scope",
+                            initializer.origin.span.clone(),
+                        )?
+                        .ok_or_else(|| {
+                            Diagnostic::new(
                                 initializer.origin.span.clone(),
-                            )?
-                            .ok_or_else(|| {
-                                Diagnostic::new(
-                                    initializer.origin.span.clone(),
-                                    "reactive scope creation returned no value",
-                                )
-                            })?
-                            .into_pointer_value();
-                        environment.resources.push((
-                            resource.resource.clone(),
-                            scope.as_any_value_enum(),
-                            false,
-                        ));
-                        environment.reactive_scopes.push(scope);
-                    }
+                                "reactive scope creation returned no value",
+                            )
+                        })?
+                        .into_pointer_value();
+                    environment.resources.push((
+                        resource.resource.clone(),
+                        scope.as_any_value_enum(),
+                        false,
+                    ));
+                    environment.reactive_scopes.push(scope);
                 }
-            }
-            self.emit_block(
-                EmissionOwner::Initializer(id),
-                initializer.body,
-                &mut environment,
-            )?;
-            if !environment.returned {
-                for scope in environment.reactive_scopes.iter().rev() {
-                    self.backend.build_reactive_runtime_call(
-                        "__staple_reactive_scope_dispose",
-                        &[(*scope).into()],
-                        None,
-                        "reactive.dispose",
-                        initializer.origin.span.clone(),
-                    )?;
-                }
-                self.backend
-                    .builder
-                    .build_return(None)
-                    .map_err(compiler_diagnostic)?;
             }
         }
+        self.emit_block(
+            EmissionOwner::Initializer(id),
+            initializer.body,
+            &mut environment,
+        )?;
+        if !environment.returned {
+            for scope in environment.reactive_scopes.iter().rev() {
+                self.backend.build_reactive_runtime_call(
+                    "__staple_reactive_scope_dispose",
+                    &[(*scope).into()],
+                    None,
+                    "reactive.dispose",
+                    initializer.origin.span.clone(),
+                )?;
+            }
+            self.backend
+                .builder
+                .build_return(None)
+                .map_err(compiler_diagnostic)?;
+        }
         Ok(())
+    }
+
+    /// Strict: attempt every initializer body, collecting one diagnostic per
+    /// failure (F8).
+    fn emit_initializers(&mut self, diagnostics: &mut Vec<Diagnostic>) {
+        for (id, _) in self.view.initializers() {
+            if let Err(diagnostic) = self.emit_initializer_body(id) {
+                diagnostics.push(diagnostic);
+            }
+        }
+    }
+
+    /// Partial: attempt every initializer body and stub the failed ones.
+    fn emit_initializers_partial(&mut self, report: &mut LoweredEmissionReport) {
+        for (id, _) in self.view.initializers() {
+            let Err(diagnostic) = self.emit_initializer_body(id) else {
+                continue;
+            };
+            let function = self.initializers[&id];
+            self.emit_stub_body(function);
+            report.push_stub(
+                function_name(function),
+                LoweredCatalogEntry::Initializer(id.index()),
+                diagnostic,
+            );
+        }
+    }
+
+    /// Partial: every artifact function still without a body belongs to a
+    /// family with no body emitter yet, so it gets a stub with a missing-family
+    /// diagnostic (which resolves F4 for the harness).
+    fn emit_artifact_stubs(&mut self, report: &mut LoweredEmissionReport) {
+        for (_, artifact) in self.view.artifacts() {
+            let Some(plan) = artifact.plan.as_ref() else {
+                continue;
+            };
+            let Some(functions) = self.artifacts.get(&artifact.ordinal) else {
+                continue;
+            };
+            let family = artifact_family(plan);
+            for function in functions.clone() {
+                if function.count_basic_blocks() > 0 {
+                    continue;
+                }
+                let diagnostic = Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    format!("lowered emitter: {family} is not implemented yet"),
+                );
+                self.emit_stub_body(function);
+                report.push_stub(
+                    function_name(function),
+                    LoweredCatalogEntry::Artifact(artifact.ordinal.index()),
+                    diagnostic,
+                );
+            }
+        }
+    }
+
+    /// A `llvm.trap` followed by `unreachable`: the stub body partial mode
+    /// gives a function whose real body is missing or failed. The function
+    /// keeps its declaration, name, type, and linkage, so the declaration
+    /// census still sees it.
+    fn emit_stub_body(&self, function: FunctionValue<'context>) {
+        // The failed body's blocks are deleted so the stub is the only body.
+        // The builder is immediately repositioned, and no deleted value is
+        // reused afterwards.
+        for block in function.get_basic_blocks() {
+            unsafe {
+                block
+                    .delete()
+                    .expect("a stub target block still belongs to its function");
+            }
+        }
+        let entry = self.backend.context.append_basic_block(function, "stub");
+        self.backend.builder.position_at_end(entry);
+        let trap = self
+            .backend
+            .llvm_module
+            .get_function("llvm.trap")
+            .unwrap_or_else(|| {
+                self.backend.llvm_module.add_function(
+                    "llvm.trap",
+                    self.backend.context.void_type().fn_type(&[], false),
+                    None,
+                )
+            });
+        self.backend
+            .builder
+            .build_direct_call(trap, &[], "stub.trap")
+            .expect("stub trap call");
+        self.backend
+            .builder
+            .build_unreachable()
+            .expect("stub unreachable");
     }
 
     fn emit_main(&mut self) -> CodeGenerationResult<()> {
@@ -1807,4 +1968,34 @@ fn call_argument_diagnostic(
         return Some("call argument pass mode");
     }
     None
+}
+
+/// The final LLVM name of a declared function, used by the partial-mode stub
+/// records.
+fn function_name(function: FunctionValue<'_>) -> String {
+    function.get_name().to_string_lossy().into_owned()
+}
+
+/// The construct family of one artifact plan, the `<family>` in a partial-mode
+/// missing-body diagnostic (`lowered emitter: <family> is not implemented
+/// yet`).
+fn artifact_family(plan: &LoweredArtifactPlan) -> &'static str {
+    match plan {
+        LoweredArtifactPlan::ConstructorAdapter(_) => "constructor adapter artifact",
+        LoweredArtifactPlan::StructuralMethod(_) => "structural method artifact",
+        LoweredArtifactPlan::DropGlue(_) => "drop glue artifact",
+        LoweredArtifactPlan::GcFinalizer(_) => "GC finalizer artifact",
+        LoweredArtifactPlan::CoroutineCodes(_) => "coroutine pair artifact",
+        LoweredArtifactPlan::ReactionRunner(_) => "reaction runner artifact",
+        LoweredArtifactPlan::UntilRunner(_) => "until runner artifact",
+        LoweredArtifactPlan::DerivedRunner(_) => "derived runner artifact",
+        LoweredArtifactPlan::ExternAdapter(_) => "extern adapter artifact",
+    }
+}
+
+fn invalid_module_diagnostic(message: impl std::fmt::Display) -> Diagnostic {
+    Diagnostic::new(
+        staple_syntax::Span::Compiler,
+        format!("invalid LLVM module: {message}"),
+    )
 }

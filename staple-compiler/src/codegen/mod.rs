@@ -94,6 +94,117 @@ pub enum Emitter {
     Lowered,
 }
 
+/// Stage 5.3 Step 2: which lowered catalog entry a stubbed function belongs to.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LoweredCatalogEntry {
+    /// A source-function instance, by catalog ordinal.
+    Instance(usize),
+    /// A generated artifact, by catalog ordinal.
+    Artifact(usize),
+    /// A module initializer, by lowered ID.
+    Initializer(usize),
+}
+
+impl LoweredCatalogEntry {
+    /// A stable description for reports and diagnostics.
+    pub fn description(self) -> String {
+        match self {
+            LoweredCatalogEntry::Instance(ordinal) => format!("instance {ordinal}"),
+            LoweredCatalogEntry::Artifact(ordinal) => format!("artifact {ordinal}"),
+            LoweredCatalogEntry::Initializer(id) => format!("initializer {id}"),
+        }
+    }
+}
+
+/// Stage 5.3 Step 2: one function the partial lowered emitter stubbed.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct LoweredStubRecord {
+    name: String,
+    entry: LoweredCatalogEntry,
+    diagnostic: Diagnostic,
+}
+
+impl LoweredStubRecord {
+    /// The stubbed function's planned LLVM name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The catalog entry the stubbed function belongs to.
+    pub fn entry(&self) -> LoweredCatalogEntry {
+        self.entry
+    }
+
+    /// The diagnostic the body failed with, or the missing-family diagnostic
+    /// for an artifact whose family has no body emitter yet.
+    pub fn diagnostic(&self) -> &Diagnostic {
+        &self.diagnostic
+    }
+}
+
+/// Stage 5.3 Step 2: the partial-emission report, the progress measure for
+/// Stage 5.4–5.8. It lists every stubbed function with its catalog entry and
+/// diagnostic, and a histogram of the diagnostics by construct family.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct LoweredEmissionReport {
+    stubbed: Vec<LoweredStubRecord>,
+    families: Vec<(String, usize)>,
+}
+
+impl LoweredEmissionReport {
+    /// Every stubbed function in emission order (instances, then artifacts,
+    /// then initializers).
+    pub fn stubbed(&self) -> &[LoweredStubRecord] {
+        &self.stubbed
+    }
+
+    /// The construct-family histogram, ordered by stub count (descending) then
+    /// family name. A family is the `<family>` of a
+    /// `lowered emitter: <family> is not implemented yet` diagnostic; any
+    /// other diagnostic contributes its whole message.
+    pub fn family_histogram(&self) -> &[(String, usize)] {
+        &self.families
+    }
+
+    pub(crate) fn push_stub(
+        &mut self,
+        name: String,
+        entry: LoweredCatalogEntry,
+        diagnostic: Diagnostic,
+    ) {
+        let family = diagnostic_family(&diagnostic);
+        match self.families.iter_mut().find(|(key, _)| key == &family) {
+            Some((_, count)) => *count += 1,
+            None => self.families.push((family, 1)),
+        }
+        self.stubbed.push(LoweredStubRecord {
+            name,
+            entry,
+            diagnostic,
+        });
+    }
+
+    /// Orders the histogram by count (descending) then family name.
+    pub(crate) fn finish(&mut self) {
+        self.families
+            .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    }
+}
+
+/// The construct family of one lowered diagnostic: the `<family>` in
+/// `lowered emitter: <family> is not implemented yet`, or the whole message.
+fn diagnostic_family(diagnostic: &Diagnostic) -> String {
+    diagnostic
+        .message
+        .strip_prefix("lowered emitter: ")
+        .and_then(|family| family.strip_suffix(" is not implemented yet"))
+        .unwrap_or(&diagnostic.message)
+        .to_owned()
+}
+
 struct ModuleEmitter<'module, 'context> {
     typed_module: &'module TypedModule,
     /// The Stage 5.2 shared layout/ABI/runtime/IR layer. Field and method
@@ -452,7 +563,24 @@ impl<'context> CodeGenerator<'context> {
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
         self.compile_selected(module, &target_machine)
             .map(|module| module.print_to_string().to_string())
-            .map_err(|diagnostic| vec![diagnostic])
+    }
+
+    /// Stage 5.3 Step 2: emit a lower-derived module in partial mode for the
+    /// differential harness. Functions whose bodies fail, and artifact
+    /// families that still have no body emitter, get an `llvm.trap` followed
+    /// by `unreachable` instead of failing the compile, and the returned
+    /// report lists every stub with a construct-family histogram. The module
+    /// always passes LLVM verification on success. The CLI and the
+    /// `lowered-emitter` default never call this entry point.
+    #[doc(hidden)]
+    pub fn compile_lowered_partial(
+        &self,
+        module: &LoweredModule,
+    ) -> Result<(String, LoweredEmissionReport), Vec<Diagnostic>> {
+        let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
+        lowered::LoweredEmitter::new(self.context, module.program(), &target_machine)
+            .compile_partial(&target_machine)
+            .map(|(module, report)| (module.print_to_string().to_string(), report))
     }
 
     pub fn emit_object(
@@ -469,9 +597,7 @@ impl<'context> CodeGenerator<'context> {
         }
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        let llvm_module = self
-            .compile_selected(module, &target_machine)
-            .map_err(|diagnostic| vec![diagnostic])?;
+        let llvm_module = self.compile_selected(module, &target_machine)?;
         target_machine
             .write_to_file(&llvm_module, FileType::Object, path)
             .map_err(|error| {
@@ -486,11 +612,11 @@ impl<'context> CodeGenerator<'context> {
         &self,
         module: &LoweredModule,
         target_machine: &TargetMachine,
-    ) -> CodeGenerationResult<LlvmModule<'context>> {
+    ) -> Result<LlvmModule<'context>, Vec<Diagnostic>> {
         match self.emitter {
-            Emitter::Legacy => {
-                ModuleEmitter::new(self.context, module, target_machine).compile(target_machine)
-            }
+            Emitter::Legacy => ModuleEmitter::new(self.context, module, target_machine)
+                .compile(target_machine)
+                .map_err(|diagnostic| vec![diagnostic]),
             Emitter::Lowered => {
                 lowered::LoweredEmitter::new(self.context, module.program(), target_machine)
                     .compile(target_machine)

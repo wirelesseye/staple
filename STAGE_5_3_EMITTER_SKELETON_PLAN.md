@@ -4,7 +4,7 @@ This plan covers what remains of Stage 5.3 as of `2b20b12`. It supersedes the St
 
 Line references are against `2b20b12` and will drift; re-locate code by function name.
 
-**Status:** Step 1 (the review fixes) is complete: F2 linkage, F3 coroutine pair names, F5 argument validation, and F9 progress notes. Steps 2–7 remain.
+**Status:** Steps 1–2 are complete. Step 1 landed the review fixes (F2 linkage, F3 coroutine pair names, F5 argument validation, F9 progress notes); Step 2 landed F8 (every body is attempted and every diagnostic reported) and partial emission (`compile_lowered_partial`, `LoweredEmissionReport`, stub bodies, and the family histogram; the empty program reports 157 stubs across 17 families). Steps 3–7 remain.
 
 ## Where Stage 5.3 Stands
 
