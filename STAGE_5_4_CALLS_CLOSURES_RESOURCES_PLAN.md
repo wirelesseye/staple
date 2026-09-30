@@ -4,6 +4,8 @@ This is the separate plan the Stage 5.4 section of [STAGE_5_LLVM_MIGRATION_BREAK
 
 Line references are against `71be158` and will drift; re-locate code by function name.
 
+**Status:** Step 1 landed. The mixed `call resources, mutation, or cleanup` bucket is split into `call resources`, `call initialization check`, `call mutation argument`, `call moved ownership`, `call C-string temporary`, and `reactive call` (the old 722 split exactly as 617/62/2/2/0/39). `codegen/differential.rs` now owns the `(family, owning substage)` table, the in-process harness fails on an unclassified family and prints stub totals per owning substage, and `DifferentialProgram::emits` plus the focus assertion are in place for the Step 10 corpus entries. A body-level owned-binding guard makes any body that owns a droppable binding fail with `owned binding cleanup` (5.6) before its root block is emitted. Baseline after Step 1: 2278 fully emitted bodies compared (unchanged), 3236 stubs across 40 families, now 1912 (5.4), 1167 (5.5), 43 (5.6), 7 (5.7), 107 (5.8). The guard newly stubs four bodies that previously reported `coercion or move`; no previously fully emitted body was affected.
+
 ## Starting Point
 
 The lowered emitter (`codegen/lowered/mod.rs`, about 2k lines) declares every catalog entry, emits initializers and `main`, and already emits:

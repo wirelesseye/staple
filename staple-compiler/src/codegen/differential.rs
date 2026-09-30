@@ -54,6 +54,12 @@ pub struct DifferentialProgram {
     pub substage: &'static str,
     /// What the CLI harness requires of the program.
     pub expectation: DifferentialExpectation,
+    /// Stage 5.4 Step 1: template names from the program's own module
+    /// (matched against `LoweredFunction::name`). Every instance of each
+    /// listed template must be fully emitted by the lowered emitter and
+    /// body-identical to legacy. This is the per-feature gate that does not
+    /// need a runnable program.
+    pub emits: &'static [&'static str],
 }
 
 const fn inline(
@@ -66,6 +72,7 @@ const fn inline(
         source: DifferentialSource::Inline(source),
         substage,
         expectation: DifferentialExpectation::MayBeBlocked,
+        emits: &[],
     }
 }
 
@@ -79,6 +86,7 @@ const fn file(
         source: DifferentialSource::File(path),
         substage,
         expectation: DifferentialExpectation::MayBeBlocked,
+        emits: &[],
     }
 }
 
@@ -86,6 +94,157 @@ const fn file(
 const fn compile_only(mut program: DifferentialProgram) -> DifferentialProgram {
     program.expectation = DifferentialExpectation::CompileOnly;
     program
+}
+
+/// Stage 5.4 Step 1: names the functions the entry must fully emit. Step 10
+/// attaches the list to the 5.4 corpus entries.
+#[allow(dead_code)]
+const fn emits(
+    mut program: DifferentialProgram,
+    templates: &'static [&'static str],
+) -> DifferentialProgram {
+    program.emits = templates;
+    program
+}
+
+/// Stage 5.4 Step 1: the construct family of every diagnostic the lowered
+/// emitter can produce, with the substage that owns emitting it. The
+/// in-process harness fails when a stub's family is absent, so a new
+/// diagnostic must be classified here as soon as it can appear. It is also
+/// the per-substage progress report for 5.4–5.8.
+///
+/// A family that mixes two substages is assigned to the one that finishes it,
+/// so the earlier substage's zero-stub gate is not blocked by the later
+/// construct: `coercion or move` is 5.5 (5.4 emits the move half),
+/// `checked or reactive name` is 5.8 (5.4 emits the checked half), and
+/// `reactive or cell binding` is 5.8 (5.4 emits the cell half).
+#[cfg(test)]
+pub static FAMILY_OWNERS: &[(&str, &str)] = &[
+    // 5.4: calls, call arguments, callable values, closures, resources, and
+    // the numeric/string/slice intrinsics.
+    ("call resources", "5.4"),
+    ("call initialization check", "5.4"),
+    ("call mutation argument", "5.4"),
+    ("call moved ownership", "5.4"),
+    ("call C-string temporary", "5.4"),
+    ("call argument pass mode", "5.4"),
+    ("call argument writeback", "5.4"),
+    ("materialized call argument", "5.4"),
+    ("materialized argument", "5.4"),
+    ("implicit thunk", "5.4"),
+    ("call argument", "5.4"),
+    ("product argument", "5.4"),
+    ("product spread call", "5.4"),
+    ("named spread call", "5.4"),
+    ("default argument", "5.4"),
+    ("resource argument", "5.4"),
+    ("variadic extern call", "5.4"),
+    ("constructor call", "5.4"),
+    ("trait call", "5.4"),
+    ("structural call", "5.4"),
+    ("compiler helper call", "5.4"),
+    ("compiler helper callable value", "5.4"),
+    ("intrinsic callable value", "5.4"),
+    ("callable adapter or initialization check", "5.4"),
+    ("fresh closure environment", "5.4"),
+    ("stored closure", "5.4"),
+    ("stored closure storage", "5.4"),
+    ("current closure environment", "5.4"),
+    ("resource", "5.4"),
+    ("with", "5.4"),
+    ("string", "5.4"),
+    ("binding cell read", "5.4"),
+    ("mutable or moved pattern binding", "5.4"),
+    ("integer comparison", "5.4"),
+    ("float arithmetic", "5.4"),
+    ("float comparison", "5.4"),
+    ("numeric string conversion", "5.4"),
+    ("string addition", "5.4"),
+    ("slice length", "5.4"),
+    ("slice reference", "5.4"),
+    ("constructor adapter artifact", "5.4"),
+    ("extern adapter artifact", "5.4"),
+    // 5.5: expressions, patterns, places, and control flow.
+    ("access", "5.5"),
+    ("assignment", "5.5"),
+    ("at pattern binding", "5.5"),
+    ("break", "5.5"),
+    ("coercion or move", "5.5"),
+    ("index", "5.5"),
+    ("literal pattern binding", "5.5"),
+    ("logical", "5.5"),
+    ("loop value or cleanup", "5.5"),
+    ("match", "5.5"),
+    ("nominal pattern binding", "5.5"),
+    ("parameter destructuring", "5.5"),
+    ("product", "5.5"),
+    ("product pattern binding", "5.5"),
+    ("propagating pattern binding", "5.5"),
+    ("repeated product", "5.5"),
+    ("satisfies", "5.5"),
+    ("string template", "5.5"),
+    // 5.6: ownership cleanup, finalizers, and buffers.
+    ("call argument cleanup", "5.6"),
+    ("buffer allocation", "5.6"),
+    ("buffer capacity", "5.6"),
+    ("buffer clone", "5.6"),
+    ("buffer freeze", "5.6"),
+    ("buffer get", "5.6"),
+    ("buffer length", "5.6"),
+    ("buffer pop", "5.6"),
+    ("buffer push", "5.6"),
+    ("buffer transfer", "5.6"),
+    ("drop", "5.6"),
+    ("drop glue artifact", "5.6"),
+    ("expression result cleanup", "5.6"),
+    ("GC finalizer artifact", "5.6"),
+    ("owned binding cleanup", "5.6"),
+    ("reference replacement", "5.6"),
+    ("wildcard cleanup", "5.6"),
+    // 5.7: structural methods and formatting.
+    ("structural method artifact", "5.7"),
+    // 5.8: coroutines, tasks, and reactive code.
+    ("await", "5.8"),
+    ("batch", "5.8"),
+    ("checked or reactive name", "5.8"),
+    ("completion", "5.8"),
+    ("completion token", "5.8"),
+    ("completion token cancel", "5.8"),
+    ("completion token resolve", "5.8"),
+    ("completion with cancel", "5.8"),
+    ("coro", "5.8"),
+    ("coroutine block_on", "5.8"),
+    ("coroutine pair artifact", "5.8"),
+    ("deferred expression", "5.8"),
+    ("derived runner artifact", "5.8"),
+    ("pump", "5.8"),
+    ("reaction", "5.8"),
+    ("reaction runner artifact", "5.8"),
+    ("reactive call", "5.8"),
+    ("reactive or cell binding", "5.8"),
+    ("reactive scope", "5.8"),
+    ("resolver cancel", "5.8"),
+    ("resolver complete", "5.8"),
+    ("scheduler", "5.8"),
+    ("snapshot", "5.8"),
+    ("spawn", "5.8"),
+    ("Stage 2.6 expression", "5.8"),
+    ("task cancel", "5.8"),
+    ("task is_finished", "5.8"),
+    ("task scope", "5.8"),
+    ("until", "5.8"),
+    ("until runner artifact", "5.8"),
+    ("yield_now", "5.8"),
+];
+
+/// The substage that owns one diagnostic family, or `None` for a diagnostic
+/// that is not a construct family at all (an internal invariant the emitter
+/// should never report on a corpus program).
+#[cfg(test)]
+pub fn family_owner(family: &str) -> Option<&'static str> {
+    FAMILY_OWNERS
+        .iter()
+        .find_map(|(name, owner)| (*name == family).then_some(*owner))
 }
 
 /// Stage 5.3's differential corpus: the empty program, a non-generic
@@ -574,15 +733,17 @@ mod tests {
         );
     }
 
-    /// Stage 5.3 Step 6: over the whole corpus, verify both emitted modules,
-    /// run the declaration census, compare every fully emitted function's
-    /// normalized body with its mapped legacy function, and print the
-    /// partial-mode report.
+    /// Stage 5.3 Step 6, extended by Stage 5.4 Step 1: over the whole corpus,
+    /// verify both emitted modules, run the declaration census, compare every
+    /// fully emitted function's normalized body with its mapped legacy
+    /// function, check each entry's focus `emits` templates, and print the
+    /// partial-mode report with stub totals per owning substage.
     #[test]
     fn stage_5_3_differential_harness_reports_and_matches_bodies() {
         let mut total_stubs = 0;
         let mut compared = 0;
         let mut histogram: HashMap<String, usize> = HashMap::new();
+        let mut owner_totals: HashMap<&'static str, usize> = HashMap::new();
         for program in differential_corpus() {
             let (source, root) = program_source(program);
             let lowered = lower(&source, &root);
@@ -606,20 +767,38 @@ mod tests {
 
             total_stubs += partial.report.stubbed().len();
             for (family, count) in partial.report.family_histogram() {
+                let owner = super::family_owner(family).unwrap_or_else(|| {
+                    panic!(
+                        "`{}` stubbed family `{family}`, which is not in the ownership table",
+                        program.name
+                    )
+                });
+                *owner_totals.entry(owner).or_insert(0) += count;
                 *histogram.entry(family.clone()).or_insert(0) += count;
             }
-            compared +=
+            let compared_names =
                 compare_fully_emitted_bodies(program.name, &lowered, &mapping, &legacy, &partial);
+            assert_focus_emissions(program, &lowered, &partial, &compared_names);
+            compared += compared_names.len();
         }
 
+        let mut owners = owner_totals.into_iter().collect::<Vec<_>>();
+        owners.sort_by(|left, right| left.0.cmp(right.0));
         let mut families = histogram.into_iter().collect::<Vec<_>>();
         families.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         eprintln!(
             "differential corpus: {compared} fully emitted bodies compared, {total_stubs} stubs across {} families",
             families.len()
         );
-        for (family, count) in families.iter().take(12) {
-            eprintln!("{count:5}  {family}");
+        eprintln!("stub totals by owning substage:");
+        for (owner, count) in owners {
+            eprintln!("{count:5}  {owner}");
+        }
+        for (family, count) in &families {
+            eprintln!(
+                "{count:5}  {family} ({})",
+                super::family_owner(family).expect("every reported family has an owner")
+            );
         }
         assert!(
             compared > 0,
@@ -627,15 +806,74 @@ mod tests {
         );
     }
 
+    /// Stage 5.4 Step 1: every instance of an entry's `emits` templates is
+    /// fully emitted and body-compared. A template must exist in the module
+    /// catalog and have at least one materialized instance.
+    fn assert_focus_emissions(
+        program: &DifferentialProgram,
+        lowered: &LoweredModule,
+        partial: &crate::codegen::LoweredPartialEmissions,
+        compared: &HashSet<String>,
+    ) {
+        if program.emits.is_empty() {
+            return;
+        }
+        let view = lowered.program();
+        for template in program.emits {
+            assert!(
+                view.functions()
+                    .any(|(_, function)| function.name == *template),
+                "`{}` lists focus template `{template}`, which is not in the module catalog",
+                program.name
+            );
+        }
+        let stubbed = partial
+            .report
+            .stubbed()
+            .iter()
+            .map(|stub| stub.name().to_owned())
+            .collect::<HashSet<_>>();
+        let mut matched = 0;
+        for (id, instance) in view.instances() {
+            let Some(function) = view.function(instance.template) else {
+                continue;
+            };
+            if !program.emits.contains(&function.name.as_str()) || instance.body.is_none() {
+                continue;
+            }
+            matched += 1;
+            let name = view
+                .planned_name(id)
+                .expect("a materialized instance has a planned name");
+            assert!(
+                !stubbed.contains(name),
+                "`{}`: focus instance `{name}` ({}) is stubbed",
+                program.name,
+                function.name
+            );
+            assert!(
+                compared.contains(name),
+                "`{}`: focus instance `{name}` ({}) was not body-compared against legacy",
+                program.name,
+                function.name
+            );
+        }
+        assert!(
+            matched > 0,
+            "`{}` lists focus templates but the module has no materialized instance of them",
+            program.name
+        );
+    }
+
     /// Compare every function the lowered emitter fully emitted (not a stub)
-    /// with its mapped legacy function. Returns the number compared.
+    /// with its mapped legacy function. Returns the planned names compared.
     fn compare_fully_emitted_bodies(
         label: &str,
         lowered: &LoweredModule,
         mapping: &CensusMapping,
         legacy: &crate::codegen::LegacyEmissions,
         partial: &crate::codegen::LoweredPartialEmissions,
-    ) -> usize {
+    ) -> HashSet<String> {
         use crate::lower::graph_validation::tests::planned_names_for;
 
         let program = lowered.program();
@@ -659,7 +897,7 @@ mod tests {
         let legacy_constants = module_constants(&legacy.module_ir);
         let lowered_constants = module_constants(&partial.module_ir);
 
-        let mut compared = 0;
+        let mut compared = HashSet::new();
         for (legacy_name, entry) in &mapping.mapped {
             for planned in planned_names_for(program, entry) {
                 if stubbed.contains(&planned) {
@@ -677,7 +915,7 @@ mod tests {
                     actual, expected,
                     "normalized body differs for legacy `{legacy_name}` -> `{planned}` ({label})"
                 );
-                compared += 1;
+                compared.insert(planned);
             }
         }
         compared

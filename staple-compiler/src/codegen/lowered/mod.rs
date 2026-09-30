@@ -19,7 +19,8 @@ use crate::{
     LoweredCallEnvironment, LoweredCallId, LoweredCallStep, LoweredCallableAdapter,
     LoweredCallableTarget, LoweredCallableValueId, LoweredClosureEnvironment,
     LoweredEntryResourceKind, LoweredExpressionKind, LoweredInstanceCapture, LoweredItemKind,
-    LoweredPatternKind, LoweredResourceProviderId, ModuleId, RuntimeRequirement, SymbolId,
+    LoweredPatternKind, LoweredResourceProviderId, ModuleId, OwnedStorage, RuntimeRequirement,
+    SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -564,6 +565,32 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
+    /// Stage 5.4 Step 1: a body that owns a droppable binding needs scope-exit
+    /// cleanup, which is Stage 5.6's job. Until 5.6 emits it, the body fails
+    /// up front, before its root block is emitted, so no drop is silently
+    /// skipped (Contract 2). Every collected record has drop glue (the
+    /// collector only records types that need drop), and a cell-storage record
+    /// is dropped through its cell state, so either fact makes the body 5.6's.
+    fn guard_owned_bindings(
+        &self,
+        owner: EmissionOwner,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let Some(bindings) = self.view.owned_bindings(owner) else {
+            return Ok(());
+        };
+        if bindings
+            .iter()
+            .any(|record| record.glue.is_some() || matches!(record.storage, OwnedStorage::Cell))
+        {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "lowered emitter: owned binding cleanup is not implemented yet",
+            ));
+        }
+        Ok(())
+    }
+
     /// One instance body, or `Ok(())` when the instance declares nothing
     /// emittable (no materialized body, no declaration, or no root block).
     fn emit_instance_body(&mut self, id: FunctionInstanceId) -> CodeGenerationResult<()> {
@@ -580,6 +607,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let Some(root) = body.root else {
             return Ok(());
         };
+        self.guard_owned_bindings(EmissionOwner::Instance(id), &body.origin.span)?;
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         let mut environment = FunctionEnvironment::default();
@@ -835,6 +863,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let initializer = self.view.initializer(id).ok_or_else(|| {
             Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered initializer")
         })?;
+        self.guard_owned_bindings(EmissionOwner::Initializer(id), &initializer.origin.span)?;
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         let mut environment = FunctionEnvironment::default();
@@ -1577,14 +1606,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let native_extern = matches!(call.target, LoweredCallableTarget::ExternalFunction { .. });
         let string_constructor = matches!(call.target, LoweredCallableTarget::Constructor { .. })
             && call.result_type == CheckedType::String;
-        if !call.resource_bindings.is_empty()
-            || !call.initialization_checks.is_empty()
-            || (call.c_string_temporary && !native_extern)
-            || call.reactive.is_some()
-            || !call.mutations.is_empty()
-            || (!c_string_conversion && !string_constructor && !call.moves.is_empty())
-        {
-            return Err(unsupported("call resources, mutation, or cleanup"));
+        // Stage 5.4 Step 1 splits the old mixed bucket into one family per
+        // recorded fact, so the harness can attribute each stub to the
+        // substage that owns the construct.
+        if !call.resource_bindings.is_empty() {
+            return Err(unsupported("call resources"));
+        }
+        if !call.initialization_checks.is_empty() {
+            return Err(unsupported("call initialization check"));
+        }
+        if !call.mutations.is_empty() {
+            return Err(unsupported("call mutation argument"));
+        }
+        if !c_string_conversion && !string_constructor && !call.moves.is_empty() {
+            return Err(unsupported("call moved ownership"));
+        }
+        if call.c_string_temporary && !native_extern {
+            return Err(unsupported("call C-string temporary"));
+        }
+        if call.reactive.is_some() {
+            return Err(unsupported("reactive call"));
         }
         if native_extern
             && matches!(
