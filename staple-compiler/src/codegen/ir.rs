@@ -4,7 +4,10 @@
 //! registration, traps, unit values, and the byte helpers the UTF-8 validator
 //! uses. Nothing here consults the checker or the `TypedModule`.
 
-use inkwell::{AddressSpace, values::AnyValue};
+use inkwell::{
+    AddressSpace,
+    values::{AnyValue, AnyValueEnum},
+};
 
 use super::{Backend, CodeGenerationResult, Diagnostic, Span, compiler_diagnostic};
 
@@ -223,6 +226,280 @@ impl<'program, 'context> Backend<'program, 'context> {
                 byte,
                 self.context.i8_type().const_int(expected, false),
                 "byte.equals",
+            )
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Legacy `build_owned_c_string`: a malloc'd NUL-terminated copy of one
+    /// C-string payload. Shared (Stage 5.3 Step 5) so both emitters emit the
+    /// same instructions under the same SSA names.
+    pub(crate) fn build_owned_c_string(
+        &self,
+        value: &str,
+        span: Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let source = self
+            .builder
+            .build_global_string_ptr(value, "c_string.literal")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .as_pointer_value();
+        let length = self
+            .size_type
+            .const_int((value.len() as u64).saturating_add(1), false);
+        let pointer = self
+            .builder
+            .build_array_malloc(self.context.i8_type(), length, "c_string.data")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_memcpy(pointer, 1, source, 1, length)
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(pointer.as_any_value_enum())
+    }
+
+    /// Legacy `build_string_value`: the `{pointer, length}` slice value.
+    pub(crate) fn build_string_value(
+        &self,
+        pointer: inkwell::values::PointerValue<'context>,
+        length: inkwell::values::IntValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let mut value = self.slice_type().const_zero();
+        value = self
+            .builder
+            .build_insert_value(value, pointer, 0, "string.pointer")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_struct_value();
+        value = self
+            .builder
+            .build_insert_value(value, length, 1, "string.length")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_struct_value();
+        Ok(value)
+    }
+
+    /// Legacy `compile_string_from_c_string`'s core (the caller evaluates the
+    /// argument and, in legacy's case, releases the C string through its drop
+    /// machinery): validate the C string as UTF-8, copy it to the GC heap, and
+    /// return the owned String.
+    pub(crate) fn build_string_from_c_string(
+        &self,
+        source: inkwell::values::PointerValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let strlen_type = self.size_type.fn_type(
+            &[self.context.ptr_type(AddressSpace::default()).into()],
+            false,
+        );
+        let strlen = self.declare_named_function("strlen", strlen_type);
+        let length = self
+            .builder
+            .build_direct_call(strlen, &[source.into()], "c_string.length")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let validator = self
+            .llvm_module
+            .get_function("__staple_is_valid_utf8")
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing UTF-8 validator"))?;
+        let valid = self
+            .builder
+            .build_direct_call(
+                validator,
+                &[source.into(), length.into()],
+                "c_string.valid_utf8",
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let invalid = self
+            .builder
+            .build_not(valid, "c_string.invalid_utf8")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.build_trap_if(invalid, span.clone())?;
+        let pointer = self.build_gc_allocation(length, "string.data", span.clone())?;
+        self.builder
+            .build_memcpy(pointer, 1, source, 1, length)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let result = self.build_string_value(pointer, length, span.clone())?;
+        Ok(result)
+    }
+
+    /// The CString release call (`free`) both emitters emit for a consumed C
+    /// string. Legacy reaches it through `compile_drop_value`, so its test-only
+    /// drop-site recorder still sees the obligation; the lowered emitter calls
+    /// it directly at the same site.
+    pub(crate) fn build_free_c_string(
+        &self,
+        source: inkwell::values::PointerValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let free_type = self.context.void_type().fn_type(
+            &[self.context.ptr_type(AddressSpace::default()).into()],
+            false,
+        );
+        let free = self.declare_named_function("free", free_type);
+        self.builder
+            .build_direct_call(free, &[source.into()], "c_string.drop")
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(())
+    }
+
+    /// Legacy `compile_string_to_c_string`'s core (the caller evaluates the
+    /// argument): trap on an interior NUL, allocate a NUL-terminated copy, and
+    /// return it.
+    pub(crate) fn build_string_to_c_string(
+        &self,
+        string: inkwell::values::StructValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let pointer = self
+            .builder
+            .build_extract_value(string, 0, "string.pointer")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_pointer_value();
+        let length = self
+            .builder
+            .build_extract_value(string, 1, "string.length")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_int_value();
+        let memchr_type = self.context.ptr_type(AddressSpace::default()).fn_type(
+            &[
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.context.i32_type().into(),
+                self.size_type.into(),
+            ],
+            false,
+        );
+        let memchr = self.declare_named_function("memchr", memchr_type);
+        let nul = self
+            .builder
+            .build_direct_call(
+                memchr,
+                &[
+                    pointer.into(),
+                    self.context.i32_type().const_zero().into(),
+                    length.into(),
+                ],
+                "string.interior_nul",
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+        let has_nul = self
+            .builder
+            .build_is_not_null(nul, "string.has_interior_nul")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.build_trap_if(has_nul, span.clone())?;
+        let allocation_length = self
+            .builder
+            .build_int_add(
+                length,
+                self.size_type.const_int(1, false),
+                "c_string.length",
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let overflow = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                allocation_length,
+                length,
+                "c_string.length_overflow",
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.build_trap_if(overflow, span.clone())?;
+        let result = self
+            .builder
+            .build_array_malloc(self.context.i8_type(), allocation_length, "c_string.data")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_memcpy(result, 1, pointer, 1, length)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let terminator = unsafe {
+            self.builder.build_gep(
+                self.context.i8_type(),
+                result,
+                &[length],
+                "c_string.terminator",
+            )
+        }
+        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_store(terminator, self.context.i8_type().const_zero())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(result)
+    }
+
+    /// Legacy's integer binary builder with its SSA names
+    /// (`{type}.add`/`.subtract`/`.multiply`/`.divide`).
+    pub(crate) fn build_integer_binary(
+        &self,
+        integer: crate::IntegerType,
+        operation: crate::IntegerBinaryOperation,
+        left: inkwell::values::IntValue<'context>,
+        right: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        use crate::IntegerBinaryOperation;
+        let value = match operation {
+            IntegerBinaryOperation::Add => self.builder.build_int_add(
+                left,
+                right,
+                &format!("{}.add", integer.intrinsic_name()),
+            ),
+            IntegerBinaryOperation::Subtract => self.builder.build_int_sub(
+                left,
+                right,
+                &format!("{}.subtract", integer.intrinsic_name()),
+            ),
+            IntegerBinaryOperation::Multiply => self.builder.build_int_mul(
+                left,
+                right,
+                &format!("{}.multiply", integer.intrinsic_name()),
+            ),
+            IntegerBinaryOperation::Divide if integer.is_signed() => self
+                .builder
+                .build_int_signed_div(left, right, &format!("{}.divide", integer.intrinsic_name())),
+            IntegerBinaryOperation::Divide => self.builder.build_int_unsigned_div(
+                left,
+                right,
+                &format!("{}.divide", integer.intrinsic_name()),
+            ),
+        }
+        .map_err(compiler_diagnostic)?;
+        Ok(value)
+    }
+
+    /// Legacy's integer compare builder with its SSA name
+    /// (`{type}.compare`).
+    pub(crate) fn build_integer_compare(
+        &self,
+        integer: crate::IntegerType,
+        operation: crate::IntegerCompareOperation,
+        left: inkwell::values::IntValue<'context>,
+        right: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        use crate::IntegerCompareOperation;
+        let predicate = match (operation, integer.is_signed()) {
+            (IntegerCompareOperation::Equal, _) => inkwell::IntPredicate::EQ,
+            (IntegerCompareOperation::NotEqual, _) => inkwell::IntPredicate::NE,
+            (IntegerCompareOperation::LessThan, true) => inkwell::IntPredicate::SLT,
+            (IntegerCompareOperation::LessThan, false) => inkwell::IntPredicate::ULT,
+            (IntegerCompareOperation::LessThanOrEqual, true) => inkwell::IntPredicate::SLE,
+            (IntegerCompareOperation::LessThanOrEqual, false) => inkwell::IntPredicate::ULE,
+            (IntegerCompareOperation::GreaterThan, true) => inkwell::IntPredicate::SGT,
+            (IntegerCompareOperation::GreaterThan, false) => inkwell::IntPredicate::UGT,
+            (IntegerCompareOperation::GreaterThanOrEqual, true) => inkwell::IntPredicate::SGE,
+            (IntegerCompareOperation::GreaterThanOrEqual, false) => inkwell::IntPredicate::UGE,
+        };
+        self.builder
+            .build_int_compare(
+                predicate,
+                left,
+                right,
+                &format!("{}.compare", integer.intrinsic_name()),
             )
             .map_err(compiler_diagnostic)
     }

@@ -6499,49 +6499,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.build_owned_c_string(&value, string.syntax.span.clone())
     }
 
-    fn build_owned_c_string(
-        &mut self,
-        value: &str,
-        span: Span,
-    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let source = self
-            .builder
-            .build_global_string_ptr(value, "c_string.literal")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .as_pointer_value();
-        let length = self
-            .size_type
-            .const_int((value.len() as u64).saturating_add(1), false);
-        let pointer = self
-            .builder
-            .build_array_malloc(self.context.i8_type(), length, "c_string.data")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.builder
-            .build_memcpy(pointer, 1, source, 1, length)
-            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
-        Ok(pointer.as_any_value_enum())
-    }
-
-    fn build_string_value(
-        &mut self,
-        pointer: inkwell::values::PointerValue<'context>,
-        length: inkwell::values::IntValue<'context>,
-        span: Span,
-    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
-        let mut value = self.slice_type().const_zero();
-        value = self
-            .builder
-            .build_insert_value(value, pointer, 0, "string.pointer")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .into_struct_value();
-        value = self
-            .builder
-            .build_insert_value(value, length, 1, "string.length")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .into_struct_value();
-        Ok(value)
-    }
-
     fn build_ref_value(
         &mut self,
         value: BasicValueEnum<'context>,
@@ -8017,74 +7974,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ));
         };
         let value = match intrinsic {
-            IntrinsicFunction::IntegerBinary {
-                integer,
-                operation: IntegerBinaryOperation::Add,
-            } => self.builder.build_int_add(
-                *left,
-                *right,
-                &format!("{}.add", integer.intrinsic_name()),
-            ),
-            IntrinsicFunction::IntegerBinary {
-                integer,
-                operation: IntegerBinaryOperation::Subtract,
-            } => self.builder.build_int_sub(
-                *left,
-                *right,
-                &format!("{}.subtract", integer.intrinsic_name()),
-            ),
-            IntrinsicFunction::IntegerBinary {
-                integer,
-                operation: IntegerBinaryOperation::Multiply,
-            } => self.builder.build_int_mul(
-                *left,
-                *right,
-                &format!("{}.multiply", integer.intrinsic_name()),
-            ),
-            IntrinsicFunction::IntegerBinary {
-                integer,
-                operation: IntegerBinaryOperation::Divide,
-            } if integer.is_signed() => self.builder.build_int_signed_div(
-                *left,
-                *right,
-                &format!("{}.divide", integer.intrinsic_name()),
-            ),
-            IntrinsicFunction::IntegerBinary {
-                integer,
-                operation: IntegerBinaryOperation::Divide,
-            } => self.builder.build_int_unsigned_div(
-                *left,
-                *right,
-                &format!("{}.divide", integer.intrinsic_name()),
-            ),
+            IntrinsicFunction::IntegerBinary { integer, operation } => {
+                self.build_integer_binary(integer, operation, *left, *right)
+            }
             IntrinsicFunction::IntegerCompare { integer, operation } => {
-                let predicate = match (operation, integer.is_signed()) {
-                    (IntegerCompareOperation::Equal, _) => inkwell::IntPredicate::EQ,
-                    (IntegerCompareOperation::NotEqual, _) => inkwell::IntPredicate::NE,
-                    (IntegerCompareOperation::LessThan, true) => inkwell::IntPredicate::SLT,
-                    (IntegerCompareOperation::LessThan, false) => inkwell::IntPredicate::ULT,
-                    (IntegerCompareOperation::LessThanOrEqual, true) => inkwell::IntPredicate::SLE,
-                    (IntegerCompareOperation::LessThanOrEqual, false) => inkwell::IntPredicate::ULE,
-                    (IntegerCompareOperation::GreaterThan, true) => inkwell::IntPredicate::SGT,
-                    (IntegerCompareOperation::GreaterThan, false) => inkwell::IntPredicate::UGT,
-                    (IntegerCompareOperation::GreaterThanOrEqual, true) => {
-                        inkwell::IntPredicate::SGE
-                    }
-                    (IntegerCompareOperation::GreaterThanOrEqual, false) => {
-                        inkwell::IntPredicate::UGE
-                    }
-                };
-                let condition = self
-                    .builder
-                    .build_int_compare(
-                        predicate,
-                        *left,
-                        *right,
-                        &format!("{}.compare", integer.intrinsic_name()),
-                    )
-                    .map_err(|error| {
-                        Diagnostic::new(call.syntax.span.clone(), error.to_string())
-                    })?;
+                let condition = self.build_integer_compare(integer, operation, *left, *right)?;
                 return self.compile_bool(condition, call.syntax.id, call.syntax.span.clone());
             }
             IntrinsicFunction::StringFromCString
@@ -9126,43 +9020,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "CString conversion requires a pointer",
             ));
         };
-        let strlen_type = self.size_type.fn_type(
-            &[self.context.ptr_type(AddressSpace::default()).into()],
-            false,
-        );
-        let strlen = self.declare_named_function("strlen", strlen_type);
-        let length = self
-            .builder
-            .build_direct_call(strlen, &[source.into()], "c_string.length")
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        let validator = self
-            .llvm_module
-            .get_function("__staple_is_valid_utf8")
-            .expect("UTF-8 validator is declared before function bodies");
-        let valid = self
-            .builder
-            .build_direct_call(
-                validator,
-                &[source.into(), length.into()],
-                "c_string.valid_utf8",
-            )
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        let invalid = self
-            .builder
-            .build_not(valid, "c_string.invalid_utf8")
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
-        self.build_trap_if(invalid, call.syntax.span.clone())?;
-        let pointer = self.build_gc_allocation(length, "string.data", call.syntax.span.clone())?;
-        self.builder
-            .build_memcpy(pointer, 1, source, 1, length)
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
-        let result = self.build_string_value(pointer, length, call.syntax.span.clone())?;
+        // Stage 5.3 Step 5: the conversion core is shared with the lowered
+        // emitter, so both produce the same instructions under the same names.
+        let result = self.build_string_from_c_string(source, call.syntax.span.clone())?;
         self.compile_drop_value(
             source.into(),
             &CheckedType::CString,
@@ -9186,84 +9046,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "String conversion requires a String value",
             ));
         };
-        let pointer = self
-            .builder
-            .build_extract_value(string, 0, "string.pointer")
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
-            .into_pointer_value();
-        let length = self
-            .builder
-            .build_extract_value(string, 1, "string.length")
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
-            .into_int_value();
-
-        let memchr_type = self.context.ptr_type(AddressSpace::default()).fn_type(
-            &[
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.context.i32_type().into(),
-                self.size_type.into(),
-            ],
-            false,
-        );
-        let memchr = self.declare_named_function("memchr", memchr_type);
-        let nul = self
-            .builder
-            .build_direct_call(
-                memchr,
-                &[
-                    pointer.into(),
-                    self.context.i32_type().const_zero().into(),
-                    length.into(),
-                ],
-                "string.interior_nul",
-            )
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_pointer_value();
-        let has_nul = self
-            .builder
-            .build_is_not_null(nul, "string.has_interior_nul")
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
-        self.build_trap_if(has_nul, call.syntax.span.clone())?;
-
-        let allocation_length = self
-            .builder
-            .build_int_add(
-                length,
-                self.size_type.const_int(1, false),
-                "c_string.length",
-            )
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
-        let overflow = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::ULT,
-                allocation_length,
-                length,
-                "c_string.length_overflow",
-            )
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
-        self.build_trap_if(overflow, call.syntax.span.clone())?;
-        let result = self
-            .builder
-            .build_array_malloc(self.context.i8_type(), allocation_length, "c_string.data")
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
-        self.builder
-            .build_memcpy(result, 1, pointer, 1, length)
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
-        let terminator = unsafe {
-            self.builder.build_gep(
-                self.context.i8_type(),
-                result,
-                &[length],
-                "c_string.terminator",
-            )
-        }
-        .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
-        self.builder
-            .build_store(terminator, self.context.i8_type().const_zero())
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        // Stage 5.3 Step 5: the conversion core is shared with the lowered
+        // emitter, so both produce the same instructions under the same names.
+        let result = self.build_string_to_c_string(string, call.syntax.span.clone())?;
         Ok(result.as_any_value_enum())
     }
 

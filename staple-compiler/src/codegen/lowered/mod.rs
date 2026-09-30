@@ -14,13 +14,12 @@ use inkwell::{
 use crate::specialization::ArtifactOrdinal;
 use crate::{
     BlockId, CheckedMutation, CheckedResource, CheckedType, EmissionView, ExpressionId,
-    FunctionInstanceId, InitializerId, IntegerBinaryOperation, IntrinsicFunction,
-    LoweredArgumentPassMode, LoweredArtifactPlan, LoweredBindingSite, LoweredBoundTarget,
-    LoweredCallArgument, LoweredCallEnvironment, LoweredCallId, LoweredCallStep,
-    LoweredCallableAdapter, LoweredCallableTarget, LoweredCallableValueId,
-    LoweredClosureEnvironment, LoweredEntryResourceKind, LoweredExpressionKind,
-    LoweredInstanceCapture, LoweredItemKind, LoweredPatternKind, ModuleId, RuntimeRequirement,
-    SymbolId,
+    FunctionInstanceId, InitializerId, IntrinsicFunction, LoweredArgumentPassMode,
+    LoweredArtifactPlan, LoweredBindingSite, LoweredBoundTarget, LoweredCallArgument,
+    LoweredCallEnvironment, LoweredCallId, LoweredCallStep, LoweredCallableAdapter,
+    LoweredCallableTarget, LoweredCallableValueId, LoweredClosureEnvironment,
+    LoweredEntryResourceKind, LoweredExpressionKind, LoweredInstanceCapture, LoweredItemKind,
+    LoweredPatternKind, ModuleId, RuntimeRequirement, SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -1274,26 +1273,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     std::str::from_utf8(&string.bytes[..string.bytes.len() - 1]).map_err(|_| {
                         Diagnostic::new(expression.origin.span.clone(), "invalid C string payload")
                     })?;
-                let source = self
-                    .backend
-                    .builder
-                    .build_global_string_ptr(text, "c_string.literal")
-                    .map_err(compiler_diagnostic)?
-                    .as_pointer_value();
-                let length = self
-                    .backend
-                    .size_type
-                    .const_int(string.bytes.len() as u64, false);
-                let pointer = self
-                    .backend
-                    .builder
-                    .build_array_malloc(self.backend.context.i8_type(), length, "c_string.data")
-                    .map_err(compiler_diagnostic)?;
+                // Stage 5.3 Step 5: shared with legacy `build_owned_c_string`.
                 self.backend
-                    .builder
-                    .build_memcpy(pointer, 1, source, 1, length)
-                    .map_err(compiler_diagnostic)?;
-                Ok(pointer.as_any_value_enum())
+                    .build_owned_c_string(text, expression.origin.span.clone())
             }
             LoweredExpressionKind::Access(_) => Err(unimplemented("access")),
             LoweredExpressionKind::Product(product) if product.fields.is_empty() => {
@@ -1700,15 +1682,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if call.c_string_temporary
                     && let Some(BasicMetadataValueEnum::PointerValue(pointer)) = values.first()
                 {
-                    let free = self
-                        .backend
-                        .llvm_module
-                        .get_function("free")
-                        .ok_or_else(|| unsupported("CString cleanup function"))?;
+                    // Stage 5.3 Step 5: the shared CString release.
                     self.backend
-                        .builder
-                        .build_direct_call(free, &[(*pointer).into()], "c_string.drop")
-                        .map_err(compiler_diagnostic)?;
+                        .build_free_c_string(*pointer, call.origin.span.clone())?;
                 }
                 Ok(result.try_as_basic_value().basic().map_or_else(
                     || self.backend.unit_value(),
@@ -1756,35 +1732,43 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "integer arithmetic operands must be integers",
                     ));
                 };
-                let name = format!("{}.arithmetic", integer.intrinsic_name());
-                let value = match operation {
-                    IntegerBinaryOperation::Add => {
-                        self.backend.builder.build_int_add(*left, *right, &name)
-                    }
-                    IntegerBinaryOperation::Subtract => {
-                        self.backend.builder.build_int_sub(*left, *right, &name)
-                    }
-                    IntegerBinaryOperation::Multiply => {
-                        self.backend.builder.build_int_mul(*left, *right, &name)
-                    }
-                    IntegerBinaryOperation::Divide if integer.is_signed() => self
-                        .backend
-                        .builder
-                        .build_int_signed_div(*left, *right, &name),
-                    IntegerBinaryOperation::Divide => self
-                        .backend
-                        .builder
-                        .build_int_unsigned_div(*left, *right, &name),
-                }
-                .map_err(compiler_diagnostic)?;
+                // Stage 5.3 Step 5: shared with legacy, names included.
+                let value = self
+                    .backend
+                    .build_integer_binary(integer, operation, *left, *right)?;
                 Ok(value.as_any_value_enum())
             }
             IntrinsicFunction::ToString { .. } => Err(unsupported("numeric string conversion")),
             IntrinsicFunction::IntegerCompare { .. } => Err(unsupported("integer comparison")),
             IntrinsicFunction::FloatBinary { .. } => Err(unsupported("float arithmetic")),
             IntrinsicFunction::FloatCompare { .. } => Err(unsupported("float comparison")),
-            IntrinsicFunction::StringFromCString => self.string_from_c_string(arguments, span),
-            IntrinsicFunction::StringToCString => self.string_to_c_string(arguments, span),
+            IntrinsicFunction::StringFromCString => {
+                let [BasicMetadataValueEnum::PointerValue(source)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "CString conversion requires a pointer",
+                    ));
+                };
+                // Stage 5.3 Step 5: shared with legacy.
+                let result = self
+                    .backend
+                    .build_string_from_c_string(*source, span.clone())?;
+                self.backend.build_free_c_string(*source, span)?;
+                Ok(result.as_any_value_enum())
+            }
+            IntrinsicFunction::StringToCString => {
+                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "String conversion requires a String value",
+                    ));
+                };
+                // Stage 5.3 Step 5: shared with legacy.
+                Ok(self
+                    .backend
+                    .build_string_to_c_string(*string, span)?
+                    .as_any_value_enum())
+            }
             IntrinsicFunction::StringAdd => Err(unsupported("string addition")),
             IntrinsicFunction::SliceLength => Err(unsupported("slice length")),
             IntrinsicFunction::SliceGetRef => Err(unsupported("slice reference")),
@@ -1822,184 +1806,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             IntrinsicFunction::ResolverCancel => Err(unsupported("resolver cancel")),
             IntrinsicFunction::Until => Err(unsupported("until")),
         }
-    }
-
-    fn string_from_c_string(
-        &self,
-        arguments: &[BasicMetadataValueEnum<'context>],
-        span: staple_syntax::Span,
-    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let [BasicMetadataValueEnum::PointerValue(source)] = arguments else {
-            return Err(Diagnostic::new(
-                span,
-                "CString conversion requires a pointer",
-            ));
-        };
-        let strlen = self
-            .backend
-            .llvm_module
-            .get_function("strlen")
-            .ok_or_else(|| Diagnostic::new(span.clone(), "missing CString length function"))?;
-        let length = self
-            .backend
-            .builder
-            .build_direct_call(strlen, &[(*source).into()], "c_string.length")
-            .map_err(compiler_diagnostic)?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        let validator = self
-            .backend
-            .llvm_module
-            .get_function("__staple_is_valid_utf8")
-            .ok_or_else(|| Diagnostic::new(span.clone(), "missing UTF-8 validator"))?;
-        let valid = self
-            .backend
-            .builder
-            .build_direct_call(
-                validator,
-                &[(*source).into(), length.into()],
-                "c_string.valid_utf8",
-            )
-            .map_err(compiler_diagnostic)?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        let invalid = self
-            .backend
-            .builder
-            .build_not(valid, "c_string.invalid_utf8")
-            .map_err(compiler_diagnostic)?;
-        self.backend.build_trap_if(invalid, span.clone())?;
-        let pointer = self
-            .backend
-            .build_gc_allocation(length, "string.data", span.clone())?;
-        self.backend
-            .builder
-            .build_memcpy(pointer, 1, *source, 1, length)
-            .map_err(compiler_diagnostic)?;
-        let mut result = self.backend.slice_type().const_zero();
-        result = self
-            .backend
-            .builder
-            .build_insert_value(result, pointer, 0, "string.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        result = self
-            .backend
-            .builder
-            .build_insert_value(result, length, 1, "string.length")
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        let free = self
-            .backend
-            .llvm_module
-            .get_function("free")
-            .ok_or_else(|| Diagnostic::new(span, "missing CString release function"))?;
-        self.backend
-            .builder
-            .build_direct_call(free, &[(*source).into()], "c_string.drop")
-            .map_err(compiler_diagnostic)?;
-        Ok(result.as_any_value_enum())
-    }
-
-    fn string_to_c_string(
-        &self,
-        arguments: &[BasicMetadataValueEnum<'context>],
-        span: staple_syntax::Span,
-    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
-            return Err(Diagnostic::new(
-                span,
-                "String conversion requires a String value",
-            ));
-        };
-        let pointer = self
-            .backend
-            .builder
-            .build_extract_value(*string, 0, "string.pointer")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let length = self
-            .backend
-            .builder
-            .build_extract_value(*string, 1, "string.length")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let memchr = self
-            .backend
-            .llvm_module
-            .get_function("memchr")
-            .ok_or_else(|| Diagnostic::new(span.clone(), "missing interior-NUL check function"))?;
-        let nul = self
-            .backend
-            .builder
-            .build_direct_call(
-                memchr,
-                &[
-                    pointer.into(),
-                    self.backend.context.i32_type().const_zero().into(),
-                    length.into(),
-                ],
-                "string.interior_nul",
-            )
-            .map_err(compiler_diagnostic)?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_pointer_value();
-        let has_nul = self
-            .backend
-            .builder
-            .build_is_not_null(nul, "string.has_interior_nul")
-            .map_err(compiler_diagnostic)?;
-        self.backend.build_trap_if(has_nul, span.clone())?;
-        let allocation_length = self
-            .backend
-            .builder
-            .build_int_add(
-                length,
-                self.backend.size_type.const_int(1, false),
-                "c_string.length",
-            )
-            .map_err(compiler_diagnostic)?;
-        let overflow = self
-            .backend
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::ULT,
-                allocation_length,
-                length,
-                "c_string.length_overflow",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.backend.build_trap_if(overflow, span.clone())?;
-        let result = self
-            .backend
-            .builder
-            .build_array_malloc(
-                self.backend.context.i8_type(),
-                allocation_length,
-                "c_string.data",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.backend
-            .builder
-            .build_memcpy(result, 1, pointer, 1, length)
-            .map_err(compiler_diagnostic)?;
-        let terminator = unsafe {
-            self.backend.builder.build_gep(
-                self.backend.context.i8_type(),
-                result,
-                &[length],
-                "c_string.terminator",
-            )
-        }
-        .map_err(compiler_diagnostic)?;
-        self.backend
-            .builder
-            .build_store(terminator, self.backend.context.i8_type().const_zero())
-            .map_err(compiler_diagnostic)?;
-        Ok(result.as_any_value_enum())
     }
 }
 
