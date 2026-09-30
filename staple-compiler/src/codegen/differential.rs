@@ -490,9 +490,6 @@ static CORPUS: [DifferentialProgram; 28] = [
         inline(
             "calls_curried_defaults",
             concat!(
-                // `sum3` and `pair_of` destructure their parameters and build
-                // products (5.5), so only the callers that exercise defaults,
-                // spreads, and designated elements are focus functions.
                 "def sum3: (I32, b: I32 = 2, c: I32 = 3) -> I32 = (a, b, c) => a + b + c\n",
                 "def pair_of: (I32, I32) -> (I32, I32) = (left, right) => (left, right)\n",
                 "def total: () -> I32 = () => sum3 (1, .c: 9)\n",
@@ -508,7 +505,7 @@ static CORPUS: [DifferentialProgram; 28] = [
             ),
             "5.4",
         ),
-        &["total", "spread", "curried"],
+        &["total", "spread", "curried", "sum3", "pair_of"],
     ),
     emits(
         inline(

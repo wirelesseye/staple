@@ -22,7 +22,7 @@ use crate::{
     LoweredCallableTarget, LoweredCallableValueId, LoweredClosureEnvironment,
     LoweredEntryResourceKind, LoweredExpressionKind, LoweredInstanceCapture, LoweredItemKind,
     LoweredPatternKind, LoweredProviderStorage, LoweredResourceProviderId, LoweredScopeExit,
-    ModuleId, OwnedStorage, RuntimeRequirement, SymbolId,
+    ModuleId, OwnedStorage, PatternId, RuntimeRequirement, SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -699,7 +699,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     fn bind_parameters(
-        &self,
+        &mut self,
         instance: FunctionInstanceId,
         function: FunctionValue<'context>,
         environment: &mut FunctionEnvironment<'context>,
@@ -798,62 +798,197 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let logical_types = flattened_parameter_types(&body.signature.parameter);
         let indirect_mask = self.backend.indirect_parameter_mask(&body.signature);
         let whole = body.signature.mutations.contains(&CheckedMutation::Whole);
-        if body.parameters.len() != logical_types.len() || (whole && logical_types.len() > 1) {
-            return Err(Diagnostic::new(
-                body.origin.span.clone(),
-                "lowered emitter: parameter destructuring is not implemented yet",
-            ));
-        }
-        // A nominal destructuring parameter (`Ref left`) binds a payload
-        // symbol whose concrete type differs from the signature slot; real
-        // pattern traversal is 5.5's, so stop before emitting a wrongly typed
-        // binding.
-        for (parameter, logical) in body.parameters.iter().zip(logical_types.iter()) {
-            if &parameter.value_type != *logical {
-                return Err(Diagnostic::new(
-                    body.origin.span.clone(),
-                    "lowered emitter: parameter destructuring is not implemented yet",
-                ));
-            }
-        }
-        for (index, parameter) in body.parameters.iter().enumerate() {
-            let (value, pointer) = if whole || indirect_mask[index] {
-                let pointer = raw
-                    .get(if whole { 0 } else { index })
-                    .ok_or_else(|| {
-                        Diagnostic::new(body.origin.span.clone(), "missing function parameter")
-                    })?
-                    .into_pointer_value();
-                let llvm_type = self.backend.compile_type(logical_types[index])?;
-                let value = self
-                    .backend
+        // Legacy `bind_function_parameters`: load every indirect parameter
+        // through its pointer (or the single whole-mutation pointer) and keep
+        // every one as a mutable pointer for `compile_place_pointer`.
+        let mut values: Vec<BasicValueEnum<'context>> = Vec::new();
+        let mut mutable_pointers: Vec<(usize, PointerValue<'context>)> = Vec::new();
+        if whole {
+            let pointer = raw
+                .first()
+                .ok_or_else(|| {
+                    Diagnostic::new(body.origin.span.clone(), "missing function parameter")
+                })?
+                .into_pointer_value();
+            let llvm_type = self.backend.compile_type(&body.signature.parameter)?;
+            values.push(
+                self.backend
                     .builder
                     .build_load(llvm_type, pointer, "parameter.value")
-                    .map_err(compiler_diagnostic)?;
-                (value, Some(pointer))
-            } else {
-                (
-                    *raw.get(index).ok_or_else(|| {
-                        Diagnostic::new(body.origin.span.clone(), "missing function parameter")
-                    })?,
-                    None,
-                )
+                    .map_err(compiler_diagnostic)?,
+            );
+            mutable_pointers.push((0, pointer));
+        } else {
+            for (index, parameter) in raw.iter().copied().enumerate() {
+                if indirect_mask.get(index).copied().unwrap_or(false) {
+                    let pointer = parameter.into_pointer_value();
+                    let llvm_type = self.backend.compile_type(logical_types[index])?;
+                    values.push(
+                        self.backend
+                            .builder
+                            .build_load(llvm_type, pointer, "parameter.value")
+                            .map_err(compiler_diagnostic)?,
+                    );
+                    mutable_pointers.push((index, pointer));
+                } else {
+                    values.push(parameter);
+                }
+            }
+        }
+        self.bind_mutable_parameter_pointers(
+            EmissionOwner::Instance(instance),
+            body.parameter_pattern,
+            &body.signature.parameter,
+            whole,
+            &mutable_pointers,
+            environment,
+        )?;
+        self.bind_top_level_pattern(
+            EmissionOwner::Instance(instance),
+            body.parameter_pattern,
+            &values,
+            environment,
+        )
+    }
+
+    /// Legacy `bind_mutable_parameter_pointers`: every indirect parameter
+    /// pointer replaces any capture cell for its top-level symbol, with a
+    /// whole mutation projecting each product field.
+    fn bind_mutable_parameter_pointers(
+        &self,
+        owner: EmissionOwner,
+        pattern: PatternId,
+        parameter_type: &CheckedType,
+        whole: bool,
+        pointers: &[(usize, PointerValue<'context>)],
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let symbols = self.top_level_pattern_symbols(owner, pattern);
+        if whole {
+            let Some((_, pointer)) = pointers.first().copied() else {
+                return Ok(());
             };
-            environment
-                .locals
-                .insert(parameter.symbol, value.as_any_value_enum());
-            if let Some(pointer) = pointer {
-                // F7/legacy `bind_mutable_parameter_pointers`: a whole or
-                // indirect parameter pointer is the place every mutable read
-                // and write goes through, so it replaces any capture cell
-                // registered for the same symbol.
-                environment.binding_cells.remove(&parameter.symbol);
-                environment
-                    .parameter_pointers
-                    .insert(parameter.symbol, pointer);
+            if symbols.len() == 1 {
+                if let Some(Some(symbol)) = symbols.first() {
+                    environment.binding_cells.remove(symbol);
+                    environment.parameter_pointers.insert(*symbol, pointer);
+                }
+                return Ok(());
+            }
+            let CheckedType::Product(_) = parameter_type else {
+                return Ok(());
+            };
+            let llvm_type = self
+                .backend
+                .compile_type(parameter_type)?
+                .into_struct_type();
+            for (index, symbol) in symbols.into_iter().enumerate() {
+                if let Some(symbol) = symbol {
+                    let field = self
+                        .backend
+                        .builder
+                        .build_struct_gep(llvm_type, pointer, index as u32, "parameter.field")
+                        .map_err(compiler_diagnostic)?;
+                    environment.binding_cells.remove(&symbol);
+                    environment.parameter_pointers.insert(symbol, field);
+                }
+            }
+            return Ok(());
+        }
+        for (index, pointer) in pointers {
+            if let Some(Some(symbol)) = symbols.get(*index) {
+                environment.binding_cells.remove(symbol);
+                environment.parameter_pointers.insert(*symbol, *pointer);
             }
         }
         Ok(())
+    }
+
+    /// Legacy `bind_top_level_pattern`: a top-level non-product parameter
+    /// pattern binds the flattened values rebuilt into one product value, a
+    /// one-element product collapses, and a product element binds its own
+    /// flattened slot directly.
+    fn bind_top_level_pattern(
+        &mut self,
+        owner: EmissionOwner,
+        pattern: PatternId,
+        values: &[BasicValueEnum<'context>],
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let record = self
+            .view
+            .pattern(owner, pattern)
+            .ok_or_else(|| {
+                Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered pattern")
+            })?
+            .clone();
+        let span = record.origin.span.clone();
+        match &record.kind {
+            crate::LoweredPatternKind::Binding { .. }
+            | crate::LoweredPatternKind::At { .. }
+            | crate::LoweredPatternKind::Wildcard
+            | crate::LoweredPatternKind::Nominal { .. } => {
+                let value = self
+                    .backend
+                    .build_product_value(values, span)?
+                    .as_any_value_enum();
+                self.bind_pattern(owner, pattern, value, environment)
+            }
+            crate::LoweredPatternKind::Product { elements, .. } if elements.len() == 1 => {
+                self.bind_top_level_pattern(owner, elements[0], values, environment)
+            }
+            crate::LoweredPatternKind::Product { elements, .. }
+                if elements.len() == values.len() =>
+            {
+                for (element, value) in elements.iter().zip(values.iter().copied()) {
+                    self.bind_pattern(owner, *element, value.as_any_value_enum(), environment)?;
+                }
+                Ok(())
+            }
+            // A whole `mut`/`move`-marked product pattern (`mut (a, b) => ...`)
+            // is passed as one value and destructured from it.
+            crate::LoweredPatternKind::Product { .. } if values.len() == 1 => {
+                self.bind_pattern(owner, pattern, values[0].as_any_value_enum(), environment)
+            }
+            _ => Err(Diagnostic::new(
+                span,
+                "function pattern layout does not match its declared type",
+            )),
+        }
+    }
+
+    /// The top-level bound symbols of a parameter pattern, one entry per
+    /// flattened parameter slot (`None` for a wildcard, singleton, or
+    /// non-binding pattern).
+    fn top_level_pattern_symbols(
+        &self,
+        owner: EmissionOwner,
+        pattern: PatternId,
+    ) -> Vec<Option<SymbolId>> {
+        let Some(record) = self.view.pattern(owner, pattern) else {
+            return vec![None];
+        };
+        match &record.kind {
+            crate::LoweredPatternKind::Product { elements, .. } => elements
+                .iter()
+                .map(|element| self.top_level_pattern_symbol(owner, *element))
+                .collect(),
+            _ => vec![self.top_level_pattern_symbol(owner, pattern)],
+        }
+    }
+
+    fn top_level_pattern_symbol(
+        &self,
+        owner: EmissionOwner,
+        pattern: PatternId,
+    ) -> Option<SymbolId> {
+        match &self.view.pattern(owner, pattern)?.kind {
+            crate::LoweredPatternKind::Binding { symbol, .. } => *symbol,
+            crate::LoweredPatternKind::At { binding, .. } => {
+                self.top_level_pattern_symbol(owner, *binding)
+            }
+            _ => None,
+        }
     }
 
     /// Whether one capture's environment field is a pointer: a cell,
@@ -1622,8 +1757,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if binding.propagating {
                     return Err(unimplemented("propagating pattern binding"));
                 }
+                // Legacy `compile_item`'s pattern-binding order: state 1,
+                // evaluate, bind, module-global stores, state 2.
+                self.store_pattern_initialization_state(owner, binding.pattern, 1)?;
                 let value = self.emit_expression(owner, binding.value, environment)?;
-                self.bind_pattern(owner, binding.pattern, value, environment)
+                self.bind_pattern(owner, binding.pattern, value, environment)?;
+                self.store_pattern_globals(owner, binding.pattern, environment)?;
+                self.store_pattern_initialization_state(owner, binding.pattern, 2)
             }
             LoweredItemKind::Assignment(assignment) => {
                 self.emit_assignment(owner, id, &assignment, environment)
@@ -1668,7 +1808,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 format!("lowered emitter: {family} is not implemented yet"),
             )
         };
-        match pattern.kind {
+        let span = pattern.origin.span.clone();
+        match &pattern.kind {
             LoweredPatternKind::Wildcard => {
                 // Lowering records a `WildcardDiscard` use exactly when the
                 // discarded value needs drop; the drop body is 5.6. The
@@ -1683,27 +1824,196 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 Ok(())
             }
+            // A name-like pattern that selects a singleton binds nothing.
+            LoweredPatternKind::Binding { symbol: None, .. } => Ok(()),
             LoweredPatternKind::Binding {
                 symbol: Some(symbol),
-                mutable: false,
-                moved: false,
+                ..
+            } => self.bind_symbol(owner, *symbol, value, environment, &span),
+            LoweredPatternKind::Product { elements, .. } => match elements.len() {
+                0 => Ok(()),
+                1 => self.bind_pattern(owner, elements[0], value, environment),
+                _ => {
+                    let Some(BasicValueEnum::StructValue(product)) = value_as_basic(value) else {
+                        return Err(Diagnostic::new(
+                            span,
+                            "nested product pattern requires a product value",
+                        ));
+                    };
+                    for (index, element) in elements.iter().enumerate() {
+                        let extracted = self
+                            .backend
+                            .builder
+                            .build_extract_value(product, index as u32, "pattern.element")
+                            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                        self.bind_pattern(
+                            owner,
+                            *element,
+                            extracted.as_any_value_enum(),
+                            environment,
+                        )?;
+                    }
+                    Ok(())
+                }
+            },
+            LoweredPatternKind::Nominal { argument, .. } => {
+                // Legacy `bind_pattern_value`'s nominal arm only loads the
+                // payload for a `Ref` pattern; every other nominal form binds
+                // its argument transparently.
+                let value = if pattern.test.identity == crate::LoweredPatternIdentity::Ref {
+                    let payload = self
+                        .view
+                        .pattern(owner, *argument)
+                        .map(|argument| argument.test.subject.clone())
+                        .unwrap_or(CheckedType::Error);
+                    self.backend
+                        .load_ref_payloads(value, std::slice::from_ref(&payload), span.clone())?
+                        .as_any_value_enum()
+                } else {
+                    value
+                };
+                self.bind_pattern(owner, *argument, value, environment)
+            }
+            LoweredPatternKind::Literal { .. } => Ok(()),
+            LoweredPatternKind::At {
+                binding,
+                pattern: nested,
+            } => {
+                self.bind_pattern(owner, *binding, value, environment)?;
+                self.bind_pattern(owner, *nested, value, environment)
+            }
+        }
+    }
+
+    /// One binding pattern's symbol, mirroring legacy `bind_pattern_value`:
+    /// a parameter pointer keeps the value in `locals`, a mutable symbol with
+    /// no module storage gets a binding cell and state 2, and every other
+    /// binding is a plain local. Owned droppable bindings stay stopped by the
+    /// body-level guard until 5.6.
+    fn bind_symbol(
+        &mut self,
+        owner: EmissionOwner,
+        symbol: SymbolId,
+        value: AnyValueEnum<'context>,
+        environment: &mut FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        if environment.parameter_pointers.contains_key(&symbol) {
+            environment.locals.insert(symbol, value);
+            return Ok(());
+        }
+        let mutable = self
+            .view
+            .symbol(symbol)
+            .is_some_and(|symbol| symbol.mutable_storage)
+            && !self.storage.contains_key(&symbol);
+        if mutable {
+            let cell = self.allocate_binding_cell(owner, environment, symbol, span)?;
+            let cell_type = self.binding_cell_type(owner, symbol)?;
+            let slot = self
+                .backend
+                .builder
+                .build_struct_gep(cell_type, cell, 0, "binding.value")
+                .map_err(compiler_diagnostic)?;
+            let value = value_as_basic(value)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "pattern value is not storable"))?;
+            self.backend
+                .builder
+                .build_store(slot, value)
+                .map_err(compiler_diagnostic)?;
+            return self.store_local_initialization_state(owner, environment, symbol, 2, span);
+        }
+        environment.locals.insert(symbol, value);
+        Ok(())
+    }
+
+    /// Legacy `store_pattern_globals`: after a module-level pattern binding
+    /// has bound its symbols, write each symbol's local value into its module
+    /// global.
+    fn store_pattern_globals(
+        &mut self,
+        owner: EmissionOwner,
+        pattern: PatternId,
+        environment: &FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let Some(record) = self.view.pattern(owner, pattern).cloned() else {
+            return Ok(());
+        };
+        match record.kind {
+            LoweredPatternKind::Binding {
+                symbol: Some(symbol),
                 ..
             } => {
-                environment.locals.insert(symbol, value);
+                let Some(global) = self.storage.get(&symbol) else {
+                    return Ok(());
+                };
+                let value = environment.locals.get(&symbol).copied().ok_or_else(|| {
+                    Diagnostic::new(record.origin.span.clone(), "unbound destructuring pattern")
+                })?;
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(record.origin.span.clone(), "pattern value is not storable")
+                })?;
+                self.backend
+                    .builder
+                    .build_store(global.as_pointer_value(), value)
+                    .map_err(compiler_diagnostic)?;
                 Ok(())
             }
-            LoweredPatternKind::Binding { .. } => {
-                Err(unsupported("mutable or moved pattern binding"))
+            LoweredPatternKind::At {
+                binding,
+                pattern: nested,
+            } => {
+                self.store_pattern_globals(owner, binding, environment)?;
+                self.store_pattern_globals(owner, nested, environment)
             }
-            LoweredPatternKind::Product { .. } => Err(unsupported("product pattern binding")),
-            LoweredPatternKind::Nominal { argument, .. }
-                if pattern.value_type == CheckedType::String =>
-            {
-                self.bind_pattern(owner, argument, value, environment)
+            LoweredPatternKind::Product { elements, .. } => {
+                for element in elements {
+                    self.store_pattern_globals(owner, element, environment)?;
+                }
+                Ok(())
             }
-            LoweredPatternKind::Nominal { .. } => Err(unsupported("nominal pattern binding")),
-            LoweredPatternKind::Literal { .. } => Err(unsupported("literal pattern binding")),
-            LoweredPatternKind::At { .. } => Err(unsupported("at pattern binding")),
+            LoweredPatternKind::Nominal { argument, .. } => {
+                self.store_pattern_globals(owner, argument, environment)
+            }
+            LoweredPatternKind::Wildcard | LoweredPatternKind::Literal { .. } => Ok(()),
+            LoweredPatternKind::Binding { symbol: None, .. } => Ok(()),
+        }
+    }
+
+    /// Legacy `store_pattern_initialization_state`: write the module
+    /// initialization state of every symbol a pattern binds.
+    fn store_pattern_initialization_state(
+        &mut self,
+        owner: EmissionOwner,
+        pattern: PatternId,
+        state: u64,
+    ) -> CodeGenerationResult<()> {
+        let Some(record) = self.view.pattern(owner, pattern).cloned() else {
+            return Ok(());
+        };
+        match record.kind {
+            LoweredPatternKind::Binding {
+                symbol: Some(symbol),
+                ..
+            } => self.store_initialization_state(symbol, state),
+            LoweredPatternKind::At {
+                binding,
+                pattern: nested,
+            } => {
+                self.store_pattern_initialization_state(owner, binding, state)?;
+                self.store_pattern_initialization_state(owner, nested, state)
+            }
+            LoweredPatternKind::Product { elements, .. } => {
+                for element in elements {
+                    self.store_pattern_initialization_state(owner, element, state)?;
+                }
+                Ok(())
+            }
+            LoweredPatternKind::Nominal { argument, .. } => {
+                self.store_pattern_initialization_state(owner, argument, state)
+            }
+            LoweredPatternKind::Wildcard | LoweredPatternKind::Literal { .. } => Ok(()),
+            LoweredPatternKind::Binding { symbol: None, .. } => Ok(()),
         }
     }
 
