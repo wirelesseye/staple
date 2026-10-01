@@ -75,14 +75,12 @@ fn partial_emission_empty_program_verifies() {
 /// with the stub/histogram report.
 #[test]
 fn partial_emission_stubs_unsupported_sites_and_verifies() {
-    // Stage 5.5 emits expressions, patterns, places, and control flow, so the
-    // stub fixture uses the still-unported 5.6 discarded-result cleanup and a
-    // 5.7 structural Debug artifact.
+    // Stage 5.6 Step 3 emits drop glue, so the stub fixture uses the
+    // still-unported `coro` expressions and a 5.7 structural Debug artifact.
     let lowered = prepare(concat!(
-        "type Handle = ctor I32\n",
-        "impl Drop Handle { def drop = Handle value => () }\n",
-        "def first: () -> () = () => { Handle 1; () }\n",
-        "def second: () -> () = () => { Handle 2; () }\n",
+        "use std.coroutine.*\n",
+        "def first: () -> Coroutine{} I32 = () => coro { 1 }\n",
+        "def second: () -> Coroutine{} I32 = () => coro { 2 }\n",
         "type Point = ctor (I32, I32)\n",
         "let point: Point = Point (1, 2)\n",
         "let make: () -> ((I32, I32) -> Point) = () => Point\n",
@@ -98,10 +96,7 @@ fn partial_emission_stubs_unsupported_sites_and_verifies() {
     assert!(ir.contains("@llvm.trap"), "stub bodies call llvm.trap");
     assert!(
         report.stubbed().iter().any(|stub| stub.name() == "first"
-            && stub
-                .diagnostic()
-                .message
-                .contains("discarded result cleanup")),
+            && stub.diagnostic().message.contains("coro is not implemented")),
         "the unsupported `first` body is stubbed: {:?}",
         report.stubbed()
     );
@@ -121,8 +116,8 @@ fn partial_emission_stubs_unsupported_sites_and_verifies() {
         report
             .family_histogram()
             .iter()
-            .any(|(family, count)| family == "discarded result cleanup" && *count >= 2),
-        "the histogram counts the discarded-result cleanup family: {:?}",
+            .any(|(family, count)| family == "coro" && *count >= 2),
+        "the histogram counts the coro family: {:?}",
         report.family_histogram()
     );
     assert!(

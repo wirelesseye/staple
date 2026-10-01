@@ -16,15 +16,15 @@ use inkwell::{
 
 use crate::specialization::ArtifactOrdinal;
 use crate::{
-    BlockId, CheckedMutation, CheckedResource, CheckedType, EmissionView, ExpressionId,
-    FunctionInstanceId, GcFinalizerPlan, InitializerId, IntrinsicFunction, LoweredArgumentPassMode,
-    LoweredArtifactPlan, LoweredBindingSite, LoweredBoundTarget, LoweredCallArgument,
-    LoweredCallEnvironment, LoweredCallId, LoweredCallStep, LoweredCallableAdapter,
-    LoweredCallableTarget, LoweredCallableValueId, LoweredClosureEnvironment,
-    LoweredEntryResourceKind, LoweredExpressionKind, LoweredInstanceCapture, LoweredItemKind,
-    LoweredPatternKind, LoweredProviderStorage, LoweredReactiveOperationKind,
-    LoweredResourceProviderId, LoweredScopeExit, ModuleId, OwnedStorage, PatternId,
-    RuntimeRequirement, SymbolId,
+    BlockId, CheckedMutation, CheckedResource, CheckedType, DropGlueBody, DropGluePlan,
+    EmissionView, ExpressionId, FunctionInstanceId, GcFinalizerPlan, InitializerId,
+    IntrinsicFunction, LoweredArgumentPassMode, LoweredArtifactPlan, LoweredBindingSite,
+    LoweredBoundTarget, LoweredCallArgument, LoweredCallEnvironment, LoweredCallId,
+    LoweredCallStep, LoweredCallableAdapter, LoweredCallableTarget, LoweredCallableValueId,
+    LoweredClosureEnvironment, LoweredEntryResourceKind, LoweredExpressionKind,
+    LoweredInstanceCapture, LoweredItemKind, LoweredPatternKind, LoweredProviderStorage,
+    LoweredReactiveOperationKind, LoweredResourceProviderId, LoweredScopeExit, ModuleId,
+    OwnedStorage, PatternId, PlannedArtifact, RuntimeRequirement, SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -58,6 +58,19 @@ impl<'context> FunctionEnvironment<'context> {
         self.binding_cells = snapshot.binding_cells.clone();
         self.parameter_pointers = snapshot.parameter_pointers.clone();
     }
+}
+
+/// Stage 5.6 Step 3: how a drop position obtains the value it drops.
+enum DropSource<'context> {
+    /// The value is already evaluated.
+    Value(BasicValueEnum<'context>),
+    /// Legacy `assignment.old`: load from the target place pointer.
+    Place(PointerValue<'context>),
+    /// Legacy `mutation.temporary.final`: load from a mutation temporary.
+    Temporary(PointerValue<'context>),
+    /// Legacy `compile_conditional_cell_drop`: test the cell state, load the
+    /// value, expand the glue, then clear the state.
+    Cell(PointerValue<'context>),
 }
 
 /// One provider's bound resource value. Stage 5.4 reads these when it emits
@@ -606,31 +619,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// `GcFinalizer` work, and emitting the cell without it would silently
     /// change behavior.
     ///
-    /// Stage 5.5 Step 1 (E2): a drop position checks the owner's artifact-use
-    /// record for its exact site and diagnoses the position's cleanup family
-    /// when one exists. No record means the value needs no drop, so the
-    /// position emits nothing (exactly as legacy does). Keeping the check
-    /// record-driven rather than type-driven preserves Contract 1.
+    /// Stage 5.6 Step 3 (O1): a drop position looks up its exact artifact-use
+    /// record and expands the named drop glue. No record means the value needs
+    /// no drop, so the position emits nothing (exactly as legacy does). The
+    /// check is record-driven, never type-driven (Contract 1).
     fn emit_drop_site(
         &self,
         owner: EmissionOwner,
         site: crate::ArtifactUseSite,
+        source: DropSource<'context>,
+        span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
-        let family = match site {
-            crate::ArtifactUseSite::DiscardedResult(_) => "discarded result cleanup",
-            crate::ArtifactUseSite::ReplacedValue(_) => "replaced value cleanup",
-            crate::ArtifactUseSite::LoopBodyResult(_) => "loop body result cleanup",
-            crate::ArtifactUseSite::IndexTemporary { .. }
-            | crate::ArtifactUseSite::MutateIndexTemporary(_) => "index temporary cleanup",
-            // Every other site is not a drop position this hook serves; a
-            // caller passing one is a bug, never a silently skipped drop.
-            other => {
-                return Err(Diagnostic::new(
-                    staple_syntax::Span::Compiler,
-                    format!("emit_drop_site called with a non-drop site {other:?}"),
-                ));
-            }
-        };
         let Some(record) = self
             .view
             .artifact_uses(owner)
@@ -638,10 +637,237 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         else {
             return Ok(());
         };
-        Err(Diagnostic::new(
-            record.origin.span.clone(),
-            format!("lowered emitter: {family} is not implemented yet"),
-        ))
+        let plan = self.drop_glue_plan(record.artifact, span)?;
+        let llvm_type = self.backend.compile_type(&plan.value_type)?;
+        match source {
+            DropSource::Value(value) => self.emit_drop_glue(value, plan, span),
+            DropSource::Place(pointer) => {
+                let old = self
+                    .backend
+                    .builder
+                    .build_load(llvm_type, pointer, "assignment.old")
+                    .map_err(compiler_diagnostic)?;
+                self.emit_drop_glue(old, plan, span)
+            }
+            DropSource::Temporary(pointer) => {
+                let value = self
+                    .backend
+                    .builder
+                    .build_load(llvm_type, pointer, "mutation.temporary.final")
+                    .map_err(compiler_diagnostic)?;
+                self.emit_drop_glue(value, plan, span)
+            }
+            DropSource::Cell(cell) => {
+                let blocks =
+                    self.backend
+                        .begin_conditional_cell_drop(cell, llvm_type, span.clone())?;
+                self.emit_drop_glue(blocks.value, plan, span)?;
+                self.backend.end_conditional_cell_drop(&blocks)
+            }
+        }
+    }
+
+    /// Stage 5.6 Step 3 (O2): expand one `DropGlueBody` inline at its site,
+    /// recursing through each nested planned glue. No function is emitted.
+    fn emit_drop_glue(
+        &self,
+        value: BasicValueEnum<'context>,
+        plan: &DropGluePlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        match &plan.body {
+            DropGlueBody::Unexpanded => Err(Diagnostic::new(
+                span.clone(),
+                "lowered emitter: drop glue plan was never expanded",
+            )),
+            DropGlueBody::UserDrop {
+                method,
+                representation,
+            } => {
+                let instance = method.instance.ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "selected Drop method has no instance")
+                })?;
+                let function = self.instances.get(&instance).copied().ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "Drop method instance is not declared")
+                })?;
+                let null_environment = self
+                    .backend
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .const_null();
+                let pointer = self
+                    .backend
+                    .builder
+                    .build_alloca(value.get_type(), "drop.borrow")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(pointer, value)
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_direct_call(
+                        function,
+                        &[null_environment.into(), pointer.into()],
+                        "drop.call",
+                    )
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                if let Some(representation) = representation {
+                    let plan = self.planned_drop_glue(representation, span)?;
+                    self.emit_drop_glue(value, plan, span)?;
+                }
+                Ok(())
+            }
+            DropGlueBody::CoroutineCleanup => {
+                let BasicValueEnum::PointerValue(frame) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "coroutine value is not a frame pointer",
+                    ));
+                };
+                self.backend
+                    .build_coroutine_frame_cleanup(frame, span.clone())
+            }
+            DropGlueBody::RuntimeRelease(release) => {
+                let BasicValueEnum::PointerValue(record) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "runtime value is not a pointer",
+                    ));
+                };
+                self.backend
+                    .build_runtime_release(*release, record, span.clone())
+            }
+            DropGlueBody::CStringFree => {
+                let BasicValueEnum::PointerValue(pointer) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "CString has an invalid representation",
+                    ));
+                };
+                self.backend.build_free_c_string(pointer, span.clone())
+            }
+            DropGlueBody::Product { fields } => {
+                let BasicValueEnum::StructValue(product) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "product has an invalid representation",
+                    ));
+                };
+                for field in fields {
+                    let element = self
+                        .backend
+                        .builder
+                        .build_extract_value(product, field.index as u32, "drop.field")
+                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                    let plan = self.planned_drop_glue(&field.glue, span)?;
+                    self.emit_drop_glue(element, plan, span)?;
+                }
+                Ok(())
+            }
+            DropGlueBody::Sum { alternatives } => {
+                let BasicValueEnum::StructValue(sum_value) = value else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "sum has an invalid representation",
+                    ));
+                };
+                let CheckedType::Sum(sum) = &plan.value_type else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "drop glue sum plan does not name a sum type",
+                    ));
+                };
+                let tag = self
+                    .backend
+                    .builder
+                    .build_extract_value(sum_value, 0, "drop.tag")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+                    .into_int_value();
+                let function = self
+                    .backend
+                    .builder
+                    .get_insert_block()
+                    .and_then(|block| block.get_parent())
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "drop glue is not in a function")
+                    })?;
+                let merge = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "drop.sum.done");
+                let mut cases = Vec::with_capacity(sum.alternatives.len());
+                for index in 0..sum.alternatives.len() {
+                    cases.push((
+                        self.backend
+                            .context
+                            .i32_type()
+                            .const_int(index as u64, false),
+                        self.backend
+                            .context
+                            .append_basic_block(function, "drop.sum.case"),
+                    ));
+                }
+                self.backend
+                    .builder
+                    .build_switch(tag, merge, &cases)
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                for index in 0..sum.alternatives.len() {
+                    self.backend.builder.position_at_end(cases[index].1);
+                    if let Some(dropped) = alternatives.iter().find(|entry| entry.index == index) {
+                        let payload = self.backend.extract_sum_alternative(
+                            sum_value,
+                            sum,
+                            index,
+                            span.clone(),
+                        )?;
+                        let plan = self.planned_drop_glue(&dropped.glue, span)?;
+                        self.emit_drop_glue(payload, plan, span)?;
+                    }
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(merge)
+                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                }
+                self.backend.builder.position_at_end(merge);
+                Ok(())
+            }
+            DropGlueBody::Distinct { representation } => {
+                let plan = self.planned_drop_glue(representation, span)?;
+                self.emit_drop_glue(value, plan, span)
+            }
+        }
+    }
+
+    /// The expanded drop-glue plan of one planned artifact ordinal.
+    fn drop_glue_plan(
+        &self,
+        ordinal: ArtifactOrdinal,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<&'program DropGluePlan> {
+        let artifact = self
+            .view
+            .artifact(ordinal)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing drop glue artifact"))?;
+        match &artifact.plan {
+            Some(LoweredArtifactPlan::DropGlue(plan)) => Ok(plan),
+            _ => Err(Diagnostic::new(
+                span.clone(),
+                "drop site artifact is not a drop glue plan",
+            )),
+        }
+    }
+
+    /// The expanded drop-glue plan of one planned artifact callee.
+    fn planned_drop_glue(
+        &self,
+        planned: &PlannedArtifact,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<&'program DropGluePlan> {
+        let ordinal = planned.artifact.ok_or_else(|| {
+            Diagnostic::new(span.clone(), "nested drop glue has no artifact ordinal")
+        })?;
+        self.drop_glue_plan(ordinal, span)
     }
 
     fn guard_owned_bindings(
@@ -1797,11 +2023,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredItemKind::Expression(statement) => {
-                // E2: the discriminant is the owner's `DiscardedResult` use
-                // record, not the `drop_result` flag, so a discarded value
-                // that needs no drop now emits.
-                self.emit_drop_site(owner, crate::ArtifactUseSite::DiscardedResult(id))?;
-                self.emit_expression(owner, statement.expression, environment)?;
+                // Legacy `compile_item` evaluates the statement, then drops
+                // its result when one was recorded (O1: the `DiscardedResult`
+                // use record is the discriminant).
+                let value = self.emit_expression(owner, statement.expression, environment)?;
+                if !environment.returned {
+                    let value =
+                        value_as_basic(value).ok_or_else(|| unimplemented("statement result"))?;
+                    self.emit_drop_site(
+                        owner,
+                        crate::ArtifactUseSite::DiscardedResult(id),
+                        DropSource::Value(value),
+                        &item.origin.span,
+                    )?;
+                }
                 Ok(())
             }
             LoweredItemKind::Return(item) => {
@@ -1918,18 +2153,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let span = pattern.origin.span.clone();
         match &pattern.kind {
             LoweredPatternKind::Wildcard => {
-                // Lowering records a `WildcardDiscard` use exactly when the
-                // discarded value needs drop; the drop body is 5.6. The
-                // emitter reads the record instead of re-deciding from the
-                // type (Contract 1).
-                let discards = self.view.artifact_uses(owner).is_some_and(|uses| {
-                    uses.iter()
-                        .any(|use_| use_.site == crate::ArtifactUseSite::WildcardDiscard(id))
-                });
-                if discards {
-                    return Err(unsupported("wildcard cleanup"));
-                }
-                Ok(())
+                // Legacy `bind_pattern_value` drops the discarded subject when
+                // lowering recorded a `WildcardDiscard` use (O1).
+                let value = value_as_basic(value).ok_or_else(|| unsupported("wildcard cleanup"))?;
+                self.emit_drop_site(
+                    owner,
+                    crate::ArtifactUseSite::WildcardDiscard(id),
+                    DropSource::Value(value),
+                    &span,
+                )
             }
             // A name-like pattern that selects a singleton binds nothing.
             LoweredPatternKind::Binding { symbol: None, .. } => Ok(()),
@@ -2887,12 +3119,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             incoming: Vec::new(),
         });
         environment.returned = false;
-        let _ = self.emit_block(owner, loop_.body, environment)?;
+        let value = self.emit_block(owner, loop_.body, environment)?;
         if !environment.returned {
-            // E2: a discarded loop body result needs its drop only when the
-            // owner has the site's artifact-use record (the drop body is 5.6).
+            // Legacy `compile_loop_expression` drops a droppable body result
+            // before the back edge (O1: the `LoopBodyResult` use record).
             if loop_.drops_body_result {
-                self.emit_drop_site(owner, crate::ArtifactUseSite::LoopBodyResult(id))?;
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "loop body result is not first-class")
+                })?;
+                self.emit_drop_site(
+                    owner,
+                    crate::ArtifactUseSite::LoopBodyResult(id),
+                    DropSource::Value(value),
+                    &span,
+                )?;
             }
             self.backend
                 .builder
@@ -4065,8 +4305,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // `[environment, hidden..., visible...]` (`compile_resource_arguments`).
         let mut hidden: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
         // Mutation temporaries whose value needs drop after the call, in
-        // evaluation order; `emit_call_cleanup` drops them in reverse.
-        let mut cleanups: Vec<(PointerValue<'context>, CheckedType)> = Vec::new();
+        // evaluation order with their argument record index; `emit_call_cleanup`
+        // drops them in reverse.
+        let mut cleanups: Vec<(usize, PointerValue<'context>)> = Vec::new();
         let mut invoked = false;
         // A whole-product argument against a flattened multi-element parameter
         // records no ABI slot; legacy `compile_arguments` unpacks the single
@@ -4232,9 +4473,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.ensure_callee_parts(&callee_value, &mut callee_parts)?;
         let mut values = hidden;
         values.extend(slots.into_iter().map(Option::unwrap));
-        // A non-extern C-string temporary is the first visible argument
-        // (legacy's `scoped_c_string_temporary` check).
-        let cleanup_c_string = if !native_extern && call.c_string_temporary {
+        // A C-string temporary is the first visible argument (legacy's
+        // `scoped_c_string_temporary` check).
+        let cleanup_c_string = if call.c_string_temporary {
             match values.first() {
                 Some(BasicMetadataValueEnum::PointerValue(pointer)) => Some(*pointer),
                 _ => None,
@@ -4285,6 +4526,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Err(unsupported("intrinsic call binding"));
                 }
                 self.emit_intrinsic(
+                    owner,
+                    id,
                     *intrinsic,
                     &values,
                     &call.result_type,
@@ -4325,13 +4568,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_direct_call(function, &values, "extern.call")
                     .map_err(compiler_diagnostic)?;
-                if call.c_string_temporary
-                    && let Some(BasicMetadataValueEnum::PointerValue(pointer)) = values.first()
-                {
-                    // Stage 5.3 Step 5: the shared CString release.
-                    self.backend
-                        .build_free_c_string(*pointer, call.origin.span.clone())?;
-                }
                 Ok(result.try_as_basic_value().basic().map_or_else(
                     || self.backend.unit_value(),
                     |value| value.as_any_value_enum(),
@@ -4389,27 +4625,41 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         };
         let value = result?;
-        self.emit_call_cleanup(&cleanups, cleanup_c_string, &call.origin.span)?;
+        self.emit_call_cleanup(owner, id, &cleanups, cleanup_c_string, &call.origin.span)?;
         Ok(value)
     }
 
-    /// Stage 5.4 Step 4: the post-call cleanup hook. Legacy drops mutation
-    /// temporaries in reverse argument order (only when their value needs
-    /// drop) and then frees a non-extern call's C-string temporary. The
-    /// signature and placement are final for 5.6, which fills in the drop
-    /// bodies; until then any recorded cleanup remains a 5.6 diagnostic
-    /// instead of being silently skipped.
+    /// Stage 5.6 Step 3: the post-call cleanup hook. Legacy
+    /// `drop_mutation_temporaries` drops mutation temporaries in reverse
+    /// collection order and then releases a C-string temporary; each drop
+    /// expands the glue named by its own `CallTemporary`, or `CStringTemporary`,
+    /// use record (O1).
     fn emit_call_cleanup(
-        &mut self,
-        temporaries: &[(PointerValue<'context>, CheckedType)],
+        &self,
+        owner: EmissionOwner,
+        call_id: LoweredCallId,
+        temporaries: &[(usize, PointerValue<'context>)],
         c_string: Option<PointerValue<'context>>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
-        if !temporaries.is_empty() || c_string.is_some() {
-            return Err(Diagnostic::new(
-                span.clone(),
-                "lowered emitter: call argument cleanup is not implemented yet",
-            ));
+        for (argument, pointer) in temporaries.iter().rev() {
+            self.emit_drop_site(
+                owner,
+                crate::ArtifactUseSite::CallTemporary {
+                    call: call_id,
+                    argument: *argument,
+                },
+                DropSource::Temporary(*pointer),
+                span,
+            )?;
+        }
+        if let Some(pointer) = c_string {
+            self.emit_drop_site(
+                owner,
+                crate::ArtifactUseSite::CStringTemporary(call_id),
+                DropSource::Value(pointer.into()),
+                span,
+            )?;
         }
         Ok(())
     }
@@ -4537,7 +4787,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         expression: Option<ExpressionId>,
         by_value_route: bool,
         environment: &mut FunctionEnvironment<'context>,
-        cleanups: &mut Vec<(PointerValue<'context>, CheckedType)>,
+        cleanups: &mut Vec<(usize, PointerValue<'context>)>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
         if record.writeback {
@@ -4553,7 +4803,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             // builds the thunk's closure over the current environment.
             let value =
                 self.build_thunk_closure(owner, call_id, record_index, environment, span)?;
-            return self.pass_computed_argument(record, value, by_value_route, cleanups);
+            return self.pass_computed_argument(
+                record,
+                record_index,
+                value,
+                by_value_route,
+                cleanups,
+            );
         };
         if !by_value_route
             && matches!(
@@ -4589,7 +4845,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "call argument is not a first-class value",
             )
         })?;
-        self.pass_computed_argument(record, value, by_value_route, cleanups)
+        self.pass_computed_argument(record, record_index, value, by_value_route, cleanups)
     }
 
     /// One implicit thunk argument's closure: the thunk instance's function
@@ -4732,9 +4988,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     fn pass_computed_argument(
         &self,
         record: &LoweredCallArgument,
+        record_index: usize,
         value: BasicValueEnum<'context>,
         by_value_route: bool,
-        cleanups: &mut Vec<(PointerValue<'context>, CheckedType)>,
+        cleanups: &mut Vec<(usize, PointerValue<'context>)>,
     ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
         if by_value_route || record.pass_mode == LoweredArgumentPassMode::Value {
             return Ok(value.into());
@@ -4760,7 +5017,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     staple_syntax::Span::Compiler,
                 )?;
                 if record.drops_after_call {
-                    cleanups.push((pointer, record.expected.clone()));
+                    cleanups.push((record_index, pointer));
                 }
                 Ok(pointer.into())
             }
@@ -4778,7 +5035,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         mappings: &[(usize, usize)],
         by_value_route: bool,
         environment: &mut FunctionEnvironment<'context>,
-        cleanups: &mut Vec<(PointerValue<'context>, CheckedType)>,
+        cleanups: &mut Vec<(usize, PointerValue<'context>)>,
         slots: &mut [Option<BasicMetadataValueEnum<'context>>],
     ) -> CodeGenerationResult<()> {
         let value = self.emit_expression(owner, expression, environment)?;
@@ -4797,7 +5054,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .builder
                 .build_extract_value(product, *source as u32, "product.spread.element")
                 .map_err(compiler_diagnostic)?;
-            let passed = self.pass_computed_argument(record, element, by_value_route, cleanups)?;
+            let passed =
+                self.pass_computed_argument(record, *slot, element, by_value_route, cleanups)?;
             place_argument_slot(slots, *slot, passed, &call.origin.span)?;
         }
         Ok(())
@@ -5055,10 +5313,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         let value = value_as_basic(value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "assigned value is not storable"))?;
-        // E2: diagnose the replaced value's cleanup only when the owner has
-        // the site's artifact-use record; otherwise legacy drops nothing.
+        // Legacy `compile_assignment` conditionally drops a binding cell's
+        // old value, or loads `assignment.old` from the place; the owner's
+        // `ReplacedValue` use record is the discriminant (O1).
         if assignment.drop_previous {
-            self.emit_drop_site(owner, crate::ArtifactUseSite::ReplacedValue(id))?;
+            let cell = self
+                .place_root_symbol(owner, assignment.target)
+                .and_then(|symbol| environment.binding_cells.get(&symbol).copied());
+            let source = match cell {
+                Some(cell) => DropSource::Cell(cell),
+                None => DropSource::Place(pointer),
+            };
+            self.emit_drop_site(
+                owner,
+                crate::ArtifactUseSite::ReplacedValue(id),
+                source,
+                &span,
+            )?;
         }
         self.backend
             .builder
@@ -5075,6 +5346,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             ));
         }
         Ok(())
+    }
+
+    /// The root symbol legacy `compile_place_pointer` returns for a place: a
+    /// symbol place (direct or captured cell) or a representation base;
+    /// product elements, temporaries, dereferences, resources, and indexed
+    /// targets return `None`.
+    fn place_root_symbol(&self, owner: EmissionOwner, id: crate::PlaceId) -> Option<SymbolId> {
+        let place = self.view.place(owner, id)?;
+        match &place.kind {
+            crate::LoweredPlaceKind::Symbol { symbol }
+            | crate::LoweredPlaceKind::CapturedCell { symbol } => Some(*symbol),
+            crate::LoweredPlaceKind::Representation { base } => {
+                self.place_root_symbol(owner, *base)
+            }
+            crate::LoweredPlaceKind::Temporary { .. }
+            | crate::LoweredPlaceKind::Resource { .. }
+            | crate::LoweredPlaceKind::Dereference { .. }
+            | crate::LoweredPlaceKind::ProductElement { .. }
+            | crate::LoweredPlaceKind::Indexed { .. } => None,
+        }
     }
 
     /// Stage 5.5 Step 5: `base[index] = value`, mirroring legacy
@@ -5154,9 +5445,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_direct_call(function, &arguments, "mutate_index.call")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         // Legacy `drop_mutation_temporaries` drops the materialized base when
-        // lowering recorded it; the drop body is Stage 5.6 (E2).
+        // lowering recorded it.
         if assignment.drops_base_temporary {
-            self.emit_drop_site(owner, crate::ArtifactUseSite::MutateIndexTemporary(id))?;
+            self.emit_drop_site(
+                owner,
+                crate::ArtifactUseSite::MutateIndexTemporary(id),
+                DropSource::Temporary(pointer),
+                &span,
+            )?;
         }
         Ok(())
     }
@@ -5217,6 +5513,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mutation_mask =
             super::abi::mutation_parameter_mask(types.len(), &method_type.mutations);
         let mut values: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
+        // Mutation temporaries legacy `drop_mutation_temporaries` drops after
+        // the call, in collection order; the owned `IndexTemporary` use record
+        // names each site's glue (O1).
+        let mut whole_temporary: Option<PointerValue<'context>> = None;
+        let mut temporaries: Vec<(usize, PointerValue<'context>)> = Vec::new();
         if !mask.iter().any(|indirect| *indirect) {
             for operand in [index.base, index.index] {
                 let value = self.emit_expression(owner, operand, environment)?;
@@ -5246,6 +5547,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "mutation.temporary",
                 span.clone(),
             )?;
+            whole_temporary = Some(pointer);
             values.push(pointer.into());
         } else {
             for (element, operand) in [(0usize, index.base), (1usize, index.index)] {
@@ -5276,6 +5578,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                 "mutation.temporary",
                                 span.clone(),
                             )?;
+                            if index
+                                .operands
+                                .drops_after_call
+                                .get(element)
+                                .copied()
+                                .unwrap_or(false)
+                            {
+                                temporaries.push((element, pointer));
+                            }
                             values.push(pointer.into());
                         }
                     } else {
@@ -5338,27 +5649,30 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .basic()
             .ok_or_else(|| Diagnostic::new(span.clone(), "Index result is not first-class"))?;
         // Legacy `drop_mutation_temporaries` drops the recorded operand
-        // temporaries after the call in reverse order; the drop bodies are
-        // Stage 5.6, so a recorded site diagnoses (E2).
-        if index.operands.whole_drops_after_call {
+        // temporaries after the call in reverse collection order.
+        if index.operands.whole_drops_after_call
+            && let Some(pointer) = whole_temporary
+        {
             self.emit_drop_site(
                 owner,
                 crate::ArtifactUseSite::IndexTemporary {
                     expression: id,
                     operand: None,
                 },
+                DropSource::Temporary(pointer),
+                &span,
             )?;
         }
-        for (operand, drops) in index.operands.drops_after_call.iter().enumerate().rev() {
-            if *drops {
-                self.emit_drop_site(
-                    owner,
-                    crate::ArtifactUseSite::IndexTemporary {
-                        expression: id,
-                        operand: Some(operand),
-                    },
-                )?;
-            }
+        for (operand, pointer) in temporaries.into_iter().rev() {
+            self.emit_drop_site(
+                owner,
+                crate::ArtifactUseSite::IndexTemporary {
+                    expression: id,
+                    operand: Some(operand),
+                },
+                DropSource::Temporary(pointer),
+                &span,
+            )?;
         }
         Ok(result.as_any_value_enum())
     }
@@ -5716,6 +6030,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     fn emit_intrinsic(
         &self,
+        owner: EmissionOwner,
+        call_id: LoweredCallId,
         intrinsic: IntrinsicFunction,
         arguments: &[BasicMetadataValueEnum<'context>],
         result_type: &CheckedType,
@@ -5814,11 +6130,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "CString conversion requires a pointer",
                     ));
                 };
-                // Stage 5.3 Step 5: shared with legacy.
+                // Stage 5.3 Step 5: shared conversion core; the CString
+                // release expands the recorded `CStringConversion` glue.
                 let result = self
                     .backend
                     .build_string_from_c_string(*source, span.clone())?;
-                self.backend.build_free_c_string(*source, span)?;
+                self.emit_drop_site(
+                    owner,
+                    crate::ArtifactUseSite::CStringConversion(call_id),
+                    DropSource::Value((*source).into()),
+                    &span,
+                )?;
                 Ok(result.as_any_value_enum())
             }
             IntrinsicFunction::StringToCString => {
@@ -5885,7 +6207,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             IntrinsicFunction::BufferTransfer => Err(unsupported("buffer transfer")),
             IntrinsicFunction::BufferClone => Err(unsupported("buffer clone")),
             IntrinsicFunction::RefReplace => Err(unsupported("reference replacement")),
-            IntrinsicFunction::Drop => Err(unsupported("drop")),
+            IntrinsicFunction::Drop => {
+                // Legacy evaluates the argument, drops it through the
+                // recorded `DropIntrinsic` glue, and returns unit.
+                let Some(value) = arguments.first().copied() else {
+                    return Err(Diagnostic::new(span, "Drop requires a value"));
+                };
+                let value = BasicValueEnum::try_from(value).map_err(|_| {
+                    Diagnostic::new(span.clone(), "Drop argument is not first-class")
+                })?;
+                self.emit_drop_site(
+                    owner,
+                    crate::ArtifactUseSite::DropIntrinsic(call_id),
+                    DropSource::Value(value),
+                    &span,
+                )?;
+                Ok(self.backend.unit_value())
+            }
             IntrinsicFunction::ReactiveScope => Err(unsupported("reactive scope")),
             IntrinsicFunction::Reaction => Err(unsupported("reaction")),
             IntrinsicFunction::Batch => Err(unsupported("batch")),
