@@ -4962,14 +4962,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if !matches!(binding, LoweredBoundTarget::Route(_)) {
                     return Err(unsupported("intrinsic call binding"));
                 }
-                self.emit_intrinsic(
-                    owner,
-                    id,
-                    *intrinsic,
-                    &values,
-                    &call.result_type,
-                    call.origin.span.clone(),
-                )
+                self.emit_intrinsic(owner, &call, id, *intrinsic, &values)
             }
             LoweredCallableTarget::IndirectClosure { .. } => {
                 if !matches!(binding, LoweredBoundTarget::Route(_)) {
@@ -6482,12 +6475,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     fn emit_intrinsic(
         &self,
         owner: EmissionOwner,
+        call: &crate::LoweredCall,
         call_id: LoweredCallId,
         intrinsic: IntrinsicFunction,
         arguments: &[BasicMetadataValueEnum<'context>],
-        result_type: &CheckedType,
-        span: staple_syntax::Span,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = call.origin.span.clone();
+        let result_type = &call.result_type;
         let unsupported = |family| {
             Diagnostic::new(
                 span.clone(),
@@ -6648,16 +6642,233 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .build_slice_get_ref(*slice, *position, element_type, span)?;
                 Ok(pointer.as_any_value_enum())
             }
-            IntrinsicFunction::BufferWithCapacity => Err(unsupported("buffer allocation")),
-            IntrinsicFunction::BufferLength => Err(unsupported("buffer length")),
-            IntrinsicFunction::BufferCapacity => Err(unsupported("buffer capacity")),
-            IntrinsicFunction::BufferPush => Err(unsupported("buffer push")),
-            IntrinsicFunction::BufferPop => Err(unsupported("buffer pop")),
-            IntrinsicFunction::BufferGet => Err(unsupported("buffer get")),
-            IntrinsicFunction::BufferFreeze => Err(unsupported("buffer freeze")),
-            IntrinsicFunction::BufferTransfer => Err(unsupported("buffer transfer")),
-            IntrinsicFunction::BufferClone => Err(unsupported("buffer clone")),
-            IntrinsicFunction::RefReplace => Err(unsupported("reference replacement")),
+            IntrinsicFunction::BufferWithCapacity => {
+                let [BasicMetadataValueEnum::IntValue(capacity)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "Buffer.with_capacity requires a USize capacity",
+                    ));
+                };
+                let CheckedType::Buffer(element) = result_type else {
+                    return Err(Diagnostic::new(span, "invalid Buffer result type"));
+                };
+                let llvm_element = self.backend.compile_type(element)?;
+                let header = self.backend.buffer_header_type(llvm_element);
+                self.backend.trap_if_buffer_capacity_overflows(
+                    *capacity,
+                    llvm_element,
+                    header,
+                    span.clone(),
+                )?;
+                let buffer = self.backend.build_buffer_allocation(
+                    *capacity,
+                    llvm_element,
+                    header,
+                    "buffer",
+                    span.clone(),
+                )?;
+                self.backend.build_buffer_capacity_store(
+                    buffer,
+                    header,
+                    *capacity,
+                    "buffer.capacity.slot",
+                )?;
+                // The `BufferAllocation` use records the element finalizer
+                // legacy `ensure_buffer_finalizer` installs.
+                if let Some(finalizer) = self
+                    .artifact_use_function(owner, crate::ArtifactUseSite::BufferAllocation(call_id))
+                {
+                    self.backend.set_gc_finalizer(buffer, finalizer)?;
+                }
+                Ok(buffer.as_any_value_enum())
+            }
+            IntrinsicFunction::BufferLength => {
+                self.emit_buffer_metadata(call, arguments, 0, "buffer.length", &span)
+            }
+            IntrinsicFunction::BufferCapacity => {
+                self.emit_buffer_metadata(call, arguments, 1, "buffer.capacity", &span)
+            }
+            IntrinsicFunction::BufferPush => {
+                let [BasicMetadataValueEnum::PointerValue(buffer), replacement] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "Buffer.push requires a buffer and value",
+                    ));
+                };
+                let element = intrinsic_buffer_element(call, 0, &span)?;
+                let llvm_element = self.backend.compile_type(&element)?;
+                let header = self.backend.buffer_header_type(llvm_element);
+                self.backend
+                    .trap_if_buffer_frozen(*buffer, header, span.clone())?;
+                let length_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(header, *buffer, 0, "buffer.length.slot")
+                    .map_err(compiler_diagnostic)?;
+                let capacity_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(header, *buffer, 1, "buffer.capacity.slot")
+                    .map_err(compiler_diagnostic)?;
+                let length = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, length_slot, "buffer.length")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let capacity = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, capacity_slot, "buffer.capacity")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let full = self
+                    .backend
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::UGE, length, capacity, "buffer.full")
+                    .map_err(compiler_diagnostic)?;
+                self.backend.build_trap_if(full, span.clone())?;
+                let data = self.backend.buffer_data_pointer(*buffer, llvm_element)?;
+                let replacement = BasicValueEnum::try_from(*replacement)
+                    .map_err(|_| Diagnostic::new(span.clone(), "Buffer element is not storable"))?;
+                self.backend.build_buffer_element_store(
+                    data,
+                    llvm_element,
+                    length,
+                    replacement,
+                    "buffer.push.slot",
+                    span.clone(),
+                )?;
+                let next = self
+                    .backend
+                    .builder
+                    .build_int_add(
+                        length,
+                        self.backend.size_type.const_int(1, false),
+                        "buffer.next.length",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(length_slot, next)
+                    .map_err(compiler_diagnostic)?;
+                Ok(self.backend.unit_value())
+            }
+            IntrinsicFunction::BufferGet => {
+                let [
+                    BasicMetadataValueEnum::PointerValue(buffer),
+                    BasicMetadataValueEnum::IntValue(position),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "Buffer.get_ref requires a buffer and USize index",
+                    ));
+                };
+                let CheckedType::Ref(element) = result_type else {
+                    return Err(Diagnostic::new(span, "invalid Buffer.get_ref result"));
+                };
+                let llvm_element = self.backend.compile_type(element)?;
+                let header = self.backend.buffer_header_type(llvm_element);
+                let length = self.backend.build_buffer_length(
+                    *buffer,
+                    header,
+                    "buffer.length.slot",
+                    "buffer.length",
+                )?;
+                let out = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::UGE,
+                        *position,
+                        length,
+                        "buffer.get.out_of_bounds",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend.build_trap_if(out, span.clone())?;
+                let data = self.backend.buffer_data_pointer(*buffer, llvm_element)?;
+                let reference = self.backend.build_buffer_element_pointer(
+                    data,
+                    llvm_element,
+                    *position,
+                    "buffer.get.reference",
+                )?;
+                self.backend.register_gc_interior(reference, *buffer)?;
+                Ok(reference.as_any_value_enum())
+            }
+            IntrinsicFunction::BufferPop => self.emit_buffer_pop(call, arguments, &span),
+            IntrinsicFunction::BufferFreeze => {
+                let [BasicMetadataValueEnum::PointerValue(buffer)] = arguments else {
+                    return Err(Diagnostic::new(span, "invalid Buffer handle"));
+                };
+                let element = intrinsic_buffer_element(call, 0, &span)?;
+                let llvm_element = self.backend.compile_type(&element)?;
+                let header = self.backend.buffer_header_type(llvm_element);
+                let frozen_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(header, *buffer, 2, "buffer.frozen.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(
+                        frozen_slot,
+                        self.backend.context.i8_type().const_int(1, false),
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let length = self.backend.build_buffer_length(
+                    *buffer,
+                    header,
+                    "buffer.length.slot",
+                    "buffer.length",
+                )?;
+                let data = self.backend.buffer_data_pointer(*buffer, llvm_element)?;
+                self.backend.register_gc_interior(data, *buffer)?;
+                let mut result = self.backend.slice_type().const_zero();
+                result = self
+                    .backend
+                    .builder
+                    .build_insert_value(result, data, 0, "buffer.slice.pointer")
+                    .map_err(compiler_diagnostic)?
+                    .into_struct_value();
+                result = self
+                    .backend
+                    .builder
+                    .build_insert_value(result, length, 1, "buffer.slice.length")
+                    .map_err(compiler_diagnostic)?
+                    .into_struct_value();
+                Ok(result.as_any_value_enum())
+            }
+            IntrinsicFunction::BufferTransfer => self.emit_buffer_transfer(call, arguments, &span),
+            IntrinsicFunction::BufferClone => {
+                self.emit_buffer_clone(owner, call, call_id, arguments, &span)
+            }
+            IntrinsicFunction::RefReplace => {
+                // Legacy `RefReplace`: read the old payload, store the
+                // replacement, return the old value (its drop is the
+                // surrounding site's recorded cleanup).
+                let [BasicMetadataValueEnum::PointerValue(reference), replacement] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "replace requires a fixed Ref and a replacement value",
+                    ));
+                };
+                let payload_type = self.backend.compile_type(result_type)?;
+                let old = self
+                    .backend
+                    .builder
+                    .build_load(payload_type, *reference, "ref.replace.old")
+                    .map_err(compiler_diagnostic)?;
+                let replacement = BasicValueEnum::try_from(*replacement)
+                    .map_err(|_| Diagnostic::new(span.clone(), "replacement is not storable"))?;
+                self.backend
+                    .builder
+                    .build_store(*reference, replacement)
+                    .map_err(compiler_diagnostic)?;
+                Ok(old.as_any_value_enum())
+            }
             IntrinsicFunction::Drop => {
                 // Legacy evaluates the argument, drops it through the
                 // recorded `DropIntrinsic` glue, and returns unit.
@@ -6698,6 +6909,593 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             IntrinsicFunction::ResolverCancel => Err(unsupported("resolver cancel")),
             IntrinsicFunction::Until => Err(unsupported("until")),
         }
+    }
+
+    /// Legacy `compile_buffer_metadata`: the buffer handle's field 0
+    /// (`buffer.length`) or 1 (`buffer.capacity`), with the GEP and the load
+    /// sharing one name.
+    fn emit_buffer_metadata(
+        &self,
+        call: &crate::LoweredCall,
+        arguments: &[BasicMetadataValueEnum<'context>],
+        field: u32,
+        name: &str,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let [BasicMetadataValueEnum::PointerValue(buffer)] = arguments else {
+            return Err(Diagnostic::new(span.clone(), "invalid Buffer handle"));
+        };
+        let element = intrinsic_buffer_element(call, 0, span)?;
+        let llvm_element = self.backend.compile_type(&element)?;
+        let header = self.backend.buffer_header_type(llvm_element);
+        let slot = self
+            .backend
+            .builder
+            .build_struct_gep(header, *buffer, field, name)
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_load(self.backend.size_type, slot, name)
+            .map(|value| value.as_any_value_enum())
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Legacy `compile_buffer_pop`: empty returns `None`, otherwise the last
+    /// element moves out into `Some`, the length decrements, and the vacated
+    /// slot is zeroed.
+    fn emit_buffer_pop(
+        &self,
+        call: &crate::LoweredCall,
+        arguments: &[BasicMetadataValueEnum<'context>],
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let [BasicMetadataValueEnum::PointerValue(buffer)] = arguments else {
+            return Err(Diagnostic::new(span.clone(), "invalid Buffer handle"));
+        };
+        let element = intrinsic_buffer_element(call, 0, span)?;
+        let CheckedType::Sum(option) = &call.result_type else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "Buffer.pop must return Option T",
+            ));
+        };
+        let none_index = option
+            .alternatives
+            .iter()
+            .position(|alternative| {
+                matches!(alternative, CheckedType::Distinct { name, .. } if name.ends_with("None"))
+            })
+            .ok_or_else(|| Diagnostic::new(span.clone(), "Option is missing None"))?;
+        let some_index = option
+            .alternatives
+            .iter()
+            .position(|alternative| {
+                matches!(alternative, CheckedType::Distinct { name, .. } if name.ends_with("Some"))
+            })
+            .ok_or_else(|| Diagnostic::new(span.clone(), "Option is missing Some"))?;
+        let llvm_element = self.backend.compile_type(&element)?;
+        let header = self.backend.buffer_header_type(llvm_element);
+        self.backend
+            .trap_if_buffer_frozen(*buffer, header, span.clone())?;
+        let length_slot = self
+            .backend
+            .builder
+            .build_struct_gep(header, *buffer, 0, "buffer.length.slot")
+            .map_err(compiler_diagnostic)?;
+        let length = self
+            .backend
+            .builder
+            .build_load(self.backend.size_type, length_slot, "buffer.length")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let empty = self
+            .backend
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                length,
+                self.backend.size_type.const_zero(),
+                "buffer.empty",
+            )
+            .map_err(compiler_diagnostic)?;
+        let function = self
+            .backend
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "Buffer.pop is in a function"))?;
+        let none_block = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.pop.none");
+        let some_block = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.pop.some");
+        let merge = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.pop.done");
+        let option_type = self.backend.compile_sum_type(option)?;
+        let result_slot = self
+            .backend
+            .builder
+            .build_alloca(option_type, "buffer.pop.result")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(result_slot, option_type.const_zero())
+            .map_err(compiler_diagnostic)?;
+        let tag_slot = self
+            .backend
+            .builder
+            .build_struct_gep(option_type, result_slot, 0, "buffer.pop.tag")
+            .map_err(compiler_diagnostic)?;
+        let payload_slot = self
+            .backend
+            .builder
+            .build_struct_gep(option_type, result_slot, 1, "buffer.pop.payload")
+            .map_err(compiler_diagnostic)?;
+        let payload_type = option_type
+            .get_field_type_at_index(1)
+            .expect("Option payload");
+        let storage = super::layout::SumStorage {
+            tag: tag_slot,
+            payload: payload_slot,
+            alignment: self.backend.target_data.get_abi_alignment(&payload_type),
+        };
+        self.backend
+            .builder
+            .build_conditional_branch(empty, none_block, some_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.backend.builder.position_at_end(none_block);
+        self.backend
+            .builder
+            .build_store(
+                tag_slot,
+                self.backend
+                    .context
+                    .i32_type()
+                    .const_int(none_index as u64, false),
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_unconditional_branch(merge)
+            .map_err(compiler_diagnostic)?;
+
+        self.backend.builder.position_at_end(some_block);
+        let next = self
+            .backend
+            .builder
+            .build_int_sub(
+                length,
+                self.backend.size_type.const_int(1, false),
+                "buffer.pop.index",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(length_slot, next)
+            .map_err(compiler_diagnostic)?;
+        let data = self.backend.buffer_data_pointer(*buffer, llvm_element)?;
+        let (slot, popped) = self.backend.build_buffer_element_load(
+            data,
+            llvm_element,
+            next,
+            "buffer.pop.slot",
+            "buffer.pop.value",
+        )?;
+        self.backend.store_sum_payload(
+            popped.as_any_value_enum(),
+            &option.alternatives[some_index],
+            some_index,
+            &storage,
+            span.clone(),
+        )?;
+        self.backend
+            .builder
+            .build_memset(
+                slot,
+                self.backend.target_data.get_abi_alignment(&llvm_element),
+                self.backend.context.i8_type().const_zero(),
+                self.backend.size_type.const_int(
+                    self.backend.target_data.get_store_size(&llvm_element),
+                    false,
+                ),
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_unconditional_branch(merge)
+            .map_err(compiler_diagnostic)?;
+
+        self.backend.builder.position_at_end(merge);
+        self.backend
+            .builder
+            .build_load(option_type, result_slot, "buffer.pop.option")
+            .map(|value| value.as_any_value_enum())
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Legacy `compile_buffer_transfer`: alias and frozen traps, capacity
+    /// check, element memcpy, then length updates.
+    fn emit_buffer_transfer(
+        &self,
+        call: &crate::LoweredCall,
+        arguments: &[BasicMetadataValueEnum<'context>],
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let [
+            BasicMetadataValueEnum::PointerValue(source),
+            BasicMetadataValueEnum::PointerValue(destination),
+        ] = arguments
+        else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "Buffer.transfer requires two buffers",
+            ));
+        };
+        let element = intrinsic_buffer_element(call, 0, span)?;
+        let llvm_element = self.backend.compile_type(&element)?;
+        let header = self.backend.buffer_header_type(llvm_element);
+        let aliased = self
+            .backend
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                *source,
+                *destination,
+                "buffer.transfer.aliased",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend.build_trap_if(aliased, span.clone())?;
+        self.backend
+            .trap_if_buffer_frozen(*source, header, span.clone())?;
+        self.backend
+            .trap_if_buffer_frozen(*destination, header, span.clone())?;
+        let source_length_slot = self
+            .backend
+            .builder
+            .build_struct_gep(header, *source, 0, "buffer.transfer.source.length.slot")
+            .map_err(compiler_diagnostic)?;
+        let source_length = self
+            .backend
+            .builder
+            .build_load(
+                self.backend.size_type,
+                source_length_slot,
+                "buffer.transfer.source.length",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let dest_length_slot = self
+            .backend
+            .builder
+            .build_struct_gep(header, *destination, 0, "buffer.transfer.dest.length.slot")
+            .map_err(compiler_diagnostic)?;
+        let dest_length = self
+            .backend
+            .builder
+            .build_load(
+                self.backend.size_type,
+                dest_length_slot,
+                "buffer.transfer.dest.length",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let dest_capacity = self.backend.build_buffer_capacity(
+            *destination,
+            header,
+            "buffer.transfer.dest.capacity.slot",
+            "buffer.transfer.dest.capacity",
+        )?;
+        let dest_remaining = self
+            .backend
+            .builder
+            .build_int_sub(dest_capacity, dest_length, "buffer.transfer.dest.remaining")
+            .map_err(compiler_diagnostic)?;
+        let insufficient = self
+            .backend
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                dest_remaining,
+                source_length,
+                "buffer.transfer.insufficient_capacity",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend.build_trap_if(insufficient, span.clone())?;
+        let source_data = self.backend.buffer_data_pointer(*source, llvm_element)?;
+        let dest_data = self
+            .backend
+            .buffer_data_pointer(*destination, llvm_element)?;
+        let dest_write = self.backend.build_buffer_element_pointer(
+            dest_data,
+            llvm_element,
+            dest_length,
+            "buffer.transfer.dest.write",
+        )?;
+        let stride = self.backend.target_data.get_abi_size(&llvm_element);
+        let bytes = self
+            .backend
+            .builder
+            .build_int_mul(
+                source_length,
+                self.backend.size_type.const_int(stride, false),
+                "buffer.transfer.bytes",
+            )
+            .map_err(compiler_diagnostic)?;
+        let alignment = self.backend.target_data.get_abi_alignment(&llvm_element);
+        self.backend
+            .builder
+            .build_memcpy(dest_write, alignment, source_data, alignment, bytes)
+            .map_err(compiler_diagnostic)?;
+        let new_dest_length = self
+            .backend
+            .builder
+            .build_int_add(
+                dest_length,
+                source_length,
+                "buffer.transfer.dest.next_length",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(dest_length_slot, new_dest_length)
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(source_length_slot, self.backend.size_type.const_zero())
+            .map_err(compiler_diagnostic)?;
+        Ok(self.backend.unit_value())
+    }
+
+    /// Legacy `compile_buffer_clone`: allocate a destination with the source's
+    /// capacity, install the recorded destination finalizer, then call the
+    /// recorded element `Clone` instance per live element.
+    fn emit_buffer_clone(
+        &self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        call_id: LoweredCallId,
+        arguments: &[BasicMetadataValueEnum<'context>],
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let [BasicMetadataValueEnum::PointerValue(source)] = arguments else {
+            return Err(Diagnostic::new(span.clone(), "invalid Buffer handle"));
+        };
+        let element = intrinsic_buffer_element(call, 0, span)?;
+        let llvm_element = self.backend.compile_type(&element)?;
+        let header = self.backend.buffer_header_type(llvm_element);
+        let length = self.backend.build_buffer_length(
+            *source,
+            header,
+            "buffer.clone.source.length.slot",
+            "buffer.clone.length",
+        )?;
+        let capacity = self.backend.build_buffer_capacity(
+            *source,
+            header,
+            "buffer.clone.source.capacity.slot",
+            "buffer.clone.capacity",
+        )?;
+        let destination = self.backend.build_buffer_allocation(
+            capacity,
+            llvm_element,
+            header,
+            "buffer.clone",
+            span.clone(),
+        )?;
+        self.backend.build_buffer_capacity_store(
+            destination,
+            header,
+            capacity,
+            "buffer.clone.destination.capacity.slot",
+        )?;
+        if let Some(finalizer) =
+            self.artifact_use_function(owner, crate::ArtifactUseSite::BufferCloneFinalizer(call_id))
+        {
+            self.backend.set_gc_finalizer(destination, finalizer)?;
+        }
+        let clone_function = self
+            .instance_use_function(owner, crate::ArtifactUseSite::BufferCloneElement(call_id))
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "buffer clone has no element Clone instance")
+            })?;
+        let source_data = self.backend.buffer_data_pointer(*source, llvm_element)?;
+        let destination_data = self
+            .backend
+            .buffer_data_pointer(destination, llvm_element)?;
+        let destination_length_slot = self
+            .backend
+            .builder
+            .build_struct_gep(
+                header,
+                destination,
+                0,
+                "buffer.clone.destination.length.slot",
+            )
+            .map_err(compiler_diagnostic)?;
+        let index_slot = self
+            .backend
+            .builder
+            .build_alloca(self.backend.size_type, "buffer.clone.index.slot")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(index_slot, self.backend.size_type.const_zero())
+            .map_err(compiler_diagnostic)?;
+        let function = self
+            .backend
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "buffer clone function"))?;
+        let condition = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.clone.condition");
+        let body = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.clone.body");
+        let done = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.clone.done");
+        self.backend
+            .builder
+            .build_unconditional_branch(condition)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(condition);
+        let index = self
+            .backend
+            .builder
+            .build_load(self.backend.size_type, index_slot, "buffer.clone.index")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let has_element = self
+            .backend
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                index,
+                length,
+                "buffer.clone.has.element",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_conditional_branch(has_element, body, done)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(body);
+        let source_slot = self.backend.build_buffer_element_pointer(
+            source_data,
+            llvm_element,
+            index,
+            "buffer.clone.source.slot",
+        )?;
+        let source_element = self
+            .backend
+            .builder
+            .build_load(llvm_element, source_slot, "buffer.clone.source.element")
+            .map_err(compiler_diagnostic)?;
+        let closure_environment = self
+            .backend
+            .context
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        let clone_argument: BasicMetadataValueEnum<'context> = if matches!(
+            clone_function.get_type().get_param_types().get(1),
+            Some(inkwell::types::BasicMetadataTypeEnum::PointerType(_))
+        ) {
+            source_slot.into()
+        } else {
+            source_element.into()
+        };
+        let cloned = self
+            .backend
+            .builder
+            .build_direct_call(
+                clone_function,
+                &[closure_environment.into(), clone_argument],
+                "buffer.clone.element",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "Clone result is not first-class"))?;
+        self.backend.build_buffer_element_store(
+            destination_data,
+            llvm_element,
+            index,
+            cloned,
+            "buffer.clone.destination.slot",
+            span.clone(),
+        )?;
+        let next = self
+            .backend
+            .builder
+            .build_int_add(
+                index,
+                self.backend.size_type.const_int(1, false),
+                "buffer.clone.next",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(destination_length_slot, next)
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(index_slot, next)
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_unconditional_branch(condition)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(done);
+        Ok(destination.as_any_value_enum())
+    }
+
+    /// The declared function of one owner artifact-use site, when the owner
+    /// records it.
+    fn artifact_use_function(
+        &self,
+        owner: EmissionOwner,
+        site: crate::ArtifactUseSite,
+    ) -> Option<FunctionValue<'context>> {
+        let uses = self.view.artifact_uses(owner)?;
+        let ordinal = uses
+            .iter()
+            .find(|use_| use_.site == site)
+            .map(|use_| use_.artifact)?;
+        self.artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+    }
+
+    /// The declared function of one owner instance-use site, when the owner
+    /// records it.
+    fn instance_use_function(
+        &self,
+        owner: EmissionOwner,
+        site: crate::ArtifactUseSite,
+    ) -> Option<FunctionValue<'context>> {
+        let uses = self.view.instance_uses(owner)?;
+        let instance = uses
+            .iter()
+            .find(|use_| use_.site == site)
+            .map(|use_| use_.instance)?;
+        self.instances.get(&instance).copied()
+    }
+}
+
+/// The buffer element type legacy reads from an intrinsic call's argument: the
+/// first element of a product argument, or the argument type itself.
+fn intrinsic_buffer_element(
+    call: &crate::LoweredCall,
+    argument: usize,
+    span: &staple_syntax::Span,
+) -> CodeGenerationResult<Box<CheckedType>> {
+    let Some(record) = call.arguments.get(argument) else {
+        return Err(Diagnostic::new(
+            span.clone(),
+            "missing Buffer argument record",
+        ));
+    };
+    let buffer_type = match &record.expected {
+        CheckedType::Product(product) if !product.elements.is_empty() => {
+            &product.elements[0].value_type
+        }
+        other => other,
+    };
+    match buffer_type {
+        CheckedType::Buffer(element) => Ok(element.clone()),
+        _ => Err(Diagnostic::new(span.clone(), "invalid Buffer type")),
     }
 }
 
