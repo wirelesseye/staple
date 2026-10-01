@@ -287,6 +287,11 @@ The partial-mode report is the Stage 5.4–5.8 backlog baseline. The empty progr
 
 No separate plan is needed: the 4.3 plans already record every decision verbatim.
 
+**Implementation steps:** (1) shared structural prologue and product/sum `Debug`; (2) index/mutation/reference bodies and lowering-owned coercion decisions; (3) iterator bodies and binding-only trait dispatch; (4) focused transition corpus and final gates. Each step updates this breakdown and the main plan and ends with a conventional commit.
+
+**Progress (Step 1).** The new `codegen/lowered/structural.rs` emits product `Debug` in the recorded literal/element order and sum `Debug` in alternative order, resolving delegates and `Formatter.write` through their planned catalog IDs. Strict and partial modes both attempt structural bodies. Both emitters share `load_structural_parameters`, `build_debug_delegate`, and `begin_debug_sum`; formatting literals already use the shared builder from 5.5. Index, mutation, reference, and iterator bodies remain explicit 5.7 diagnostics. The default and feature workspace checks, formatting, diff check, object/run smoke checks, and full nextest suite pass (1298 tests, including declaration census, body parity, and CLI differential harness). The additional pre-step binary IR sweep is running and its result will be recorded in Step 2.
+
+
 - Emit the seven structural kinds from `StructuralBody`: `Debug` literals and delegates in order through `callee_type`, the `Index`/`MutateIndex` switch and load, the `DerefIndex` fast path and delegation, `IntoIterator`/`next` with `Done`/`Yield` indices, and the shared `Formatter.write` instance.
 - String templates from the `FormattingConstructor`/`Write`/`Finish` and `Interpolation` bindings.
 - Delete the new emitter's temporary trait-dispatch arms. Every trait call is already an instance or artifact binding from 5.4.

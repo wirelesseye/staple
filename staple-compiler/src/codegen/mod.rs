@@ -4217,27 +4217,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let previous = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
-        let parameters = function.get_params();
-        let raw_values = &parameters[1..];
-        let value_types = flattened_parameter_types(&function_type.parameter);
-        let indirect_mask = self.indirect_parameter_mask(function_type);
-        let mutation_mask = mutation_parameter_mask(value_types.len(), &function_type.mutations);
-        let mut values = Vec::with_capacity(raw_values.len());
-        for (index, value) in raw_values.iter().copied().enumerate() {
-            if indirect_mask[index] && !mutation_mask[index] {
-                values.push(
-                    self.builder
-                        .build_load(
-                            self.compile_type(value_types[index])?,
-                            value.into_pointer_value(),
-                            "structural.borrow",
-                        )
-                        .map_err(compiler_diagnostic)?,
-                );
-            } else {
-                values.push(value);
-            }
-        }
+        let values = self
+            .backend
+            .load_structural_parameters(function, function_type)?;
         let result = match structural {
             crate::StructuralTraitMethod::Debug => {
                 self.compile_structural_debug_body(&values, &arguments[0], span.clone())?
@@ -4353,20 +4335,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let arguments = vec![element.value_type.clone()];
             let function =
                 self.trait_method_code(debug_trait, &arguments, debug_method, span.clone())?;
-            self.builder
-                .build_direct_call(
-                    function,
-                    &[
-                        self.context
-                            .ptr_type(AddressSpace::default())
-                            .const_null()
-                            .into(),
-                        field.into(),
-                        (*formatter).into(),
-                    ],
-                    "debug.fmt",
-                )
-                .map_err(compiler_diagnostic)?;
+            self.backend
+                .build_debug_delegate(function, field, *formatter, "debug.fmt")?;
         }
         self.compile_formatter_write_literal(*formatter, ")", span.clone())?;
         value_as_basic(self.unit_value()).ok_or_else(|| Diagnostic::new(span, "invalid unit value"))
@@ -4379,31 +4349,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         sum: &crate::CheckedSumType,
         span: Span,
     ) -> CodeGenerationResult<BasicValueEnum<'context>> {
-        let tag = self
-            .builder
-            .build_extract_value(value, 0, "debug.sum.tag")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let function = self
-            .builder
-            .get_insert_block()
-            .and_then(|block| block.get_parent())
-            .ok_or_else(|| Diagnostic::new(span.clone(), "sum Debug is not in a function"))?;
-        let merge = self.context.append_basic_block(function, "debug.sum.done");
-        let cases = sum
-            .alternatives
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                (
-                    self.context.i32_type().const_int(index as u64, false),
-                    self.context.append_basic_block(function, "debug.sum.case"),
-                )
-            })
-            .collect::<Vec<_>>();
-        self.builder
-            .build_switch(tag, merge, &cases)
-            .map_err(compiler_diagnostic)?;
+        let (merge, cases) =
+            self.backend
+                .begin_debug_sum(value, sum.alternatives.len(), span.clone())?;
         let debug_trait = self
             .typed_module
             .resolved()
@@ -4418,7 +4366,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .copied()
             .ok_or_else(|| Diagnostic::new(span.clone(), "standard Debug method is unavailable"))?;
         for (index, alternative) in sum.alternatives.iter().enumerate() {
-            self.builder.position_at_end(cases[index].1);
+            self.builder.position_at_end(cases[index]);
             let payload = self.extract_sum_alternative(value, sum, index, span.clone())?;
             let function = self.trait_method_code(
                 debug_trait,
@@ -4426,20 +4374,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 debug_method,
                 span.clone(),
             )?;
-            self.builder
-                .build_direct_call(
-                    function,
-                    &[
-                        self.context
-                            .ptr_type(AddressSpace::default())
-                            .const_null()
-                            .into(),
-                        payload.into(),
-                        formatter.into(),
-                    ],
-                    "debug.sum.fmt",
-                )
-                .map_err(compiler_diagnostic)?;
+            self.backend
+                .build_debug_delegate(function, payload, formatter, "debug.sum.fmt")?;
             self.builder
                 .build_unconditional_branch(merge)
                 .map_err(compiler_diagnostic)?;

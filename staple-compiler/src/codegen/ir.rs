@@ -1307,6 +1307,66 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
+    /// Shared null-environment call used by structural Debug delegates.
+    pub(crate) fn build_debug_delegate(
+        &self,
+        function: inkwell::values::FunctionValue<'context>,
+        value: BasicValueEnum<'context>,
+        formatter: BasicValueEnum<'context>,
+        name: &str,
+    ) -> CodeGenerationResult<()> {
+        self.builder
+            .build_direct_call(
+                function,
+                &[
+                    self.context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into(),
+                    value.into(),
+                    formatter.into(),
+                ],
+                name,
+            )
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// The shared sum Debug dispatch skeleton.
+    pub(crate) fn begin_debug_sum(
+        &self,
+        value: inkwell::values::StructValue<'context>,
+        length: usize,
+        span: Span,
+    ) -> CodeGenerationResult<(
+        inkwell::basic_block::BasicBlock<'context>,
+        Vec<inkwell::basic_block::BasicBlock<'context>>,
+    )> {
+        let tag = self
+            .builder
+            .build_extract_value(value, 0, "debug.sum.tag")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span, "sum Debug is not in a function"))?;
+        let merge = self.context.append_basic_block(function, "debug.sum.done");
+        let cases = (0..length)
+            .map(|index| {
+                (
+                    self.context.i32_type().const_int(index as u64, false),
+                    self.context.append_basic_block(function, "debug.sum.case"),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.builder
+            .build_switch(tag, merge, &cases)
+            .map_err(compiler_diagnostic)?;
+        Ok((merge, cases.into_iter().map(|(_, block)| block).collect()))
+    }
+
     /// Stage 5.5 Step 3: the literal half of legacy
     /// `compile_formatter_write_literal` once the target function is bound:
     /// allocate a `String` from the literal and call `Formatter.write`.

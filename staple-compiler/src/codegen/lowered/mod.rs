@@ -1,5 +1,7 @@
 //! Parallel LLVM emitter over the read-only lowered program view.
 
+mod structural;
+
 use std::collections::HashMap;
 
 use inkwell::{
@@ -1798,6 +1800,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::ExternAdapter(plan) => {
                 self.emit_extern_adapter_body(ordinal, plan, &artifact.origin.span)
             }
+            LoweredArtifactPlan::StructuralMethod(plan) => {
+                self.emit_structural_body(ordinal, plan, &artifact.origin.span)
+            }
             LoweredArtifactPlan::GcFinalizer(plan) => {
                 self.emit_gc_finalizer_body(ordinal, plan, &artifact.origin.span)
             }
@@ -2029,6 +2034,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 LoweredArtifactPlan::ConstructorAdapter(_)
                     | LoweredArtifactPlan::ExternAdapter(_)
                     | LoweredArtifactPlan::GcFinalizer(_)
+                    | LoweredArtifactPlan::StructuralMethod(_)
             ) {
                 continue;
             }

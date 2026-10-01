@@ -9,9 +9,39 @@ use inkwell::{AddressSpace, types::BasicTypeEnum};
 
 use crate::{CheckedFunctionType, CheckedMutation, CheckedType};
 
-use super::{Backend, CodeGenerationResult, Diagnostic, Span};
+use super::{Backend, CodeGenerationResult, Diagnostic, Span, compiler_diagnostic};
 
 impl<'program, 'context> Backend<'program, 'context> {
+    /// Shared structural-method prologue, preserving borrowed and mutable slots.
+    pub(crate) fn load_structural_parameters(
+        &self,
+        function: inkwell::values::FunctionValue<'context>,
+        function_type: &CheckedFunctionType,
+    ) -> CodeGenerationResult<Vec<inkwell::values::BasicValueEnum<'context>>> {
+        let parameters = function.get_params();
+        let raw_values = &parameters[1..];
+        let value_types = flattened_parameter_types(&function_type.parameter);
+        let indirect_mask = self.indirect_parameter_mask(function_type);
+        let mutation_mask = mutation_parameter_mask(value_types.len(), &function_type.mutations);
+        let mut values = Vec::with_capacity(raw_values.len());
+        for (index, value) in raw_values.iter().copied().enumerate() {
+            if indirect_mask[index] && !mutation_mask[index] {
+                values.push(
+                    self.builder
+                        .build_load(
+                            self.compile_type(value_types[index])?,
+                            value.into_pointer_value(),
+                            "structural.borrow",
+                        )
+                        .map_err(compiler_diagnostic)?,
+                );
+            } else {
+                values.push(value);
+            }
+        }
+        Ok(values)
+    }
+
     pub(crate) fn compile_native_function_type(
         &self,
         function_type: &CheckedFunctionType,
