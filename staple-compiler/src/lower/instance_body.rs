@@ -1647,12 +1647,7 @@ impl<'a> BodyCloner<'a> {
     /// still matches are preserved; the rest select the innermost active
     /// provider with the exact concrete type, matching the backend's rule.
     fn rebind_hidden_resources(&mut self, call: &mut LoweredCall) {
-        let passes_hidden = !matches!(
-            call.target.category(),
-            LoweredCallableCategory::ExternalFunction
-                | LoweredCallableCategory::Intrinsic
-                | LoweredCallableCategory::Constructor
-        );
+        let passes_hidden = call.target.records_resources();
         if !passes_hidden {
             return;
         }
@@ -1745,6 +1740,20 @@ impl<'a> BodyCloner<'a> {
             }
         }
         call.resource_bindings = bindings;
+        if matches!(call.target, LoweredCallableTarget::Intrinsic { .. }) {
+            call.steps
+                .retain(|step| !matches!(step, LoweredCallStep::Resource { .. }));
+            let invoke = call
+                .steps
+                .iter()
+                .position(|step| matches!(step, LoweredCallStep::Invoke))
+                .unwrap_or(call.steps.len());
+            call.steps.splice(
+                invoke..invoke,
+                (0..call.resource_bindings.len())
+                    .map(|resource| LoweredCallStep::Resource { resource }),
+            );
+        }
     }
 
     /// Recomputes concrete-sensitive call-argument pass decisions from the
@@ -2060,6 +2069,17 @@ impl<'a> BodyCloner<'a> {
             .map(|operation| self.clone_operation(operation));
         self.recompute_call_arguments(&mut call);
         self.rebind_hidden_resources(&mut call);
+        match super::LoweredRuntimeCallFacts::for_call(
+            &call.target,
+            &call.arguments,
+            &call.function_type,
+            &self.program.semantic_ids,
+        ) {
+            Ok(facts) => call.runtime = facts,
+            Err(message) => self
+                .diagnostics
+                .push(Diagnostic::new(call.origin.span.clone(), message)),
+        }
         let new = self.body.calls.push(call);
         self.calls.insert(id, new);
         for (index, argument) in original.arguments.iter().enumerate() {
@@ -3091,6 +3111,7 @@ impl<'a> BodyCloner<'a> {
             c_string_temporary: false,
             reactive: None,
             buffer_pop: None,
+            runtime: Default::default(),
         })
     }
 
@@ -3771,6 +3792,21 @@ impl<'a> BodyValidator<'a> {
             "call function type",
         );
         self.check_concrete_type(&origin, &call.result_type, "call result type");
+        if super::LoweredRuntimeCallFacts::for_call(
+            &call.target,
+            &call.arguments,
+            &call.function_type,
+            &self.program.semantic_ids,
+        )
+        .ok()
+        .as_ref()
+            != Some(&call.runtime)
+        {
+            self.report(
+                origin.span.clone(),
+                "instance body runtime call facts disagree with the concrete types",
+            );
+        }
         if super::LoweredOptionAlternatives::for_call(&call.target, &call.result_type)
             .ok()
             .flatten()
@@ -3821,12 +3857,7 @@ impl<'a> BodyValidator<'a> {
                 }
             }
         }
-        let passes_hidden = !matches!(
-            call.target.category(),
-            LoweredCallableCategory::ExternalFunction
-                | LoweredCallableCategory::Intrinsic
-                | LoweredCallableCategory::Constructor
-        );
+        let passes_hidden = call.target.records_resources();
         if passes_hidden
             && call.resource_bindings.len() != call.function_type.effects.resources.len()
         {
@@ -5583,5 +5614,213 @@ mod tests {
                 .contains("Buffer.pop alternatives disagree")),
             "{diagnostics:?}"
         );
+    }
+    fn runtime_facts_program() -> LoweredProgram {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "use std.coroutine.*\n",
+            "use std.io.(IO, println)\n",
+            "def make: <T> Scheduler -> (Wait T, Resolver T) = sched => completion sched\n",
+            "def finish: <T> Resolver T * T -> () = resolver * value => resolver^complete value\n",
+            "def worker_io: () -> Coroutine{IO} I32 = () => coro { println \"work\"; 7 }\n",
+            "def worker_pure: () -> Coroutine{} U8 = () => coro { 8 satisfies U8 }\n",
+            "def launch: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+            "  println \"launch\"\n",
+            "  let _ = spawn (worker_io ())\n",
+            "  let _ = spawn (worker_pure ())\n",
+            "  ()\n",
+            "}\n",
+            "let sched = scheduler ()\n",
+            "let settled = {\n",
+            "let pair32: (Wait I32, Resolver I32) = make sched\n",
+            "let (wait32, resolver32) = pair32\n",
+            "let pair8: (Wait U8, Resolver U8) = make sched\n",
+            "let (wait8, resolver8) = pair8\n",
+            "finish resolver32 7\n",
+            "finish resolver8 (8 satisfies U8)\n",
+            "() }\n",
+            "let plain = block_on (coro { 9 })\n",
+            "with Tasks = task_scope (sched) { let _ = spawn (launch ()) }\n",
+        ));
+        materialize(&mut program);
+        program
+    }
+
+    #[test]
+    fn runtime_call_facts_are_concrete_per_instance() {
+        let program = runtime_facts_program();
+        let mut completions = Vec::new();
+        let mut activation_rows = Vec::new();
+        for (_, instance) in program.instances.iter() {
+            let body = instance.body.as_ref().unwrap();
+            for (_, call) in body.calls.iter() {
+                if let Some(payload) = &call.runtime.completion_value_type {
+                    assert!(!contains_type_parameter(payload));
+                    completions.push(payload.clone());
+                }
+                if let Some(activation) = &call.runtime.coroutine {
+                    assert!(!contains_type_parameter(&activation.result_type));
+                    if matches!(
+                        call.target,
+                        LoweredCallableTarget::Intrinsic {
+                            intrinsic: crate::IntrinsicFunction::Spawn,
+                            ..
+                        }
+                    ) {
+                        let tasks = activation.tasks_resource.expect("spawn retains Tasks");
+                        assert!(
+                            body.resource_uses
+                                .get(call.resource_bindings[tasks])
+                                .unwrap()
+                                .provider
+                                .is_some()
+                        );
+                        activation_rows.push((
+                            activation.result_type.clone(),
+                            activation.deferred_resources.len(),
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(completions.contains(&CheckedType::I32));
+        assert!(completions.contains(&CheckedType::U8));
+        assert!(
+            activation_rows.contains(&(CheckedType::I32, 1)),
+            "IO is captured at activation"
+        );
+        assert!(
+            activation_rows.contains(&(CheckedType::U8, 0)),
+            "pure instantiation has no deferred resources"
+        );
+    }
+
+    #[test]
+    fn runtime_call_payload_corruption_is_rejected() {
+        let mut program = runtime_facts_program();
+        let call = program
+            .instances
+            .iter_mut()
+            .filter_map(|(_, instance)| instance.body.as_mut())
+            .flat_map(|body| body.calls.iter_mut().map(|(_, call)| call))
+            .find(|call| call.runtime.completion_value_type.is_some())
+            .unwrap();
+        call.runtime.completion_value_type = Some(CheckedType::Error);
+        let diagnostics = program.validate_instance_bodies();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("runtime call facts disagree")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_call_activation_corruption_is_rejected() {
+        let baseline = runtime_facts_program();
+        for field in ["tasks", "deferred", "result"] {
+            let mut program = baseline.clone();
+            let call = program
+                .instances
+                .iter_mut()
+                .filter_map(|(_, instance)| instance.body.as_mut())
+                .flat_map(|body| body.calls.iter_mut().map(|(_, call)| call))
+                .find(|call| {
+                    call.runtime.coroutine.as_ref().is_some_and(|facts| {
+                        facts.tasks_resource.is_some() && !facts.deferred_resources.is_empty()
+                    })
+                })
+                .unwrap();
+            let facts = call.runtime.coroutine.as_mut().unwrap();
+            match field {
+                "tasks" => facts.tasks_resource = None,
+                "deferred" => facts.deferred_resources.clear(),
+                "result" => facts.result_type = CheckedType::Error,
+                _ => unreachable!(),
+            }
+            let diagnostics = program.validate_instance_bodies();
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains("runtime call facts disagree")),
+                "{field}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_call_missing_intrinsic_provider_is_rejected() {
+        let mut program = runtime_facts_program();
+        let call = program
+            .instances
+            .iter_mut()
+            .filter_map(|(_, instance)| instance.body.as_mut())
+            .flat_map(|body| body.calls.iter_mut().map(|(_, call)| call))
+            .find(|call| {
+                call.runtime
+                    .coroutine
+                    .as_ref()
+                    .is_some_and(|facts| facts.tasks_resource.is_some())
+            })
+            .unwrap();
+        call.resource_bindings.clear();
+        let diagnostics = program.validate_instance_bodies();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("hidden-resource bindings disagree")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_call_template_corruption_is_rejected() {
+        let mut program = runtime_facts_program();
+        let call = program
+            .calls
+            .iter_mut()
+            .map(|(_, call)| call)
+            .find(|call| call.runtime.completion_value_type.is_some())
+            .unwrap();
+        call.runtime.completion_value_type = None;
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("call runtime facts disagree")),
+            "{diagnostics:?}"
+        );
+    }
+    #[test]
+    fn child_await_without_plan_keeps_runtime_facts() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "use std.coroutine.*\n",
+            "def parent: move Coroutine{} I32 -> Coroutine{} I32 = move child => coro { await child }\n",
+            "let _ = parent (coro { 9 })\n",
+        ));
+        materialize(&mut program);
+        let await_ = program
+            .instances
+            .iter()
+            .filter_map(|(_, instance)| instance.body.as_ref())
+            .flat_map(|body| body.awaits.iter().map(|(_, await_)| await_))
+            .find(|await_| {
+                matches!(
+                    await_.kind,
+                    LoweredAwaitKind::ChildCoroutine { plan: None, .. }
+                )
+            })
+            .expect("a child parameter has no statically known body plan");
+        let LoweredAwaitKind::ChildCoroutine {
+            child_result,
+            deferred_resources,
+            ..
+        } = &await_.kind
+        else {
+            unreachable!()
+        };
+        assert_eq!(child_result, &CheckedType::I32);
+        assert!(deferred_resources.is_empty());
+        assert_eq!(await_.result_type, CheckedType::I32);
+        assert_eq!(await_.resume_state, 1);
     }
 }

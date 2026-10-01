@@ -4987,6 +4987,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     place_argument_slot(&mut slots, *slot, value, &call.origin.span)?;
                 }
                 LoweredCallStep::Resource { resource } => {
+                    // Intrinsic resources are activation metadata, not hidden
+                    // ABI arguments. The intrinsic emitter reads the records.
+                    if matches!(call.target, LoweredCallableTarget::Intrinsic { .. }) {
+                        continue;
+                    }
                     self.ensure_callee_parts(&callee_value, &mut callee_parts)?;
                     hidden.push(self.emit_hidden_resource_argument(
                         owner,

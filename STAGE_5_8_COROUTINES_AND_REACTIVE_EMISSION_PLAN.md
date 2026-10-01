@@ -65,10 +65,10 @@ The lowered emitter is deterministic: plan order for frame cells and unwind drop
 | `type_of_symbol`, `type_needs_drop` (`ensure_coroutine_codes`) | frame cell types, unwind drops | `CoroutineFrameBinding { value_type, unwind_drop }` |
 | `active_type_substitutions` (pairs, `coro`) | concrete types | the body instance and the pair plan (already concrete) |
 | `task_result`, `wait_result` (`compile_coroutine_await`) | external await payloads | `LoweredAwaitKind::{Task, Wait}.result` |
-| `wait_result`, `concrete_expression_type`, `type_needs_drop` (`compile_completion_intrinsic`) | completion value type, orphan drop | the call's types (verify, Step 2) and the `CompletionOrphan` use |
+| `wait_result`, `concrete_expression_type`, `type_needs_drop` (`compile_completion_intrinsic`) | completion value type, orphan drop | `LoweredCall.runtime.completion_value_type` and the `CompletionOrphan` use |
 | `type_of_function`, `concrete_expression_type` (`compile_reaction`, `compile_batch`) | callback closure type | `LoweredReactiveCallback.function_type`, `ReactiveRunnerBody::Reaction` |
-| `concrete_expression_type` (`compile_scheduler_intrinsic`) | intrinsic argument types | call argument records (verify, Step 2) |
-| `is_tasks_type` (`coroutine_current_task_scope`) | finding the `Tasks` resource by type | the call's `resource_bindings` (verify, Step 2) |
+| `concrete_expression_type` (`compile_scheduler_intrinsic`) | intrinsic argument types | `LoweredCall.arguments[*].expected` and `runtime.coroutine` |
+| `is_tasks_type` (`coroutine_current_task_scope`) | finding the `Tasks` resource by type | `runtime.coroutine.tasks_resource` and the call's `resource_bindings` |
 | `is_signal_symbol`, `is_derived_symbol` | signal metadata, forced derived reads | symbol flags and `LoweredReactiveOperationKind` |
 
 ## Decisions Specific to 5.8
@@ -169,6 +169,26 @@ For each row of the type-query table marked "verify", show that the lowered reco
 - **Child awaits.** `LoweredAwaitKind::ChildCoroutine.plan` may be `None` ("only the checked effect/result parts are known"). Confirm that legacy's child await never needs the plan in that case, or record what it reads.
 
 Each added fact is recomputed per instance and checked by a validator, with a corruption test. **Gate:** the step notes list each type query and its record, and no "verify" entry remains open.
+
+**Step 2 notes (complete).** `LoweredCall::runtime` now records `LoweredRuntimeCallFacts`: a completion payload type and, for `spawn`/`block_on`, a `LoweredCoroutineActivation` with the concrete result type, ordered deferred-resource indices, and the `Tasks` resource index. These indices address the call's `resource_bindings`, whose uses name exact lexical providers and carry pass modes. Both ordinary and juxtaposed intrinsic calls retain the activation effect row. Instance cloning substitutes argument/signature types, rebinds the concrete row, rebuilds intrinsic resource steps when the row changes, and recomputes the facts. Program-arena and instance validators recompute and compare the records; the resource validators require the entire recorded effect row. Intrinsic resource steps are metadata and do not add hidden runtime ABI arguments.
+
+The query audit is closed:
+
+| Legacy query | Recorded source and validation |
+| --- | --- |
+| `type_of_symbol` / `type_needs_drop` for frame bindings | `CoroutineFrameBinding.value_type` / `unwind_drop`, re-expanded by the 4.5 pair validator |
+| `active_type_substitutions` for pairs and creation | concrete body instance, captures, and frame plan |
+| `task_result` / `wait_result` for external awaits | `LoweredAwaitKind::Task/Wait.result`, with checked `LoweredAwait.result_type` |
+| `wait_result` for completion creation and `concrete_expression_type` for resolver completion | `LoweredCall.runtime.completion_value_type`, recomputed after substitution and checked in both owner shapes |
+| `type_needs_drop` for a completion orphan | presence of the exact `CompletionOrphan` artifact use; the 4.4 scanner selects glue from the last argument's recorded expected type |
+| callback `type_of_function` / `concrete_expression_type` | `LoweredReactiveCallback.function_type`; `BodyCloner::clone_callback` substitutes it per instance, the body validator checks concreteness, and 4.5 re-expands runner plans from it |
+| scheduler `concrete_expression_type` / coroutine parts for `spawn` and `block_on` | `LoweredCall.arguments[*].expected` and `runtime.coroutine.result_type` / ordered deferred resources |
+| `is_tasks_type` for `spawn` | `runtime.coroutine.tasks_resource` indexes the recorded call binding, never an environment type search |
+| signal / derived predicates | lowered symbol flags and the explicit reactive operation |
+
+`yield_now` allocates only a header and records no ambient provider at creation: its `Tasks` requirement is deferred until activation/await and is already carried by that site's resource records. Scheduler creation, task-scope creation, pump, task queries/cancellation, and completion handle operations use their visible recorded arguments; legacy searches no ambient `Tasks` provider for those operations. Reaction/batch callback records and their instance substitution needed no new field. A child await with `plan = None` needs no missing fact: legacy reads the child's checked deferred row/result, stores the resource bundle, returns the child frame to the driver, and loads the pending result, reaching resume/cleanup only through header slots.
+
+Six new tests prove generic completion payloads become concrete at I32/U8 instantiations, IO versus pure coroutine activation rows and exact providers, corruption of completion payloads in both template and instance records, corruption of activation result/deferred/Tasks facts, missing intrinsic bindings, and a parameter child await with no body plan. The focused tests and all Contract 6 gates pass: nextest and `cargo test --workspace --quiet` each pass 1307 tests, both workspace checks pass, formatting/diff checks pass, legacy coroutine and lowered-feature hello-world LLVM/object/run paths pass, and the legacy IR sweep against the Step 1 deterministic binary reports `same` (one variant) over every compiling example and the actual game-loop fixture at two samples per binary (`macros.sta` remains rejected by both). The differential corpus is unchanged: **13935 fully emitted bodies compared, 74 stubs across 12 first-blocker families; 24 reached families**. No type-query verification entry remains open. Step 3 is next.
 
 ### Step 3: Shared coroutine and reactive helpers (Contract 7)
 

@@ -36,9 +36,12 @@ pub(crate) mod graph_validation;
 mod initializer_bindings;
 mod instance_body;
 mod instance_resolution;
+mod runtime_call_facts;
 mod runtime_requirements;
 mod structural_artifacts;
 mod worklist;
+
+pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
 
 // Stage 5.1/5.2 backend read view. `LoweredModule::program` returns this
 // type; Stage 5.2's `codegen::layout::LayoutContext` stores it so the shared
@@ -1106,6 +1109,8 @@ pub(crate) struct LoweredCall {
     /// from the concrete result type and validated there, so the emitter
     /// never searches the sum for them.
     pub buffer_pop: Option<LoweredOptionAlternatives>,
+    /// Concrete coroutine/task/completion inputs, recomputed per instance.
+    pub runtime: LoweredRuntimeCallFacts,
 }
 
 /// The `None` and `Some` alternative indices of an `Option` result sum.
@@ -7023,7 +7028,7 @@ impl LoweredProgram {
         if let Some(callee) = callee {
             steps.insert(0, LoweredCallStep::Callee { expression: callee });
         }
-        let resource_bindings = if route.passes_hidden_resources() {
+        let resource_bindings = if target.records_resources() {
             self.lower_call_resource_bindings(module, owner, &origin, &function_type.effects)?
         } else {
             // External, intrinsic, and constructor calls have no hidden
@@ -7044,6 +7049,13 @@ impl LoweredProgram {
         let buffer_pop =
             LoweredOptionAlternatives::for_call(&target, function_type.result.as_ref())
                 .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
+        let runtime = LoweredRuntimeCallFacts::for_call(
+            &target,
+            &arguments,
+            &function_type,
+            &self.semantic_ids,
+        )
+        .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
         let call_id = self.calls.push(LoweredCall {
             origin,
             target,
@@ -7061,6 +7073,7 @@ impl LoweredProgram {
             c_string_temporary,
             reactive,
             buffer_pop,
+            runtime,
         });
         Ok(LoweredExpressionKind::Call(call_id))
     }
@@ -7151,7 +7164,7 @@ impl LoweredProgram {
             steps.push(call_argument_step(index, index, entry.expression));
             arguments.push(entry);
         }
-        let resource_bindings = if intrinsic_call {
+        let resource_bindings = if !target.records_resources() {
             Vec::new()
         } else {
             self.lower_call_resource_bindings(module, owner, &origin, &function_type.effects)?
@@ -7169,6 +7182,13 @@ impl LoweredProgram {
         let buffer_pop =
             LoweredOptionAlternatives::for_call(&target, function_type.result.as_ref())
                 .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
+        let runtime = LoweredRuntimeCallFacts::for_call(
+            &target,
+            &arguments,
+            &function_type,
+            &self.semantic_ids,
+        )
+        .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
         let call_id = self.calls.push(LoweredCall {
             origin,
             target,
@@ -7186,6 +7206,7 @@ impl LoweredProgram {
             c_string_temporary: false,
             reactive,
             buffer_pop,
+            runtime,
         });
         Ok(LoweredExpressionKind::Call(call_id))
     }
@@ -8873,6 +8894,22 @@ impl LoweredProgram {
             (_, None) => {}
         }
 
+        if LoweredRuntimeCallFacts::for_call(
+            &call.target,
+            &call.arguments,
+            &call.function_type,
+            &self.semantic_ids,
+        )
+        .ok()
+        .as_ref()
+            != Some(&call.runtime)
+        {
+            diagnostics.push(Diagnostic::new(
+                call.origin.span.clone(),
+                "call runtime facts disagree with its checked types",
+            ));
+        }
+
         let expected_resources = &call.function_type.effects.resources;
         let mut bound_resources = Vec::with_capacity(call.resource_bindings.len());
         for binding in &call.resource_bindings {
@@ -8886,12 +8923,7 @@ impl LoweredProgram {
                 )),
             }
         }
-        let passes_hidden_resources = !matches!(
-            call.target,
-            LoweredCallableTarget::ExternalFunction { .. }
-                | LoweredCallableTarget::Intrinsic { .. }
-                | LoweredCallableTarget::Constructor { .. }
-        );
+        let passes_hidden_resources = call.target.records_resources();
         let agrees = if passes_hidden_resources {
             bound_resources.len() == expected_resources.len()
                 && bound_resources
