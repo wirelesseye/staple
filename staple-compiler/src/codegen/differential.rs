@@ -279,7 +279,7 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
 /// none of their families stubs anywhere in the corpus; each later substage
 /// appends itself when its gate closes.
 #[cfg(test)]
-const COMPLETED_SUBSTAGES: &[&str] = &["5.3", "5.4", "5.5", "5.6"];
+const COMPLETED_SUBSTAGES: &[&str] = &["5.3", "5.4", "5.5", "5.6", "5.7"];
 
 /// The substage that owns one diagnostic family, or `None` for a diagnostic
 /// that is not a construct family at all (an internal invariant the emitter
@@ -302,7 +302,7 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 42] = [
+static CORPUS: [DifferentialProgram; 46] = [
     must_run(inline("empty", "", "5.3")),
     must_run(inline(
         "integer_arithmetic",
@@ -342,7 +342,7 @@ static CORPUS: [DifferentialProgram; 42] = [
         ),
         "5.3",
     )),
-    inline(
+    must_run(inline(
         "census_structural_methods",
         concat!(
             "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
@@ -362,7 +362,7 @@ static CORPUS: [DifferentialProgram; 42] = [
             "let e = deref_mixed (Ref ((1 satisfies U8), 2))\n",
         ),
         "5.3",
-    ),
+    )),
     compile_only(inline(
         "census_cleanup",
         concat!(
@@ -807,7 +807,7 @@ static CORPUS: [DifferentialProgram; 42] = [
         ),
         &["sum_pair", "destructure", "nested"],
     )),
-    emits(
+    must_run(emits(
         inline(
             "places_assignment",
             concat!(
@@ -840,7 +840,7 @@ static CORPUS: [DifferentialProgram; 42] = [
             "5.5",
         ),
         &["places", "ref_place", "make_counter"],
-    ),
+    )),
     must_run(emits(
         inline(
             "coercions",
@@ -1231,6 +1231,116 @@ static CORPUS: [DifferentialProgram; 42] = [
         ),
         &["replace"],
     )),
+    // Stage 5.7: every structural body, formatting delegates, and cleanup.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "structural_debug",
+                r#"use std.cinterop.(CString, c_string)
+extern "c" { puts: CString -> I32 }
+type Held T = ctor (T)
+impl<T where Debug T> Debug (Held T) { def fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }
+def nested: ((I32, I32), (I32, I32)) -> String = pair => "${pair:?}"
+def named: (left: I32, right: I32) -> String = pair => "${pair:?}"
+def sum: (I32 | U8) -> String = value => "${value:?}"
+def generic: (Held I32, I32) -> String = pair => "${pair:?}"
+def template: I32 -> String = value => "display=${value} debug=${value:?}"
+puts (CString.from_string (nested ((1, 2), (3, 4))))
+puts (CString.from_string (named (5, 6)))
+puts (CString.from_string (sum (7 satisfies (I32 | U8))))
+puts (CString.from_string (sum ((8 satisfies U8) satisfies (I32 | U8))))
+puts (CString.from_string (generic (Held 9, 10)))
+puts (CString.from_string (template 11))
+def nested_sum: ((I32, I32) | U8) -> String = value => "${value:?}"
+puts (CString.from_string (nested_sum ((12, 13) satisfies ((I32, I32) | U8))))
+puts (CString.from_string (nested_sum ((14 satisfies U8) satisfies ((I32, I32) | U8))))
+"#,
+                "5.7",
+            ),
+            &[
+                "nested",
+                "named",
+                "sum",
+                "generic",
+                "template",
+                "nested_sum",
+            ],
+        ),
+        "((1, 2), (3, 4))\n(left: 5, right: 6)\n7\n8\n(9, 10)\ndisplay=11 debug=11\n(12, 13)\n14\n",
+    )),
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "structural_index_references",
+                r#"use std.cinterop.CString
+extern "c" { puts: CString -> I32 }
+type Row = ctor (I32, I32)
+impl Index Row USize I32 { def index = (row, position) => 7 }
+def mixed: (U8, I32) -> (I32 | U8) = pair => pair[1]
+def uniform: (I32, I32) -> I32 = pair => pair[0]
+def replace: (I32, I32) -> (I32, I32) = pair => { let mut own = pair; own[0] = 3; own }
+def ref_uniform: Ref (I32, I32) -> I32 = reference => reference[1]
+def ref_mixed: Ref (U8, I32) -> (I32 | U8) = reference => reference[0]
+def ref_row: Ref Row -> I32 = reference => reference[0]
+def ref_replace: move (Ref (I32, I32)) -> Ref (I32, I32) = move reference => { let mut own = reference; own[0] = 8; own }
+puts (CString.from_string "mixed=${mixed ((1 satisfies U8), 2):?} uniform=${uniform (4, 5)}")
+puts (CString.from_string "replace=${replace (1, 2):?}")
+puts (CString.from_string "refs=${ref_uniform (Ref (5, 6))} ${ref_mixed (Ref ((9 satisfies U8), 10)):?} ${ref_row (Ref (Row (1, 2)))}")
+let replaced = ref_replace (Ref (1, 2))
+puts (CString.from_string "ref_replace=${replaced[0]} ${replaced[1]}")
+"#,
+                "5.7",
+            ),
+            &[
+                "mixed",
+                "uniform",
+                "replace",
+                "ref_uniform",
+                "ref_mixed",
+                "ref_row",
+                "ref_replace",
+            ],
+        ),
+        "mixed=2 uniform=4\nreplace=(3, 2)\nrefs=6 9 7\nref_replace=8 2\n",
+    )),
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "structural_iterators",
+                r#"use std.cinterop.CString
+extern "c" { puts: CString -> I32 }
+def walk_mixed: (U8, I32) -> () = pair => { for item in pair { puts (CString.from_string "${item:?}") }; () }
+def walk_uniform: (I32, I32) -> () = pair => { for item in pair { puts (CString.from_string "${item}") }; () }
+walk_mixed ((1 satisfies U8), 2)
+walk_uniform (3, 4)
+"#,
+                "5.7",
+            ),
+            &["walk_mixed", "walk_uniform"],
+        ),
+        "1\n2\n3\n4\n",
+    )),
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "structural_mutation_drop",
+                r#"use std.cinterop.(CString, c_string)
+extern "c" { puts: CString -> I32 }
+type Tag = ctor CString
+impl Drop Tag { def drop = Tag text => { puts text; () } }
+def replace_owned: move (Tag, Tag) -> () = move pair => {
+    let mut own = pair
+    own[0] = Tag (c_string "replacement")
+    ()
+}
+replace_owned (Tag (c_string "old"), Tag (c_string "second"))
+"#,
+                "5.7",
+            ),
+            &["replace_owned"],
+        ),
+        "old\nsecond\nreplacement\n",
+    )),
 ];
 
 /// Extract every `define`d function body from one module's IR text, keyed by
@@ -1519,6 +1629,8 @@ mod tests {
     /// partial-mode report with stub totals per owning substage.
     #[test]
     fn stage_5_3_differential_harness_reports_and_matches_bodies() {
+        let mut structural_kinds = std::collections::HashSet::new();
+        let mut structural_bodies = std::collections::HashSet::new();
         let mut total_stubs = 0;
         let mut compared = 0;
         let mut histogram: HashMap<String, usize> = HashMap::new();
@@ -1526,6 +1638,29 @@ mod tests {
         for program in differential_corpus() {
             let (source, root) = program_source(program);
             let lowered = lower(&source, &root);
+            if program.substage == "5.7" {
+                for (_, artifact) in lowered.program().artifacts() {
+                    if let Some(crate::LoweredArtifactPlan::StructuralMethod(plan)) = &artifact.plan
+                    {
+                        structural_kinds.insert(plan.structural);
+                        use crate::StructuralBody;
+                        structural_bodies.insert(match &plan.body {
+                            StructuralBody::ProductDebug { .. } => "ProductDebug",
+                            StructuralBody::SumDebug { .. } => "SumDebug",
+                            StructuralBody::IndexSwitch { .. } => "IndexSwitch",
+                            StructuralBody::IndexLoad { .. } => "IndexLoad",
+                            StructuralBody::MutateReplace { .. } => "MutateReplace",
+                            StructuralBody::DerefIndexLoad { .. } => "DerefIndexLoad",
+                            StructuralBody::DerefDelegate { .. } => "DerefDelegate",
+                            StructuralBody::IntoIterator { .. } => "IntoIterator",
+                            StructuralBody::Next { .. } => "Next",
+                            StructuralBody::Unexpanded => {
+                                panic!("closed structural plan is unexpanded")
+                            }
+                        });
+                    }
+                }
+            }
             let context = Context::create();
             let legacy = crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(
                 |diagnostics| {
@@ -1566,6 +1701,35 @@ mod tests {
                 compare_fully_emitted_bodies(program.name, &lowered, &mapping, &legacy, &partial);
             assert_focus_emissions(program, &lowered, &partial, &compared_names);
             compared += compared_names.len();
+        }
+
+        use crate::StructuralTraitMethod;
+        for kind in [
+            StructuralTraitMethod::Debug,
+            StructuralTraitMethod::Index,
+            StructuralTraitMethod::MutateIndex,
+            StructuralTraitMethod::DerefIndex,
+            StructuralTraitMethod::DerefMutateIndex,
+            StructuralTraitMethod::IntoIterator,
+            StructuralTraitMethod::Iterator,
+        ] {
+            assert!(
+                structural_kinds.contains(&kind),
+                "5.7 corpus misses {kind:?}"
+            );
+        }
+        for body in [
+            "ProductDebug",
+            "SumDebug",
+            "IndexSwitch",
+            "IndexLoad",
+            "MutateReplace",
+            "DerefIndexLoad",
+            "DerefDelegate",
+            "IntoIterator",
+            "Next",
+        ] {
+            assert!(structural_bodies.contains(body), "5.7 corpus misses {body}");
         }
 
         // The zero-stub ratchet: a completed substage's families can never

@@ -30,6 +30,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
         let function = self.planned_function(&delegate.callee, span)?;
+        if function.get_type()
+            != self
+                .backend
+                .compile_closure_function_type(&delegate.callee_type)?
+        {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "planned Debug delegate ABI disagrees with its declaration",
+            ));
+        }
         self.backend
             .build_debug_delegate(function, value, formatter, name)
     }
@@ -303,7 +313,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .map_err(compiler_diagnostic)?;
                         (Some(reference), "mutate_index.deref")
                     }
-                    other => {
+                    other @ (crate::StructuralTraitMethod::Debug
+                    | crate::StructuralTraitMethod::Index
+                    | crate::StructuralTraitMethod::MutateIndex
+                    | crate::StructuralTraitMethod::IntoIterator
+                    | crate::StructuralTraitMethod::Iterator) => {
                         return Err(Diagnostic::new(
                             span.clone(),
                             format!("invalid dereference plan {other:?}"),

@@ -1810,7 +1810,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             // owned by a later substage, so strict emission reports it rather
             // than leaving an undefined declaration behind.
             LoweredArtifactPlan::DropGlue(_) => Ok(()),
-            other => Err(Diagnostic::new(
+            other @ (LoweredArtifactPlan::CoroutineCodes(_)
+            | LoweredArtifactPlan::ReactionRunner(_)
+            | LoweredArtifactPlan::UntilRunner(_)
+            | LoweredArtifactPlan::DerivedRunner(_)) => Err(Diagnostic::new(
                 artifact.origin.span.clone(),
                 format!(
                     "lowered emitter: {} is not implemented yet",
