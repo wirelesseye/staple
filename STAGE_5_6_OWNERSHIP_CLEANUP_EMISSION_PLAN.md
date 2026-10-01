@@ -149,6 +149,8 @@ Install the finalizers that are not yet installed:
 
 `RefConstruction`, `ClosureEnvironment`, and `ThunkArgumentEnvironment` were already installed in 5.4. Partial mode stops stubbing the finalizer families.
 
+**Step 5 notes (complete).** `emit_gc_finalizer_body` emits all four subkinds from their plans with legacy's names: `Payload` loads `finalizer.value` at the payload type and expands the plan's glue; `Cell` wraps the glue in `begin_conditional_cell_drop`/`end_conditional_cell_drop`; `ClosureEnvironment` builds the closure instance's own capture layout (`capture_field_type`, legacy `compile_capture_type`), loads `closure.finalizer.environment`, and expands each recorded `DroppedCapture.glue` in the stored reverse order; `Buffer` loads the length, loops `buffer.finalize.check`/`buffer.finalize.element`/`buffer.finalize.done`, loads each element through `buffer.finalize.slot`/`buffer.finalize.value`, and expands the element glue. The captured-cell `CellFinalizer` install landed in Step 4; the `BufferAllocation` install is Step 6's `BufferWithCapacity`. Partial mode now emits finalizer bodies instead of stubbing them, so the four finalizer families reach zero stubs. The differential harness compares 9918 fully emitted bodies (+17) with 387 stubs (-18). The full suite passes 1298 tests.
+
 ### Step 6: Buffers and `RefReplace`
 
 Port the nine buffer intrinsics through the Step 2 helpers, keeping legacy's traps, growth policy, and SSA names:

@@ -1796,8 +1796,199 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::ExternAdapter(plan) => {
                 self.emit_extern_adapter_body(ordinal, plan, &artifact.origin.span)
             }
+            LoweredArtifactPlan::GcFinalizer(plan) => {
+                self.emit_gc_finalizer_body(ordinal, plan, &artifact.origin.span)
+            }
             _ => Ok(()),
         }
+    }
+
+    /// Stage 5.6 Step 5: one `GcFinalizer` body, mirroring legacy
+    /// `ensure_gc_finalizer` (`Payload`), `ensure_cell_finalizer` (`Cell`),
+    /// `ensure_closure_finalizer` (`ClosureEnvironment`), and
+    /// `ensure_buffer_finalizer` (`Buffer`).
+    fn emit_gc_finalizer_body(
+        &mut self,
+        ordinal: ArtifactOrdinal,
+        plan: &GcFinalizerPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let function = self
+            .artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing finalizer declaration"))?;
+        let body = self
+            .backend
+            .enter_finalizer_function(function, span.clone())?;
+        match plan {
+            GcFinalizerPlan::Payload { value_type, glue } => {
+                let drop_plan = self.finalizer_glue(glue, span)?;
+                let payload_type = self.backend.compile_type(value_type)?;
+                let value = self
+                    .backend
+                    .builder
+                    .build_load(payload_type, body.payload, "finalizer.value")
+                    .map_err(compiler_diagnostic)?;
+                self.emit_drop_glue(value, drop_plan, span)?;
+            }
+            GcFinalizerPlan::Cell { value_type, glue } => {
+                let drop_plan = self.finalizer_glue(glue, span)?;
+                let llvm_type = self.backend.compile_type(value_type)?;
+                let blocks = self.backend.begin_conditional_cell_drop(
+                    body.payload,
+                    llvm_type,
+                    span.clone(),
+                )?;
+                self.emit_drop_glue(blocks.value, drop_plan, span)?;
+                self.backend.end_conditional_cell_drop(&blocks)?;
+            }
+            GcFinalizerPlan::ClosureEnvironment { closure, drops, .. } => {
+                let drops = drops.as_ref().ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "closure finalizer plan was never expanded")
+                })?;
+                // The environment layout is the closure instance's own capture
+                // layout (legacy's `compile_capture_type`).
+                let capture_body = self
+                    .view
+                    .instance(*closure)
+                    .and_then(|record| record.body.as_ref())
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "closure finalizer has no capture layout")
+                    })?;
+                let fields = capture_body
+                    .captures
+                    .iter()
+                    .map(|capture| self.capture_field_type(capture))
+                    .collect::<CodeGenerationResult<Vec<_>>>()?;
+                let environment_type = self.backend.capture_environment_type(&fields);
+                let environment = self
+                    .backend
+                    .builder
+                    .build_load(
+                        environment_type,
+                        body.payload,
+                        "closure.finalizer.environment",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_struct_value();
+                for capture in drops {
+                    let value = self
+                        .backend
+                        .builder
+                        .build_extract_value(
+                            environment,
+                            capture.index as u32,
+                            "closure.finalizer.capture",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    let drop_plan = self.planned_drop_glue(&capture.glue, span)?;
+                    self.emit_drop_glue(value, drop_plan, span)?;
+                }
+            }
+            GcFinalizerPlan::Buffer { element, glue } => {
+                let drop_plan = self.finalizer_glue(glue, span)?;
+                let llvm_element = self.backend.compile_type(element)?;
+                let header = self.backend.buffer_header_type(llvm_element);
+                let length = self.backend.build_buffer_length(
+                    body.payload,
+                    header,
+                    "buffer.length.slot",
+                    "buffer.length",
+                )?;
+                let index_slot = self
+                    .backend
+                    .builder
+                    .build_alloca(self.backend.size_type, "buffer.finalize.index")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(index_slot, self.backend.size_type.const_zero())
+                    .map_err(compiler_diagnostic)?;
+                let check = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.finalize.check");
+                let element_block = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.finalize.element");
+                let done = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.finalize.done");
+                self.backend
+                    .builder
+                    .build_unconditional_branch(check)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(check);
+                let index = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, index_slot, "buffer.finalize.index")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let remaining = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::ULT,
+                        index,
+                        length,
+                        "buffer.finalize.remaining",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_conditional_branch(remaining, element_block, done)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(element_block);
+                let data = self
+                    .backend
+                    .buffer_data_pointer(body.payload, llvm_element)?;
+                let (_, value) = self.backend.build_buffer_element_load(
+                    data,
+                    llvm_element,
+                    index,
+                    "buffer.finalize.slot",
+                    "buffer.finalize.value",
+                )?;
+                self.emit_drop_glue(value, drop_plan, span)?;
+                let next = self
+                    .backend
+                    .builder
+                    .build_int_add(
+                        index,
+                        self.backend.size_type.const_int(1, false),
+                        "buffer.finalize.next",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(index_slot, next)
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_unconditional_branch(check)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(done);
+            }
+        }
+        self.backend.finish_finalizer_function(&body)
+    }
+
+    /// The required expanded drop glue of a `Payload`/`Cell`/`Buffer`
+    /// finalizer plan.
+    fn finalizer_glue(
+        &self,
+        glue: &Option<PlannedArtifact>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<&'program DropGluePlan> {
+        let glue = glue.as_ref().ok_or_else(|| {
+            Diagnostic::new(span.clone(), "finalizer glue plan was never expanded")
+        })?;
+        self.planned_drop_glue(glue, span)
     }
 
     /// Strict: attempt every adapter body, collecting one diagnostic per
@@ -1808,6 +1999,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 artifact.plan,
                 Some(LoweredArtifactPlan::ConstructorAdapter(_))
                     | Some(LoweredArtifactPlan::ExternAdapter(_))
+                    | Some(LoweredArtifactPlan::GcFinalizer(_))
             ) {
                 continue;
             }
@@ -1825,7 +2017,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             };
             if !matches!(
                 plan,
-                LoweredArtifactPlan::ConstructorAdapter(_) | LoweredArtifactPlan::ExternAdapter(_)
+                LoweredArtifactPlan::ConstructorAdapter(_)
+                    | LoweredArtifactPlan::ExternAdapter(_)
+                    | LoweredArtifactPlan::GcFinalizer(_)
             ) {
                 continue;
             }
