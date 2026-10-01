@@ -2044,6 +2044,12 @@ impl<'a> BodyCloner<'a> {
             })
             .collect();
         call.result_type = self.ty(&call.result_type);
+        match super::LoweredOptionAlternatives::for_call(&call.target, &call.result_type) {
+            Ok(alternatives) => call.buffer_pop = alternatives,
+            Err(message) => self
+                .diagnostics
+                .push(Diagnostic::new(original.origin.span.clone(), message)),
+        }
         call.substitutions = self.substitutions(&call.substitutions);
         call.evidence = call
             .evidence
@@ -3084,6 +3090,7 @@ impl<'a> BodyCloner<'a> {
             evidence: None,
             c_string_temporary: false,
             reactive: None,
+            buffer_pop: None,
         })
     }
 
@@ -3764,6 +3771,17 @@ impl<'a> BodyValidator<'a> {
             "call function type",
         );
         self.check_concrete_type(&origin, &call.result_type, "call result type");
+        if super::LoweredOptionAlternatives::for_call(&call.target, &call.result_type)
+            .ok()
+            .flatten()
+            != call.buffer_pop
+        {
+            self.report(
+                origin.span.clone(),
+                "instance body Buffer.pop alternatives disagree with the concrete result type"
+                    .to_string(),
+            );
+        }
         if let Some(evidence) = &call.evidence {
             self.check_effects_of_evidence(&origin, evidence);
         }
@@ -5527,5 +5545,43 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    /// Stage 5.7 review: `Buffer.pop` records its `Option` alternatives per
+    /// concrete instance, and the instance validator rejects a corrupted
+    /// record, so the emitter never searches the sum itself.
+    #[test]
+    fn buffer_pop_alternatives_are_recorded_and_revalidated() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "use std.buffer.Buffer\n",
+            "def take: <T> mut Buffer T -> Option T = mut values => Buffer.pop values\n",
+            "let mut values: Buffer I32 = Buffer.with_capacity (1 satisfies USize)\n",
+            "let popped = take values\n",
+        ));
+        materialize(&mut program);
+        let mut recorded = 0;
+        for (_, instance) in program.instances.iter_mut() {
+            let Some(body) = instance.body.as_mut() else {
+                continue;
+            };
+            for (_, call) in body.calls.iter_mut() {
+                if let Some(alternatives) = call.buffer_pop {
+                    assert_ne!(alternatives.none, alternatives.some);
+                    call.buffer_pop = Some(super::super::LoweredOptionAlternatives {
+                        none: alternatives.some,
+                        some: alternatives.none,
+                    });
+                    recorded += 1;
+                }
+            }
+        }
+        assert!(recorded > 0, "the concrete `take` instance pops a buffer");
+        let diagnostics = program.validate_instance_bodies();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("Buffer.pop alternatives disagree")),
+            "{diagnostics:?}"
+        );
     }
 }

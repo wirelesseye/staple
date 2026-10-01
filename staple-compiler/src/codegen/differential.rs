@@ -63,6 +63,9 @@ pub struct DifferentialProgram {
     /// The exact stdout a `MustRun` program prints. The CLI harness asserts it
     /// under both emitters, so a defect mirrored by both cannot pass as parity.
     pub expected_stdout: Option<&'static str>,
+    /// A `MustRun` program that must end in an `llvm.trap` (killed by a
+    /// signal, so no exit code) under both emitters.
+    pub traps: bool,
 }
 
 const fn inline(
@@ -77,6 +80,7 @@ const fn inline(
         expectation: DifferentialExpectation::MayBeBlocked,
         emits: &[],
         expected_stdout: None,
+        traps: false,
     }
 }
 
@@ -92,6 +96,7 @@ const fn file(
         expectation: DifferentialExpectation::MayBeBlocked,
         emits: &[],
         expected_stdout: None,
+        traps: false,
     }
 }
 
@@ -105,6 +110,12 @@ const fn compile_only(mut program: DifferentialProgram) -> DifferentialProgram {
 /// under both emitters must never regress to blocked.
 const fn must_run(mut program: DifferentialProgram) -> DifferentialProgram {
     program.expectation = DifferentialExpectation::MustRun;
+    program
+}
+
+/// Requires a `MustRun` entry to end in a trap under both emitters.
+const fn expect_trap(mut program: DifferentialProgram) -> DifferentialProgram {
+    program.traps = true;
     program
 }
 
@@ -302,7 +313,7 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 46] = [
+static CORPUS: [DifferentialProgram; 49] = [
     must_run(inline("empty", "", "5.3")),
     must_run(inline(
         "integer_arithmetic",
@@ -1341,6 +1352,49 @@ replace_owned (Tag (c_string "old"), Tag (c_string "second"))
         ),
         "old\nsecond\nreplacement\n",
     )),
+    // Stage 5.7 review: runtime coverage for a droppable element replaced
+    // through a reference and for the structural bounds traps.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "structural_ref_mutation_drop",
+                r#"use std.cinterop.(CString, c_string)
+extern "c" { puts: CString -> I32 }
+type Tag = ctor CString
+impl Drop Tag { def drop = Tag text => { puts text; () } }
+def ref_mutate: move (Ref (Tag, Tag)) -> () = move reference => {
+    let mut own = reference
+    own[0] = Tag (c_string "ref replacement")
+    ()
+}
+ref_mutate (Ref (Tag (c_string "ref old"), Tag (c_string "ref second")))
+"#,
+                "5.7",
+            ),
+            &["ref_mutate"],
+        ),
+        "ref old\n",
+    )),
+    must_run(expect_trap(emits(
+        inline(
+            "structural_switch_trap",
+            r#"def at: ((U8, I32), USize) -> (I32 | U8) = (pair, position) => pair[position]
+let value = at (((1 satisfies U8), 2), (5 satisfies USize))
+"#,
+            "5.7",
+        ),
+        &["at"],
+    ))),
+    must_run(expect_trap(emits(
+        inline(
+            "structural_deref_trap",
+            r#"def at: (Ref (I32, I32), USize) -> I32 = (reference, position) => reference[position]
+let value = at (Ref (1, 2), (5 satisfies USize))
+"#,
+            "5.7",
+        ),
+        &["at"],
+    ))),
 ];
 
 /// Extract every `define`d function body from one module's IR text, keyed by

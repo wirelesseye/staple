@@ -477,6 +477,7 @@ impl LoweredArtifactPlan {
                         for SumAlternative {
                             index: _,
                             alternative,
+                            coercion_plan: _,
                         } in [done, yield_]
                         {
                             visit(Value(alternative));
@@ -971,6 +972,9 @@ pub(crate) struct SumAlternative {
     pub index: usize,
     /// The alternative type (a `Distinct` representation).
     pub alternative: CheckedType,
+    /// The concrete injection of `alternative` into the result sum, computed
+    /// and revalidated during expansion like `IndexedElement::coercion_plan`.
+    pub coercion_plan: super::LoweredCoercionPlan,
 }
 
 /// The plan shape of one drop-glue body: the concrete value type and the

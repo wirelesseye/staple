@@ -4596,7 +4596,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     "heterogeneous product has an invalid representation",
                 ));
             };
-            let (output_type, output_slot, merge, cases) = self.backend.begin_structural_index(
+            let ir::StructuralIndexBlocks {
+                output_type,
+                slot: output_slot,
+                merge,
+                cases,
+            } = self.backend.begin_structural_index(
                 *position,
                 product.elements.len(),
                 output,
@@ -4959,7 +4964,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let product_value = *product_value;
         let cursor = *cursor;
 
-        let (result_type, result_slot, done_block, dispatch_block, unreachable_block, merge) = self
+        let ir::StructuralNextBlocks {
+            result_type,
+            slot: result_slot,
+            done: done_block,
+            dispatch: dispatch_block,
+            unreachable: unreachable_block,
+            merge,
+        } = self
             .backend
             .begin_structural_next(cursor, product.elements.len(), result)?;
 

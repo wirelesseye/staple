@@ -1331,12 +1331,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         length: usize,
         output: &crate::CheckedType,
         span: Span,
-    ) -> CodeGenerationResult<(
-        BasicTypeEnum<'context>,
-        PointerValue<'context>,
-        BasicBlock<'context>,
-        Vec<(IntValue<'context>, BasicBlock<'context>)>,
-    )> {
+    ) -> CodeGenerationResult<StructuralIndexBlocks<'context>> {
         let llvm_length = self.size_type.const_int(length as u64, false);
         let out = self
             .builder
@@ -1360,7 +1355,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .builder
             .get_insert_block()
             .and_then(|block| block.get_parent())
-            .expect("structural index is in a function");
+            .ok_or_else(|| {
+                Diagnostic::new(Span::Compiler, "structural index is not in a function")
+            })?;
         let merge = self.context.append_basic_block(function, "index.done");
         let cases = (0..length)
             .map(|index| {
@@ -1373,7 +1370,12 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.builder
             .build_switch(position, merge, &cases)
             .map_err(compiler_diagnostic)?;
-        Ok((output_type, output_slot, merge, cases))
+        Ok(StructuralIndexBlocks {
+            output_type,
+            slot: output_slot,
+            merge,
+            cases,
+        })
     }
 
     /// Rebuild a source product and pair it with its initial cursor.
@@ -1393,14 +1395,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         cursor: IntValue<'context>,
         length: usize,
         result: &crate::CheckedType,
-    ) -> CodeGenerationResult<(
-        BasicTypeEnum<'context>,
-        PointerValue<'context>,
-        BasicBlock<'context>,
-        BasicBlock<'context>,
-        BasicBlock<'context>,
-        BasicBlock<'context>,
-    )> {
+    ) -> CodeGenerationResult<StructuralNextBlocks<'context>> {
         let llvm_length = self.size_type.const_int(length as u64, false);
         let in_range = self
             .builder
@@ -1416,7 +1411,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .builder
             .get_insert_block()
             .and_then(|block| block.get_parent())
-            .expect("structural next is in a function");
+            .ok_or_else(|| {
+                Diagnostic::new(Span::Compiler, "structural next is not in a function")
+            })?;
         let done_block = self.context.append_basic_block(function, "next.done");
         let dispatch_block = self.context.append_basic_block(function, "next.dispatch");
         let unreachable_block = self
@@ -1434,14 +1431,14 @@ impl<'program, 'context> Backend<'program, 'context> {
             .build_conditional_branch(in_range, dispatch_block, done_block)
             .map_err(compiler_diagnostic)?;
 
-        Ok((
+        Ok(StructuralNextBlocks {
             result_type,
-            result_slot,
-            done_block,
-            dispatch_block,
-            unreachable_block,
+            slot: result_slot,
+            done: done_block,
+            dispatch: dispatch_block,
+            unreachable: unreachable_block,
             merge,
-        ))
+        })
     }
 
     /// Dispatch to one recorded product element; impossible cursors are unreachable.
@@ -1451,9 +1448,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         length: usize,
         unreachable_block: BasicBlock<'context>,
     ) -> CodeGenerationResult<Vec<(IntValue<'context>, BasicBlock<'context>)>> {
-        let function = unreachable_block
-            .get_parent()
-            .expect("structural next is in a function");
+        let function = unreachable_block.get_parent().ok_or_else(|| {
+            Diagnostic::new(Span::Compiler, "structural next is not in a function")
+        })?;
         let cases = (0..length)
             .map(|index| {
                 (
@@ -2060,6 +2057,26 @@ pub(crate) struct SumStorageSlot<'context> {
     pub llvm_type: inkwell::types::StructType<'context>,
     pub slot: inkwell::values::PointerValue<'context>,
     pub storage: super::layout::SumStorage<'context>,
+}
+
+/// Stage 5.7: [`Backend::begin_structural_index`]'s output: the result slot
+/// and its type, the merge block, and one `(position, block)` case per element.
+pub(crate) struct StructuralIndexBlocks<'context> {
+    pub output_type: BasicTypeEnum<'context>,
+    pub slot: PointerValue<'context>,
+    pub merge: BasicBlock<'context>,
+    pub cases: Vec<(IntValue<'context>, BasicBlock<'context>)>,
+}
+
+/// Stage 5.7: [`Backend::begin_structural_next`]'s output: the result slot and
+/// its type, and the `Done`, dispatch, unreachable, and merge blocks.
+pub(crate) struct StructuralNextBlocks<'context> {
+    pub result_type: BasicTypeEnum<'context>,
+    pub slot: PointerValue<'context>,
+    pub done: BasicBlock<'context>,
+    pub dispatch: BasicBlock<'context>,
+    pub unreachable: BasicBlock<'context>,
+    pub merge: BasicBlock<'context>,
 }
 
 /// Stage 5.6 Step 2: the state [`Backend::begin_conditional_cell_drop`] opened:

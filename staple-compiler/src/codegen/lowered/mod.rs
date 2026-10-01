@@ -6998,20 +6998,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "Buffer.pop must return Option T",
             ));
         };
-        let none_index = option
-            .alternatives
-            .iter()
-            .position(|alternative| {
-                matches!(alternative, CheckedType::Distinct { name, .. } if name.ends_with("None"))
-            })
-            .ok_or_else(|| Diagnostic::new(span.clone(), "Option is missing None"))?;
-        let some_index = option
-            .alternatives
-            .iter()
-            .position(|alternative| {
-                matches!(alternative, CheckedType::Distinct { name, .. } if name.ends_with("Some"))
-            })
-            .ok_or_else(|| Diagnostic::new(span.clone(), "Option is missing Some"))?;
+        // Lowering records the `None`/`Some` alternatives per concrete
+        // instance (O1); the emitter never searches the sum for them.
+        let crate::LoweredOptionAlternatives {
+            none: none_index,
+            some: some_index,
+        } = call.buffer_pop.ok_or_else(|| {
+            Diagnostic::new(
+                span.clone(),
+                "Buffer.pop has no recorded Option alternatives",
+            )
+        })?;
         let llvm_element = self.backend.compile_type(&element)?;
         let header = self.backend.buffer_header_type(llvm_element);
         self.backend

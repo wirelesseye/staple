@@ -858,20 +858,34 @@ fn structural_next_body(
         .enumerate()
         .map(|(index, element)| indexed_element(index, &element.value_type, &item, origin))
         .collect::<Result<Vec<_>, _>>()?;
+    let done = sum_alternative(&sum, done, &result, origin)?;
+    let yield_ = sum_alternative(&sum, yield_, &result, origin)?;
     Ok(StructuralBody::Next {
         product: CheckedType::Product(product.clone()),
         iterator,
         item,
         elements,
         result,
-        done: SumAlternative {
-            index: done,
-            alternative: sum.alternatives[done].clone(),
-        },
-        yield_: SumAlternative {
-            index: yield_,
-            alternative: sum.alternatives[yield_].clone(),
-        },
+        done,
+        yield_,
+    })
+}
+
+/// One resolved `IterStep` alternative with its recorded injection into the
+/// result sum, so the emitter never re-plans the coercion.
+fn sum_alternative(
+    sum: &crate::CheckedSumType,
+    index: usize,
+    result: &CheckedType,
+    origin: &Origin,
+) -> Result<SumAlternative, Diagnostic> {
+    let alternative = sum.alternatives[index].clone();
+    let coercion_plan = super::LoweredCoercionPlan::plan(&alternative, result)
+        .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
+    Ok(SumAlternative {
+        index,
+        alternative,
+        coercion_plan,
     })
 }
 
@@ -1114,6 +1128,46 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Stage 5.7 review: the iterator's `Done`/`Yield` injections are recorded
+    /// plans, revalidated by re-expansion like the element coercions.
+    #[test]
+    fn iterator_step_injections_are_recorded_and_revalidated() {
+        let (_, mut lowered) = lower(concat!(
+            "def walk: (I32, I32) -> I32 = pair => { for item in pair { () }; 0 }\n",
+            "let walked = walk (1, 2)\n",
+        ));
+        let mut changed = false;
+        for (_, artifact) in lowered.program.artifacts.iter_mut() {
+            if let Some(LoweredArtifactPlan::StructuralMethod(plan)) = &mut artifact.plan
+                && let StructuralBody::Next { done, yield_, .. } = &mut plan.body
+            {
+                for step in [&*done, &*yield_] {
+                    assert!(
+                        matches!(
+                            step.coercion_plan,
+                            super::super::LoweredCoercionPlan::SumInject { alternative, .. }
+                                if alternative == step.index
+                        ),
+                        "{step:?}"
+                    );
+                }
+                done.coercion_plan = super::super::LoweredCoercionPlan::Identity;
+                changed = true;
+                break;
+            }
+        }
+        assert!(changed);
+        let diagnostics = lowered
+            .program
+            .validate_artifact_closure(&super::super::artifact_closure::ProductionHooks);
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("re-expanded to a different plan")),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

@@ -2,7 +2,25 @@
 use super::*;
 use crate::{DebugDelegate, DebugStep, PlannedCallee, StructuralBody, StructuralMethodPlan};
 
+/// The structural method's first recorded argument type (its target).
+fn structural_argument<'a>(
+    plan: &'a StructuralMethodPlan,
+    span: &staple_syntax::Span,
+) -> CodeGenerationResult<&'a CheckedType> {
+    plan.arguments
+        .first()
+        .ok_or_else(|| Diagnostic::new(span.clone(), "structural plan has no target argument"))
+}
+
 impl<'program, 'context> LoweredEmitter<'program, 'context> {
+    fn structural_unit(
+        &self,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        value_as_basic(self.backend.unit_value())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "invalid unit value"))
+    }
+
     fn planned_function(
         &self,
         callee: &PlannedCallee,
@@ -44,7 +62,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_debug_delegate(function, value, formatter, name)
     }
 
-    /// Inject through the recorded result index; no representation search is needed.
+    /// Inject through the alternative's recorded coercion plan; the emitter
+    /// never plans the injection itself.
     fn emit_structural_alternative(
         &mut self,
         value: BasicValueEnum<'context>,
@@ -52,15 +71,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         result: &CheckedType,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<BasicValueEnum<'context>> {
-        let plan = crate::LoweredCoercionPlan::SumInject {
-            alternative: alternative.index,
-            payload: Box::new(crate::LoweredCoercionPlan::Identity),
-        };
         value_as_basic(self.emit_coercion(
             value.as_any_value_enum(),
             &alternative.alternative,
             result,
-            &plan,
+            &alternative.coercion_plan,
             span,
         )?)
         .ok_or_else(|| Diagnostic::new(span.clone(), "iterator step is not first-class"))
@@ -122,7 +137,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         }
                     }
                 }
-                value_as_basic(self.backend.unit_value()).unwrap()
+                self.structural_unit(span)?
             }
             StructuralBody::SumDebug { alternatives } => {
                 let [BasicValueEnum::StructValue(value), formatter] = values.as_slice() else {
@@ -131,7 +146,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "invalid structural Debug arguments",
                     ));
                 };
-                let CheckedType::Sum(sum) = &plan.arguments[0] else {
+                let Some(CheckedType::Sum(sum)) = plan.arguments.first() else {
                     return Err(Diagnostic::new(
                         span.clone(),
                         "invalid structural Debug sum",
@@ -152,7 +167,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic)?;
                 }
                 self.backend.builder.position_at_end(merge);
-                value_as_basic(self.backend.unit_value()).unwrap()
+                self.structural_unit(span)?
             }
             StructuralBody::IndexSwitch { elements, output } => {
                 let [
@@ -165,7 +180,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "invalid structural Index arguments",
                     ));
                 };
-                let (output_type, slot, merge, cases) = self.backend.begin_structural_index(
+                let crate::codegen::ir::StructuralIndexBlocks {
+                    output_type,
+                    slot,
+                    merge,
+                    cases,
+                } = self.backend.begin_structural_index(
                     *position,
                     elements.len(),
                     output,
@@ -216,7 +236,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .backend
                     .builder
                     .build_alloca(
-                        self.backend.compile_type(&plan.arguments[0])?,
+                        self.backend
+                            .compile_type(structural_argument(plan, span)?)?,
                         "index.product",
                     )
                     .map_err(compiler_diagnostic)?;
@@ -287,13 +308,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_store(slot, *replacement)
                     .map_err(compiler_diagnostic)?;
-                value_as_basic(self.backend.unit_value()).unwrap()
+                self.structural_unit(span)?
             }
             StructuralBody::DerefDelegate { payload, delegate } => {
                 let mut values = values;
+                let Some(BasicValueEnum::PointerValue(target)) = values.first().copied() else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "invalid structural dereference arguments",
+                    ));
+                };
                 let (pointer, name) = match plan.structural {
                     crate::StructuralTraitMethod::DerefIndex => {
-                        let pointer = values[0].into_pointer_value();
+                        let pointer = target;
                         values[0] = self
                             .backend
                             .builder
@@ -306,8 +333,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .backend
                             .builder
                             .build_load(
-                                self.backend.compile_type(&plan.arguments[0])?,
-                                values[0].into_pointer_value(),
+                                self.backend
+                                    .compile_type(structural_argument(plan, span)?)?,
+                                target,
                                 "mutation.target",
                             )
                             .map_err(compiler_diagnostic)?;
@@ -355,13 +383,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 yield_,
                 ..
             } => {
-                let [product, BasicValueEnum::IntValue(cursor)] = values.as_slice() else {
+                let [
+                    product @ BasicValueEnum::StructValue(product_value),
+                    BasicValueEnum::IntValue(cursor),
+                ] = values.as_slice()
+                else {
                     return Err(Diagnostic::new(
                         span.clone(),
                         "invalid structural Iterator arguments",
                     ));
                 };
-                let (result_type, slot, done_block, dispatch, unreachable, merge) = self
+                let crate::codegen::ir::StructuralNextBlocks {
+                    result_type,
+                    slot,
+                    done: done_block,
+                    dispatch,
+                    unreachable,
+                    merge,
+                } = self
                     .backend
                     .begin_structural_next(*cursor, elements.len(), result)?;
                 self.backend.builder.position_at_end(done_block);
@@ -387,11 +426,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let field = self
                         .backend
                         .builder
-                        .build_extract_value(
-                            product.into_struct_value(),
-                            element.index as u32,
-                            "next.field",
-                        )
+                        .build_extract_value(*product_value, element.index as u32, "next.field")
                         .map_err(compiler_diagnostic)?;
                     let field = self.emit_coercion(
                         field.as_any_value_enum(),

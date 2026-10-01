@@ -1102,6 +1102,53 @@ pub(crate) struct LoweredCall {
     /// The reactive operation this intrinsic call performs (`reactive_scope`,
     /// `reaction`, `batch`, `until`, `snapshot`).
     pub reactive: Option<LoweredReactiveOperationId>,
+    /// `Buffer.pop`'s `Option` result alternatives. Recomputed per instance
+    /// from the concrete result type and validated there, so the emitter
+    /// never searches the sum for them.
+    pub buffer_pop: Option<LoweredOptionAlternatives>,
+}
+
+/// The `None` and `Some` alternative indices of an `Option` result sum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LoweredOptionAlternatives {
+    pub none: usize,
+    pub some: usize,
+}
+
+impl LoweredOptionAlternatives {
+    /// The alternatives of `Buffer.pop`'s result when `target` is that
+    /// intrinsic, with legacy `compile_buffer_pop`'s rule (the `Distinct`
+    /// alternatives named `None` and `Some`); `None` for any other target.
+    pub(crate) fn for_call(
+        target: &LoweredCallableTarget,
+        result: &CheckedType,
+    ) -> Result<Option<Self>, String> {
+        if !matches!(
+            target,
+            LoweredCallableTarget::Intrinsic {
+                intrinsic: IntrinsicFunction::BufferPop,
+                ..
+            }
+        ) {
+            return Ok(None);
+        }
+        let CheckedType::Sum(option) = result else {
+            return Err("Buffer.pop must return Option T".to_string());
+        };
+        let find = |suffix: &str| {
+            option
+                .alternatives
+                .iter()
+                .position(|alternative| {
+                    matches!(alternative, CheckedType::Distinct { name, .. } if name.ends_with(suffix))
+                })
+                .ok_or_else(|| format!("Option is missing {suffix}"))
+        };
+        Ok(Some(Self {
+            none: find("None")?,
+            some: find("Some")?,
+        }))
+    }
 }
 
 /// A first-class callable value with its explicit target and construction
@@ -6994,6 +7041,9 @@ impl LoweredProgram {
             }
             _ => None,
         };
+        let buffer_pop =
+            LoweredOptionAlternatives::for_call(&target, function_type.result.as_ref())
+                .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
         let call_id = self.calls.push(LoweredCall {
             origin,
             target,
@@ -7010,6 +7060,7 @@ impl LoweredProgram {
             evidence,
             c_string_temporary,
             reactive,
+            buffer_pop,
         });
         Ok(LoweredExpressionKind::Call(call_id))
     }
@@ -7115,6 +7166,9 @@ impl LoweredProgram {
             }
             _ => None,
         };
+        let buffer_pop =
+            LoweredOptionAlternatives::for_call(&target, function_type.result.as_ref())
+                .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
         let call_id = self.calls.push(LoweredCall {
             origin,
             target,
@@ -7131,6 +7185,7 @@ impl LoweredProgram {
             evidence: None,
             c_string_temporary: false,
             reactive,
+            buffer_pop,
         });
         Ok(LoweredExpressionKind::Call(call_id))
     }

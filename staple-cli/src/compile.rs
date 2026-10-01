@@ -4648,6 +4648,13 @@ mod tests {
                     "`{}` behaves differently under the lowered emitter",
                     program.name
                 );
+                if program.traps {
+                    assert_eq!(
+                        legacy.0, None,
+                        "`{}` must end in a trap under both emitters",
+                        program.name
+                    );
+                }
                 if let Some(expected) = program.expected_stdout {
                     assert_eq!(
                         legacy.1, expected,

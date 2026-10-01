@@ -19,7 +19,12 @@ impl<'program, 'context> Backend<'program, 'context> {
         function_type: &CheckedFunctionType,
     ) -> CodeGenerationResult<Vec<inkwell::values::BasicValueEnum<'context>>> {
         let parameters = function.get_params();
-        let raw_values = &parameters[1..];
+        let raw_values = parameters.get(1..).ok_or_else(|| {
+            Diagnostic::new(
+                Span::Compiler,
+                "structural method has no environment parameter",
+            )
+        })?;
         let value_types = flattened_parameter_types(&function_type.parameter);
         let indirect_mask = self.indirect_parameter_mask(function_type);
         let mutation_mask = mutation_parameter_mask(value_types.len(), &function_type.mutations);
