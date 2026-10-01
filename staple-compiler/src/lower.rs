@@ -1529,8 +1529,91 @@ pub(crate) struct LoweredIndex {
     pub base_place: Option<PlaceId>,
     /// The index operand's place when it has one.
     pub index_place: Option<PlaceId>,
+    /// Stage 5.5 review: how the `Index` call passes its operands and which
+    /// operand temporaries it drops afterwards, so the emitter never derives
+    /// a pass mode or a cleanup from the operand types (Contract 1).
+    pub operands: LoweredIndexOperands,
     /// The single validated evidence recipe for the `Index` dispatch.
     pub evidence: TraitEvidence,
+}
+
+/// The operand passing and cleanup facts of one `Index` call, mirroring legacy
+/// `compile_effect_arguments` over the `(base, index)` product and
+/// `drop_mutation_temporaries` after the call. Indexed by the method's
+/// flattened parameters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LoweredIndexOperands {
+    /// The parameter is passed by address (a place pointer or a temporary).
+    pub indirect: Vec<bool>,
+    /// A mutation operand without a place is materialized into a temporary
+    /// that is dropped after the call.
+    pub drops_after_call: Vec<bool>,
+    /// The whole-argument mutation temporary is dropped after the call.
+    pub whole_drops_after_call: bool,
+}
+
+impl LoweredIndexOperands {
+    /// Legacy's decisions for one `Index` call: a parameter is indirect when
+    /// it is mutated or, unless moved, not `Copy` (for the two-operand shape,
+    /// judged on the actual operand type); a mutation operand with no place
+    /// gets a temporary dropped when its parameter type needs drop; a whole
+    /// mutation materializes the product, dropped when the product needs drop.
+    pub(crate) fn compute(
+        method_type: &CheckedFunctionType,
+        operand_types: [&CheckedType; 2],
+        operand_places: [bool; 2],
+        whole_temporary: bool,
+        is_copy: impl Fn(&CheckedType) -> bool,
+        needs_drop: impl Fn(&CheckedType) -> bool,
+    ) -> Self {
+        let types = match method_type.parameter.as_ref() {
+            CheckedType::Product(product) => product
+                .elements
+                .iter()
+                .map(|element| &element.value_type)
+                .collect::<Vec<_>>(),
+            other => vec![other],
+        };
+        let mask = |mutations: &[CheckedMutation]| {
+            let whole = mutations.contains(&CheckedMutation::Whole);
+            (0..types.len())
+                .map(|index| whole || mutations.contains(&CheckedMutation::Element(index)))
+                .collect::<Vec<_>>()
+        };
+        let mutation = mask(&method_type.mutations);
+        let moves = mask(&method_type.moves);
+        let mut indirect = types
+            .iter()
+            .enumerate()
+            .map(|(index, value_type)| mutation[index] || (!moves[index] && !is_copy(value_type)))
+            .collect::<Vec<_>>();
+        if types.len() == 2 {
+            for (element, actual) in operand_types.into_iter().enumerate() {
+                if !mutation[element] && !moves[element] {
+                    indirect[element] = !is_copy(actual);
+                }
+            }
+        }
+        let any_indirect = indirect.iter().any(|indirect| *indirect);
+        let whole_drops_after_call =
+            any_indirect && whole_temporary && needs_drop(&method_type.parameter);
+        let drops_after_call = (0..types.len())
+            .map(|element| {
+                any_indirect
+                    && !whole_temporary
+                    && element < 2
+                    && indirect[element]
+                    && mutation[element]
+                    && !operand_places[element]
+                    && needs_drop(types[element])
+            })
+            .collect();
+        Self {
+            indirect,
+            drops_after_call,
+            whole_drops_after_call,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2166,6 +2249,30 @@ pub(crate) struct LoweredPatternBindingItem {
     /// `coerce_sum_value` path). `None` when the source is returned unchanged
     /// or extracted as a residual variant.
     pub propagation_plan: Option<LoweredCoercionPlan>,
+    /// Stage 5.5 review (E1): the source alternative returned as the failure
+    /// value when the propagated result is a single, non-sum residual variant
+    /// (`compile_propagating_binding`'s `extract_sum_alternative` path).
+    pub propagation_residual: Option<usize>,
+}
+
+impl LoweredPatternBindingItem {
+    /// The residual failure alternative of one propagation: the source sum's
+    /// alternative equal to a non-sum result. `None` when the source is
+    /// returned unchanged or widened through a coercion plan.
+    pub(crate) fn residual_alternative(propagation: &CheckedPropagation) -> Option<usize> {
+        if propagation.source == propagation.result
+            || matches!(propagation.result, CheckedType::Sum(_))
+        {
+            return None;
+        }
+        let CheckedType::Sum(source) = &propagation.source else {
+            return None;
+        };
+        source
+            .alternatives
+            .iter()
+            .position(|alternative| alternative == &propagation.result)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2180,6 +2287,10 @@ pub(crate) struct LoweredAssignmentItem {
     pub initialization_symbol: Option<SymbolId>,
     /// Whether the place's previous value must be dropped before the store.
     pub drop_previous: bool,
+    /// Stage 5.5 review: an indexed (`MutateIndex`) assignment whose base has
+    /// no place materializes it into a temporary that legacy
+    /// `drop_mutation_temporaries` drops after the call when it needs drop.
+    pub drops_base_temporary: bool,
     /// The signal write notification this assignment performs, when the place
     /// is rooted at a signal symbol.
     pub signal_notify: Option<LoweredReactiveOperationId>,
@@ -3530,12 +3641,16 @@ impl LoweredProgram {
             .then(|| LoweredCoercionPlan::plan(&propagation.source, &propagation.result).ok())
             .flatten()
         });
+        let propagation_residual = propagation
+            .as_ref()
+            .and_then(LoweredPatternBindingItem::residual_alternative);
         Ok(LoweredPatternBindingItem {
             pattern,
             value,
             propagating,
             propagation,
             propagation_plan,
+            propagation_residual,
         })
     }
 
@@ -3561,6 +3676,9 @@ impl LoweredProgram {
                 span: assignment.syntax.span.clone(),
             };
             let evidence = Some(self.evidence_for_dispatch(module, owner, &origin, dispatch)?);
+            let drops_base_temporary = self
+                .indexed_base_temporary_type(target)
+                .is_some_and(|base_type| module.type_needs_drop(&base_type));
             return Ok(LoweredAssignmentItem {
                 target,
                 value,
@@ -3568,6 +3686,7 @@ impl LoweredProgram {
                 evidence,
                 initialization_symbol: None,
                 drop_previous: false,
+                drops_base_temporary,
                 signal_notify: None,
             });
         }
@@ -3597,8 +3716,19 @@ impl LoweredProgram {
             evidence: None,
             initialization_symbol,
             drop_previous: module.type_needs_drop(&target_type),
+            drops_base_temporary: false,
             signal_notify,
         })
+    }
+
+    /// The value type of an indexed assignment target's base when the base is
+    /// a materialized temporary (no source place), else `None`.
+    pub(crate) fn indexed_base_temporary_type(&self, target: PlaceId) -> Option<CheckedType> {
+        let LoweredPlaceKind::Indexed { base, .. } = &self.places.get(target)?.kind else {
+            return None;
+        };
+        let base = self.places.get(*base)?;
+        matches!(base.kind, LoweredPlaceKind::Temporary { .. }).then(|| base.value_type.clone())
     }
 
     /// Builds the evidence recipe for a checked dispatch whose owning trait is
@@ -5776,6 +5906,29 @@ impl LoweredProgram {
             },
             &dispatch,
         )?;
+        let operands = match &method_type {
+            Some(method_type) => {
+                let base_type = self
+                    .expressions
+                    .get(base)
+                    .map(|expression| expression.value_type.clone())
+                    .unwrap_or(CheckedType::Error);
+                let position_type = self
+                    .expressions
+                    .get(position)
+                    .map(|expression| expression.value_type.clone())
+                    .unwrap_or(CheckedType::Error);
+                LoweredIndexOperands::compute(
+                    method_type,
+                    [&base_type, &position_type],
+                    [base_place.is_some(), index_place.is_some()],
+                    whole_temporary,
+                    |value_type| module.is_copy_in_function(value_type, None),
+                    |value_type| module.type_needs_drop(value_type),
+                )
+            }
+            None => LoweredIndexOperands::default(),
+        };
         Ok(LoweredIndex {
             base,
             index: position,
@@ -5788,6 +5941,7 @@ impl LoweredProgram {
             index_temporary,
             base_place,
             index_place,
+            operands,
             evidence,
         })
     }
@@ -9462,6 +9616,20 @@ impl LoweredProgram {
                                 ));
                             }
                         }
+                        // The recorded operand facts cover exactly the
+                        // method's flattened parameters.
+                        let parameters = match method_type.parameter.as_ref() {
+                            CheckedType::Product(product) => product.elements.len(),
+                            _ => 1,
+                        };
+                        if index.operands.indirect.len() != parameters
+                            || index.operands.drops_after_call.len() != parameters
+                        {
+                            diagnostics.push(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                "index operand facts do not cover the method's parameters",
+                            ));
+                        }
                     }
                     if self
                         .trait_methods
@@ -9873,6 +10041,15 @@ impl LoweredProgram {
                                 "propagation coercion has no emission plan",
                             )),
                             _ => {}
+                        }
+                        if !unresolved
+                            && binding.propagation_residual
+                                != LoweredPatternBindingItem::residual_alternative(propagation)
+                        {
+                            diagnostics.push(Diagnostic::new(
+                                item.origin.span.clone(),
+                                "propagation residual alternative disagrees with its checked types",
+                            ));
                         }
                     }
                 }
@@ -22070,6 +22247,7 @@ mod tests {
                 evidence: None,
                 initialization_symbol: None,
                 drop_previous: false,
+                drops_base_temporary: false,
                 signal_notify: None,
             });
         let diagnostics = program.validate();

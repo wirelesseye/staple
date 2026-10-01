@@ -619,7 +619,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             crate::ArtifactUseSite::DiscardedResult(_) => "discarded result cleanup",
             crate::ArtifactUseSite::ReplacedValue(_) => "replaced value cleanup",
             crate::ArtifactUseSite::LoopBodyResult(_) => "loop body result cleanup",
-            _ => return Ok(()),
+            crate::ArtifactUseSite::IndexTemporary { .. }
+            | crate::ArtifactUseSite::MutateIndexTemporary(_) => "index temporary cleanup",
+            // Every other site is not a drop position this hook serves; a
+            // caller passing one is a bug, never a silently skipped drop.
+            other => {
+                return Err(Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    format!("emit_drop_site called with a non-drop site {other:?}"),
+                ));
+            }
         };
         let Some(record) = self
             .view
@@ -3518,16 +3527,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 &span,
             )?
         } else {
-            let index = source_sum
-                .alternatives
-                .iter()
-                .position(|alternative| alternative == &propagation.result)
-                .ok_or_else(|| {
-                    Diagnostic::new(
-                        span.clone(),
-                        "propagated result is missing its residual variant",
-                    )
-                })?;
+            // E1: lowering records the residual alternative; the emitter
+            // never selects one by comparing types.
+            let index = binding.propagation_residual.ok_or_else(|| {
+                Diagnostic::new(
+                    span.clone(),
+                    "propagated result is missing its residual variant",
+                )
+            })?;
             self.backend
                 .extract_sum_alternative(sum_value, source_sum, index, span.clone())?
                 .as_any_value_enum()
@@ -5106,11 +5113,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         // Legacy compiles the base pointer first, then the position, then the
         // replacement.
-        let base_place = self.view.place(owner, *base).ok_or_else(|| {
+        self.view.place(owner, *base).ok_or_else(|| {
             Diagnostic::new(span.clone(), "missing indexed assignment base place")
         })?;
-        let base_temporary = matches!(base_place.kind, crate::LoweredPlaceKind::Temporary { .. });
-        let base_type = base_place.value_type.clone();
         let pointer = self.emit_place_pointer(owner, *base, environment)?;
         let position = self.emit_expression(owner, *index, environment)?;
         if environment.returned {
@@ -5141,12 +5146,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_direct_call(function, &arguments, "mutate_index.call")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         // Legacy `drop_mutation_temporaries` drops the materialized base when
-        // its type needs drop; that cleanup is Stage 5.6.
-        if base_temporary && self.view.concrete_needs_drop(&base_type) {
-            return Err(Diagnostic::new(
-                span,
-                "lowered emitter: call argument cleanup is not implemented yet",
-            ));
+        // lowering recorded it; the drop body is Stage 5.6 (E2).
+        if assignment.drops_base_temporary {
+            self.emit_drop_site(owner, crate::ArtifactUseSite::MutateIndexTemporary(id))?;
         }
         Ok(())
     }
@@ -5197,29 +5199,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if !method_type.effects.resources.is_empty() {
             return Err(unsupported("index resources"));
         }
-        let base_type = self
-            .view
-            .expression(owner, index.base)
-            .map(|expression| expression.value_type.clone())
-            .ok_or_else(|| unsupported("index base"))?;
-        let index_type = self
-            .view
-            .expression(owner, index.index)
-            .map(|expression| expression.value_type.clone())
-            .ok_or_else(|| unsupported("index position"))?;
         let types = flattened_parameter_types(&method_type.parameter);
-        let mut mask = self.backend.indirect_parameter_mask(method_type);
+        // Lowering records which operands pass by address (Contract 1); the
+        // mutation mask is the checked method type's own fact.
+        let mask = index.operands.indirect.clone();
+        if mask.len() != types.len() {
+            return Err(unsupported("index operand facts"));
+        }
         let mutation_mask =
             super::abi::mutation_parameter_mask(types.len(), &method_type.mutations);
-        let move_mask = super::abi::mutation_parameter_mask(types.len(), &method_type.moves);
-        if types.len() == 2 {
-            for (element, actual) in [&base_type, &index_type].into_iter().enumerate() {
-                if !mutation_mask[element] && !move_mask[element] {
-                    mask[element] = !self.view.concrete_is_copy(actual);
-                }
-            }
-        }
-        let mut temporaries: Vec<(PointerValue<'context>, CheckedType)> = Vec::new();
         let mut values: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
         if !mask.iter().any(|indirect| *indirect) {
             for operand in [index.base, index.index] {
@@ -5250,7 +5238,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "mutation.temporary",
                 span.clone(),
             )?;
-            temporaries.push((pointer, method_type.parameter.as_ref().clone()));
             values.push(pointer.into());
         } else {
             for (element, operand) in [(0usize, index.base), (1usize, index.index)] {
@@ -5281,12 +5268,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                 "mutation.temporary",
                                 span.clone(),
                             )?;
-                            temporaries.push((pointer, types[element].clone()));
                             values.push(pointer.into());
                         }
                     } else {
+                        // A recorded place is always used; a place that
+                        // cannot be emitted is a diagnostic, never a silent
+                        // fallback to a borrowed copy.
                         let pointer = match place {
-                            Some(place) => self.emit_place_pointer(owner, place, environment).ok(),
+                            Some(place) => {
+                                Some(self.emit_place_pointer(owner, place, environment)?)
+                            }
                             None => None,
                         };
                         match pointer {
@@ -5338,11 +5329,27 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| Diagnostic::new(span.clone(), "Index result is not first-class"))?;
-        // Mutation temporaries are dropped in reverse order by legacy
-        // `drop_mutation_temporaries`; that cleanup is Stage 5.6.
-        for (_, value_type) in temporaries.iter().rev() {
-            if self.view.concrete_needs_drop(value_type) {
-                return Err(unsupported("call argument cleanup"));
+        // Legacy `drop_mutation_temporaries` drops the recorded operand
+        // temporaries after the call in reverse order; the drop bodies are
+        // Stage 5.6, so a recorded site diagnoses (E2).
+        if index.operands.whole_drops_after_call {
+            self.emit_drop_site(
+                owner,
+                crate::ArtifactUseSite::IndexTemporary {
+                    expression: id,
+                    operand: None,
+                },
+            )?;
+        }
+        for (operand, drops) in index.operands.drops_after_call.iter().enumerate().rev() {
+            if *drops {
+                self.emit_drop_site(
+                    owner,
+                    crate::ArtifactUseSite::IndexTemporary {
+                        expression: id,
+                        operand: Some(operand),
+                    },
+                )?;
             }
         }
         Ok(result.as_any_value_enum())

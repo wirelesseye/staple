@@ -115,6 +115,16 @@ pub(crate) enum ArtifactUseSite {
     CellFinalizer(SymbolId),
     /// A closure environment's finalizer.
     ClosureEnvironment(LoweredCallableValueId),
+    /// An `Index` call's operand temporary dropped after the call (legacy
+    /// `drop_mutation_temporaries`): `operand` is the flattened parameter
+    /// index, or `None` for the whole-argument temporary.
+    IndexTemporary {
+        expression: ExpressionId,
+        operand: Option<usize>,
+    },
+    /// An indexed (`MutateIndex`) assignment's materialized base temporary,
+    /// dropped after the call.
+    MutateIndexTemporary(ItemId),
     /// An implicit thunk argument's closure environment finalizer. Legacy
     /// builds the thunk's closure over the current scope when it evaluates the
     /// argument (`compile_adapted_call_argument` → `build_closure`), and
@@ -1626,6 +1636,16 @@ impl LoweredProgram {
             ArtifactUseSite::CStringTemporary(id) => {
                 if !call(id) {
                     report("call", id.index());
+                }
+            }
+            ArtifactUseSite::IndexTemporary { expression: id, .. } => {
+                if !expression(id) {
+                    report("expression", id.index());
+                }
+            }
+            ArtifactUseSite::MutateIndexTemporary(id) => {
+                if !item(id) {
+                    report("item", id.index());
                 }
             }
             ArtifactUseSite::ThunkArgumentEnvironment { call: id, argument } => {

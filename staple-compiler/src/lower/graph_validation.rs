@@ -2204,6 +2204,8 @@ pub(crate) mod tests {
             ArtifactUseSite::CellFinalizer(_) => "cell",
             ArtifactUseSite::ClosureEnvironment(_) => "closure",
             ArtifactUseSite::ThunkArgumentEnvironment { .. } => "thunk-argument-environment",
+            ArtifactUseSite::IndexTemporary { .. } => "index-temporary",
+            ArtifactUseSite::MutateIndexTemporary(_) => "mutate-index-temporary",
             ArtifactUseSite::RefConstruction(_) => "ref",
             ArtifactUseSite::DropIntrinsic(_) => "drop-intrinsic",
             ArtifactUseSite::CStringConversion(_) => "cstring-conversion",
@@ -2321,6 +2323,23 @@ pub(crate) mod tests {
                 // a fresh callable value (`ThunkArgumentEnvironment`).
                 "def evaluate: (() -> I32) -> I32 = callback => callback ()\n",
                 "def thunk_env: move CString -> I32 = move value => evaluate { inspect value }\n",
+                // An indexed assignment whose base is a droppable temporary:
+                // legacy `drop_mutation_temporaries` drops it after the
+                // `MutateIndex` call (`MutateIndexTemporary`). The place-based
+                // assignment must not record a replaced-value drop: the
+                // `MutateIndex` method replaces the element itself.
+                "type Holder = ctor I32\n",
+                "impl Drop Holder { def drop = Holder value => () }\n",
+                "type Item = ctor I32\n",
+                "impl Drop Item { def drop = Item value => () }\n",
+                "impl Index Holder I32 Item { def index = (holder, key) => Item 0 }\n",
+                "impl MutateIndex Holder I32 Item { def mutate_index = (mut holder, key, move value) => () }\n",
+                "def make_holder: () -> Holder = () => Holder 0\n",
+                "def assign_temp: () -> () = () => { (make_holder ())[0] = Item 1 }\n",
+                "def assign_place: () -> () = () => {\n",
+                "  let mut holder = make_holder ()\n",
+                "  holder[0] = Item 2\n",
+                "}\n",
                 "type Owned = ctor I32\n",
                 "impl Drop Owned { def drop = Owned value => () }\n",
                 "impl Clone Owned { def clone = Owned value => Owned value }\n",
@@ -2331,6 +2350,8 @@ pub(crate) mod tests {
                 "let b = cell_finalizer ()\n",
                 "let c = closure_env (c_string \"e\")\n",
                 "let t = thunk_env (c_string \"t\")\n",
+                "let at = assign_temp ()\n",
+                "let ap = assign_place ()\n",
                 "let d = make_buffer ()\n",
             ),
             concat!(
@@ -2397,6 +2418,7 @@ pub(crate) mod tests {
             "cell",
             "closure",
             "thunk-argument-environment",
+            "mutate-index-temporary",
             "ref",
             "drop-intrinsic",
             "cstring-conversion",
@@ -6350,5 +6372,75 @@ pub(crate) mod tests {
             Some(format!("__staple_instance_{}", generic_instance.index()).as_str()),
             "a generic instance keeps its ordinal name"
         );
+    }
+
+    /// Stage 5.5 review: an indexed (`MutateIndex`) assignment never records a
+    /// replaced-value drop (the method replaces the element; legacy drops
+    /// nothing at the site), in instance bodies as in lowering, and a
+    /// droppable materialized base records `MutateIndexTemporary`.
+    #[test]
+    fn stage_5_5_indexed_assignment_cleanup_facts_match_legacy() {
+        let lowered = lower(concat!(
+            "type Holder = ctor I32\n",
+            "impl Drop Holder { def drop = Holder value => () }\n",
+            "type Item = ctor I32\n",
+            "impl Drop Item { def drop = Item value => () }\n",
+            "impl Index Holder I32 Item { def index = (holder, key) => Item 0 }\n",
+            "impl MutateIndex Holder I32 Item { def mutate_index = (mut holder, key, move value) => () }\n",
+            "def make_holder: () -> Holder = () => Holder 0\n",
+            "def assign_temp: () -> () = () => { (make_holder ())[0] = Item 1 }\n",
+            "def assign_place: () -> () = () => {\n",
+            "  let mut holder = make_holder ()\n",
+            "  holder[0] = Item 2\n",
+            "}\n",
+            "let at = assign_temp ()\n",
+            "let ap = assign_place ()\n",
+        ));
+        let program = &lowered.program;
+        let body_of = |name: &str| {
+            let template = function_id(program, name);
+            program
+                .instances
+                .iter()
+                .find(|(_, instance)| instance.template == template)
+                .and_then(|(_, instance)| instance.body.as_ref())
+                .unwrap_or_else(|| panic!("`{name}` has a materialized body"))
+        };
+        for (name, base_temporary) in [("assign_temp", true), ("assign_place", false)] {
+            let body = body_of(name);
+            let assignments = body
+                .items
+                .iter()
+                .filter_map(|(id, item)| match &item.kind {
+                    LoweredItemKind::Assignment(assignment)
+                        if assignment.mutate_index.is_some() =>
+                    {
+                        Some((id, assignment))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(assignments.len(), 1, "`{name}` has one indexed assignment");
+            let (item, assignment) = assignments[0];
+            assert!(
+                !assignment.drop_previous,
+                "`{name}`: an indexed assignment never drops the previous value"
+            );
+            assert_eq!(assignment.drops_base_temporary, base_temporary, "`{name}`");
+            assert!(
+                !body
+                    .artifact_uses
+                    .iter()
+                    .any(|use_| use_.site == crate::ArtifactUseSite::ReplacedValue(item)),
+                "`{name}`: no replaced-value drop is recorded for an indexed assignment"
+            );
+            assert_eq!(
+                body.artifact_uses
+                    .iter()
+                    .any(|use_| use_.site == crate::ArtifactUseSite::MutateIndexTemporary(item)),
+                base_temporary,
+                "`{name}`: the base-temporary drop is recorded exactly when the base is a droppable temporary"
+            );
+        }
     }
 }

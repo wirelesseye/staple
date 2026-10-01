@@ -226,3 +226,16 @@ Step 1 → Step 2 → Step 3 → Step 4 → Step 5 → Step 6 → Step 7 → Ste
 - Step 4 comes before everything that produces or consumes values of widened types. Step 5 comes before Step 6, because patterns with `mutable` bindings and assignment share places. Step 6 comes before Step 7, because match arms bind through `bind_pattern`.
 - Steps 8 and 9 depend only on Step 4 and can run in parallel with Steps 5–7.
 - None of the steps needs a separate plan file. Steps 6 and 7 carry the most risk, since they port the 457-line `compile_match_pattern_branch`. Land them as several small commits (one pattern form at a time), re-running the in-process harness each time. The body comparison catches block-structure drift immediately.
+
+## Post-gate review fixes
+
+- **Index operands and temporaries are recorded in lowering (Contract 1).** `emit_index` had derived each operand's pass mode with `!concrete_is_copy(actual)`, and both index paths had decided temporary drops with `concrete_needs_drop` (re-adding the view accessor the 5.4 review removed). Legacy takes both decisions from `compile_effect_arguments` and `drop_mutation_temporaries`. Now:
+  - `LoweredIndex::operands` (`LoweredIndexOperands`: per-parameter `indirect` and `drops_after_call`, plus `whole_drops_after_call`) records legacy's rule. Lowering computes it, and each instance recomputes it from concrete types.
+  - `LoweredAssignmentItem::drops_base_temporary` records the materialized `MutateIndex` base drop.
+  - The 4.4 scanner requests `ArtifactUseSite::IndexTemporary { expression, operand }` and `MutateIndexTemporary(item)`.
+  - The emitter reads the facts and reports the sites through `emit_drop_site` (family `index temporary cleanup`, owner 5.6). `EmissionView::concrete_needs_drop` is gone again.
+- **No silent fallbacks in the index path.** A recorded operand place that cannot be emitted is now a diagnostic (`emit_index` had used `.ok()` and fallen back to a borrowed copy). `emit_drop_site` rejects a non-drop site instead of returning `Ok`.
+- **Indexed assignments no longer record a spurious replaced-value drop.** The instance-body cloner recomputed `drop_previous` from the target type for every assignment, including `MutateIndex` ones, which lowering records as `false` because the method replaces the element. A droppable element therefore gained a `ReplacedValue` use in every instance, which 5.6 would have emitted as an extra drop. `stage_5_5_indexed_assignment_cleanup_facts_match_legacy` fails without the fix. The Stage 4.4 legacy comparison passed either way, because it compares drop glue and drop-call trees, not drop positions per site. 5.6's body comparison is the per-site check.
+- **The propagation residual alternative is recorded (E1).** `LoweredPatternBindingItem::propagation_residual` is computed by `residual_alternative` in lowering and in each instance, and validated against the checked types. The emitter no longer finds it by type equality.
+- **Focus lists:** `nested` (`match_sums_products`), `fallback` (`match_strings_literals`), and `nested` (`destructuring`) join their entries. All three were already fully emitted and body-identical.
+- **Results:** 9882 fully emitted bodies match legacy, and there are 424 stubs (5.6: 272, 5.7: 8, 5.8: 144). The 4.4 comparison now also requires the `mutate-index-temporary` site.

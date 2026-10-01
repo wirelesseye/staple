@@ -931,6 +931,10 @@ impl<'a> BodyCloner<'a> {
                     })
                     .flatten()
                 });
+                binding.propagation_residual = binding
+                    .propagation
+                    .as_ref()
+                    .and_then(super::LoweredPatternBindingItem::residual_alternative);
                 LoweredItemKind::PatternBinding(binding)
             }
             LoweredItemKind::Assignment(mut assignment) => {
@@ -957,7 +961,28 @@ impl<'a> BodyCloner<'a> {
                     .get(assignment.target)
                     .map(|place| place.value_type.clone())
                     .unwrap_or(CheckedType::Error);
-                assignment.drop_previous = self.program.concrete_needs_drop(&concrete_target);
+                // An indexed (`MutateIndex`) assignment never drops the
+                // previous value itself (the method does), exactly as lowering
+                // records it; only a plain assignment recomputes the fact.
+                assignment.drop_previous = assignment.mutate_index.is_none()
+                    && self.program.concrete_needs_drop(&concrete_target);
+                // Stage 5.5 review: the materialized base temporary's drop,
+                // recomputed from the substituted base type.
+                assignment.drops_base_temporary = assignment.mutate_index.is_some()
+                    && self
+                        .body
+                        .places
+                        .get(assignment.target)
+                        .and_then(|place| match &place.kind {
+                            super::LoweredPlaceKind::Indexed { base, .. } => {
+                                self.body.places.get(*base)
+                            }
+                            _ => None,
+                        })
+                        .filter(|base| {
+                            matches!(base.kind, super::LoweredPlaceKind::Temporary { .. })
+                        })
+                        .is_some_and(|base| self.program.concrete_needs_drop(&base.value_type));
                 LoweredItemKind::Assignment(assignment)
             }
             LoweredItemKind::Return(mut item) => {
@@ -1173,6 +1198,30 @@ impl<'a> BodyCloner<'a> {
                 index.base_place = index.base_place.map(|place| self.clone_place(place));
                 index.index_place = index.index_place.map(|place| self.clone_place(place));
                 index.evidence = self.evidence(&index.evidence);
+                // Stage 5.5 review: recompute the operand passing and cleanup
+                // facts from the substituted operand and method types.
+                index.operands = match &index.method_type {
+                    Some(method_type) => {
+                        let operand_type = |id: ExpressionId| {
+                            self.body
+                                .expressions
+                                .get(id)
+                                .map(|expression| expression.value_type.clone())
+                                .unwrap_or(CheckedType::Error)
+                        };
+                        let base_type = operand_type(index.base);
+                        let position_type = operand_type(index.index);
+                        super::LoweredIndexOperands::compute(
+                            method_type,
+                            [&base_type, &position_type],
+                            [index.base_place.is_some(), index.index_place.is_some()],
+                            index.whole_temporary,
+                            |value_type| self.program.concrete_is_copy(value_type),
+                            |value_type| self.program.concrete_needs_drop(value_type),
+                        )
+                    }
+                    None => super::LoweredIndexOperands::default(),
+                };
                 LoweredExpressionKind::Index(index)
             }
             LoweredExpressionKind::StringTemplate(mut template) => {

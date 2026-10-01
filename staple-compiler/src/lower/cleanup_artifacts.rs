@@ -721,6 +721,24 @@ impl<'a> LoweredWalker<'a> {
                         &origin,
                     )?;
                 }
+                if assignment.drops_base_temporary
+                    && let Some(base_type) = self
+                        .owner
+                        .place(self.program, assignment.target)
+                        .and_then(|place| match &place.kind {
+                            super::LoweredPlaceKind::Indexed { base, .. } => {
+                                self.owner.place(self.program, *base)
+                            }
+                            _ => None,
+                        })
+                        .map(|base| base.value_type.clone())
+                {
+                    self.visitor.drop_site(
+                        ArtifactUseSite::MutateIndexTemporary(id),
+                        &base_type,
+                        &origin,
+                    )?;
+                }
                 if let Some(operation) = assignment.signal_notify {
                     self.visitor.reactive_operation(operation, &origin)?;
                 }
@@ -909,6 +927,41 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredExpressionKind::Index(index) => {
                 self.walk_expression(index.base)?;
                 self.walk_expression(index.index)?;
+                // Legacy `drop_mutation_temporaries` drops the call's operand
+                // temporaries after the call, in reverse collection order.
+                if let Some(method_type) = &index.method_type {
+                    if index.operands.whole_drops_after_call {
+                        self.visitor.drop_site(
+                            ArtifactUseSite::IndexTemporary {
+                                expression: id,
+                                operand: None,
+                            },
+                            &method_type.parameter,
+                            &origin,
+                        )?;
+                    }
+                    let types = match method_type.parameter.as_ref() {
+                        CheckedType::Product(product) => product
+                            .elements
+                            .iter()
+                            .map(|element| element.value_type.clone())
+                            .collect::<Vec<_>>(),
+                        other => vec![other.clone()],
+                    };
+                    for (operand, drops) in index.operands.drops_after_call.iter().enumerate().rev()
+                    {
+                        if *drops && let Some(value_type) = types.get(operand) {
+                            self.visitor.drop_site(
+                                ArtifactUseSite::IndexTemporary {
+                                    expression: id,
+                                    operand: Some(operand),
+                                },
+                                value_type,
+                                &origin,
+                            )?;
+                        }
+                    }
+                }
             }
             super::LoweredExpressionKind::StringTemplate(template) => {
                 self.visitor.string_template_site(&template, &origin)?;

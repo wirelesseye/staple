@@ -200,6 +200,7 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     ("buffer push", "5.6"),
     ("buffer transfer", "5.6"),
     ("discarded result cleanup", "5.6"),
+    ("index temporary cleanup", "5.6"),
     ("drop", "5.6"),
     ("drop glue artifact", "5.6"),
     ("GC finalizer artifact", "5.6"),
@@ -724,7 +725,7 @@ static CORPUS: [DifferentialProgram; 36] = [
             ),
             "5.5",
         ),
-        &["nominal", "wildcard", "flag"],
+        &["nested", "nominal", "wildcard", "flag"],
     ),
     emits(
         inline(
@@ -744,7 +745,7 @@ static CORPUS: [DifferentialProgram; 36] = [
             ),
             "5.5",
         ),
-        &["describe"],
+        &["fallback", "describe"],
     ),
     emits(
         inline(
@@ -768,7 +769,7 @@ static CORPUS: [DifferentialProgram; 36] = [
             ),
             "5.5",
         ),
-        &["sum_pair", "destructure"],
+        &["sum_pair", "destructure", "nested"],
     ),
     emits(
         inline(
