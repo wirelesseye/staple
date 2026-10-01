@@ -21,6 +21,10 @@ side produced more than one variant (or `--runs` is 1) as `INCONCLUSIVE`; both
 mean "re-run with more `--runs`". Only disjoint sets of one stable variant
 each are a definite `DIFF`.
 
+`--new-subset` checks the Stage 5.8 determinism transition: the new binary
+must emit one variant and that variant must occur in the old binary's set.
+Later shared-helper gates use the default equal-set comparison.
+
 Example:
 
     scripts/compare-llvm-ir.py --old /tmp/base/staple --new target/debug/staple \\
@@ -93,6 +97,10 @@ def main() -> int:
     parser.add_argument(
         "--show-diff", action="store_true", help="print a diff for each differing program"
     )
+    parser.add_argument(
+        "--new-subset", action="store_true",
+        help="accept one deterministic new variant contained in the old variants",
+    )
     parser.add_argument("programs", nargs="+", help="source files to compile")
     arguments = parser.parse_args()
 
@@ -109,6 +117,9 @@ def main() -> int:
             failed = True
             continue
         old_keys, new_keys = set(old), set(new)
+        if arguments.new_subset and len(new_keys) == 1 and new_keys <= old_keys:
+            print(f"{program}: deterministic subset (old {len(old_keys)} variant(s), new 1)")
+            continue
         if old_keys == new_keys:
             print(f"{program}: same ({len(old_keys)} variant(s))")
             continue

@@ -122,6 +122,41 @@ Each step ends with the Contract 6 gates (`cargo nextest run --workspace` for th
   - Give the `emit_with` task-scope diagnostic the `task scope` family.
 - **Measure the true blockers.** Add a test-only mode to the partial report that records every construct a stubbed body reaches, not only the first. Record the full per-family census in the step notes, so the later steps have a complete list rather than discovering families one at a time.
 
+**Step 1 notes (complete).** Legacy `CoroutineFrameLayout::cell_fields` is now an ordered `(SymbolId, field index)` list built from `frame_bindings`; all three consumers retain that order. `main` sorts global roots by symbol ordinal. A 16-run `coroutines.sta` comparison produces exactly one new variant contained in the pre-step variant set. `scripts/compare-llvm-ir.py --new-subset` checks this determinism transition explicitly without relaxing the default equal-variant-set comparison used by subsequent helper steps.
+
+The initializer/program-arena `validate_arena_references` already rejects every `Deferred` and `Stage26Deferred` route; the instance validator does likewise. Their emitter arms now report an internal invariant error, and neither placeholder family remains in `FAMILY_OWNERS`. Reads and bindings diagnose separate signal/derived families using the recorded operation or binding flags. The `emit_with` diagnostic already uses the standardized `task scope` family.
+
+Test-only partial emission now walks the complete runtime owner of every stubbed function through the existing lowered owner walker. Coroutine pair stubs walk their body instance; both pair functions are counted, since each is a stubbed function. Counts below are functions reaching a family (one count per family per function), not occurrence counts. The first-blocker report remains unchanged: **13935 fully emitted bodies compared, 74 stubs across 12 families**, all owned by 5.8. The complete reached-family census has 24 families:
+
+| Family | Stubbed functions reaching it |
+| --- | ---: |
+| await | 18 |
+| batch call | 1 |
+| completion | 1 |
+| coro | 14 |
+| coroutine pair artifact | 28 |
+| derived binding | 3 |
+| derived read | 1 |
+| derived runner artifact | 3 |
+| pump | 3 |
+| reaction call | 3 |
+| reaction runner artifact | 3 |
+| resolver complete | 1 |
+| scheduler | 2 |
+| signal binding | 4 |
+| signal notify | 4 |
+| signal read | 18 |
+| snapshot call | 1 |
+| spawn | 2 |
+| task cancel | 2 |
+| task is_finished | 1 |
+| task scope | 2 |
+| until call | 7 |
+| until runner artifact | 5 |
+| yield_now | 2 |
+
+Gates: both full workspace test gates pass (1301 tests in nextest and `cargo test --workspace --quiet`); default and lowered-feature workspace checks, the test-target check, formatting, and diff checks pass. The 16-run example sweep produces one new variant contained in the old set for every compiling program; `coroutines.sta` reduces four old variants to one. `macros.sta` remains rejected by both binaries. The 13 extracted 5.6/5.7 probes match at two samples per binary. The plan's `examples/game_loop/main.sta` reference is stale: the actual fixture is `staple-compiler/examples/game_loop/main.sta`, checked separately at 16 samples. Legacy coroutine LLVM/object/run paths and lowered-feature hello-world LLVM/object/run paths pass with the worktree standard library. Subsequent shared-helper steps compare against the deterministic legacy binary with the default equal-set mode.
+
 ### Step 2: Lowering facts (K3)
 
 For each row of the type-query table marked "verify", show that the lowered record carries the fact, or add it.

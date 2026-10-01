@@ -878,3 +878,118 @@ mod tests {
         }
     }
 }
+
+/// Stage 5.8 blocker census: walk the whole runtime owner even after emission
+/// stops at its first unsupported construct. Count owners, not occurrences.
+#[cfg(test)]
+impl EmissionView<'_> {
+    pub(crate) fn stage58_blockers(&self, owner: EmissionOwner) -> Vec<String> {
+        use super::cleanup_artifacts::{LoweredOwnerVisitor, walk_owner};
+        use super::{LoweredExpressionKind, LoweredReactiveOperationKind as Reactive};
+        use crate::IntrinsicFunction as Intrinsic;
+        use staple_syntax::Diagnostic;
+        struct Census<'a> {
+            view: EmissionView<'a>,
+            owner: EmissionOwner,
+            families: std::collections::BTreeSet<String>,
+        }
+        impl LoweredOwnerVisitor for Census<'_> {
+            fn expression_site(
+                &mut self,
+                _: ExpressionId,
+                expression: &LoweredExpression,
+            ) -> Result<(), Vec<Diagnostic>> {
+                let family = match expression.kind {
+                    LoweredExpressionKind::Coro(_) => Some("coro"),
+                    LoweredExpressionKind::Await(_) => Some("await"),
+                    LoweredExpressionKind::With(id) => self
+                        .view
+                        .with(self.owner, id)
+                        .filter(|with| with.scope_exit == super::LoweredScopeExit::Tasks)
+                        .map(|_| "task scope"),
+                    _ => None,
+                };
+                if let Some(family) = family {
+                    self.families.insert(family.into());
+                }
+                Ok(())
+            }
+            fn binding_site(
+                &mut self,
+                binding: &super::LoweredBindingItem,
+                _: &super::Origin,
+            ) -> Result<(), Vec<Diagnostic>> {
+                if !binding.compile_time_only {
+                    if binding.derived {
+                        self.families.insert("derived binding".into());
+                    }
+                    if binding.signal {
+                        self.families.insert("signal binding".into());
+                    }
+                }
+                Ok(())
+            }
+            fn reactive_operation(
+                &mut self,
+                id: super::LoweredReactiveOperationId,
+                _: &super::Origin,
+            ) -> Result<(), Vec<Diagnostic>> {
+                let operation = self
+                    .view
+                    .reactive_operation(self.owner, id)
+                    .expect("validated operation");
+                let family = match operation.kind {
+                    Reactive::SignalCreate { .. } => "signal binding",
+                    Reactive::SignalRead { .. } => "signal read",
+                    Reactive::SignalNotify { .. } => "signal notify",
+                    Reactive::DerivedRead { .. } => "derived read",
+                    Reactive::DerivedCreate { .. } => "derived binding",
+                    Reactive::Scope => return Ok(()),
+                    Reactive::Reaction { .. } => "reaction call",
+                    Reactive::Batch { .. } => "batch call",
+                    Reactive::Until { .. } => "until call",
+                    Reactive::Snapshot => "snapshot call",
+                };
+                self.families.insert(family.into());
+                Ok(())
+            }
+            fn call_site(&mut self, call: &LoweredCall) -> Result<(), Vec<Diagnostic>> {
+                if call.reactive.is_some() {
+                    return Ok(());
+                }
+                let super::LoweredCallableTarget::Intrinsic { intrinsic, .. } = call.target else {
+                    return Ok(());
+                };
+                let family = match intrinsic {
+                    Intrinsic::CoroutineBlockOn => "coroutine block_on",
+                    Intrinsic::SchedulerCreate => "scheduler",
+                    Intrinsic::TaskScope => "task scope",
+                    Intrinsic::Spawn => "spawn",
+                    Intrinsic::Pump => "pump",
+                    Intrinsic::YieldNow => "yield_now",
+                    Intrinsic::TaskIsFinished => "task is_finished",
+                    Intrinsic::TaskCancel => "task cancel",
+                    Intrinsic::Completion => "completion",
+                    Intrinsic::CompletionWithCancel => "completion with cancel",
+                    Intrinsic::CompletionToken => "completion token",
+                    Intrinsic::CompletionTokenResolve => "completion token resolve",
+                    Intrinsic::CompletionTokenCancel => "completion token cancel",
+                    Intrinsic::ResolverComplete => "resolver complete",
+                    Intrinsic::ResolverCancel => "resolver cancel",
+                    _ => return Ok(()),
+                };
+                self.families.insert(family.into());
+                Ok(())
+            }
+        }
+        let mut census = Census {
+            view: *self,
+            owner,
+            families: Default::default(),
+        };
+        if let Some(arenas) = self.owner(owner) {
+            walk_owner(self.program, arenas, &mut census).expect("validated owner walk");
+        }
+        census.families.into_iter().collect()
+    }
+}

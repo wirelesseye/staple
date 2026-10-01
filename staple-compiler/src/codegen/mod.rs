@@ -158,6 +158,8 @@ impl LoweredStubRecord {
 pub struct LoweredEmissionReport {
     stubbed: Vec<LoweredStubRecord>,
     families: Vec<(String, usize)>,
+    #[cfg(test)]
+    pub(crate) reached_families: std::collections::BTreeMap<String, usize>,
 }
 
 impl LoweredEmissionReport {
@@ -394,7 +396,7 @@ struct CoroutineFrameLayout<'context> {
     ty: inkwell::types::StructType<'context>,
     frame_size: u64,
     /// `frame_bindings` symbol → its cell's frame field index.
-    cell_fields: HashMap<SymbolId, u32>,
+    cell_fields: Vec<(SymbolId, u32)>,
     /// Frame field index of the coroutine's own result slot.
     result_field: u32,
     /// Frame field index of the pending-result scratch (only when the body has
@@ -2222,17 +2224,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_direct_call(set_stack_bottom, &[stack_bottom.into()], "")
             .map_err(compiler_diagnostic)?;
 
-        let global_roots = self
+        let mut global_roots = self
             .storage
             .iter()
             .filter_map(|(symbol, global)| {
                 self.typed_module
                     .type_of_symbol(*symbol)
                     .filter(|value_type| checked_type_contains_ref(value_type))
-                    .map(|value_type| (*global, value_type.clone()))
+                    .map(|value_type| (*symbol, *global, value_type.clone()))
             })
             .collect::<Vec<_>>();
-        for (global, value_type) in global_roots {
+        global_roots.sort_by_key(|(symbol, _, _)| symbol.0);
+        for (_, global, value_type) in global_roots {
             let llvm_type = self.compile_type(&value_type)?;
             self.register_gc_root_region(
                 global.as_pointer_value(),
@@ -8277,9 +8280,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             vec![i8_type.into(), ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr];
         debug_assert_eq!(fields.len() as u32, CORO_HEADER_FIELDS);
 
-        let mut cell_fields = HashMap::new();
+        let mut cell_fields = Vec::new();
         for symbol in &plan.frame_bindings {
-            cell_fields.insert(*symbol, fields.len() as u32);
+            cell_fields.push((*symbol, fields.len() as u32));
             fields.push(self.compile_binding_cell_type(*symbol)?.into());
         }
         let result_field = fields.len() as u32;
@@ -8368,7 +8371,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 })
                 .collect();
             let mut unwind_drops = Vec::new();
-            for symbol in layout.cell_fields.keys() {
+            for (symbol, _) in &layout.cell_fields {
                 let value_type = self
                     .typed_module
                     .type_of_symbol(*symbol)

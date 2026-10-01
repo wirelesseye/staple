@@ -148,8 +148,7 @@ const fn emits(
 /// A family that mixes two substages is assigned to the one that finishes it,
 /// so the earlier substage's zero-stub gate is not blocked by the later
 /// construct: `coercion` is 5.5 (5.4 emits the move half),
-/// `checked or reactive name` is 5.8 (5.4 emits the checked half), and
-/// `reactive or cell binding` is 5.8 (5.4 emits the cell half).
+/// Signal and derived reads and bindings belong to 5.8.
 #[cfg(test)]
 pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     // 5.4: calls, call arguments, callable values, closures, resources, and
@@ -250,7 +249,8 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     // 5.8: coroutines, tasks, and reactive code.
     ("await", "5.8"),
     ("batch", "5.8"),
-    ("checked or reactive name", "5.8"),
+    ("signal read", "5.8"),
+    ("derived read", "5.8"),
     ("completion", "5.8"),
     ("completion token", "5.8"),
     ("completion token cancel", "5.8"),
@@ -259,7 +259,6 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     ("coro", "5.8"),
     ("coroutine block_on", "5.8"),
     ("coroutine pair artifact", "5.8"),
-    ("deferred expression", "5.8"),
     ("derived runner artifact", "5.8"),
     ("pump", "5.8"),
     ("reaction", "5.8"),
@@ -269,7 +268,8 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     ("snapshot call", "5.8"),
     ("reaction runner artifact", "5.8"),
     ("reactive call", "5.8"),
-    ("reactive or cell binding", "5.8"),
+    ("signal binding", "5.8"),
+    ("derived binding", "5.8"),
     ("reactive scope", "5.8"),
     ("resolver cancel", "5.8"),
     ("resolver complete", "5.8"),
@@ -277,7 +277,6 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     ("signal notify", "5.8"),
     ("snapshot", "5.8"),
     ("spawn", "5.8"),
-    ("Stage 2.6 expression", "5.8"),
     ("task cancel", "5.8"),
     ("task is_finished", "5.8"),
     ("task scope", "5.8"),
@@ -1686,6 +1685,7 @@ mod tests {
         let mut structural_kinds = std::collections::HashSet::new();
         let mut structural_bodies = std::collections::HashSet::new();
         let mut total_stubs = 0;
+        let mut reached = std::collections::BTreeMap::<String, usize>::new();
         let mut compared = 0;
         let mut histogram: HashMap<String, usize> = HashMap::new();
         let mut owner_totals: HashMap<&'static str, usize> = HashMap::new();
@@ -1734,6 +1734,13 @@ mod tests {
             let mapping = assert_declaration_parity(program.name, &lowered, &legacy, &partial);
 
             total_stubs += partial.report.stubbed().len();
+            for (family, count) in &partial.report.reached_families {
+                assert!(
+                    super::family_owner(family).is_some(),
+                    "unclassified reached family {family}"
+                );
+                *reached.entry(family.clone()).or_default() += count;
+            }
             for (family, count) in partial.report.family_histogram() {
                 let owner = super::family_owner(family).unwrap_or_else(|| {
                     let detail = partial
@@ -1803,6 +1810,10 @@ mod tests {
             "differential corpus: {compared} fully emitted bodies compared, {total_stubs} stubs across {} families",
             families.len()
         );
+        eprintln!("all constructs reached by stubbed bodies:");
+        for (family, count) in reached {
+            eprintln!("{count:5}  {family}");
+        }
         eprintln!("stub totals by owning substage:");
         for (owner, count) in owners {
             eprintln!("{count:5}  {owner}");

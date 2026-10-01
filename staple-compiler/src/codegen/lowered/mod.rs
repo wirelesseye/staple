@@ -208,6 +208,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.emit_artifact_stubs(&mut report);
         self.emit_initializers_partial(&mut report);
         self.emit_main().map_err(|diagnostic| vec![diagnostic])?;
+        #[cfg(test)]
+        self.collect_stage58_blockers(&mut report);
         report.finish();
         self.backend
             .llvm_module
@@ -2198,6 +2200,51 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
+    #[cfg(test)]
+    fn collect_stage58_blockers(&self, report: &mut LoweredEmissionReport) {
+        for stub in report.stubbed().to_vec() {
+            let owner = match stub.entry() {
+                LoweredCatalogEntry::Instance(index) => Some(EmissionOwner::Instance(
+                    crate::FunctionInstanceId::from_index(index),
+                )),
+                LoweredCatalogEntry::Initializer(index) => Some(EmissionOwner::Initializer(
+                    crate::InitializerId::from_index(index),
+                )),
+                LoweredCatalogEntry::Artifact(index) => {
+                    match self
+                        .view
+                        .artifacts()
+                        .find(|(_, artifact)| artifact.ordinal.index() == index)
+                        .map(|(_, artifact)| artifact)
+                        .and_then(|artifact| artifact.plan.as_ref())
+                    {
+                        Some(LoweredArtifactPlan::CoroutineCodes(plan)) => {
+                            Some(EmissionOwner::Instance(plan.body))
+                        }
+                        Some(LoweredArtifactPlan::ConstructorAdapter(_))
+                        | Some(LoweredArtifactPlan::StructuralMethod(_))
+                        | Some(LoweredArtifactPlan::DropGlue(_))
+                        | Some(LoweredArtifactPlan::GcFinalizer(_))
+                        | Some(LoweredArtifactPlan::ReactionRunner(_))
+                        | Some(LoweredArtifactPlan::UntilRunner(_))
+                        | Some(LoweredArtifactPlan::DerivedRunner(_))
+                        | Some(LoweredArtifactPlan::ExternAdapter(_))
+                        | None => None,
+                    }
+                }
+            };
+            let mut families = owner
+                .map(|owner| self.view.stage58_blockers(owner))
+                .unwrap_or_default();
+            families.push(super::diagnostic_family(stub.diagnostic()));
+            families.sort();
+            families.dedup();
+            for family in families {
+                *report.reached_families.entry(family).or_default() += 1;
+            }
+        }
+    }
+
     /// A `llvm.trap` followed by `unreachable`: the stub body partial mode
     /// gives a function whose real body is missing or failed. The function
     /// keeps its declaration, name, type, and linkage, so the declaration
@@ -2359,7 +2406,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Ok(());
                 }
                 if binding.derived || binding.signal {
-                    return Err(unimplemented("reactive or cell binding"));
+                    return Err(unimplemented(if binding.derived {
+                        "derived binding"
+                    } else {
+                        "signal binding"
+                    }));
                 }
                 // The storage-only part of legacy `compile_top_level_item`:
                 // a generic binding records state 1 then 2 and evaluates
@@ -3057,8 +3108,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if name.singleton.is_some() {
                     return Ok(self.backend.unit_value());
                 }
-                if name.reactive.is_some() {
-                    return Err(unimplemented("checked or reactive name"));
+                if let Some(reactive) = name.reactive {
+                    let operation =
+                        self.view
+                            .reactive_operation(owner, reactive)
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    expression.origin.span.clone(),
+                                    "missing reactive read record",
+                                )
+                            })?;
+                    let family = match operation.kind {
+                        LoweredReactiveOperationKind::SignalRead { .. } => "signal read",
+                        LoweredReactiveOperationKind::DerivedRead { .. } => "derived read",
+                        LoweredReactiveOperationKind::SignalCreate { .. }
+                        | LoweredReactiveOperationKind::SignalNotify { .. }
+                        | LoweredReactiveOperationKind::DerivedCreate { .. }
+                        | LoweredReactiveOperationKind::Scope
+                        | LoweredReactiveOperationKind::Reaction { .. }
+                        | LoweredReactiveOperationKind::Batch { .. }
+                        | LoweredReactiveOperationKind::Until { .. }
+                        | LoweredReactiveOperationKind::Snapshot => {
+                            return Err(Diagnostic::new(
+                                expression.origin.span.clone(),
+                                "invalid reactive read record",
+                            ));
+                        }
+                    };
+                    return Err(unimplemented(family));
                 }
                 // Legacy `Expression::Name` checks the state whenever the read
                 // requires one or the symbol has mutable storage.
@@ -3071,8 +3148,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     environment,
                 )
             }
-            LoweredExpressionKind::Deferred(_) => Err(unimplemented("deferred expression")),
-            LoweredExpressionKind::Stage26Deferred(_) => Err(unimplemented("Stage 2.6 expression")),
+            LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::Stage26Deferred(_) => {
+                Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "internal invariant: deferred expression reached lowered emission",
+                ))
+            }
             LoweredExpressionKind::String(string) => {
                 // Stage 5.4 Step 3: the literal core is shared with legacy.
                 self.backend
