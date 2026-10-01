@@ -1664,27 +1664,20 @@ impl LoweredProgram {
                     report("pattern", id.index());
                 }
             }
-            ArtifactUseSite::OwnedBinding(symbol) => {
-                if !self.symbols.get(symbol).is_some_and(|record| {
+            ArtifactUseSite::OwnedBinding(symbol) | ArtifactUseSite::CellFinalizer(symbol) => {
+                // A module-scoped symbol without real module storage (a `let`
+                // inside a top-level `with`/block) is owned like a local; only
+                // an actual global, function binding, or extern is never
+                // owned. `has_global` mirrors legacy's storage map.
+                let owned = self.symbols.get(symbol).is_some_and(|record| {
                     !matches!(
                         record.storage,
-                        crate::SymbolStorage::GlobalStorage
-                            | crate::SymbolStorage::FunctionBinding
+                        crate::SymbolStorage::FunctionBinding
                             | crate::SymbolStorage::ExternalSymbol
-                    )
-                }) {
-                    report("symbol", symbol.0);
-                }
-            }
-            ArtifactUseSite::CellFinalizer(symbol) => {
-                if !self.symbols.get(symbol).is_some_and(|record| {
-                    !matches!(
-                        record.storage,
-                        crate::SymbolStorage::GlobalStorage
-                            | crate::SymbolStorage::FunctionBinding
-                            | crate::SymbolStorage::ExternalSymbol
-                    )
-                }) {
+                    ) && !(record.storage == crate::SymbolStorage::GlobalStorage
+                        && record.has_global)
+                });
+                if !owned {
                     report("symbol", symbol.0);
                 }
             }

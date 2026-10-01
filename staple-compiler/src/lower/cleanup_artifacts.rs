@@ -1455,12 +1455,17 @@ impl<'a> LoweredWalker<'a> {
         let Some(record) = self.program.symbols.get(symbol) else {
             return Ok(());
         };
-        if matches!(
-            record.storage,
-            super::SymbolStorage::GlobalStorage
-                | super::SymbolStorage::FunctionBinding
-                | super::SymbolStorage::ExternalSymbol
-        ) || record.mutated_parameter
+        // A symbol with real module storage is written into its global and
+        // never owned at scope exit. `module_symbol` alone is not that fact: a
+        // `let` inside a top-level `with`/block is module-scoped but receives
+        // no global, and legacy still owns and drops it (it keys on its own
+        // storage map, mirrored by `has_global`).
+        if record.mutated_parameter
+            || matches!(
+                record.storage,
+                super::SymbolStorage::FunctionBinding | super::SymbolStorage::ExternalSymbol
+            )
+            || (record.storage == super::SymbolStorage::GlobalStorage && record.has_global)
         {
             return Ok(());
         }

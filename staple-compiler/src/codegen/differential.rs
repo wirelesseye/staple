@@ -1767,6 +1767,79 @@ mod tests {
         );
     }
 
+    /// Stage 5.8 Step 6: scheduler/task intrinsics, `with Tasks`, and every
+    /// completion intrinsic emit and compare body for body.
+    #[test]
+    fn stage_5_8_schedulers_tasks_and_completions_match_legacy() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "use std.io.(IO, println)\n",
+            "def worker: I32 -> Coroutine{Tasks, IO} I32 = seed => coro {\n",
+            "  println \"worker ${seed:?}\"\n",
+            "  let _ = await (yield_now ())\n",
+            "  seed * 10\n",
+            "}\n",
+            "def consumer: move Task I32 ->{IO} Coroutine{IO} () = move handle => coro {\n",
+            "  let outcome = await handle\n",
+            "  match outcome {\n",
+            "    Completed value => println \"consumer: ${value:?}\",\n",
+            "    Cancelled() => println \"consumer: cancelled\",\n",
+            "  }\n",
+            "}\n",
+            "def greeter: move Wait I32 ->{IO} Coroutine{IO} () = move wait => coro {\n",
+            "  let outcome = await wait\n",
+            "  match outcome {\n",
+            "    Completed code => println \"greeter: ${code:?}\",\n",
+            "    Cancelled() => println \"greeter: cancelled\",\n",
+            "  }\n",
+            "}\n",
+            "def make_signal: Scheduler -> (wait: Wait I32, resolver: Resolver I32) = s => completion s\n",
+            "def make_guarded: Scheduler -> (wait: Wait I32, resolver: Resolver I32) =\n",
+            "  s => completion_with_cancel (s, () => ())\n",
+            "def make_token: Scheduler -> (wait: Wait (), token: CompletionToken) = s => completion_token s\n",
+            "let sched = scheduler ()\n",
+            "with Tasks = task_scope (sched) {\n",
+            "  let produced = spawn (worker 4)\n",
+            "  let _ = spawn (consumer produced)\n",
+            "  let doomed = spawn (worker 9)\n",
+            "  let (wait, resolver) = make_signal sched\n",
+            "  let _ = spawn (greeter wait)\n",
+            "  let (guarded, guarded_resolver) = make_guarded sched\n",
+            "  let _ = guarded\n",
+            "  let (token_wait, token) = make_token sched\n",
+            "  let _ = token_wait\n",
+            "  let (cancel_wait, cancel_token) = make_token sched\n",
+            "  let _ = cancel_wait\n",
+            "  let p1 = pump (sched, 16)\n",
+            "  Task.cancel doomed\n",
+            "  Resolver.complete resolver 200\n",
+            "  Resolver.cancel guarded_resolver\n",
+            "  CompletionToken.resolve token\n",
+            "  CompletionToken.cancel cancel_token\n",
+            "  let p2 = pump (sched, 16)\n",
+            "  let done = Task.is_finished doomed\n",
+            "  println \"pump ${p1.executed:?} ${p2.executed:?} ${done:?}\"\n",
+            "}\n",
+        );
+        let lowered = lower(source, &workspace_root());
+        let context = Context::create();
+        let legacy = crate::codegen::legacy_emissions(&context, &lowered)
+            .expect("legacy scheduler/completion fixture");
+        let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
+            .expect("lowered scheduler/completion fixture verifies");
+        assert!(partial.report.stubbed().is_empty(), "{:?}", partial.report);
+        let mapping =
+            assert_declaration_parity("scheduler_completion", &lowered, &legacy, &partial);
+        let compared = compare_fully_emitted_bodies(
+            "scheduler_completion",
+            &lowered,
+            &mapping,
+            &legacy,
+            &partial,
+        );
+        assert!(compared.len() > 50, "the fixture emits most bodies");
+    }
+
     /// Stage 5.3 Step 6, extended by Stage 5.4 Step 1: over the whole corpus,
     /// verify both emitted modules, run the declaration census, compare every
     /// fully emitted function's normalized body with its mapped legacy
@@ -1895,6 +1968,36 @@ mod tests {
                 reached.get(completed).copied().unwrap_or(0),
                 0,
                 "Step 4 family {completed} is no longer a blocker"
+            );
+        }
+
+        // Step 5 (awaits and driving) and Step 6 (tasks, schedulers,
+        // completions) own their families: no body may stub at one. The
+        // `reached` census for `spawn`/`pump`/`scheduler`/`task scope` stays
+        // nonzero until Step 7 emits the reactive constructs in those same
+        // stubbed bodies, so only the first-blocker histogram ratchets here.
+        for completed in [
+            "await",
+            "coroutine block_on",
+            "scheduler",
+            "spawn",
+            "pump",
+            "yield_now",
+            "task is_finished",
+            "task cancel",
+            "task scope",
+            "completion",
+            "completion with cancel",
+            "completion token",
+            "completion token resolve",
+            "completion token cancel",
+            "resolver complete",
+            "resolver cancel",
+        ] {
+            assert_eq!(
+                histogram.get(completed).copied().unwrap_or(0),
+                0,
+                "Step 5/6 family {completed} cannot regress"
             );
         }
 

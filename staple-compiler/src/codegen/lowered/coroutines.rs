@@ -2,8 +2,10 @@
 use super::*;
 use crate::codegen::ir::{CoroutineResumeEntry, ExternalAwaitKind};
 use crate::codegen::layout::{
-    COMPLETION_STATE_COMPLETED, COMPLETION_VALUE, CORO_CAPTURE_ENV, CORO_CHILD, CORO_HEADER_FIELDS,
-    CORO_RESOURCES, CORO_RESULT_PTR, CORO_STATE, TASK_RECORD_RESULT,
+    COMPLETION_CANCEL_ENV, COMPLETION_CANCEL_FN, COMPLETION_FLAG_CANCEL_ARMED, COMPLETION_FLAGS,
+    COMPLETION_SCHEDULER, COMPLETION_STATE_COMPLETED, COMPLETION_VALUE, CORO_CAPTURE_ENV,
+    CORO_CHILD, CORO_HEADER_FIELDS, CORO_PARENT, CORO_RECORD, CORO_RESOURCES, CORO_RESULT_PTR,
+    CORO_STATE, TASK_RECORD_FRAME, TASK_RECORD_RESULT, TASK_RECORD_SCHEDULER,
 };
 use crate::{
     CoroutineCodesPlan, CoroutineFramePlan, LoweredAwaitId, LoweredAwaitKind, LoweredCoercionPlan,
@@ -675,28 +677,665 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let uses = self.activation_resource_uses(call, span)?;
+        self.store_coroutine_resources(owner, &uses, frame, environment, span)?;
+        let result_llvm = self.backend.compile_type(
+            &call
+                .runtime
+                .coroutine
+                .as_ref()
+                .expect("activation")
+                .result_type,
+        )?;
+        self.backend
+            .build_coroutine_drive(frame, result_llvm, span.clone())
+            .map(|value| value.as_any_value_enum())
+    }
+
+    /// The recorded activation's deferred-resource uses, in row order.
+    fn activation_resource_uses(
+        &self,
+        call: &crate::LoweredCall,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<Vec<crate::LoweredResourceUseId>> {
         let activation = call.runtime.coroutine.as_ref().ok_or_else(|| {
-            Diagnostic::new(
-                span.clone(),
-                "`block_on` is missing its recorded activation",
-            )
+            Diagnostic::new(span.clone(), "coroutine activation is missing its record")
         })?;
-        let uses = activation
+        activation
             .deferred_resources
             .iter()
             .map(|index| {
                 call.resource_bindings.get(*index).copied().ok_or_else(|| {
                     Diagnostic::new(
                         span.clone(),
-                        "`block_on` activation names a missing resource binding",
+                        "coroutine activation names a missing resource binding",
                     )
                 })
             })
-            .collect::<CodeGenerationResult<Vec<_>>>()?;
-        self.store_coroutine_resources(owner, &uses, frame, environment, span)?;
-        let result_llvm = self.backend.compile_type(&activation.result_type)?;
+            .collect()
+    }
+
+    /// Legacy `coroutine_current_task_scope`: the `Tasks` scope pointer the
+    /// call's recorded binding names. `spawn` is the only reader, and Step 2
+    /// records the index into the call's own `resource_bindings`.
+    fn current_task_scope(
+        &self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let activation = call.runtime.coroutine.as_ref().ok_or_else(|| {
+            Diagnostic::new(span.clone(), "`spawn` is missing its recorded activation")
+        })?;
+        let index = activation.tasks_resource.ok_or_else(|| {
+            Diagnostic::new(span.clone(), "no `Tasks` scope is in scope for `spawn`")
+        })?;
+        let use_id = call.resource_bindings.get(index).copied().ok_or_else(|| {
+            Diagnostic::new(
+                span.clone(),
+                "`spawn` is missing its `Tasks` resource binding",
+            )
+        })?;
+        let record = self
+            .view
+            .resource_use(owner, use_id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing `Tasks` resource use"))?;
+        let provider = record.provider.ok_or_else(|| {
+            Diagnostic::new(span.clone(), "`Tasks` resource has no selected provider")
+        })?;
+        let bound = environment
+            .resources
+            .get(&provider)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "resource `Tasks` is not available"))?;
+        let pointer = value_as_basic(bound.value)
+            .map(|value| value.into_pointer_value())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`Tasks` resource is not first-class"))?;
+        if bound.indirect {
+            let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+            self.backend
+                .builder
+                .build_load(pointer_type, pointer, "tasks.scope")
+                .map_err(compiler_diagnostic)
+                .map(|value| value.into_pointer_value())
+        } else {
+            Ok(pointer)
+        }
+    }
+
+    /// Legacy `coroutine_current_scheduler`: load `%TaskScope.scheduler`.
+    fn current_scheduler(
+        &self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let scope = self.current_task_scope(owner, call, environment, span)?;
+        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+        // `%TaskScope { ptr scheduler, ptr tasks_head }`.
+        let scope_type = self
+            .backend
+            .context
+            .struct_type(&[pointer_type.into(), pointer_type.into()], false);
+        let scheduler_slot = self
+            .backend
+            .builder
+            .build_struct_gep(scope_type, scope, 0, "tasks.scheduler.slot")
+            .map_err(compiler_diagnostic)?;
         self.backend
-            .build_coroutine_drive(frame, result_llvm, span.clone())
-            .map(|value| value.as_any_value_enum())
+            .builder
+            .build_load(pointer_type, scheduler_slot, "tasks.scheduler")
+            .map_err(compiler_diagnostic)
+            .map(|value| value.into_pointer_value())
+    }
+
+    /// Stage 5.8 Step 6: legacy `compile_scheduler_intrinsic`.
+    pub(super) fn emit_scheduler_intrinsic(
+        &mut self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        intrinsic: IntrinsicFunction,
+        arguments: &[BasicMetadataValueEnum<'context>],
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = call.origin.span.clone();
+        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+        let i8_type = self.backend.context.i8_type();
+        match intrinsic {
+            IntrinsicFunction::SchedulerCreate => {
+                let create = self.backend.declare_named_function(
+                    "__staple_sched_create",
+                    pointer_type.fn_type(&[], false),
+                );
+                let scheduler = self
+                    .backend
+                    .build_runtime_call(create, &[], "scheduler")?
+                    .try_as_basic_value()
+                    .unwrap_basic();
+                Ok(scheduler.as_any_value_enum())
+            }
+            IntrinsicFunction::TaskScope => {
+                let [BasicMetadataValueEnum::PointerValue(scheduler)] = arguments else {
+                    return Err(Diagnostic::new(span, "scheduler is not first-class"));
+                };
+                let open = self.backend.declare_named_function(
+                    "__staple_task_scope_open",
+                    pointer_type.fn_type(&[pointer_type.into()], false),
+                );
+                let scope = self
+                    .backend
+                    .build_runtime_call(open, &[(*scheduler).into()], "task.scope")?
+                    .try_as_basic_value()
+                    .unwrap_basic();
+                Ok(scope.as_any_value_enum())
+            }
+            IntrinsicFunction::YieldNow => Ok(self
+                .backend
+                .build_yield_coroutine(span)?
+                .as_any_value_enum()),
+            IntrinsicFunction::Spawn => {
+                let result_type = call
+                    .runtime
+                    .coroutine
+                    .as_ref()
+                    .map(|activation| activation.result_type.clone())
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "`spawn` is missing its recorded activation")
+                    })?;
+                let [BasicMetadataValueEnum::PointerValue(frame)] = arguments else {
+                    return Err(Diagnostic::new(span, "coroutine is not first-class"));
+                };
+                let header_type = self.backend.coroutine_header_type();
+                let result_llvm = self.backend.compile_type(&result_type)?;
+                let record_type = self.backend.task_record_type(result_llvm);
+                let record = self.backend.build_gc_allocation(
+                    self.backend
+                        .size_type
+                        .const_int(self.backend.target_data.get_store_size(&record_type), false),
+                    "task.record",
+                    span.clone(),
+                )?;
+                self.backend
+                    .builder
+                    .build_store(record, record_type.const_zero())
+                    .map_err(compiler_diagnostic)?;
+                let record_result = self
+                    .backend
+                    .builder
+                    .build_struct_gep(
+                        record_type,
+                        record,
+                        TASK_RECORD_RESULT,
+                        "task.record.result",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let result_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(header_type, *frame, CORO_RESULT_PTR, "coro.header.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(result_slot, record_result)
+                    .map_err(compiler_diagnostic)?;
+                let record_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(header_type, *frame, CORO_RECORD, "coro.header.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(record_slot, record)
+                    .map_err(compiler_diagnostic)?;
+                let parent_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(header_type, *frame, CORO_PARENT, "coro.header.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(parent_slot, pointer_type.const_null())
+                    .map_err(compiler_diagnostic)?;
+                let frame_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(record_type, record, TASK_RECORD_FRAME, "task.record.frame")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(frame_slot, *frame)
+                    .map_err(compiler_diagnostic)?;
+
+                let uses = self.activation_resource_uses(call, &span)?;
+                self.store_coroutine_resources(owner, &uses, *frame, environment, &span)?;
+
+                let scope = self.current_task_scope(owner, call, environment, &span)?;
+                let scheduler = self.current_scheduler(owner, call, environment, &span)?;
+                let scheduler_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(
+                        record_type,
+                        record,
+                        TASK_RECORD_SCHEDULER,
+                        "task.record.scheduler",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(scheduler_slot, scheduler)
+                    .map_err(compiler_diagnostic)?;
+
+                let track = self.backend.declare_named_function(
+                    "__staple_task_scope_track",
+                    self.backend
+                        .context
+                        .void_type()
+                        .fn_type(&[pointer_type.into(), pointer_type.into()], false),
+                );
+                self.backend
+                    .build_runtime_call(track, &[scope.into(), record.into()], "")?;
+                let enqueue = self.backend.declare_named_function(
+                    "__staple_sched_enqueue",
+                    self.backend
+                        .context
+                        .void_type()
+                        .fn_type(&[pointer_type.into(), pointer_type.into()], false),
+                );
+                self.backend.build_runtime_call(
+                    enqueue,
+                    &[scheduler.into(), (*frame).into()],
+                    "",
+                )?;
+                Ok(record.as_any_value_enum())
+            }
+            IntrinsicFunction::Pump => {
+                let mut values = self.intrinsic_product(call, arguments, 2, &span)?;
+                let limit = values.pop().expect("pump limit");
+                let scheduler = values.pop().expect("pump scheduler");
+                let counts_type = self.backend.context.struct_type(
+                    &[self.backend.size_type.into(), self.backend.size_type.into()],
+                    false,
+                );
+                let pump = self.backend.declare_named_function(
+                    "__staple_sched_pump",
+                    counts_type
+                        .fn_type(&[pointer_type.into(), self.backend.size_type.into()], false),
+                );
+                let result = self
+                    .backend
+                    .build_runtime_call(pump, &[scheduler.into(), limit.into()], "pump")?
+                    .try_as_basic_value()
+                    .unwrap_basic();
+                Ok(result.as_any_value_enum())
+            }
+            IntrinsicFunction::TaskIsFinished => {
+                let [BasicMetadataValueEnum::PointerValue(record)] = arguments else {
+                    return Err(Diagnostic::new(span, "task handle is not first-class"));
+                };
+                let state = self
+                    .backend
+                    .builder
+                    .build_load(i8_type, *record, "task.state")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                // `record.state`: 0 pending, 1 completed, 2 cancelled — finished
+                // is anything past pending.
+                let finished = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        state,
+                        i8_type.const_int(0, false),
+                        "task.finished",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.build_intrinsic_bool(finished, &call.result_type, span)
+            }
+            IntrinsicFunction::TaskCancel => {
+                let [BasicMetadataValueEnum::PointerValue(record)] = arguments else {
+                    return Err(Diagnostic::new(span, "task handle is not first-class"));
+                };
+                let cancel = self.backend.declare_named_function(
+                    "__staple_task_cancel",
+                    self.backend
+                        .context
+                        .void_type()
+                        .fn_type(&[pointer_type.into()], false),
+                );
+                self.backend
+                    .build_runtime_call(cancel, &[(*record).into()], "")?;
+                Ok(self.backend.unit_value())
+            }
+            other => Err(Diagnostic::new(
+                span,
+                format!("internal invariant: {other:?} is not a scheduler intrinsic"),
+            )),
+        }
+    }
+
+    /// Stage 5.8 Step 6: legacy `compile_completion_intrinsic`.
+    pub(super) fn emit_completion_intrinsic(
+        &mut self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        call_id: LoweredCallId,
+        intrinsic: IntrinsicFunction,
+        arguments: &[BasicMetadataValueEnum<'context>],
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = call.origin.span.clone();
+        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+        let i8_type = self.backend.context.i8_type();
+        match intrinsic {
+            IntrinsicFunction::Completion
+            | IntrinsicFunction::CompletionWithCancel
+            | IntrinsicFunction::CompletionToken => {
+                let value_type = call.runtime.completion_value_type.clone().ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "completion result is missing its payload")
+                })?;
+                let (scheduler, cancel_closure) =
+                    if intrinsic == IntrinsicFunction::CompletionWithCancel {
+                        let mut fields = self.intrinsic_product(call, arguments, 2, &span)?;
+                        let closure = fields
+                            .pop()
+                            .expect("completion callback")
+                            .into_struct_value();
+                        let scheduler = fields.pop().expect("completion scheduler");
+                        (scheduler, Some(closure))
+                    } else {
+                        let [scheduler] = arguments else {
+                            return Err(Diagnostic::new(span, "argument is not first-class"));
+                        };
+                        (
+                            BasicValueEnum::try_from(*scheduler).map_err(|_| {
+                                Diagnostic::new(span.clone(), "argument is not first-class")
+                            })?,
+                            None,
+                        )
+                    };
+                let value_llvm = self.backend.compile_type(&value_type)?;
+                let record_type = self.backend.completion_record_type(value_llvm);
+                let record = self.backend.build_gc_allocation(
+                    self.backend
+                        .size_type
+                        .const_int(self.backend.target_data.get_store_size(&record_type), false),
+                    "completion.record",
+                    span.clone(),
+                )?;
+                self.backend
+                    .builder
+                    .build_store(record, record_type.const_zero())
+                    .map_err(compiler_diagnostic)?;
+                let scheduler_slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(
+                        record_type,
+                        record,
+                        COMPLETION_SCHEDULER,
+                        "completion.scheduler",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(scheduler_slot, scheduler)
+                    .map_err(compiler_diagnostic)?;
+                if let Some(closure) = cancel_closure {
+                    // `{ code, environment }` — store both halves and arm the
+                    // callback (flags bit1).
+                    let code = self
+                        .backend
+                        .builder
+                        .build_extract_value(closure, 0, "on_cancel.code")
+                        .map_err(compiler_diagnostic)?;
+                    let environment = self
+                        .backend
+                        .builder
+                        .build_extract_value(closure, 1, "on_cancel.env")
+                        .map_err(compiler_diagnostic)?;
+                    let cancel_env = self
+                        .backend
+                        .builder
+                        .build_struct_gep(
+                            record_type,
+                            record,
+                            COMPLETION_CANCEL_ENV,
+                            "completion.cancel.env",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_store(cancel_env, environment)
+                        .map_err(compiler_diagnostic)?;
+                    let cancel_fn = self
+                        .backend
+                        .builder
+                        .build_struct_gep(
+                            record_type,
+                            record,
+                            COMPLETION_CANCEL_FN,
+                            "completion.cancel.fn",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_store(cancel_fn, code)
+                        .map_err(compiler_diagnostic)?;
+                    let flags = self
+                        .backend
+                        .builder
+                        .build_struct_gep(record_type, record, COMPLETION_FLAGS, "completion.flags")
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_store(
+                            flags,
+                            i8_type.const_int(COMPLETION_FLAG_CANCEL_ARMED as u64, false),
+                        )
+                        .map_err(compiler_diagnostic)?;
+                }
+                // `(wait, resolver)` — both handles are the same record pointer.
+                let handles_type = self
+                    .backend
+                    .context
+                    .struct_type(&[pointer_type.into(), pointer_type.into()], true);
+                let mut value = handles_type.const_zero();
+                value = self
+                    .backend
+                    .builder
+                    .build_insert_value(value, record, 0, "completion.wait")
+                    .map_err(compiler_diagnostic)?
+                    .into_struct_value();
+                value = self
+                    .backend
+                    .builder
+                    .build_insert_value(value, record, 1, "completion.resolver")
+                    .map_err(compiler_diagnostic)?
+                    .into_struct_value();
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::ResolverComplete => {
+                let value_type = call.runtime.completion_value_type.clone().ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "`complete` value has no concrete type")
+                })?;
+                let mut fields = self.intrinsic_product(call, arguments, 2, &span)?;
+                let value = fields.pop().expect("resolver value");
+                let record = fields.pop().expect("resolver record").into_pointer_value();
+                let value_llvm = self.backend.compile_type(&value_type)?;
+                let slot = self
+                    .backend
+                    .builder
+                    .build_alloca(value_llvm, "resolver.value.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(slot, value)
+                    .map_err(compiler_diagnostic)?;
+                let size = self
+                    .backend
+                    .size_type
+                    .const_int(self.backend.target_data.get_store_size(&value_llvm), false);
+                let complete = self.backend.declare_named_function(
+                    "__staple_completion_complete",
+                    i8_type.fn_type(
+                        &[
+                            pointer_type.into(),
+                            pointer_type.into(),
+                            self.backend.size_type.into(),
+                        ],
+                        false,
+                    ),
+                );
+                let gone = self
+                    .backend
+                    .build_runtime_call(
+                        complete,
+                        &[record.into(), slot.into(), size.into()],
+                        "completion.gone",
+                    )?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_int_value();
+                // If the consumer had already abandoned the wait, the runtime
+                // did not take the value — drop the copy we still own. The
+                // recorded `CompletionOrphan` use is the existence fact (Step
+                // 2), never a type query.
+                let orphan = self.view.artifact_uses(owner).is_some_and(|uses| {
+                    uses.iter()
+                        .any(|use_| use_.site == crate::ArtifactUseSite::CompletionOrphan(call_id))
+                });
+                if orphan {
+                    let function = self
+                        .backend
+                        .builder
+                        .get_insert_block()
+                        .and_then(|block| block.get_parent())
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "`complete` is not in a function")
+                        })?;
+                    let drop_block = self
+                        .backend
+                        .context
+                        .append_basic_block(function, "complete.drop");
+                    let done_block = self
+                        .backend
+                        .context
+                        .append_basic_block(function, "complete.done");
+                    let is_gone = self
+                        .backend
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            gone,
+                            i8_type.const_zero(),
+                            "complete.consumer.gone",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_conditional_branch(is_gone, drop_block, done_block)
+                        .map_err(compiler_diagnostic)?;
+                    self.backend.builder.position_at_end(drop_block);
+                    let owned = self
+                        .backend
+                        .builder
+                        .build_load(value_llvm, slot, "complete.orphan")
+                        .map_err(compiler_diagnostic)?;
+                    self.emit_drop_site(
+                        owner,
+                        crate::ArtifactUseSite::CompletionOrphan(call_id),
+                        DropSource::Value(owned),
+                        &span,
+                    )?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(done_block)
+                        .map_err(compiler_diagnostic)?;
+                    self.backend.builder.position_at_end(done_block);
+                }
+                Ok(self.backend.unit_value())
+            }
+            IntrinsicFunction::ResolverCancel
+            | IntrinsicFunction::CompletionTokenResolve
+            | IntrinsicFunction::CompletionTokenCancel => {
+                let [BasicMetadataValueEnum::PointerValue(record)] = arguments else {
+                    return Err(Diagnostic::new(span, "handle is not first-class"));
+                };
+                let runtime = match intrinsic {
+                    IntrinsicFunction::CompletionTokenResolve => {
+                        "__staple_completion_token_resolve"
+                    }
+                    IntrinsicFunction::CompletionTokenCancel => "__staple_completion_token_cancel",
+                    _ => "__staple_completion_cancel",
+                };
+                let function = self.backend.declare_named_function(
+                    runtime,
+                    self.backend
+                        .context
+                        .void_type()
+                        .fn_type(&[pointer_type.into()], false),
+                );
+                self.backend
+                    .build_runtime_call(function, &[(*record).into()], "")?;
+                Ok(self.backend.unit_value())
+            }
+            other => Err(Diagnostic::new(
+                span,
+                format!("internal invariant: {other:?} is not a completion intrinsic"),
+            )),
+        }
+    }
+
+    /// Legacy `compile_product_expression`'s packed struct build followed by
+    /// the field extractions legacy's intrinsic branches perform. A product
+    /// *literal* is lowered element by element, so its product expression is
+    /// rebuilt here; a whole product value reaches `emit_intrinsic` already
+    /// unpacked into its fields by `emit_call`.
+    fn intrinsic_product(
+        &self,
+        call: &crate::LoweredCall,
+        arguments: &[BasicMetadataValueEnum<'context>],
+        fields: usize,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<Vec<BasicValueEnum<'context>>> {
+        let values = arguments
+            .iter()
+            .map(|argument| {
+                BasicValueEnum::try_from(*argument)
+                    .map_err(|_| Diagnostic::new(span.clone(), "argument is not first-class"))
+            })
+            .collect::<CodeGenerationResult<Vec<_>>>()?;
+        if values.len() != fields {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "intrinsic argument count does not match its parameter list",
+            ));
+        }
+        let product_literal = fields > 1
+            && call.arguments.len() > 1
+            && call
+                .arguments
+                .iter()
+                .all(|argument| argument.slot.is_some());
+        if !product_literal {
+            return Ok(values);
+        }
+        let product = self.backend.build_product_value(&values, span.clone())?;
+        let BasicValueEnum::StructValue(product) = product else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "intrinsic product argument is not a product value",
+            ));
+        };
+        (0..fields)
+            .map(|index| {
+                self.backend
+                    .builder
+                    .build_extract_value(product, index as u32, "argument.element")
+                    .map_err(compiler_diagnostic)
+            })
+            .collect()
     }
 }

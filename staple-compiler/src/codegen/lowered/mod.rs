@@ -48,6 +48,7 @@ struct FunctionEnvironment<'context> {
     /// provider by type; lowering already recorded the selection.
     resources: HashMap<LoweredResourceProviderId, BoundResource<'context>>,
     reactive_scopes: Vec<PointerValue<'context>>,
+    task_scopes: Vec<PointerValue<'context>>,
     loops: Vec<LoopContext<'context>>,
     /// Stage 5.6 Step 4 (O3): the owned bindings currently in scope, keyed by
     /// symbol. `owned_order` is legacy's `owned_order` registration order;
@@ -6406,8 +6407,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// Stage 5.4 Step 5: a `with` provider and its body. Legacy evaluates the
     /// provider value, stores it in the source place (`Place`) or a
     /// `resource.provider` alloca (`Materialized`), binds it while the body
-    /// runs, and disposes a reactive scope on a normal exit. A `Tasks` scope
-    /// is 5.8.
+    /// runs, disposes a reactive scope and closes a `Tasks` scope on a normal
+    /// exit. Task scopes close only on the normal exit (K4).
     fn emit_with(
         &mut self,
         owner: EmissionOwner,
@@ -6417,12 +6418,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let with = self.view.with(owner, id).ok_or_else(|| {
             Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered with")
         })?;
-        if with.scope_exit == LoweredScopeExit::Tasks {
-            return Err(Diagnostic::new(
-                with.origin.span.clone(),
-                "lowered emitter: task scope is not implemented yet",
-            ));
-        }
         let provider = self
             .view
             .resource_provider(owner, with.provider)
@@ -6479,6 +6474,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 })?;
             environment.reactive_scopes.push(scope);
         }
+        let tasks = with.scope_exit == LoweredScopeExit::Tasks;
+        if tasks {
+            let scope = value_as_basic(value)
+                .map(|value| value.into_pointer_value())
+                .ok_or_else(|| {
+                    Diagnostic::new(with.origin.span.clone(), "Tasks scope is not first-class")
+                })?;
+            environment.task_scopes.push(scope);
+        }
         let result = self.emit_block(owner, with.body, environment);
         if !environment.returned && reactive {
             self.dispose_reactive_scopes(
@@ -6490,8 +6494,43 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if reactive {
             environment.reactive_scopes.pop();
         }
+        if tasks {
+            if !environment.returned {
+                self.close_task_scopes(
+                    environment,
+                    environment.task_scopes.len().saturating_sub(1),
+                )?;
+            }
+            environment.task_scopes.pop();
+        }
         environment.resources.remove(&with.provider);
         result
+    }
+
+    /// Legacy `close_task_scopes`: close every scope from `keep` on, in
+    /// reverse order. Only a `with Tasks` normal exit calls it; early exits
+    /// deliberately leave the scopes open (K4, a mirrored legacy behavior).
+    fn close_task_scopes(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        keep: usize,
+    ) -> CodeGenerationResult<()> {
+        if environment.task_scopes.len() <= keep {
+            return Ok(());
+        }
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let close = self.backend.declare_named_function(
+            "__staple_task_scope_close",
+            self.backend
+                .context
+                .void_type()
+                .fn_type(&[pointer.into()], false),
+        );
+        for scope in environment.task_scopes[keep..].iter().rev() {
+            self.backend
+                .build_runtime_call(close, &[(*scope).into()], "")?;
+        }
+        Ok(())
     }
 
     /// Legacy `dispose_reactive_scopes`: dispose every scope from `keep` on, in
@@ -7064,22 +7103,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 self.emit_coroutine_drive(owner, call, *frame, environment, &span)
             }
-            IntrinsicFunction::SchedulerCreate => Err(unsupported("scheduler")),
-            IntrinsicFunction::TaskScope => Err(unsupported("task scope")),
-            IntrinsicFunction::Spawn => Err(unsupported("spawn")),
-            IntrinsicFunction::Pump => Err(unsupported("pump")),
-            IntrinsicFunction::YieldNow => Err(unsupported("yield_now")),
-            IntrinsicFunction::TaskIsFinished => Err(unsupported("task is_finished")),
-            IntrinsicFunction::TaskCancel => Err(unsupported("task cancel")),
-            IntrinsicFunction::Completion => Err(unsupported("completion")),
-            IntrinsicFunction::CompletionWithCancel => Err(unsupported("completion with cancel")),
-            IntrinsicFunction::CompletionToken => Err(unsupported("completion token")),
-            IntrinsicFunction::CompletionTokenResolve => {
-                Err(unsupported("completion token resolve"))
+            IntrinsicFunction::SchedulerCreate
+            | IntrinsicFunction::TaskScope
+            | IntrinsicFunction::Spawn
+            | IntrinsicFunction::Pump
+            | IntrinsicFunction::YieldNow
+            | IntrinsicFunction::TaskIsFinished
+            | IntrinsicFunction::TaskCancel => {
+                self.emit_scheduler_intrinsic(owner, call, intrinsic, arguments, environment)
             }
-            IntrinsicFunction::CompletionTokenCancel => Err(unsupported("completion token cancel")),
-            IntrinsicFunction::ResolverComplete => Err(unsupported("resolver complete")),
-            IntrinsicFunction::ResolverCancel => Err(unsupported("resolver cancel")),
+            IntrinsicFunction::Completion
+            | IntrinsicFunction::CompletionWithCancel
+            | IntrinsicFunction::CompletionToken
+            | IntrinsicFunction::CompletionTokenResolve
+            | IntrinsicFunction::CompletionTokenCancel
+            | IntrinsicFunction::ResolverComplete
+            | IntrinsicFunction::ResolverCancel => {
+                self.emit_completion_intrinsic(owner, call, call_id, intrinsic, arguments)
+            }
             IntrinsicFunction::Until => Err(unsupported("until")),
         }
     }
