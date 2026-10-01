@@ -315,13 +315,15 @@ The full suite passes 1301 tests. The legacy IR sweep against the pre-fix binary
 
 ## Stage 5.8 - Coroutines, Tasks, and Reactive Code
 
-> **Separate plan required:** `STAGE_5_8_COROUTINES_AND_REACTIVE_EMISSION_PLAN.md`. `ensure_coroutine_codes` alone is about 650 lines. With awaits, external awaits, drive, scheduler, completion, reaction, `until`, derived, and batch it covers roughly 4k legacy lines, and the state-machine frame layout and cancellation paths are the riskiest control flow in the backend. The plan may split coroutines and reactive work into two sequential steps, but they share the `until` runner and the callback-environment finalizers, so they belong in one plan.
+> **Plan:** [STAGE_5_8_COROUTINES_AND_REACTIVE_EMISSION_PLAN.md](STAGE_5_8_COROUTINES_AND_REACTIVE_EMISSION_PLAN.md). Its decisions K1–K6 and its Step 10 gate supersede the **Gate** paragraph below. K2 makes legacy's frame-cell and `main` root iteration deterministic before any `resume` comparison.
+>
+> **Why a separate plan was required:** `ensure_coroutine_codes` alone is about 650 lines. With awaits, external awaits, drive, scheduler, completion, reaction, `until`, derived, and batch it covers roughly 4k legacy lines, and the state-machine frame layout and cancellation paths are the riskiest control flow in the backend. The plan may split coroutines and reactive work into two sequential steps, but they share the `until` runner and the callback-environment finalizers, so they belong in one plan.
 
 - `CoroutineCodes` pair bodies from `CoroutineFramePlan` and the body instance's `plans[0]`: frame layout inputs (frame bindings in cell order, the result and pending fields, resource slots with pass modes, captures and `capture_finalizer`), resume-state dispatch, `await` suspension by kind (child, `Task`, `Wait`, `until`), the cancellation unwind with `unwind_drop` in plan order (D5), and the completed-body behavior mirrored (D5). `coro` creation comes from the `CoroCreation` use.
 - Task, scheduler, and completion intrinsics; `compile_coroutine_drive`; task-scope tracking.
 - Signals (global versus cell storage, read tracking, notify on assignment), derived create and read, `Reaction`/`Until`/`Derived` runner artifact bodies from `ReactiveRunnerBody`, `batch`, `scope`, `snapshot`, reactive-scope disposal, and callback/evaluator environment finalizer uses.
 
-**Gate:** The Stage 4.5 fixture set runs identically: nested coroutines, child awaits, cancellation, `Wait`/`until` states, tasks and schedulers, reaction resources, `until` inside a coroutine, derived bindings in initializers and instances, and the droppable-capture evaluator. The generic `coro`/`reaction`/`until`/`derived` fixtures at two instantiations produce two distinct pairs and runners and run correctly. These are the recorded D5 differences: legacy aliases or fails on them, so the harness asserts new-emitter correctness only.
+**Gate (superseded by the plan's Step 10; kept for history):** The Stage 4.5 fixture set runs identically: nested coroutines, child awaits, cancellation, `Wait`/`until` states, tasks and schedulers, reaction resources, `until` inside a coroutine, derived bindings in initializers and instances, and the droppable-capture evaluator. The generic `coro`/`reaction`/`until`/`derived` fixtures at two instantiations produce two distinct pairs and runners and run correctly. These are the recorded D5 differences: legacy aliases or fails on them, so the harness asserts new-emitter correctness only.
 
 ## Stage 5.9 - Full-Suite Parity and New-Emitter Census
 
