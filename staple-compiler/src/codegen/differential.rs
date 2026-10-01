@@ -1688,22 +1688,35 @@ mod tests {
         );
     }
 
+    /// Stage 5.8 Step 5 replaced the staging partial fixture: nested child
+    /// awaits and `block_on` now emit and compare body for body, including
+    /// the suspended parent pair.
     #[test]
-    fn stage_5_8_partial_coroutine_pair_stubs_both_functions_on_body_failure() {
+    fn stage_5_8_awaits_and_block_on_match_legacy() {
         let source = concat!(
             "use std.coroutine.*\n",
-            "let parent = coro { let child = coro { 1 }; await child }\n",
+            "def nested: () -> Coroutine{} I32 = () => coro {\n",
+            "  let inner = coro { 2 }\n",
+            "  await inner\n",
+            "}\n",
+            "let parent = coro {\n",
+            "  let first = await (coro { 1 })\n",
+            "  let second = await nested ()\n",
+            "  first + second\n",
+            "}\n",
+            "let driven = block_on parent\n",
+            "let empty = block_on (coro { 7 })\n",
         );
         let lowered = lower(source, &workspace_root());
         let context = Context::create();
+        let legacy =
+            crate::codegen::legacy_emissions(&context, &lowered).expect("legacy await fixture");
         let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
-            .expect("failed pair is replaced by verified stubs");
-        let stubbed = partial
-            .report
-            .stubbed()
-            .iter()
-            .map(|stub| stub.name())
-            .collect::<HashSet<_>>();
+            .expect("lowered await fixture verifies");
+        assert!(partial.report.stubbed().is_empty(), "{:?}", partial.report);
+        let mapping = assert_declaration_parity("await_fixture", &lowered, &legacy, &partial);
+        let compared =
+            compare_fully_emitted_bodies("await_fixture", &lowered, &mapping, &legacy, &partial);
         let mut suspended = 0;
         for (_, artifact) in lowered.program().artifacts() {
             if let Some(crate::LoweredArtifactPlan::CoroutineCodes(pair)) = &artifact.plan {
@@ -1711,29 +1724,13 @@ mod tests {
                     .program()
                     .planned_coroutine_pair_names(artifact.ordinal)
                     .expect("planned pair");
+                assert!(compared.contains(&names.0) && compared.contains(&names.1));
                 if pair.frame.as_ref().expect("expanded frame").resume_points > 0 {
-                    assert!(
-                        stubbed.contains(names.0.as_str()) && stubbed.contains(names.1.as_str())
-                    );
                     suspended += 1;
-                } else {
-                    assert!(
-                        !stubbed.contains(names.0.as_str()) && !stubbed.contains(names.1.as_str())
-                    );
                 }
             }
         }
-        assert_eq!(suspended, 1);
-        assert_eq!(stubbed.len(), 2);
-        assert_eq!(
-            partial
-                .report
-                .family_histogram()
-                .iter()
-                .find(|(family, _)| family == "await")
-                .map(|(_, count)| *count),
-            Some(2)
-        );
+        assert_eq!(suspended, 2, "parent and nested pairs suspend");
     }
 
     /// A constant reference compares by the constant's content: the same

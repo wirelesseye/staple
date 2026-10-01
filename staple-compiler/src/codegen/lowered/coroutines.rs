@@ -1,14 +1,16 @@
 //! Coroutine pair emission from the concrete artifact and body records.
 use super::*;
-use crate::codegen::ir::CoroutineResumeEntry;
+use crate::codegen::ir::{CoroutineResumeEntry, ExternalAwaitKind};
 use crate::codegen::layout::{
-    CORO_CAPTURE_ENV, CORO_HEADER_FIELDS, CORO_RESOURCES, CORO_RESULT_PTR, CORO_STATE,
+    COMPLETION_STATE_COMPLETED, COMPLETION_VALUE, CORO_CAPTURE_ENV, CORO_CHILD, CORO_HEADER_FIELDS,
+    CORO_RESOURCES, CORO_RESULT_PTR, CORO_STATE, TASK_RECORD_RESULT,
 };
-use crate::{CoroutineCodesPlan, CoroutineFramePlan, LoweredCoroId};
+use crate::{
+    CoroutineCodesPlan, CoroutineFramePlan, LoweredAwaitId, LoweredAwaitKind, LoweredCoercionPlan,
+    LoweredCoroId,
+};
 use inkwell::types::StructType;
 
-// Step 5 consumes the suspension context fields.
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(super) struct CoroutineContext<'context> {
     pub frame: PointerValue<'context>,
@@ -359,5 +361,342 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 span.clone(),
             )
             .map(|frame| frame.as_any_value_enum())
+    }
+
+    /// Stage 5.8 Step 5: one `await` suspension inside a coroutine body.
+    /// A child coroutine parks `RESUME_CHILD` after stashing the child frame
+    /// and its deferred-resource bundle; on resume it loads the pending
+    /// result. An external `Task`/`Wait` handle parks `WAIT_EXTERNAL` and
+    /// returns the `Completed T | Cancelled` outcome sum.
+    pub(super) fn emit_await(
+        &mut self,
+        owner: EmissionOwner,
+        id: LoweredAwaitId,
+        environment: &mut FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let await_ = self
+            .view
+            .await_record(owner, id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing lowered await record"))?
+            .clone();
+        let context = environment
+            .coroutine
+            .clone()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`await` outside a coroutine body"))?;
+        let dispatch = context
+            .dispatch
+            .get(await_.resume_state)
+            .copied()
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "await resume state has no dispatch block")
+            })?;
+        match &await_.kind {
+            LoweredAwaitKind::ChildCoroutine {
+                child_result,
+                deferred_resources,
+                ..
+            } => {
+                let child = self.emit_expression(owner, await_.operand, environment)?;
+                let child = value_as_basic(child)
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "`await` operand is not a coroutine")
+                    })?
+                    .into_pointer_value();
+                self.store_coroutine_resources(
+                    owner,
+                    deferred_resources,
+                    child,
+                    environment,
+                    span,
+                )?;
+                let frame = context.frame;
+                self.backend.build_coroutine_child_suspend(
+                    frame,
+                    context.frame_type,
+                    context.pending_field,
+                    await_.resume_state,
+                    child,
+                    context.status_type,
+                )?;
+                self.backend.builder.position_at_end(dispatch);
+                let result_llvm = self.backend.compile_type(child_result)?;
+                let value = self.backend.build_coroutine_pending_result(
+                    frame,
+                    context.frame_type,
+                    context.pending_field,
+                    result_llvm,
+                )?;
+                Ok(value.as_any_value_enum())
+            }
+            LoweredAwaitKind::Task { result } | LoweredAwaitKind::Wait { result } => {
+                self.emit_external_await(owner, &await_, result, context, environment, span)
+            }
+        }
+    }
+
+    /// Legacy `compile_external_await`: register the frame as the record's
+    /// waiter, park, and on resume read `Completed payload | Cancelled` from
+    /// the record's state.
+    fn emit_external_await(
+        &mut self,
+        owner: EmissionOwner,
+        await_: &crate::LoweredAwait,
+        result: &CheckedType,
+        context: CoroutineContext<'context>,
+        environment: &mut FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let ptr_type = self.backend.context.ptr_type(AddressSpace::default());
+        let i8_type = self.backend.context.i8_type();
+        let header_type = self.backend.coroutine_header_type();
+        let frame = context.frame;
+        let CheckedType::Sum(outcome_sum) = &await_.result_type else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "`await` result is not a `Completed | Cancelled` sum",
+            ));
+        };
+        let completed_type = outcome_sum.alternatives[0].clone();
+        let cancelled_type = outcome_sum.alternatives[1].clone();
+        let payload_llvm = self.backend.compile_type(result)?;
+        let (record_type, result_field, kind) = match &await_.kind {
+            LoweredAwaitKind::Task { .. } => (
+                self.backend.task_record_type(payload_llvm),
+                TASK_RECORD_RESULT,
+                ExternalAwaitKind::Task,
+            ),
+            LoweredAwaitKind::Wait { .. } => (
+                self.backend.completion_record_type(payload_llvm),
+                COMPLETION_VALUE,
+                ExternalAwaitKind::Wait,
+            ),
+            LoweredAwaitKind::ChildCoroutine { .. } => {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "child coroutine await reached external await emission",
+                ));
+            }
+        };
+        let dispatch = context
+            .dispatch
+            .get(await_.resume_state)
+            .copied()
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "await resume state has no dispatch block")
+            })?;
+        let function = context
+            .dispatch
+            .first()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "await dispatch has no function"))?;
+        let record = self.emit_expression(owner, await_.operand, environment)?;
+        let record = value_as_basic(record)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`await` operand is not a wait handle"))?
+            .into_pointer_value();
+        self.backend.build_external_await_suspend(
+            function,
+            frame,
+            record,
+            await_.resume_state,
+            dispatch,
+            context.status_type,
+            kind,
+        )?;
+        let record_slot = self
+            .backend
+            .builder
+            .build_struct_gep(header_type, frame, CORO_CHILD, "coro.child.slot")
+            .map_err(compiler_diagnostic)?;
+        let record = self
+            .backend
+            .builder
+            .build_load(ptr_type, record_slot, "external.record")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let record_state = self
+            .backend
+            .builder
+            .build_load(i8_type, record, "external.record.state")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let is_completed = self
+            .backend
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                record_state,
+                i8_type.const_int(COMPLETION_STATE_COMPLETED, false),
+                "external.completed",
+            )
+            .map_err(compiler_diagnostic)?;
+
+        let completed_block = self
+            .backend
+            .context
+            .append_basic_block(function, "await.ext.completed");
+        let cancelled_block = self
+            .backend
+            .context
+            .append_basic_block(function, "await.ext.cancelled");
+        let merge_block = self
+            .backend
+            .context
+            .append_basic_block(function, "await.ext.merge");
+        self.backend
+            .builder
+            .build_conditional_branch(is_completed, completed_block, cancelled_block)
+            .map_err(compiler_diagnostic)?;
+
+        let outcome_type = &await_.result_type;
+        let outcome_llvm = self.backend.compile_type(outcome_type)?;
+        let completed_plan = LoweredCoercionPlan::SumInject {
+            alternative: 0,
+            payload: Box::new(LoweredCoercionPlan::Identity),
+        };
+        let cancelled_plan = LoweredCoercionPlan::SumInject {
+            alternative: 1,
+            payload: Box::new(LoweredCoercionPlan::Identity),
+        };
+
+        self.backend.builder.position_at_end(completed_block);
+        let result_slot = self
+            .backend
+            .builder
+            .build_struct_gep(record_type, record, result_field, "external.record.result")
+            .map_err(compiler_diagnostic)?;
+        let payload = self
+            .backend
+            .builder
+            .build_load(payload_llvm, result_slot, "external.result")
+            .map_err(compiler_diagnostic)?;
+        let completed_value = self.emit_coercion(
+            payload.as_any_value_enum(),
+            &completed_type,
+            outcome_type,
+            &completed_plan,
+            span,
+        )?;
+        let completed_value = value_as_basic(completed_value)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`Completed` value is not first-class"))?;
+        let completed_end = self
+            .backend
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing completed block"))?;
+        self.backend
+            .builder
+            .build_unconditional_branch(merge_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.backend.builder.position_at_end(cancelled_block);
+        let cancelled_value = self.emit_coercion(
+            self.backend.unit_value(),
+            &cancelled_type,
+            outcome_type,
+            &cancelled_plan,
+            span,
+        )?;
+        let cancelled_value = value_as_basic(cancelled_value)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`Cancelled` value is not first-class"))?;
+        let cancelled_end = self
+            .backend
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing cancelled block"))?;
+        self.backend
+            .builder
+            .build_unconditional_branch(merge_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.backend.builder.position_at_end(merge_block);
+        let outcome = self
+            .backend
+            .builder
+            .build_phi(outcome_llvm, "await.ext.outcome")
+            .map_err(compiler_diagnostic)?;
+        outcome.add_incoming(&[
+            (&completed_value, completed_end),
+            (&cancelled_value, cancelled_end),
+        ]);
+        Ok(outcome.as_basic_value().as_any_value_enum())
+    }
+
+    /// Legacy `store_coroutine_resources`: pack the recorded deferred
+    /// resources into a fresh GC bundle and store its pointer in
+    /// `frame->resources`. Each use's recorded pass mode decides whether the
+    /// bundle slot is the borrowed pointer or the value.
+    pub(super) fn store_coroutine_resources(
+        &mut self,
+        owner: EmissionOwner,
+        uses: &[crate::LoweredResourceUseId],
+        frame: PointerValue<'context>,
+        environment: &mut FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        if uses.is_empty() {
+            return Ok(());
+        }
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let mut fields = Vec::with_capacity(uses.len());
+        let mut arguments = Vec::with_capacity(uses.len());
+        for use_id in uses {
+            let record = self
+                .view
+                .resource_use(owner, *use_id)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing coroutine resource use"))?;
+            let value = self.bound_resource_value(environment, record)?;
+            if record.pass_mode == crate::LoweredArgumentPassMode::Value {
+                fields.push(self.backend.compile_type(&record.resource.value_type)?);
+            } else {
+                fields.push(pointer.into());
+            }
+            arguments.push(
+                value_as_basic(value)
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "coroutine resource is not first-class")
+                    })?
+                    .into(),
+            );
+        }
+        let bundle_type = self.backend.context.struct_type(&fields, false);
+        self.backend
+            .build_coroutine_resource_bundle(frame, bundle_type, arguments, span.clone())
+    }
+
+    /// Stage 5.8 Step 5: `block_on`'s synchronous drive (`compile_coroutine_drive`).
+    /// The call's recorded activation names the concrete result type and the
+    /// deferred-resource slots in its own `resource_bindings`.
+    pub(super) fn emit_coroutine_drive(
+        &mut self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        frame: PointerValue<'context>,
+        environment: &mut FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let activation = call.runtime.coroutine.as_ref().ok_or_else(|| {
+            Diagnostic::new(
+                span.clone(),
+                "`block_on` is missing its recorded activation",
+            )
+        })?;
+        let uses = activation
+            .deferred_resources
+            .iter()
+            .map(|index| {
+                call.resource_bindings.get(*index).copied().ok_or_else(|| {
+                    Diagnostic::new(
+                        span.clone(),
+                        "`block_on` activation names a missing resource binding",
+                    )
+                })
+            })
+            .collect::<CodeGenerationResult<Vec<_>>>()?;
+        self.store_coroutine_resources(owner, &uses, frame, environment, span)?;
+        let result_llvm = self.backend.compile_type(&activation.result_type)?;
+        self.backend
+            .build_coroutine_drive(frame, result_llvm, span.clone())
+            .map(|value| value.as_any_value_enum())
     }
 }

@@ -236,6 +236,15 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.resource_use(self.program, id)
     }
 
+    /// Resolve an owner's await suspension record (Stage 5.8 Step 5).
+    pub(crate) fn await_record(
+        &self,
+        owner: EmissionOwner,
+        id: super::LoweredAwaitId,
+    ) -> Option<&'a LoweredAwait> {
+        self.owner(owner)?.await_record(self.program, id)
+    }
+
     pub(crate) fn binding(
         &self,
         owner: EmissionOwner,

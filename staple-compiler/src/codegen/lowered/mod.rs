@@ -2960,13 +2960,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_store(live, self.backend.context.bool_type().const_zero())
                     .map_err(compiler_diagnostic)?;
             }
-            self.store_local_initialization_state(
-                owner,
-                environment,
-                *symbol,
-                0,
-                &expression.origin.span,
-            )?;
+            // Legacy clears the binding cell's state only for a symbol with
+            // mutable storage (`has_mutable_storage`); a coroutine frame cell
+            // for an ordinary `let` is not cleared.
+            if self
+                .view
+                .symbol(*symbol)
+                .is_some_and(|symbol| symbol.mutable_storage)
+            {
+                self.store_local_initialization_state(
+                    owner,
+                    environment,
+                    *symbol,
+                    0,
+                    &expression.origin.span,
+                )?;
+            }
         }
         Ok(())
     }
@@ -3236,7 +3245,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::Coro(id) => {
                 self.emit_coro(owner, *id, environment, &expression.origin.span)
             }
-            LoweredExpressionKind::Await(_) => Err(unimplemented("await")),
+            LoweredExpressionKind::Await(id) => {
+                self.emit_await(owner, *id, environment, &expression.origin.span)
+            }
         }
     }
 
@@ -5109,7 +5120,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if !matches!(binding, LoweredBoundTarget::Route(_)) {
                     return Err(unsupported("intrinsic call binding"));
                 }
-                self.emit_intrinsic(owner, &call, id, *intrinsic, &values)
+                self.emit_intrinsic(owner, &call, id, *intrinsic, &values, environment)
             }
             LoweredCallableTarget::IndirectClosure { .. } => {
                 if !matches!(binding, LoweredBoundTarget::Route(_)) {
@@ -6602,12 +6613,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     fn emit_intrinsic(
-        &self,
+        &mut self,
         owner: EmissionOwner,
         call: &crate::LoweredCall,
         call_id: LoweredCallId,
         intrinsic: IntrinsicFunction,
         arguments: &[BasicMetadataValueEnum<'context>],
+        environment: &mut FunctionEnvironment<'context>,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let span = call.origin.span.clone();
         let result_type = &call.result_type;
@@ -7043,7 +7055,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             IntrinsicFunction::Reaction => Err(unsupported("reaction")),
             IntrinsicFunction::Batch => Err(unsupported("batch")),
             IntrinsicFunction::Snapshot => Err(unsupported("snapshot")),
-            IntrinsicFunction::CoroutineBlockOn => Err(unsupported("coroutine block_on")),
+            IntrinsicFunction::CoroutineBlockOn => {
+                let [BasicMetadataValueEnum::PointerValue(frame)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "`block_on` operand is not a coroutine value",
+                    ));
+                };
+                self.emit_coroutine_drive(owner, call, *frame, environment, &span)
+            }
             IntrinsicFunction::SchedulerCreate => Err(unsupported("scheduler")),
             IntrinsicFunction::TaskScope => Err(unsupported("task scope")),
             IntrinsicFunction::Spawn => Err(unsupported("spawn")),
