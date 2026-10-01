@@ -176,6 +176,8 @@ After Steps 1–7, the empty program should compile strictly. Confirm that the C
 
 Do the same for every other `MayBeBlocked` program that now compiles strictly and behaves identically. A program that compiles strictly but behaves differently is a defect to fix, never something to leave unflipped. The `CompileOnly` census programs stay compile-only.
 
+**Step 8 notes (complete).** Strict emission now attempts every artifact body and diagnoses a family with no body emitter instead of leaving an undefined declaration behind (a strict compile that could not link would otherwise look runnable); partial mode is unchanged. The empty program compiles strictly, links, and runs identically under both emitters. The CLI differential harness reports 5 blocked, 28 identical, and 3 compile-only, with none different; the 28 include `empty`, every 5.3–5.5 corpus entry, and the examples that no longer reach 5.7/5.8. Each identical program is flipped to `DifferentialExpectation::MustRun` through the new `must_run` helper, so it can never regress to blocked. The five that remain `MayBeBlocked` are `census_structural_methods`, `example_coroutines`, `example_signals_and_reactions`, `example_game_loop`, and `places_assignment` (5.7/5.8 construct families). The partial-mode and selector tests were updated to use a `coro` fixture, and the 5.3 census test no longer requires a fully ported program to stub something. The full suite passes 1298 tests.
+
 ### Step 9: Corpus, gate, and handoff
 
 **Corpus additions** (tagged `5.6`, each with an `emits` list naming its own functions):

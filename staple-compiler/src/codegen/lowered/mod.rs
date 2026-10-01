@@ -1799,7 +1799,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::GcFinalizer(plan) => {
                 self.emit_gc_finalizer_body(ordinal, plan, &artifact.origin.span)
             }
-            _ => Ok(()),
+            // Drop glue emits no function (D3); every other family's body is
+            // owned by a later substage, so strict emission reports it rather
+            // than leaving an undefined declaration behind.
+            LoweredArtifactPlan::DropGlue(_) => Ok(()),
+            other => Err(Diagnostic::new(
+                artifact.origin.span.clone(),
+                format!(
+                    "lowered emitter: {} is not implemented yet",
+                    artifact_family(other)
+                ),
+            )),
         }
     }
 
@@ -1991,16 +2001,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.planned_drop_glue(glue, span)
     }
 
-    /// Strict: attempt every adapter body, collecting one diagnostic per
-    /// failure.
+    /// Strict: attempt every artifact body, collecting one diagnostic per
+    /// failure. A family without a body emitter reports its family instead of
+    /// leaving an undefined declaration behind (an unlinked artifact would
+    /// otherwise make a strict compile look runnable).
     fn emit_artifact_bodies(&mut self, diagnostics: &mut Vec<Diagnostic>) {
         for (_, artifact) in self.view.artifacts() {
-            if !matches!(
-                artifact.plan,
-                Some(LoweredArtifactPlan::ConstructorAdapter(_))
-                    | Some(LoweredArtifactPlan::ExternAdapter(_))
-                    | Some(LoweredArtifactPlan::GcFinalizer(_))
-            ) {
+            if artifact.plan.is_none() {
                 continue;
             }
             if let Err(diagnostic) = self.emit_artifact_body(artifact.ordinal) {

@@ -96,6 +96,13 @@ const fn compile_only(mut program: DifferentialProgram) -> DifferentialProgram {
     program
 }
 
+/// Stage 5.6 Step 8: an entry that compiles strictly and runs identically
+/// under both emitters must never regress to blocked.
+const fn must_run(mut program: DifferentialProgram) -> DifferentialProgram {
+    program.expectation = DifferentialExpectation::MustRun;
+    program
+}
+
 /// Stage 5.4 Step 1: names the functions the entry must fully emit. Step 10
 /// attaches the list to the 5.4 corpus entries.
 #[allow(dead_code)]
@@ -276,8 +283,8 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
 }
 
 static CORPUS: [DifferentialProgram; 36] = [
-    inline("empty", "", "5.3"),
-    inline(
+    must_run(inline("empty", "", "5.3")),
+    must_run(inline(
         "integer_arithmetic",
         concat!(
             "def plus: (I32, I32) -> I32 = (left, right) => left + right\n",
@@ -285,8 +292,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "let second = first + 3\n",
         ),
         "5.3",
-    ),
-    inline(
+    )),
+    must_run(inline(
         "module_globals",
         concat!(
             "mod first {\n",
@@ -300,8 +307,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "let answer = first.doubled + second.total\n",
         ),
         "5.3",
-    ),
-    inline(
+    )),
+    must_run(inline(
         "census_constructor_adapters",
         concat!(
             "type Point = ctor (I32, I32)\n",
@@ -314,7 +321,7 @@ static CORPUS: [DifferentialProgram; 36] = [
             "let maker_u8: U8 -> Ref U8 = ref_maker ()\n",
         ),
         "5.3",
-    ),
+    )),
     inline(
         "census_structural_methods",
         concat!(
@@ -419,56 +426,56 @@ static CORPUS: [DifferentialProgram; 36] = [
         ),
         "5.3",
     )),
-    file(
+    must_run(file(
         "example_c_interop",
         "staple-compiler/examples/c_interop.sta",
         "5.3",
-    ),
+    )),
     file(
         "example_coroutines",
         "staple-compiler/examples/coroutines.sta",
         "5.3",
     ),
-    file(
+    must_run(file(
         "example_hello_world",
         "staple-compiler/examples/hello_world.sta",
         "5.3",
-    ),
-    file(
+    )),
+    must_run(file(
         "example_language_tour",
         "staple-compiler/examples/language_tour.sta",
         "5.3",
-    ),
-    file(
+    )),
+    must_run(file(
         "example_list_and_collections",
         "staple-compiler/examples/list_and_collections.sta",
         "5.3",
-    ),
-    file(
+    )),
+    must_run(file(
         "example_modules_and_imports",
         "staple-compiler/examples/modules_and_imports.sta",
         "5.3",
-    ),
+    )),
     file(
         "example_signals_and_reactions",
         "staple-compiler/examples/signals_and_reactions.sta",
         "5.3",
     ),
-    file(
+    must_run(file(
         "example_sums_and_propagation",
         "staple-compiler/examples/sums_and_propagation.sta",
         "5.3",
-    ),
-    file(
+    )),
+    must_run(file(
         "example_traits_and_generics",
         "staple-compiler/examples/traits_and_generics.sta",
         "5.3",
-    ),
-    file(
+    )),
+    must_run(file(
         "example_types_and_matching",
         "staple-compiler/examples/types_and_matching.sta",
         "5.3",
-    ),
+    )),
     // A two-module program: `main.sta` resolves `use game.*` against its own
     // directory.
     file(
@@ -476,26 +483,28 @@ static CORPUS: [DifferentialProgram; 36] = [
         "staple-compiler/examples/game_loop/main.sta",
         "5.3",
     ),
-    // Stage 5.4: calls, callable values, closures, resources, and intrinsics.
-    // Each entry names the functions its `emits` list must fully emit; the
-    // program as a whole stays `MayBeBlocked` for the later substages'
-    // constructs.
-    emits(
-        inline(
-            "calls_generic",
-            concat!(
-                "def identity: <T> move T -> T = move value => value\n",
-                "def first: <T where Copy T> T -> T = value => value\n",
-                "let one = identity 41\n",
-                "let text = identity \"hello\"\n",
-                "let two = first 2\n",
-                "let total = one + two\n",
+    must_run(
+        // Stage 5.4: calls, callable values, closures, resources, and intrinsics.
+        // Each entry names the functions its `emits` list must fully emit; the
+        // program as a whole stays `MayBeBlocked` for the later substages'
+        // constructs.
+        emits(
+            inline(
+                "calls_generic",
+                concat!(
+                    "def identity: <T> move T -> T = move value => value\n",
+                    "def first: <T where Copy T> T -> T = value => value\n",
+                    "let one = identity 41\n",
+                    "let text = identity \"hello\"\n",
+                    "let two = first 2\n",
+                    "let total = one + two\n",
+                ),
+                "5.4",
             ),
-            "5.4",
+            &["identity", "first"],
         ),
-        &["identity", "first"],
     ),
-    emits(
+    must_run(emits(
         inline(
             "calls_curried_defaults",
             concat!(
@@ -515,8 +524,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.4",
         ),
         &["total", "spread", "curried", "sum3", "pair_of"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "calls_mutation",
             concat!(
@@ -536,8 +545,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.4",
         ),
         &["bump", "borrow", "exercise"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "closures_captures",
             concat!(
@@ -569,8 +578,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.4",
         ),
         &["keeper", "counter", "reader", "borrowed", "consume"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "extern_values",
             concat!(
@@ -591,8 +600,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.4",
         ),
         &["call_extern", "extern_value"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "constructors",
             concat!(
@@ -615,8 +624,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.4",
         ),
         &["make", "call_make", "make_ref"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "resources_with",
             concat!(
@@ -639,8 +648,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.4",
         ),
         &["get", "forward", "value_of", "read", "run", "bump"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "numeric_intrinsics",
             concat!(
@@ -668,8 +677,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "combine",
             "bytes_length",
         ],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "thunk_arguments",
             concat!(
@@ -689,8 +698,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.4",
         ),
         &["evaluate", "thunk_plain", "thunk_env"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "match_sums_products",
             concat!(
@@ -733,8 +742,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.5",
         ),
         &["nested", "nominal", "wildcard", "flag"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "match_strings_literals",
             concat!(
@@ -753,8 +762,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.5",
         ),
         &["fallback", "describe"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "destructuring",
             concat!(
@@ -777,7 +786,7 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.5",
         ),
         &["sum_pair", "destructure", "nested"],
-    ),
+    )),
     emits(
         inline(
             "places_assignment",
@@ -812,7 +821,7 @@ static CORPUS: [DifferentialProgram; 36] = [
         ),
         &["places", "ref_place", "make_counter"],
     ),
-    emits(
+    must_run(emits(
         inline(
             "coercions",
             concat!(
@@ -841,8 +850,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.5",
         ),
         &["read", "widen", "inject", "slice_ref", "take", "consume"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "loops_values",
             concat!(
@@ -876,8 +885,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.5",
         ),
         &["sum_to", "nested"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "propagation",
             concat!(
@@ -897,8 +906,8 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.5",
         ),
         &["lookup", "doubled"],
-    ),
-    emits(
+    )),
+    must_run(emits(
         inline(
             "templates",
             concat!(
@@ -913,7 +922,7 @@ static CORPUS: [DifferentialProgram; 36] = [
             "5.5",
         ),
         &["show", "debug", "both"],
-    ),
+    )),
 ];
 
 /// Extract every `define`d function body from one module's IR text, keyed by

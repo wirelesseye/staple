@@ -6181,10 +6181,8 @@ pub(crate) mod tests {
                     panic!("partial lowered emission should verify: {diagnostics:?}\n{source}")
                 });
             let mapping = assert_declaration_parity(source, &lowered, &legacy, &partial);
-            assert!(
-                !partial.report.stubbed().is_empty(),
-                "the partial report records the standard library's unported bodies\n{source}"
-            );
+            // Stage 5.6: a fully ported program may have no stubbed body at
+            // all, so the report is informational here, never required.
             if !mapping.aliased_instances.is_empty() || !mapping.aliased_artifacts.is_empty() {
                 saw_aliased_entries = true;
             }

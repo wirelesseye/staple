@@ -26,8 +26,19 @@ fn compile(source: &str, emitter: Emitter) -> Result<String, Vec<staple_syntax::
 fn selector_preserves_legacy_and_reports_unported_lowered_body() {
     let llvm = compile("", Emitter::Legacy).unwrap();
     assert!(llvm.contains("define i32 @main()"));
+    // Stage 5.6 Step 8: the empty program now compiles strictly under both
+    // emitters; a body with a still-unported construct (`coro`) reports the
+    // lowered emitter.
+    compile("", Emitter::Lowered).expect("the empty program compiles strictly");
 
-    let diagnostics = compile("", Emitter::Lowered).unwrap_err();
+    let diagnostics = compile(
+        concat!(
+            "use std.coroutine.*\n",
+            "def first: () -> Coroutine{} I32 = () => coro { 1 }\n",
+        ),
+        Emitter::Lowered,
+    )
+    .unwrap_err();
     assert!(
         diagnostics
             .iter()
@@ -40,15 +51,23 @@ fn selector_preserves_legacy_and_reports_unported_lowered_body() {
 /// compile reports every unsupported body it reached.
 #[test]
 fn strict_emission_reports_every_failed_body() {
-    let diagnostics = compile("", Emitter::Lowered).unwrap_err();
+    let diagnostics = compile(
+        concat!(
+            "use std.coroutine.*\n",
+            "def first: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def second: () -> Coroutine{} I32 = () => coro { 2 }\n",
+        ),
+        Emitter::Lowered,
+    )
+    .unwrap_err();
     assert!(
         diagnostics.len() > 1,
         "expected one diagnostic per failed body, got {diagnostics:?}"
     );
 }
 
-/// Stage 5.3 Step 2 invariant: the empty program's partial module verifies and
-/// the report is the progress measure for the standard library's eager bodies.
+/// Stage 5.3 Step 2 invariant, ratcheted by Stage 5.6 Step 8: the empty
+/// program's partial module verifies with no stubbed body at all.
 #[test]
 fn partial_emission_empty_program_verifies() {
     let lowered = prepare("");
@@ -57,17 +76,15 @@ fn partial_emission_empty_program_verifies() {
         .compile_lowered_partial(&lowered)
         .expect("the empty program should emit a verified partial module");
     assert!(
-        !report.stubbed().is_empty(),
-        "the standard library's eager bodies still stub in 5.3"
+        report.stubbed().is_empty(),
+        "the empty program has no stubbed body: {:?}",
+        report.family_histogram()
     );
     eprintln!(
         "empty program: {} stubs, {} families",
         report.stubbed().len(),
         report.family_histogram().len()
     );
-    for (family, count) in report.family_histogram() {
-        eprintln!("{count:5}  {family}");
-    }
 }
 
 /// Stage 5.3 Step 2: partial mode stubs unsupported bodies, stubs the
