@@ -92,6 +92,8 @@ Each step ends with the Contract 6 gates (`cargo nextest run --workspace` for th
 - Split `GC finalizer artifact` into the four subkinds (`payload finalizer`, `cell finalizer`, `closure environment finalizer`, `buffer finalizer`) for progress tracking.
 - Make sure every cleanup family the hooks can report is in the ownership table, owned by 5.6.
 
+**Step 1 notes (complete).** A reactive intrinsic call resolves its `LoweredReactiveOperationKind` through the new `EmissionView::reactive_operation` accessor, and `reactive_call_family` names the split families: `reactive scope call` (5.6, 72 first-blocker stubs corpus-wide; the empty program's two calls among them), and `reaction call`, `batch call`, `until call`, and `snapshot call` (5.8, with the impossible binding/name kinds kept under the general `reactive call` family). The five reactive families replace `reactive call` in the ownership table. `artifact_family` now matches `GcFinalizerPlan` and reports `payload finalizer`, `cell finalizer`, `closure environment finalizer`, and `buffer finalizer` separately (18 stubs split 13/3/2/0). Every cleanup family the hooks can report was already in the table owned by 5.6. The harness reports 424 stubs: 344 owned by 5.6, 8 by 5.7, 72 by 5.8. The full suite passes 1298 tests.
+
 ### Step 2: Share the cleanup helpers (Contract 7)
 
 Move the `TypedModule`-free cores into `codegen/ir.rs` and switch legacy to them:

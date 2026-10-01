@@ -17,13 +17,14 @@ use inkwell::{
 use crate::specialization::ArtifactOrdinal;
 use crate::{
     BlockId, CheckedMutation, CheckedResource, CheckedType, EmissionView, ExpressionId,
-    FunctionInstanceId, InitializerId, IntrinsicFunction, LoweredArgumentPassMode,
+    FunctionInstanceId, GcFinalizerPlan, InitializerId, IntrinsicFunction, LoweredArgumentPassMode,
     LoweredArtifactPlan, LoweredBindingSite, LoweredBoundTarget, LoweredCallArgument,
     LoweredCallEnvironment, LoweredCallId, LoweredCallStep, LoweredCallableAdapter,
     LoweredCallableTarget, LoweredCallableValueId, LoweredClosureEnvironment,
     LoweredEntryResourceKind, LoweredExpressionKind, LoweredInstanceCapture, LoweredItemKind,
-    LoweredPatternKind, LoweredProviderStorage, LoweredResourceProviderId, LoweredScopeExit,
-    ModuleId, OwnedStorage, PatternId, RuntimeRequirement, SymbolId,
+    LoweredPatternKind, LoweredProviderStorage, LoweredReactiveOperationKind,
+    LoweredResourceProviderId, LoweredScopeExit, ModuleId, OwnedStorage, PatternId,
+    RuntimeRequirement, SymbolId,
 };
 
 use super::abi::flattened_parameter_types;
@@ -3997,9 +3998,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // materializes.)
         let by_value_route =
             matches!(call.target, LoweredCallableTarget::Intrinsic { .. }) || native_extern;
-        // 5.8 owns reactive calls.
-        if call.reactive.is_some() {
-            return Err(unsupported("reactive call"));
+        // Stage 5.6 Step 1: a reactive intrinsic call names the operation it
+        // performs (5.6 ports the plain scope call; 5.8 owns the rest).
+        if let Some(reactive) = call.reactive {
+            let operation = self
+                .view
+                .reactive_operation(owner, reactive)
+                .ok_or_else(|| {
+                    Diagnostic::new(call.origin.span.clone(), "missing reactive operation")
+                })?;
+            return Err(unsupported(reactive_call_family(&operation.kind)));
         }
         // Legacy checks the callee symbol's initialization before evaluating
         // any argument.
@@ -5983,12 +5991,38 @@ fn artifact_family(plan: &LoweredArtifactPlan) -> &'static str {
         LoweredArtifactPlan::ConstructorAdapter(_) => "constructor adapter artifact",
         LoweredArtifactPlan::StructuralMethod(_) => "structural method artifact",
         LoweredArtifactPlan::DropGlue(_) => "drop glue artifact",
-        LoweredArtifactPlan::GcFinalizer(_) => "GC finalizer artifact",
+        // Stage 5.6 Step 1: the four finalizer subkinds are separate families
+        // so progress is tracked per body shape.
+        LoweredArtifactPlan::GcFinalizer(finalizer) => match finalizer {
+            GcFinalizerPlan::Payload { .. } => "payload finalizer",
+            GcFinalizerPlan::Cell { .. } => "cell finalizer",
+            GcFinalizerPlan::ClosureEnvironment { .. } => "closure environment finalizer",
+            GcFinalizerPlan::Buffer { .. } => "buffer finalizer",
+        },
         LoweredArtifactPlan::CoroutineCodes(_) => "coroutine pair artifact",
         LoweredArtifactPlan::ReactionRunner(_) => "reaction runner artifact",
         LoweredArtifactPlan::UntilRunner(_) => "until runner artifact",
         LoweredArtifactPlan::DerivedRunner(_) => "derived runner artifact",
         LoweredArtifactPlan::ExternAdapter(_) => "extern adapter artifact",
+    }
+}
+
+/// Stage 5.6 Step 1: the construct family of one reactive operation carried by
+/// a call. Only the five reactive intrinsics (scope, reaction, batch, `until`,
+/// snapshot) are ever attached to a call; the binding and name operations are
+/// diagnosed under the general family if one ever appears.
+fn reactive_call_family(kind: &LoweredReactiveOperationKind) -> &'static str {
+    match kind {
+        LoweredReactiveOperationKind::Scope => "reactive scope call",
+        LoweredReactiveOperationKind::Reaction { .. } => "reaction call",
+        LoweredReactiveOperationKind::Batch { .. } => "batch call",
+        LoweredReactiveOperationKind::Until { .. } => "until call",
+        LoweredReactiveOperationKind::Snapshot => "snapshot call",
+        LoweredReactiveOperationKind::SignalCreate { .. }
+        | LoweredReactiveOperationKind::SignalRead { .. }
+        | LoweredReactiveOperationKind::SignalNotify { .. }
+        | LoweredReactiveOperationKind::DerivedRead { .. }
+        | LoweredReactiveOperationKind::DerivedCreate { .. } => "reactive call",
     }
 }
 

@@ -140,6 +140,16 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.call(self.program, id)
     }
 
+    /// The reactive operation one call performs, resolved through the owned
+    /// arenas so the emitter can name the operation's construct family.
+    pub(crate) fn reactive_operation(
+        &self,
+        owner: EmissionOwner,
+        id: super::LoweredReactiveOperationId,
+    ) -> Option<&'a super::LoweredReactiveOperation> {
+        self.owner(owner)?.reactive_operation(self.program, id)
+    }
+
     pub(crate) fn pattern(
         &self,
         owner: EmissionOwner,
