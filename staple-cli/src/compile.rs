@@ -4552,8 +4552,10 @@ mod tests {
     ///   histogram while strict lowered emission fails, and must behave
     ///   identically once it succeeds;
     /// - `MustRun` programs must compile strictly and behave identically, so a
-    ///   program that once ran can never regress to blocked.
-    /// After F1 no corpus program is expected to run strictly in 5.3.
+    ///   program that once ran can never regress to blocked;
+    /// - `LoweredOnly` D5 fixtures run only under the lowered emitter and must
+    ///   print their pinned stdout; legacy must fail to compile or behave
+    ///   differently, and the run records which.
     #[cfg(unix)]
     #[test]
     fn stage_5_3_cli_differential_harness_compares_or_reports_blocked() {
@@ -4574,6 +4576,9 @@ mod tests {
         let mut blocked = 0usize;
         let mut identical = 0usize;
         let mut compile_only = 0usize;
+        let mut lowered_only = 0usize;
+        let mut legacy_rejected = 0usize;
+        let mut legacy_different = 0usize;
         let mut families: HashMap<String, usize> = HashMap::new();
         for program in staple_compiler::differential_corpus() {
             let (source, root) = match program.source {
@@ -4629,6 +4634,42 @@ mod tests {
                         )
                     });
                 compile_only += 1;
+                continue;
+            }
+            if program.expectation == DifferentialExpectation::LoweredOnly {
+                // A D5 generic fixture: legacy aliases or rejects it, so only
+                // the lowered emitter's behavior is required. Legacy must
+                // fail to compile or differ, and the run records which.
+                assert!(
+                    strict.is_ok(),
+                    "`{}` must emit strictly under the lowered emitter: {:?}",
+                    program.name,
+                    strict.err()
+                );
+                let lowered_behavior = compile_link_run(&lowered, Emitter::Lowered, &options)
+                    .unwrap_or_else(|error| {
+                        panic!("`{}` should run with lowered: {error}", program.name)
+                    });
+                let expected = program
+                    .expected_stdout
+                    .expect("a LoweredOnly program pins its stdout");
+                assert_eq!(
+                    lowered_behavior.1, expected,
+                    "`{}` prints unexpected output under the lowered emitter",
+                    program.name
+                );
+                match compile_link_run(&lowered, Emitter::Legacy, &options) {
+                    Err(_) => legacy_rejected += 1,
+                    Ok(legacy) => {
+                        assert_ne!(
+                            legacy, lowered_behavior,
+                            "`{}`: legacy must fail to compile or behave differently",
+                            program.name
+                        );
+                        legacy_different += 1;
+                    }
+                }
+                lowered_only += 1;
                 continue;
             }
             // A program whose lowered strict compile fails is blocked: it has
@@ -4690,12 +4731,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         eprintln!(
-            "stage 5.3 CLI harness: {blocked} blocked, {identical} identical, {compile_only} compile-only (top families: {top})"
+            "stage 5.3 CLI harness: {blocked} blocked, {identical} identical, {compile_only} compile-only, \
+{lowered_only} lowered-only ({legacy_rejected} legacy-rejected, {legacy_different} legacy-different) \
+(top families: {top})"
         );
         assert_eq!(
-            blocked + identical + compile_only,
+            blocked + identical + compile_only + lowered_only,
             staple_compiler::differential_corpus().len(),
-            "every corpus program is blocked, identical, or compile-only"
+            "every corpus program is blocked, identical, compile-only, or lowered-only"
         );
     }
 

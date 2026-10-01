@@ -41,6 +41,25 @@ pub enum DifferentialExpectation {
     /// substage flips an entry to this once the program first runs, so it can
     /// never regress to blocked (the ratchet the 5.6 runnable gate relies on).
     MustRun,
+    /// The D5 generic fixtures: legacy aliases or rejects the program, so only
+    /// the lowered emitter is run and its pinned stdout is required. Legacy
+    /// must fail to compile or behave differently under the test, which
+    /// records which.
+    LoweredOnly,
+}
+
+/// The D5 artifact family a `LoweredOnly` fixture must instantiate twice.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DifferentialD5 {
+    /// A generic coroutine's `resume`/`cleanup` pair.
+    CoroutinePairs,
+    /// A generic reaction's runner.
+    ReactionRunners,
+    /// A generic `until`'s runner.
+    UntilRunners,
+    /// A generic derived binding's runner.
+    DerivedRunners,
 }
 
 /// One differential corpus program.
@@ -66,6 +85,9 @@ pub struct DifferentialProgram {
     /// A `MustRun` program that must end in an `llvm.trap` (killed by a
     /// signal, so no exit code) under both emitters.
     pub traps: bool,
+    /// A `LoweredOnly` program's D5 artifact family: the in-process harness
+    /// requires two distinct artifacts of it.
+    pub d5: Option<DifferentialD5>,
 }
 
 const fn inline(
@@ -81,6 +103,7 @@ const fn inline(
         emits: &[],
         expected_stdout: None,
         traps: false,
+        d5: None,
     }
 }
 
@@ -97,7 +120,15 @@ const fn file(
         emits: &[],
         expected_stdout: None,
         traps: false,
+        d5: None,
     }
+}
+
+/// Stage 5.8 Step 8: a D5 generic fixture only the lowered emitter runs.
+const fn lowered_only(mut program: DifferentialProgram, d5: DifferentialD5) -> DifferentialProgram {
+    program.expectation = DifferentialExpectation::LoweredOnly;
+    program.d5 = Some(d5);
+    program
 }
 
 /// Marks a corpus entry as unlinkable under either emitter.
@@ -312,7 +343,7 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 49] = [
+static CORPUS: [DifferentialProgram; 53] = [
     must_run(inline("empty", "", "5.3")),
     must_run(inline(
         "integer_arithmetic",
@@ -1394,6 +1425,103 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         &["at"],
     ))),
+    // Stage 5.8 Step 8: the D5 generic fixtures. Legacy rejects each of these
+    // (an unspecialized type parameter reaches its emitter), so only the
+    // lowered emitter runs them; each instantiates its artifact twice and
+    // prints proof that the second instantiation used its own pair or runner.
+    lowered_only(
+        expect_stdout(
+            inline(
+                "generic_coro_pair",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "def generic: <T where Copy T> T -> Coroutine{} T = value => coro { value }\n",
+                    "let a: Coroutine{} I32 = generic 7\n",
+                    "let b: Coroutine{} U8 = generic (1 satisfies U8)\n",
+                    "let x = block_on a\n",
+                    "let y = block_on b\n",
+                    "println \"a=${x:?} b=${y:?}\"\n",
+                ),
+                "5.8",
+            ),
+            "a=7 b=1\n",
+        ),
+        DifferentialD5::CoroutinePairs,
+    ),
+    lowered_only(
+        expect_stdout(
+            inline(
+                "generic_reaction_runner",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "def generic_reaction: <T where Copy T, Debug T> T ->{Reactive, IO} () =\n",
+                    "  value => reaction { println \"reaction ${value:?}\"; () }\n",
+                    "with Reactive = reactive_scope () {\n",
+                    "  generic_reaction 7\n",
+                    "  generic_reaction (1 satisfies U8)\n",
+                    "}\n",
+                ),
+                "5.8",
+            ),
+            "reaction 7\nreaction 1\n",
+        ),
+        DifferentialD5::ReactionRunners,
+    ),
+    lowered_only(
+        expect_stdout(
+            inline(
+                "generic_until_runner",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "let signal count = 0\n",
+                    "def peek: <T> T -> I32 = _ => 0\n",
+                    "def generic_until: <T where Copy T, Debug T> T -> Coroutine{Reactive, IO} () =\n",
+                    "  value => coro {\n",
+                    "    let _ = await (until { count + peek value > 0 })\n",
+                    "    println \"until ${value:?}\"\n",
+                    "  }\n",
+                    "count = 1\n",
+                    "with Reactive = reactive_scope () {\n",
+                    "  let a: Coroutine{Reactive, IO} () = generic_until 7\n",
+                    "  let b: Coroutine{Reactive, IO} () = generic_until (1 satisfies U8)\n",
+                    "  let _ = block_on a\n",
+                    "  let _ = block_on b\n",
+                    "}\n",
+                ),
+                "5.8",
+            ),
+            "until 7\nuntil 1\n",
+        ),
+        DifferentialD5::UntilRunners,
+    ),
+    lowered_only(
+        expect_stdout(
+            inline(
+                "generic_derived_runner",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "let signal count = 0\n",
+                    "def peek: <T> T -> I32 = _ => 0\n",
+                    "def generic_derived: <T where Copy T, Debug T> T ->{state.read, IO} I32 =\n",
+                    "  value => {\n",
+                    "    let local = count + peek value\n",
+                    "    println \"derived ${value:?} ${local:?}\"\n",
+                    "    local\n",
+                    "  }\n",
+                    "let a = generic_derived 7\n",
+                    "let b = generic_derived (1 satisfies U8)\n",
+                    "println \"results ${a:?} ${b:?}\"\n",
+                ),
+                "5.8",
+            ),
+            "derived 7 0\nderived 1 0\nresults 0 0\n",
+        ),
+        DifferentialD5::DerivedRunners,
+    ),
 ];
 
 /// Extract every `define`d function body from one module's IR text, keyed by
@@ -1973,14 +2101,7 @@ mod tests {
                 }
             }
             let context = Context::create();
-            let legacy = crate::codegen::legacy_emissions(&context, &lowered).unwrap_or_else(
-                |diagnostics| {
-                    panic!(
-                        "the legacy backend should compile `{}`: {diagnostics:?}\n{source}",
-                        program.name
-                    )
-                },
-            );
+            let legacy = crate::codegen::legacy_emissions(&context, &lowered);
             let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
                 .unwrap_or_else(|diagnostics| {
                     panic!(
@@ -1988,18 +2109,46 @@ mod tests {
                         program.name
                     )
                 });
-            let mapping = assert_declaration_parity(program.name, &lowered, &legacy, &partial);
-
-            total_stubs += partial.report.stubbed().len();
-            for (family, count) in &partial.report.reached_families {
+            let lowered_only = program.expectation == super::DifferentialExpectation::LoweredOnly;
+            if lowered_only {
+                // Legacy rejects or aliases these programs, so only the
+                // lowered module's structure is asserted. If legacy did
+                // compile one, the second artifact must be census-explained.
                 assert!(
-                    super::family_owner(family).is_some(),
-                    "unclassified reached family {family}"
+                    partial.report.stubbed().is_empty(),
+                    "`{}` must fully emit: {:?}",
+                    program.name,
+                    partial.report
                 );
-                *reached.entry(family.clone()).or_default() += count;
-            }
-            for (family, count) in partial.report.family_histogram() {
-                let owner = super::family_owner(family).unwrap_or_else(|| {
+                assert_distinct_d5_artifacts(program, &lowered);
+                if let Ok(legacy) = legacy {
+                    let mapping =
+                        assert_declaration_parity(program.name, &lowered, &legacy, &partial);
+                    assert!(
+                        !mapping.aliased_artifacts.is_empty(),
+                        "`{}`: legacy compiled a LoweredOnly fixture without aliasing an artifact",
+                        program.name
+                    );
+                }
+            } else {
+                let legacy = legacy.unwrap_or_else(|diagnostics| {
+                    panic!(
+                        "the legacy backend should compile `{}`: {diagnostics:?}\n{source}",
+                        program.name
+                    )
+                });
+                let mapping = assert_declaration_parity(program.name, &lowered, &legacy, &partial);
+
+                total_stubs += partial.report.stubbed().len();
+                for (family, count) in &partial.report.reached_families {
+                    assert!(
+                        super::family_owner(family).is_some(),
+                        "unclassified reached family {family}"
+                    );
+                    *reached.entry(family.clone()).or_default() += count;
+                }
+                for (family, count) in partial.report.family_histogram() {
+                    let owner = super::family_owner(family).unwrap_or_else(|| {
                     let detail = partial
                         .report
                         .stubbed()
@@ -2012,13 +2161,19 @@ mod tests {
                         program.name
                     )
                 });
-                *owner_totals.entry(owner).or_insert(0) += count;
-                *histogram.entry(family.clone()).or_insert(0) += count;
+                    *owner_totals.entry(owner).or_insert(0) += count;
+                    *histogram.entry(family.clone()).or_insert(0) += count;
+                }
+                let compared_names = compare_fully_emitted_bodies(
+                    program.name,
+                    &lowered,
+                    &mapping,
+                    &legacy,
+                    &partial,
+                );
+                assert_focus_emissions(program, &lowered, &partial, &compared_names);
+                compared += compared_names.len();
             }
-            let compared_names =
-                compare_fully_emitted_bodies(program.name, &lowered, &mapping, &legacy, &partial);
-            assert_focus_emissions(program, &lowered, &partial, &compared_names);
-            compared += compared_names.len();
         }
 
         use crate::StructuralTraitMethod;
@@ -2177,6 +2332,55 @@ mod tests {
         assert!(
             matched > 0,
             "`{}` lists focus templates but the module has no materialized instance of them",
+            program.name
+        );
+    }
+
+    /// Stage 5.8 Step 8: one D5 fixture instantiates its pair or runner twice,
+    /// with distinct owners, so the emitted module proves the second
+    /// instantiation did not reuse the first artifact.
+    fn assert_distinct_d5_artifacts(program: &DifferentialProgram, lowered: &LoweredModule) {
+        use crate::{LoweredArtifactPlan, ReactiveRunnerBody};
+        let family = program
+            .d5
+            .expect("a LoweredOnly fixture names its D5 family");
+        let mut owners = Vec::new();
+        for (_, artifact) in lowered.program().artifacts() {
+            match (family, artifact.plan.as_ref()) {
+                (
+                    super::DifferentialD5::CoroutinePairs,
+                    Some(LoweredArtifactPlan::CoroutineCodes(plan)),
+                ) => owners.push(format!("{:?}", plan.body)),
+                (
+                    super::DifferentialD5::ReactionRunners,
+                    Some(LoweredArtifactPlan::ReactionRunner(plan)),
+                ) if matches!(plan.body, ReactiveRunnerBody::Reaction { .. }) => {
+                    owners.push(format!("{:?}", plan.owner));
+                }
+                (
+                    super::DifferentialD5::UntilRunners,
+                    Some(LoweredArtifactPlan::UntilRunner(plan)),
+                ) if matches!(plan.body, ReactiveRunnerBody::Until { .. }) => {
+                    owners.push(format!("{:?}", plan.owner));
+                }
+                (
+                    super::DifferentialD5::DerivedRunners,
+                    Some(LoweredArtifactPlan::DerivedRunner(plan)),
+                ) if matches!(plan.body, ReactiveRunnerBody::Derived { .. }) => {
+                    owners.push(format!("{:?}", plan.owner));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            owners.len(),
+            2,
+            "`{}`: the D5 fixture emits two artifacts, got {owners:?}",
+            program.name
+        );
+        assert_ne!(
+            owners[0], owners[1],
+            "`{}`: the two D5 artifacts have distinct owners",
             program.name
         );
     }

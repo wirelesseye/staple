@@ -319,6 +319,10 @@ The step's fixture compares body for body: the signals/derived/`until` fixture (
   - Each prints enough to prove the second instantiation used its own pair or runner.
 - **The in-process harness asserts** that each produces two distinct pair or runner artifacts. Aliased entries must appear in the census mapping's `aliased_artifacts`, not be silently skipped.
 
+**Step 8 notes (complete).** `DifferentialExpectation::LoweredOnly` (with a `DifferentialD5` family tag and pinned `expected_stdout`) and four generic fixtures landed: a generic `coro` at `I32`/`U8` (its result type is `T`, so legacy rejects it), a generic `reaction` whose callback prints the captured `T`, a generic `until` whose predicate reads `peek value`, and a generic derived binding whose evaluator reads `value`. Legacy rejects all four with "cannot generate code for unspecialized type parameter `T`"; the CLI harness records **4 lowered-only, 4 legacy-rejected, 0 legacy-different**. Each fixture prints proof that the second instantiation used its own artifact (`a=7 b=1`; `reaction 7`/`reaction 1`; `until 7`/`until 1`; `derived 7 0`/`derived 1 0`).
+
+The in-process harness asserts every `LoweredOnly` entry fully emits and that its D5 family has exactly two artifacts with distinct owners (`assert_distinct_d5_artifacts`). If legacy ever compiles one of these programs, the harness builds the declaration census and requires `mapping.aliased_artifacts` to be non-empty, so an aliased instantiation cannot be silently skipped. Corpus is 53 programs; compared bodies stay 14007 because the D5 fixtures are lowered-only by definition. CLI harness overall: **0 blocked, 46 identical, 3 compile-only, 4 lowered-only, none different**. All Contract 6 gates pass (1311 tests; both workspace checks; formatting/diff checks).
+
 ### Step 9: Runnable programs and the ratchet
 
 - **Port the 4.5 fixture set into the corpus** as `5.8` `MustRun` entries with `expected_stdout` and focus `emits` lists. Fixtures with runtime-timing-dependent output pin only deterministic lines.
