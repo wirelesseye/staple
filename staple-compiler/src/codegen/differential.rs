@@ -320,7 +320,7 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
 /// none of their families stubs anywhere in the corpus; each later substage
 /// appends itself when its gate closes.
 #[cfg(test)]
-const COMPLETED_SUBSTAGES: &[&str] = &["5.3", "5.4", "5.5", "5.6", "5.7"];
+const COMPLETED_SUBSTAGES: &[&str] = &["5.3", "5.4", "5.5", "5.6", "5.7", "5.8"];
 
 /// The substage that owns one diagnostic family, or `None` for a diagnostic
 /// that is not a construct family at all (an internal invariant the emitter
@@ -2277,6 +2277,13 @@ mod tests {
         let mut compared = 0;
         let mut histogram: HashMap<String, usize> = HashMap::new();
         let mut owner_totals: HashMap<&'static str, usize> = HashMap::new();
+        // Stage 5.8 Step 10: no entry may stay `MayBeBlocked`.
+        assert!(
+            differential_corpus()
+                .iter()
+                .all(|program| program.expectation != super::DifferentialExpectation::MayBeBlocked),
+            "every corpus entry is MustRun, LoweredOnly, or CompileOnly"
+        );
         for program in differential_corpus() {
             let (source, root) = program_source(program);
             let lowered = lower(&source, &root);
@@ -2474,6 +2481,12 @@ mod tests {
         assert!(
             compared > 0,
             "the corpus must have fully emitted functions to compare"
+        );
+        // Stage 5.8 Step 10: the zero-stub gate. Every corpus body the lowered
+        // emitter emits is a real body, and every one matches legacy.
+        assert_eq!(
+            total_stubs, 0,
+            "Stage 5.8 closed with stubs in the corpus: {families:?}"
         );
     }
 
