@@ -1,3 +1,4 @@
+use ir::{CoroutineResumeEntry, ExternalAwaitKind};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -51,10 +52,8 @@ use layout::strip_place_wrappers;
 use layout::{
     COMPLETION_CANCEL_ENV, COMPLETION_CANCEL_FN, COMPLETION_FLAGS, COMPLETION_SCHEDULER,
     COMPLETION_STATE_COMPLETED, COMPLETION_VALUE, CORO_CAPTURE_ENV, CORO_CHILD, CORO_CLEANUP_FN,
-    CORO_HEADER_FIELDS, CORO_PARENT, CORO_PENDING_PTR, CORO_RECORD, CORO_RESOURCES,
-    CORO_RESULT_PTR, CORO_RESUME_FN, CORO_STATE, CORO_STATE_DONE, CORO_STATE_FREED,
-    CORO_STATUS_CANCELLED, CORO_STATUS_DONE, CORO_STATUS_RESUME_CHILD, CORO_STATUS_WAIT_EXTERNAL,
-    SumStorage, TASK_RECORD_CANCEL, TASK_RECORD_FRAME, TASK_RECORD_RESULT, TASK_RECORD_SCHEDULER,
+    CORO_HEADER_FIELDS, CORO_PARENT, CORO_RECORD, CORO_RESOURCES, CORO_RESULT_PTR, CORO_STATE,
+    SumStorage, TASK_RECORD_FRAME, TASK_RECORD_RESULT, TASK_RECORD_SCHEDULER,
 };
 #[cfg(test)]
 pub(crate) use legacy_recorder::*;
@@ -383,13 +382,6 @@ impl<'context> FunctionEnvironment<'context> {
         self.binding_cells = snapshot.binding_cells.clone();
         self.parameter_pointers = snapshot.parameter_pointers.clone();
     }
-}
-
-/// Which external record an `await` parks on (`compile_external_await`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ExternalAwaitKind {
-    Task,
-    Wait,
 }
 
 struct CoroutineFrameLayout<'context> {
@@ -7374,38 +7366,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 payload_fields.push(self.compile_type(&resource.value_type)?);
             }
         }
-        let payload_type = self.context.struct_type(&payload_fields, false);
-        let payload = self
-            .builder
-            .build_malloc(payload_type, "reaction.payload")
-            .map_err(compiler_diagnostic)?;
-        let callback_slot = self
-            .builder
-            .build_struct_gep(payload_type, payload, 0, "reaction.callback")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(callback_slot, callback)
-            .map_err(compiler_diagnostic)?;
-        for (index, resource) in resources.iter().enumerate() {
-            let slot = self
-                .builder
-                .build_struct_gep(
-                    payload_type,
-                    payload,
-                    (index + 1) as u32,
-                    "reaction.resource",
-                )
-                .map_err(compiler_diagnostic)?;
-            let resource = BasicValueEnum::try_from(*resource).map_err(|_| {
-                Diagnostic::new(
-                    call.syntax.span.clone(),
-                    "reaction resource is not first-class",
-                )
-            })?;
-            self.builder
-                .build_store(slot, resource)
-                .map_err(compiler_diagnostic)?;
-        }
+        let payload_type = self.reaction_payload_type(&payload_fields);
+        let payload = self.build_reaction_payload(
+            payload_type,
+            callback,
+            &resources,
+            call.syntax.span.clone(),
+        )?;
 
         let previous = self.builder.get_insert_block();
         let runner_type = self.context.void_type().fn_type(
@@ -7422,69 +7389,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let index = self.legacy_runners.len() - 1;
             self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
         }
-        let entry = self.context.append_basic_block(runner, "entry");
-        self.builder.position_at_end(entry);
-        let payload_argument = runner.get_first_param().unwrap().into_pointer_value();
-        let callback_slot = self
-            .builder
-            .build_struct_gep(payload_type, payload_argument, 0, "reaction.callback")
-            .map_err(compiler_diagnostic)?;
-        let loaded_callback = self
-            .builder
-            .build_load(callback.get_type(), callback_slot, "reaction.callback")
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        let code = self
-            .builder
-            .build_extract_value(loaded_callback, 0, "reaction.code")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let closure_environment = self
-            .builder
-            .build_extract_value(loaded_callback, 1, "reaction.environment")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let mut arguments = vec![closure_environment.into()];
-        for (index, resource) in callback_type.effects.resources.iter().enumerate() {
-            let slot = self
-                .builder
-                .build_struct_gep(
-                    payload_type,
-                    payload_argument,
-                    (index + 1) as u32,
-                    "reaction.resource",
-                )
-                .map_err(compiler_diagnostic)?;
-            arguments.push(
-                self.builder
-                    .build_load(
-                        if resource.mutable
-                            || !self
-                                .typed_module
-                                .is_copy_in_function(&resource.value_type, environment.function_id)
-                        {
-                            self.context.ptr_type(AddressSpace::default()).into()
-                        } else {
-                            self.compile_type(&resource.value_type)?
-                        },
-                        slot,
-                        "reaction.resource",
-                    )
-                    .map_err(compiler_diagnostic)?
-                    .into(),
-            );
-        }
-        self.builder
-            .build_indirect_call(
-                self.compile_closure_function_type(&callback_type)?,
-                code,
-                &arguments,
-                "reaction.call",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_return(None)
-            .map_err(compiler_diagnostic)?;
+        self.build_reaction_runner(
+            runner,
+            payload_type,
+            callback.get_type(),
+            &payload_fields[1..],
+            self.compile_closure_function_type(&callback_type)?,
+        )?;
         if let Some(block) = previous {
             self.builder.position_at_end(block);
         }
@@ -7555,26 +7466,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             "batch.begin",
             call.syntax.span.clone(),
         )?;
-        let code = self
-            .builder
-            .build_extract_value(callback, 0, "batch.code")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let closure_environment = self
-            .builder
-            .build_extract_value(callback, 1, "batch.environment")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let mut arguments = vec![closure_environment.into()];
-        arguments.extend(resources);
-        self.builder
-            .build_indirect_call(
-                self.compile_closure_function_type(&callback_type)?,
-                code,
-                &arguments,
-                "batch.call",
-            )
-            .map_err(compiler_diagnostic)?;
+        let callback_llvm = self.compile_closure_function_type(&callback_type)?;
+        self.build_batch_callback(callback, callback_llvm, resources)?;
         self.build_reactive_runtime_call(
             "__staple_batch_end",
             &[],
@@ -7595,7 +7488,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let span = call.syntax.span.clone();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i8_type = self.context.i8_type();
 
         let thunk = self
             .typed_module
@@ -7667,63 +7559,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
         let runner = self.emit_until_runner(call.syntax.id, &predicate_type)?;
 
-        let resume = self.declare_named_function(
-            "__staple_until_resume",
-            self.context
-                .struct_type(&[i8_type.into(), ptr_type.into()], false)
-                .fn_type(&[ptr_type.into()], false),
-        );
-        let cleanup = self.declare_named_function(
-            "__staple_until_cleanup",
-            self.context.void_type().fn_type(&[ptr_type.into()], false),
-        );
-
-        let frame_type = self.until_frame_type();
-        let frame_size = self.target_data.get_store_size(&frame_type);
-        let frame = self.build_gc_allocation(
-            self.size_type.const_int(frame_size, false),
-            "until.frame",
-            span.clone(),
-        )?;
-        self.builder
-            .build_store(frame, frame_type.const_zero())
-            .map_err(compiler_diagnostic)?;
-        let field = |emitter: &Self, index: u32, value: BasicValueEnum<'context>, name: &str| {
-            let slot = emitter
-                .builder
-                .build_struct_gep(frame_type, frame, index, name)
-                .map_err(compiler_diagnostic)?;
-            emitter
-                .builder
-                .build_store(slot, value)
-                .map_err(compiler_diagnostic)?;
-            Ok::<(), Diagnostic>(())
-        };
-        field(self, CORO_STATE, i8_type.const_zero().into(), "until.state")?;
-        field(
-            self,
-            CORO_RESUME_FN,
-            resume.as_global_value().as_pointer_value().into(),
-            "until.resume",
-        )?;
-        field(
-            self,
-            CORO_CLEANUP_FN,
-            cleanup.as_global_value().as_pointer_value().into(),
-            "until.cleanup",
-        )?;
-        field(self, 13, pred_code.into(), "until.code")?;
-        field(self, 14, pred_env.into(), "until.env")?;
-        field(self, 15, scope.into(), "until.scope")?;
-        field(
-            self,
-            16,
-            runner.as_global_value().as_pointer_value().into(),
-            "until.runner",
-        )?;
-
-        self.register_gc_root_region(frame, frame_size, span)?;
-        Ok(frame.as_any_value_enum())
+        Ok(self
+            .build_until_coroutine(pred_code, pred_env, scope, runner, span)?
+            .as_any_value_enum())
     }
 
     /// Emits the internal reaction runner for an `until`: re-evaluates the
@@ -7754,10 +7592,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             return Ok(existing);
         }
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i8_type = self.context.i8_type();
-        let i32_type = self.context.i32_type();
-        let size_type = self.size_type;
-        let payload_type = self.context.struct_type(&[ptr_type.into(); 4], false);
         let bool_fn_type = self.compile_closure_function_type(predicate_type)?;
 
         let previous = self.builder.get_insert_block();
@@ -7771,97 +7605,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let index = self.legacy_runners.len() - 1;
             self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
         }
-        let entry = self.context.append_basic_block(runner, "entry");
-        let eval = self.context.append_basic_block(runner, "eval");
-        let resolve = self.context.append_basic_block(runner, "resolve");
-        let done = self.context.append_basic_block(runner, "done");
-
-        self.builder.position_at_end(entry);
-        let payload = runner.get_first_param().unwrap().into_pointer_value();
-        let load_field = |emitter: &Self, index: u32, name: &str| {
-            let slot = emitter
-                .builder
-                .build_struct_gep(payload_type, payload, index, name)
-                .map_err(compiler_diagnostic)?;
-            emitter
-                .builder
-                .build_load(ptr_type, slot, name)
-                .map_err(compiler_diagnostic)
-                .map(|value| value.into_pointer_value())
-        };
-        let completion = load_field(self, 2, "until.completion")?;
-        let completion_state = self
-            .builder
-            .build_load(i8_type, completion, "until.completion.state")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        let already = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::NE,
-                completion_state,
-                i8_type.const_zero(),
-                "until.already.resolved",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_conditional_branch(already, done, eval)
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(eval);
-        let code = load_field(self, 0, "until.code")?;
-        let env = load_field(self, 1, "until.env")?;
-        let result = self
-            .builder
-            .build_indirect_call(bool_fn_type, code, &[env.into()], "until.predicate")
-            .map_err(compiler_diagnostic)?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_struct_value();
-        let tag = self
-            .builder
-            .build_extract_value(result, 0, "until.bool.tag")
-            .map_err(compiler_diagnostic)?
-            .into_int_value();
-        // `Bool` is `True | False`; `True` is alternative 0.
-        let is_true = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                tag,
-                i32_type.const_zero(),
-                "until.is.true",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_conditional_branch(is_true, resolve, done)
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(resolve);
-        let complete = self.declare_named_function(
-            "__staple_completion_complete",
-            i8_type.fn_type(&[ptr_type.into(), ptr_type.into(), size_type.into()], false),
-        );
-        self.builder
-            .build_direct_call(
-                complete,
-                &[
-                    completion.into(),
-                    completion.into(),
-                    size_type.const_zero().into(),
-                ],
-                "until.resolve",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_unconditional_branch(done)
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(done);
-        self.builder
-            .build_return(None)
-            .map_err(compiler_diagnostic)?;
-
+        self.build_until_runner(runner, bool_fn_type)?;
         if let Some(block) = previous {
             self.builder.position_at_end(block);
         }
@@ -7914,27 +7658,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         });
 
         let pointer_type = self.context.ptr_type(AddressSpace::default());
-        let payload_type = self
-            .context
-            .struct_type(&[callback.get_type().into(), pointer_type.into()], false);
-        let payload = self
-            .builder
-            .build_malloc(payload_type, "derived.payload")
-            .map_err(compiler_diagnostic)?;
-        let callback_slot = self
-            .builder
-            .build_struct_gep(payload_type, payload, 0, "derived.callback")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(callback_slot, callback)
-            .map_err(compiler_diagnostic)?;
-        let output_slot = self
-            .builder
-            .build_struct_gep(payload_type, payload, 1, "derived.output")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(output_slot, value_slot)
-            .map_err(compiler_diagnostic)?;
+        let payload_type = self.derived_payload_type(callback.get_type());
+        let payload = self.build_derived_payload(payload_type, callback, value_slot)?;
 
         let previous = self.builder.get_insert_block();
         let runner_type = self
@@ -7951,55 +7676,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let index = self.legacy_runners.len() - 1;
             self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
         }
-        let entry = self.context.append_basic_block(runner, "entry");
-        self.builder.position_at_end(entry);
-        let payload_argument = runner.get_first_param().unwrap().into_pointer_value();
-        let callback_slot = self
-            .builder
-            .build_struct_gep(payload_type, payload_argument, 0, "derived.callback")
-            .map_err(compiler_diagnostic)?;
-        let loaded_callback = self
-            .builder
-            .build_load(callback.get_type(), callback_slot, "derived.callback")
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        let code = self
-            .builder
-            .build_extract_value(loaded_callback, 0, "derived.code")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let closure_environment = self
-            .builder
-            .build_extract_value(loaded_callback, 1, "derived.environment")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let call = self
-            .builder
-            .build_indirect_call(
-                self.compile_closure_function_type(&callback_type)?,
-                code,
-                &[closure_environment.into()],
-                "derived.evaluate",
-            )
-            .map_err(compiler_diagnostic)?;
-        let value = call.try_as_basic_value().basic().ok_or_else(|| {
-            Diagnostic::new(span.clone(), "derived evaluator result is not storable")
-        })?;
-        let output_slot = self
-            .builder
-            .build_struct_gep(payload_type, payload_argument, 1, "derived.output")
-            .map_err(compiler_diagnostic)?;
-        let output = self
-            .builder
-            .build_load(pointer_type, output_slot, "derived.output")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        self.builder
-            .build_store(output, value)
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_return(None)
-            .map_err(compiler_diagnostic)?;
+        self.build_derived_runner(
+            runner,
+            payload_type,
+            callback.get_type(),
+            self.compile_closure_function_type(&callback_type)?,
+            span.clone(),
+        )?;
         if let Some(block) = previous {
             self.builder.position_at_end(block);
         }
@@ -8273,36 +7956,29 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .coroutine_plan(body_syntax)
             .cloned()
             .ok_or_else(|| Diagnostic::new(Span::Compiler, "missing coroutine plan"))?;
-        let ptr: inkwell::types::BasicTypeEnum<'context> =
-            self.context.ptr_type(AddressSpace::default()).into();
-        let i8_type = self.context.i8_type();
-        let mut fields: Vec<inkwell::types::BasicTypeEnum<'context>> =
-            vec![i8_type.into(), ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr];
-        debug_assert_eq!(fields.len() as u32, CORO_HEADER_FIELDS);
-
+        let mut cells = Vec::new();
         let mut cell_fields = Vec::new();
         for symbol in &plan.frame_bindings {
-            cell_fields.push((*symbol, fields.len() as u32));
-            fields.push(self.compile_binding_cell_type(*symbol)?.into());
+            cell_fields.push((*symbol, CORO_HEADER_FIELDS + cells.len() as u32));
+            cells.push(self.compile_binding_cell_type(*symbol)?.into());
         }
-        let result_field = fields.len() as u32;
-        fields.push(self.compile_type(&plan.result_type)?);
-        let pending_field = fields.len() as u32;
+        let result = self.compile_type(&plan.result_type)?;
+        let mut pending_bytes = None;
         if plan.resume_points > 0 {
             let mut max_bytes = 1u64;
             for await_type in &plan.await_result_types {
                 let llvm = self.compile_type(await_type)?;
                 max_bytes = max_bytes.max(self.target_data.get_store_size(&llvm));
             }
-            fields.push(i8_type.array_type(max_bytes as u32).into());
+            pending_bytes = Some(max_bytes as u32);
         }
-        let ty = self.context.struct_type(&fields, false);
+        let layout = self.build_coroutine_frame_type(&cells, result, pending_bytes);
         Ok(CoroutineFrameLayout {
-            ty,
-            frame_size: self.target_data.get_store_size(&ty),
+            ty: layout.ty,
+            frame_size: layout.frame_size,
             cell_fields,
-            result_field,
-            pending_field,
+            result_field: layout.result_field,
+            pending_field: layout.pending_field,
         })
     }
 
@@ -8333,9 +8009,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i8_type = self.context.i8_type();
         let header_type = self.coroutine_header_type();
-        let status_type = self
-            .context
-            .struct_type(&[i8_type.into(), ptr_type.into()], false);
+        let status_type = self.coroutine_status_type();
 
         let resume_type = self.build_fn_type(status_type.into(), &[ptr_type.into()]);
         let base = format!("__staple_coro_{}", body_syntax.0);
@@ -8423,21 +8097,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
         // ---- resume ----
         {
-            let entry = self.context.append_basic_block(resume_fn, "entry");
-            let bad_state = self.context.append_basic_block(resume_fn, "bad.state");
-            let mut dispatch = Vec::new();
-            for state in 0..=plan.resume_points {
-                dispatch.push(
-                    self.context
-                        .append_basic_block(resume_fn, &format!("state.{state}")),
-                );
-            }
-
-            self.builder.position_at_end(entry);
-            let frame = resume_fn
-                .get_first_param()
-                .expect("resume frame parameter")
-                .into_pointer_value();
+            let CoroutineResumeEntry {
+                frame,
+                bad_state,
+                dispatch,
+            } = self.begin_coroutine_resume(resume_fn, plan.resume_points)?;
 
             let mut environment = FunctionEnvironment::default();
 
@@ -8518,108 +8182,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 pending_field: layout.pending_field,
             });
 
-            let state = self
-                .builder
-                .build_load(i8_type, state_slot, "coro.state")
-                .map_err(compiler_diagnostic)?
-                .into_int_value();
-
-            // Cancellation check: a `spawn`ed task whose record carries a
-            // cancel request unwinds at this boundary instead of resuming.
-            let cancel_check = self.context.append_basic_block(resume_fn, "cancel.check");
-            let unwind = self.context.append_basic_block(resume_fn, "cancel.unwind");
-            let do_switch = self
-                .context
-                .append_basic_block(resume_fn, "resume.dispatch");
-            let already_done = self.context.append_basic_block(resume_fn, "resume.spent");
-
-            let record_slot = self
-                .builder
-                .build_struct_gep(header_type, frame, CORO_RECORD, "coro.record.slot")
-                .map_err(compiler_diagnostic)?;
-            let record = self
-                .builder
-                .build_load(ptr_type, record_slot, "coro.record")
-                .map_err(compiler_diagnostic)?
-                .into_pointer_value();
-            let has_record = self
-                .builder
-                .build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    record,
-                    ptr_type.const_null(),
-                    "coro.has.record",
-                )
-                .map_err(compiler_diagnostic)?;
-            self.builder
-                .build_conditional_branch(has_record, cancel_check, do_switch)
-                .map_err(compiler_diagnostic)?;
-
-            self.builder.position_at_end(cancel_check);
-            let record_header = self.task_record_header_type();
-            let cancel_slot = self
-                .builder
-                .build_struct_gep(
-                    record_header,
-                    record,
-                    TASK_RECORD_CANCEL,
-                    "task.cancel.slot",
-                )
-                .map_err(compiler_diagnostic)?;
-            let cancel = self
-                .builder
-                .build_load(i8_type, cancel_slot, "task.cancel")
-                .map_err(compiler_diagnostic)?
-                .into_int_value();
-            let cancel_set = self
-                .builder
-                .build_int_compare(
-                    inkwell::IntPredicate::NE,
-                    cancel,
-                    i8_type.const_zero(),
-                    "task.cancel.set",
-                )
-                .map_err(compiler_diagnostic)?;
-            let state_live = self
-                .builder
-                .build_int_compare(
-                    inkwell::IntPredicate::ULE,
-                    state,
-                    i8_type.const_int(plan.resume_points as u64, false),
-                    "coro.state.live",
-                )
-                .map_err(compiler_diagnostic)?;
-            let want_unwind = self
-                .builder
-                .build_and(cancel_set, state_live, "coro.want.unwind")
-                .map_err(compiler_diagnostic)?;
-            self.builder
-                .build_conditional_branch(want_unwind, unwind, do_switch)
-                .map_err(compiler_diagnostic)?;
-
-            self.builder.position_at_end(do_switch);
-            let mut cases = (0..=plan.resume_points)
-                .map(|k| (i8_type.const_int(k as u64, false), dispatch[k]))
-                .collect::<Vec<_>>();
-            cases.push((i8_type.const_int(CORO_STATE_DONE, false), already_done));
-            cases.push((i8_type.const_int(CORO_STATE_FREED, false), already_done));
-            self.builder
-                .build_switch(state, bad_state, &cases)
-                .map_err(compiler_diagnostic)?;
-
-            // A frame that has already run to its end (or been freed) is driven
-            // again only by a redundant cancel/enqueue; report "done, no value".
-            self.builder.position_at_end(already_done);
-            self.builder
-                .build_return(Some(&status_type.const_zero()))
-                .map_err(compiler_diagnostic)?;
-
-            // The cancellation unwind: if the frame is parked on a `Wait`, run
-            // that completion's cancellation callback and drop the registration;
-            // then drop the frame's initialised locals (and, for a task
-            // cancelled before it ever ran, its owned captures), mark the frame
-            // spent, and report CANCELLED to the driver.
-            self.builder.position_at_end(unwind);
+            let state = self.build_coroutine_resume_dispatch(
+                resume_fn,
+                frame,
+                state_slot,
+                status_type,
+                &dispatch,
+                bad_state,
+                plan.resume_points,
+            )?;
             if !plan.wait_await_states.is_empty() || !plan.until_await_states.is_empty() {
                 let abandon = self
                     .context
@@ -8740,45 +8311,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map_err(compiler_diagnostic)?;
                 self.compile_conditional_cell_drop(cell, &value_type, Span::Compiler)?;
             }
-            let state_slot_unwind = self
-                .builder
-                .build_struct_gep(header_type, frame, CORO_STATE, "coro.state.slot")
-                .map_err(compiler_diagnostic)?;
-            self.builder
-                .build_store(state_slot_unwind, i8_type.const_int(CORO_STATE_DONE, false))
-                .map_err(compiler_diagnostic)?;
-            let mut cancelled_status = status_type.const_zero();
-            cancelled_status = self
-                .builder
-                .build_insert_value(
-                    cancelled_status,
-                    i8_type.const_int(CORO_STATUS_CANCELLED, false),
-                    0,
-                    "coro.status.cancelled",
-                )
-                .map_err(compiler_diagnostic)?
-                .into_struct_value();
-            self.builder
-                .build_return(Some(&cancelled_status))
-                .map_err(compiler_diagnostic)?;
+            self.build_coroutine_cancelled(frame, status_type)?;
 
-            self.builder.position_at_end(bad_state);
-            let trap = self
-                .llvm_module
-                .get_function("llvm.trap")
-                .unwrap_or_else(|| {
-                    self.llvm_module.add_function(
-                        "llvm.trap",
-                        self.context.void_type().fn_type(&[], false),
-                        None,
-                    )
-                });
-            self.builder
-                .build_direct_call(trap, &[], "")
-                .map_err(compiler_diagnostic)?;
-            self.builder
-                .build_unreachable()
-                .map_err(compiler_diagnostic)?;
+            self.build_coroutine_bad_state(bad_state)?;
 
             // Test-only: state 0 is the body thunk's own code, so ownership
             // registrations attribute to the thunk. Production emission never
@@ -8820,21 +8355,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     )
                 })?;
                 self.drop_all_owned(&mut environment, Span::Compiler)?;
-                let result_ptr = self
-                    .builder
-                    .build_load(ptr_type, result_ptr_slot, "coro.result.ptr")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                self.builder
-                    .build_store(result_ptr, return_value)
-                    .map_err(compiler_diagnostic)?;
-                self.builder
-                    .build_store(state_slot, i8_type.const_int(CORO_STATE_DONE, false))
-                    .map_err(compiler_diagnostic)?;
-                let status = status_type.const_zero();
-                self.builder
-                    .build_return(Some(&status))
-                    .map_err(compiler_diagnostic)?;
+                self.build_coroutine_complete(
+                    return_value,
+                    result_ptr_slot,
+                    state_slot,
+                    status_type,
+                )?;
             }
             #[cfg(test)]
             {
@@ -8844,99 +8370,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
 
         // ---- cleanup ----
-        {
-            let entry = self.context.append_basic_block(cleanup_fn, "entry");
-            let not_freed = self.context.append_basic_block(cleanup_fn, "not.freed");
-            let drop_block = self.context.append_basic_block(cleanup_fn, "drop.captures");
-            let finish = self.context.append_basic_block(cleanup_fn, "finish");
-            let done = self.context.append_basic_block(cleanup_fn, "done");
-
-            self.builder.position_at_end(entry);
-            let frame = cleanup_fn
-                .get_first_param()
-                .expect("cleanup frame parameter")
-                .into_pointer_value();
-            let state_slot = self
-                .builder
-                .build_struct_gep(header_type, frame, CORO_STATE, "coro.state.slot")
-                .map_err(compiler_diagnostic)?;
-            let state = self
-                .builder
-                .build_load(i8_type, state_slot, "coro.state")
-                .map_err(compiler_diagnostic)?
-                .into_int_value();
-            let is_freed = self
-                .builder
-                .build_int_compare(
-                    inkwell::IntPredicate::EQ,
-                    state,
-                    i8_type.const_int(CORO_STATE_FREED, false),
-                    "coro.is.freed",
-                )
-                .map_err(compiler_diagnostic)?;
-            self.builder
-                .build_conditional_branch(is_freed, done, not_freed)
-                .map_err(compiler_diagnostic)?;
-
-            self.builder.position_at_end(not_freed);
-            // `state == 0` (created, never resumed) is the only case whose
-            // captures are still owned by the frame; a completed body already
-            // dropped its owned locals, and a mid-body suspension leaves its
-            // frame cells for the (Step 3d) unwind path.
-            let never_resumed = self
-                .builder
-                .build_int_compare(
-                    inkwell::IntPredicate::EQ,
-                    state,
-                    i8_type.const_int(0, false),
-                    "coro.never.resumed",
-                )
-                .map_err(compiler_diagnostic)?;
-            self.builder
-                .build_conditional_branch(never_resumed, drop_block, finish)
-                .map_err(compiler_diagnostic)?;
-
-            self.builder.position_at_end(drop_block);
-            if !thunk.captures.is_empty() {
-                let env_slot = self
-                    .builder
-                    .build_struct_gep(header_type, frame, CORO_CAPTURE_ENV, "coro.env.slot")
-                    .map_err(compiler_diagnostic)?;
-                let env_ptr = self
-                    .builder
-                    .build_load(ptr_type, env_slot, "coro.env")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let environment_type = self.compile_capture_type(&thunk)?;
-                let finalizer = self.ensure_closure_finalizer(&thunk, environment_type)?;
-                self.builder
-                    .build_direct_call(finalizer, &[env_ptr.into()], "")
-                    .map_err(compiler_diagnostic)?;
-            }
-            self.builder
-                .build_unconditional_branch(finish)
-                .map_err(compiler_diagnostic)?;
-
-            self.builder.position_at_end(finish);
-            let unregister = self
-                .llvm_module
-                .get_function("__staple_gc_unregister_root")
-                .expect("GC root unregistration function");
-            self.builder
-                .build_direct_call(unregister, &[frame.into()], "")
-                .map_err(compiler_diagnostic)?;
-            self.builder
-                .build_store(state_slot, i8_type.const_int(CORO_STATE_FREED, false))
-                .map_err(compiler_diagnostic)?;
-            self.builder
-                .build_unconditional_branch(done)
-                .map_err(compiler_diagnostic)?;
-
-            self.builder.position_at_end(done);
-            self.builder
-                .build_return(None)
-                .map_err(compiler_diagnostic)?;
-        }
+        let finalizer = if !thunk.captures.is_empty() {
+            let environment_type = self.compile_capture_type(&thunk)?;
+            Some(self.ensure_closure_finalizer(&thunk, environment_type)?)
+        } else {
+            None
+        };
+        self.build_coroutine_cleanup(cleanup_fn, finalizer)?;
 
         if let Some(block) = previous_block {
             self.builder.position_at_end(block);
@@ -8969,48 +8409,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing coroutine body"))?;
         let env_ptr = self.build_capture_environment(environment, &thunk, span.clone(), false)?;
         let layout = self.coroutine_frame_layout(body_syntax)?;
-        let header_type = self.coroutine_header_type();
-        let i8_type = self.context.i8_type();
 
-        let frame = self.build_gc_allocation(
-            self.size_type.const_int(layout.frame_size, false),
-            "coro.frame",
-            span.clone(),
+        let frame = self.build_coroutine_creation(
+            layout.ty,
+            layout.frame_size,
+            layout.result_field,
+            resume_fn,
+            cleanup_fn,
+            env_ptr,
+            span,
         )?;
-        self.builder
-            .build_store(frame, layout.ty.const_zero())
-            .map_err(compiler_diagnostic)?;
-        let store_header =
-            |emitter: &Self, field: u32, value: inkwell::values::BasicValueEnum<'context>| {
-                let slot = emitter
-                    .builder
-                    .build_struct_gep(header_type, frame, field, "coro.header.slot")
-                    .map_err(compiler_diagnostic)?;
-                emitter
-                    .builder
-                    .build_store(slot, value)
-                    .map_err(compiler_diagnostic)?;
-                Ok::<(), Diagnostic>(())
-            };
-        store_header(self, CORO_STATE, i8_type.const_int(0, false).into())?;
-        store_header(
-            self,
-            CORO_RESUME_FN,
-            resume_fn.as_global_value().as_pointer_value().into(),
-        )?;
-        store_header(
-            self,
-            CORO_CLEANUP_FN,
-            cleanup_fn.as_global_value().as_pointer_value().into(),
-        )?;
-        store_header(self, CORO_CAPTURE_ENV, env_ptr.into())?;
-        let own_result = self
-            .builder
-            .build_struct_gep(layout.ty, frame, layout.result_field, "coro.own.result")
-            .map_err(compiler_diagnostic)?;
-        store_header(self, CORO_RESULT_PTR, own_result.into())?;
-
-        self.register_gc_root_region(frame, layout.frame_size, span)?;
         Ok(frame.as_any_value_enum())
     }
 
@@ -9028,34 +8436,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
         let arguments = self.compile_resource_arguments(environment, deferred, span.clone())?;
         let bundle_type = self.coroutine_resource_bundle_type(deferred)?;
-        let bundle = self.build_gc_allocation(
-            self.size_type
-                .const_int(self.target_data.get_store_size(&bundle_type), false),
-            "coro.bundle",
-            span.clone(),
-        )?;
-        let mut value = bundle_type.const_zero();
-        for (index, argument) in arguments.into_iter().enumerate() {
-            let basic = value_as_basic(argument.as_any_value_enum())
-                .ok_or_else(|| Diagnostic::new(span.clone(), "resource is not first-class"))?;
-            value = self
-                .builder
-                .build_insert_value(value, basic, index as u32, "coro.resource")
-                .map_err(compiler_diagnostic)?
-                .into_struct_value();
-        }
-        self.builder
-            .build_store(bundle, value)
-            .map_err(compiler_diagnostic)?;
-        let header_type = self.coroutine_header_type();
-        let slot = self
-            .builder
-            .build_struct_gep(header_type, frame, CORO_RESOURCES, "coro.resources.slot")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(slot, bundle)
-            .map_err(compiler_diagnostic)?;
-        Ok(())
+        self.build_coroutine_resource_bundle(frame, bundle_type, arguments, span)
     }
 
     /// Suspends the current coroutine at `await <child>` and returns the value
@@ -9117,85 +8498,24 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .into_pointer_value();
         self.store_coroutine_resources(environment, child, &child_deferred, span.clone())?;
 
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i8_type = self.context.i8_type();
-        let header_type = self.coroutine_header_type();
         let frame = context.frame;
 
-        let child_slot = self
-            .builder
-            .build_struct_gep(header_type, frame, CORO_CHILD, "coro.child.slot")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(child_slot, child)
-            .map_err(compiler_diagnostic)?;
-
-        let pending = self
-            .builder
-            .build_struct_gep(
-                context.frame_type,
-                frame,
-                context.pending_field,
-                "coro.own.pending",
-            )
-            .map_err(compiler_diagnostic)?;
-        let pending_ptr_slot = self
-            .builder
-            .build_struct_gep(
-                header_type,
-                frame,
-                CORO_PENDING_PTR,
-                "coro.pending.ptr.slot",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(pending_ptr_slot, pending)
-            .map_err(compiler_diagnostic)?;
-
-        let state_slot = self
-            .builder
-            .build_struct_gep(header_type, frame, CORO_STATE, "coro.state.slot")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(state_slot, i8_type.const_int(state as u64, false))
-            .map_err(compiler_diagnostic)?;
-
-        let mut status = context.status_type.const_zero();
-        status = self
-            .builder
-            .build_insert_value(
-                status,
-                i8_type.const_int(CORO_STATUS_RESUME_CHILD, false),
-                0,
-                "coro.status.kind",
-            )
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        status = self
-            .builder
-            .build_insert_value(status, child, 1, "coro.status.child")
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        self.builder
-            .build_return(Some(&status))
-            .map_err(compiler_diagnostic)?;
-
+        self.build_coroutine_child_suspend(
+            frame,
+            context.frame_type,
+            context.pending_field,
+            state,
+            child,
+            context.status_type,
+        )?;
         self.builder.position_at_end(dispatch);
         let result_llvm = self.compile_type(&child_result)?;
-        let pending = self
-            .builder
-            .build_struct_gep(
-                context.frame_type,
-                frame,
-                context.pending_field,
-                "coro.own.pending",
-            )
-            .map_err(compiler_diagnostic)?;
-        let value = self
-            .builder
-            .build_load(result_llvm, pending, "await.result")
-            .map_err(compiler_diagnostic)?;
-        let _ = ptr_type;
+        let value = self.build_coroutine_pending_result(
+            frame,
+            context.frame_type,
+            context.pending_field,
+            result_llvm,
+        )?;
         Ok(value.as_any_value_enum())
     }
 
@@ -9264,153 +8584,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .ok_or_else(|| Diagnostic::new(span.clone(), "`await` operand is not a wait handle"))?
             .into_pointer_value();
 
-        // Stash the record in the (otherwise unused for an external await) child
-        // slot so both the suspend-then-resume path and the already-resolved
-        // fast path can recover it in the dispatch block.
-        let child_slot = self
-            .builder
-            .build_struct_gep(header_type, frame, CORO_CHILD, "coro.child.slot")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(child_slot, record)
-            .map_err(compiler_diagnostic)?;
-
-        // Register the waiter; the runtime returns 0 when the record is already
-        // resolved — an already-completed wait continues in the same resume
-        // without losing a wakeup.
-        let should_suspend = match kind {
-            ExternalAwaitKind::Task => {
-                let register = self.declare_named_function(
-                    "__staple_task_await_register",
-                    i8_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
-                );
-                self.builder
-                    .build_direct_call(register, &[record.into(), frame.into()], "await.suspend")
-                    .map_err(compiler_diagnostic)?
-                    .try_as_basic_value()
-                    .unwrap_basic()
-                    .into_int_value()
-            }
-            ExternalAwaitKind::Wait => {
-                // Current task's scheduler: `frame->record->scheduler`, or null
-                // for a `block_on` root (the runtime rejects a cross-scheduler
-                // await).
-                let task_record_slot = self
-                    .builder
-                    .build_struct_gep(header_type, frame, CORO_RECORD, "coro.record.slot")
-                    .map_err(compiler_diagnostic)?;
-                let task_record = self
-                    .builder
-                    .build_load(ptr_type, task_record_slot, "coro.record")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let has_record = self
-                    .builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::NE,
-                        task_record,
-                        ptr_type.const_null(),
-                        "await.has.record",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                let sched_from_record = self
-                    .context
-                    .append_basic_block(function, "await.sched.load");
-                let sched_join = self
-                    .context
-                    .append_basic_block(function, "await.sched.join");
-                let entry_block = self.builder.get_insert_block().expect("await block");
-                self.builder
-                    .build_conditional_branch(has_record, sched_from_record, sched_join)
-                    .map_err(compiler_diagnostic)?;
-                self.builder.position_at_end(sched_from_record);
-                let sched_slot = self
-                    .builder
-                    .build_struct_gep(
-                        self.task_record_header_type(),
-                        task_record,
-                        TASK_RECORD_SCHEDULER,
-                        "task.record.scheduler",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                let sched_value = self
-                    .builder
-                    .build_load(ptr_type, sched_slot, "await.scheduler")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                self.builder
-                    .build_unconditional_branch(sched_join)
-                    .map_err(compiler_diagnostic)?;
-                self.builder.position_at_end(sched_join);
-                let scheduler = self
-                    .builder
-                    .build_phi(ptr_type, "await.scheduler")
-                    .map_err(compiler_diagnostic)?;
-                scheduler.add_incoming(&[
-                    (&ptr_type.const_null(), entry_block),
-                    (&sched_value, sched_from_record),
-                ]);
-                let register = self.declare_named_function(
-                    "__staple_completion_register",
-                    i8_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
-                );
-                self.builder
-                    .build_direct_call(
-                        register,
-                        &[
-                            record.into(),
-                            frame.into(),
-                            scheduler.as_basic_value().into_pointer_value().into(),
-                        ],
-                        "await.suspend",
-                    )
-                    .map_err(compiler_diagnostic)?
-                    .try_as_basic_value()
-                    .unwrap_basic()
-                    .into_int_value()
-            }
-        };
-        let want_suspend = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::NE,
-                should_suspend,
-                i8_type.const_zero(),
-                "await.want.suspend",
-            )
-            .map_err(compiler_diagnostic)?;
-        let suspend_block = self
-            .context
-            .append_basic_block(function, "await.external.suspend");
-        self.builder
-            .build_conditional_branch(want_suspend, suspend_block, dispatch)
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(suspend_block);
-        let state_slot = self
-            .builder
-            .build_struct_gep(header_type, frame, CORO_STATE, "coro.state.slot")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(state_slot, i8_type.const_int(state as u64, false))
-            .map_err(compiler_diagnostic)?;
-        let mut status = context.status_type.const_zero();
-        status = self
-            .builder
-            .build_insert_value(
-                status,
-                i8_type.const_int(CORO_STATUS_WAIT_EXTERNAL, false),
-                0,
-                "coro.status.kind",
-            )
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
-        self.builder
-            .build_return(Some(&status))
-            .map_err(compiler_diagnostic)?;
-
-        // ---- resume / fast path: the record is resolved ----
-        self.builder.position_at_end(dispatch);
+        self.build_external_await_suspend(
+            function,
+            frame,
+            record,
+            state,
+            dispatch,
+            context.status_type,
+            kind,
+        )?;
         let record_slot = self
             .builder
             .build_struct_gep(header_type, frame, CORO_CHILD, "coro.child.slot")
@@ -9511,77 +8693,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map(|(effects, result)| (effects.clone(), result.clone()))
             .ok_or_else(|| Diagnostic::new(span.clone(), "`block_on` requires a coroutine"))?;
         let frame = frame_value.into_pointer_value();
-        let header_type = self.coroutine_header_type();
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i8_type = self.context.i8_type();
 
         self.store_coroutine_resources(environment, frame, &deferred, span.clone())?;
 
-        // `block_on`'s coroutine is a task root.
-        let parent_slot = self
-            .builder
-            .build_struct_gep(header_type, frame, CORO_PARENT, "coro.parent.slot")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(parent_slot, ptr_type.const_null())
-            .map_err(compiler_diagnostic)?;
-        let leaf_out = self
-            .builder
-            .build_alloca(ptr_type, "coro.leaf")
-            .map_err(compiler_diagnostic)?;
-
-        let drive = self
-            .llvm_module
-            .get_function("__staple_coro_drive")
-            .expect("coroutine driver");
-        let status = self
-            .builder
-            .build_direct_call(drive, &[frame.into(), leaf_out.into()], "coro.drive")
-            .map_err(compiler_diagnostic)?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        let suspended = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::NE,
-                status,
-                i8_type.const_int(CORO_STATUS_DONE, false),
-                "coro.suspended",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.build_trap_if(suspended, span.clone())?;
-
-        let result_ptr_slot = self
-            .builder
-            .build_struct_gep(header_type, frame, CORO_RESULT_PTR, "coro.result.ptr.slot")
-            .map_err(compiler_diagnostic)?;
-        let result_ptr = self
-            .builder
-            .build_load(ptr_type, result_ptr_slot, "coro.result.ptr")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
         let result_llvm = self.compile_type(&result_type)?;
-        let result = self
-            .builder
-            .build_load(result_llvm, result_ptr, "coro.result")
-            .map_err(compiler_diagnostic)?;
-
-        let cleanup_slot = self
-            .builder
-            .build_struct_gep(header_type, frame, CORO_CLEANUP_FN, "coro.cleanup.slot")
-            .map_err(compiler_diagnostic)?;
-        let cleanup_ptr = self
-            .builder
-            .build_load(ptr_type, cleanup_slot, "coro.cleanup.fn")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let cleanup_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
-        self.builder
-            .build_indirect_call(cleanup_type, cleanup_ptr, &[frame.into()], "")
-            .map_err(compiler_diagnostic)?;
-
-        Ok(result.as_any_value_enum())
+        Ok(self
+            .build_coroutine_drive(frame, result_llvm, span)?
+            .as_any_value_enum())
     }
 
     fn compile_scheduler_intrinsic(
@@ -9600,9 +8718,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let create = self
                     .declare_named_function("__staple_sched_create", ptr_type.fn_type(&[], false));
                 let sched = self
-                    .builder
-                    .build_direct_call(create, &[], "scheduler")
-                    .map_err(compiler_diagnostic)?
+                    .build_runtime_call(create, &[], "scheduler")?
                     .try_as_basic_value()
                     .unwrap_basic();
                 Ok(sched.as_any_value_enum())
@@ -9616,52 +8732,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     ptr_type.fn_type(&[ptr_type.into()], false),
                 );
                 let scope = self
-                    .builder
-                    .build_direct_call(open, &[sched.into()], "task.scope")
-                    .map_err(compiler_diagnostic)?
+                    .build_runtime_call(open, &[sched.into()], "task.scope")?
                     .try_as_basic_value()
                     .unwrap_basic();
                 Ok(scope.as_any_value_enum())
             }
             IntrinsicFunction::YieldNow => {
                 self.compile_expression(environment, &call.argument)?;
-                let header_type = self.coroutine_header_type();
-                let header_size = self.target_data.get_store_size(&header_type);
-                let frame = self.build_gc_allocation(
-                    self.size_type.const_int(header_size, false),
-                    "coro.yield.frame",
-                    span.clone(),
-                )?;
-                self.builder
-                    .build_store(frame, header_type.const_zero())
-                    .map_err(compiler_diagnostic)?;
-                let resume = self.declare_named_function(
-                    "__staple_coro_yield_resume",
-                    self.context
-                        .struct_type(&[i8_type.into(), ptr_type.into()], false)
-                        .fn_type(&[ptr_type.into()], false),
-                );
-                let cleanup = self.declare_named_function(
-                    "__staple_coro_yield_cleanup",
-                    self.context.void_type().fn_type(&[ptr_type.into()], false),
-                );
-                for (field, value) in [
-                    (CORO_RESUME_FN, resume.as_global_value().as_pointer_value()),
-                    (
-                        CORO_CLEANUP_FN,
-                        cleanup.as_global_value().as_pointer_value(),
-                    ),
-                ] {
-                    let slot = self
-                        .builder
-                        .build_struct_gep(header_type, frame, field, "coro.yield.slot")
-                        .map_err(compiler_diagnostic)?;
-                    self.builder
-                        .build_store(slot, value)
-                        .map_err(compiler_diagnostic)?;
-                }
-                self.register_gc_root_region(frame, header_size, span)?;
-                Ok(frame.as_any_value_enum())
+                Ok(self.build_yield_coroutine(span)?.as_any_value_enum())
             }
             IntrinsicFunction::Spawn => {
                 let coroutine_type =
@@ -9748,9 +8826,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .void_type()
                         .fn_type(&[ptr_type.into(), ptr_type.into()], false),
                 );
-                self.builder
-                    .build_direct_call(track, &[scope.into(), record.into()], "")
-                    .map_err(compiler_diagnostic)?;
+                self.build_runtime_call(track, &[scope.into(), record.into()], "")?;
 
                 let enqueue = self.declare_named_function(
                     "__staple_sched_enqueue",
@@ -9758,9 +8834,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .void_type()
                         .fn_type(&[ptr_type.into(), ptr_type.into()], false),
                 );
-                self.builder
-                    .build_direct_call(enqueue, &[scheduler.into(), frame.into()], "")
-                    .map_err(compiler_diagnostic)?;
+                self.build_runtime_call(enqueue, &[scheduler.into(), frame.into()], "")?;
                 Ok(record.as_any_value_enum())
             }
             IntrinsicFunction::Pump => {
@@ -9786,9 +8860,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     counts_type.fn_type(&[ptr_type.into(), self.size_type.into()], false),
                 );
                 let result = self
-                    .builder
-                    .build_direct_call(pump, &[sched.into(), limit.into()], "pump")
-                    .map_err(compiler_diagnostic)?
+                    .build_runtime_call(pump, &[sched.into(), limit.into()], "pump")?
                     .try_as_basic_value()
                     .unwrap_basic();
                 Ok(result.as_any_value_enum())
@@ -9825,9 +8897,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     "__staple_task_cancel",
                     self.context.void_type().fn_type(&[ptr_type.into()], false),
                 );
-                self.builder
-                    .build_direct_call(cancel, &[record.into()], "")
-                    .map_err(compiler_diagnostic)?;
+                self.build_runtime_call(cancel, &[record.into()], "")?;
                 Ok(self.unit_value())
             }
             _ => unreachable!("compile_scheduler_intrinsic: {intrinsic:?}"),
@@ -10035,13 +9105,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     ),
                 );
                 let gone = self
-                    .builder
-                    .build_direct_call(
+                    .build_runtime_call(
                         complete,
                         &[record.into(), slot.into(), size.into()],
                         "completion.gone",
-                    )
-                    .map_err(compiler_diagnostic)?
+                    )?
                     .try_as_basic_value()
                     .unwrap_basic()
                     .into_int_value();
@@ -10099,9 +9167,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     runtime,
                     self.context.void_type().fn_type(&[ptr_type.into()], false),
                 );
-                self.builder
-                    .build_direct_call(function, &[record.into()], "")
-                    .map_err(compiler_diagnostic)?;
+                self.build_runtime_call(function, &[record.into()], "")?;
                 Ok(self.unit_value())
             }
             _ => unreachable!("compile_completion_intrinsic: {intrinsic:?}"),

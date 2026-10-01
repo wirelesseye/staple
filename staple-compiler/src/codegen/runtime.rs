@@ -12,6 +12,18 @@ use staple_syntax::Span;
 use super::{Backend, CodeGenerationResult, Diagnostic, compiler_diagnostic};
 
 impl<'program, 'context> Backend<'program, 'context> {
+    /// Emits a direct runtime call from an already-selected LLVM declaration.
+    pub(crate) fn build_runtime_call(
+        &self,
+        function: inkwell::values::FunctionValue<'context>,
+        arguments: &[inkwell::values::BasicMetadataValueEnum<'context>],
+        call_name: &str,
+    ) -> CodeGenerationResult<inkwell::values::CallSiteValue<'context>> {
+        self.builder
+            .build_direct_call(function, arguments, call_name)
+            .map_err(compiler_diagnostic)
+    }
+
     pub(crate) fn build_reactive_runtime_call(
         &self,
         name: &str,

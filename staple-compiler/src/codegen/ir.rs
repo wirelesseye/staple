@@ -2110,3 +2110,6 @@ pub(crate) fn value_as_basic(
         _ => None,
     }
 }
+
+mod coroutines;
+pub(crate) use coroutines::{CoroutineResumeEntry, ExternalAwaitKind};

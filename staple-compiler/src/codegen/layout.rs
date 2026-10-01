@@ -337,6 +337,17 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// The fixed frame-header prefix every coroutine frame starts with; used to
+    /// Runtime resume status: a kind byte and pending pointer.
+    pub(crate) fn coroutine_status_type(&self) -> inkwell::types::StructType<'context> {
+        self.context.struct_type(
+            &[
+                self.context.i8_type().into(),
+                self.context.ptr_type(AddressSpace::default()).into(),
+            ],
+            false,
+        )
+    }
+
     /// GEP a header field through a `ptr` whose full frame type is not known at
     /// the site (`await`, `block_on`, drop). Matches `coroutine.ll`'s
     /// `%CoroHeader` plus the trailing `resources` pointer.
