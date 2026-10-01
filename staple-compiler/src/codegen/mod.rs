@@ -4881,9 +4881,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         // `compile_structural_index_body` observes for its `target`), so
         // the source value itself must first be rebuilt as a single
         // struct before being paired with the initial cursor.
-        let source_value = self.build_product_value(values, span.clone())?;
-        let cursor = self.size_type.const_int(0, false);
-        self.build_product_value(&[source_value, cursor.into()], span)
+        self.backend.build_structural_iterator(values, span)
     }
 
     /// `next` for a structurally-iterable product: the `Iter` is `(P,
@@ -4961,35 +4959,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let product_value = *product_value;
         let cursor = *cursor;
 
-        let length = self
-            .size_type
-            .const_int(product.elements.len() as u64, false);
-        let in_range = self
-            .builder
-            .build_int_compare(inkwell::IntPredicate::ULT, cursor, length, "next.in_range")
-            .map_err(compiler_diagnostic)?;
-
-        let function = self
-            .builder
-            .get_insert_block()
-            .and_then(|block| block.get_parent())
-            .expect("structural next is in a function");
-        let done_block = self.context.append_basic_block(function, "next.done");
-        let dispatch_block = self.context.append_basic_block(function, "next.dispatch");
-        let unreachable_block = self
-            .context
-            .append_basic_block(function, "next.unreachable");
-        let merge = self.context.append_basic_block(function, "next.merge");
-
-        let result_type = self.compile_type(result)?;
-        let result_slot = self
-            .builder
-            .build_alloca(result_type, "next.result")
-            .map_err(compiler_diagnostic)?;
-
-        self.builder
-            .build_conditional_branch(in_range, dispatch_block, done_block)
-            .map_err(compiler_diagnostic)?;
+        let (result_type, result_slot, done_block, dispatch_block, unreachable_block, merge) = self
+            .backend
+            .begin_structural_next(cursor, product.elements.len(), result)?;
 
         self.builder.position_at_end(done_block);
         let iter_value = self.build_product_value(&[product_value, cursor.into()], span.clone())?;
@@ -5009,25 +4981,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map_err(compiler_diagnostic)?;
 
         self.builder.position_at_end(dispatch_block);
-        let cases = product
-            .elements
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                (
-                    self.size_type.const_int(index as u64, false),
-                    self.context.append_basic_block(function, "next.case"),
-                )
-            })
-            .collect::<Vec<_>>();
-        self.builder
-            .build_switch(cursor, unreachable_block, &cases)
-            .map_err(compiler_diagnostic)?;
-
-        self.builder.position_at_end(unreachable_block);
-        self.builder
-            .build_unreachable()
-            .map_err(compiler_diagnostic)?;
+        let cases =
+            self.backend
+                .begin_next_dispatch(cursor, product.elements.len(), unreachable_block)?;
 
         for (index, element) in product.elements.iter().enumerate() {
             self.builder.position_at_end(cases[index].1);

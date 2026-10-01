@@ -1376,6 +1376,104 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok((output_type, output_slot, merge, cases))
     }
 
+    /// Rebuild a source product and pair it with its initial cursor.
+    pub(crate) fn build_structural_iterator(
+        &self,
+        values: &[BasicValueEnum<'context>],
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let source_value = self.build_product_value(values, span.clone())?;
+        let cursor = self.size_type.const_int(0, false);
+        self.build_product_value(&[source_value, cursor.into()], span)
+    }
+
+    /// Shared Done/Yield control-flow and result storage.
+    pub(crate) fn begin_structural_next(
+        &self,
+        cursor: IntValue<'context>,
+        length: usize,
+        result: &crate::CheckedType,
+    ) -> CodeGenerationResult<(
+        BasicTypeEnum<'context>,
+        PointerValue<'context>,
+        BasicBlock<'context>,
+        BasicBlock<'context>,
+        BasicBlock<'context>,
+        BasicBlock<'context>,
+    )> {
+        let llvm_length = self.size_type.const_int(length as u64, false);
+        let in_range = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                cursor,
+                llvm_length,
+                "next.in_range",
+            )
+            .map_err(compiler_diagnostic)?;
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .expect("structural next is in a function");
+        let done_block = self.context.append_basic_block(function, "next.done");
+        let dispatch_block = self.context.append_basic_block(function, "next.dispatch");
+        let unreachable_block = self
+            .context
+            .append_basic_block(function, "next.unreachable");
+        let merge = self.context.append_basic_block(function, "next.merge");
+
+        let result_type = self.compile_type(result)?;
+        let result_slot = self
+            .builder
+            .build_alloca(result_type, "next.result")
+            .map_err(compiler_diagnostic)?;
+
+        self.builder
+            .build_conditional_branch(in_range, dispatch_block, done_block)
+            .map_err(compiler_diagnostic)?;
+
+        Ok((
+            result_type,
+            result_slot,
+            done_block,
+            dispatch_block,
+            unreachable_block,
+            merge,
+        ))
+    }
+
+    /// Dispatch to one recorded product element; impossible cursors are unreachable.
+    pub(crate) fn begin_next_dispatch(
+        &self,
+        cursor: IntValue<'context>,
+        length: usize,
+        unreachable_block: BasicBlock<'context>,
+    ) -> CodeGenerationResult<Vec<(IntValue<'context>, BasicBlock<'context>)>> {
+        let function = unreachable_block
+            .get_parent()
+            .expect("structural next is in a function");
+        let cases = (0..length)
+            .map(|index| {
+                (
+                    self.size_type.const_int(index as u64, false),
+                    self.context.append_basic_block(function, "next.case"),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.builder
+            .build_switch(cursor, unreachable_block, &cases)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(unreachable_block);
+        self.builder
+            .build_unreachable()
+            .map_err(compiler_diagnostic)?;
+
+        Ok(cases)
+    }
+
     /// Shared null-environment call used by structural Debug delegates.
     pub(crate) fn build_debug_delegate(
         &self,

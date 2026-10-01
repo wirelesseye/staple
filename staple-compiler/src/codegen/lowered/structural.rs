@@ -34,24 +34,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_debug_delegate(function, value, formatter, name)
     }
 
+    /// Inject through the recorded result index; no representation search is needed.
+    fn emit_structural_alternative(
+        &mut self,
+        value: BasicValueEnum<'context>,
+        alternative: &crate::SumAlternative,
+        result: &CheckedType,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let plan = crate::LoweredCoercionPlan::SumInject {
+            alternative: alternative.index,
+            payload: Box::new(crate::LoweredCoercionPlan::Identity),
+        };
+        value_as_basic(self.emit_coercion(
+            value.as_any_value_enum(),
+            &alternative.alternative,
+            result,
+            &plan,
+            span,
+        )?)
+        .ok_or_else(|| Diagnostic::new(span.clone(), "iterator step is not first-class"))
+    }
+
     pub(super) fn emit_structural_body(
         &mut self,
         ordinal: ArtifactOrdinal,
         plan: &StructuralMethodPlan,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
-        // Until the remaining bodies land, fail before creating any blocks.
-        if matches!(
-            plan.body,
-            StructuralBody::IntoIterator { .. }
-                | StructuralBody::Next { .. }
-                | StructuralBody::Unexpanded
-        ) {
-            return Err(Diagnostic::new(
-                span.clone(),
-                "lowered emitter: structural method artifact is not implemented yet",
-            ));
-        }
         let function = self
             .artifacts
             .get(&ordinal)
@@ -319,9 +329,99 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         Diagnostic::new(span.clone(), "trait method result is not first-class")
                     })?
             }
-            StructuralBody::Unexpanded
-            | StructuralBody::IntoIterator { .. }
-            | StructuralBody::Next { .. } => unreachable!("guarded above"),
+            StructuralBody::IntoIterator { .. } => self
+                .backend
+                .build_structural_iterator(&values, span.clone())?,
+            StructuralBody::Next {
+                elements,
+                iterator: _,
+                item,
+                result,
+                done,
+                yield_,
+                ..
+            } => {
+                let [product, BasicValueEnum::IntValue(cursor)] = values.as_slice() else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "invalid structural Iterator arguments",
+                    ));
+                };
+                let (result_type, slot, done_block, dispatch, unreachable, merge) = self
+                    .backend
+                    .begin_structural_next(*cursor, elements.len(), result)?;
+                self.backend.builder.position_at_end(done_block);
+                let iter_value = self
+                    .backend
+                    .build_product_value(&[*product, (*cursor).into()], span.clone())?;
+                let done_value =
+                    self.emit_structural_alternative(iter_value, done, result, span)?;
+                self.backend
+                    .builder
+                    .build_store(slot, done_value)
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_unconditional_branch(merge)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(dispatch);
+                let cases =
+                    self.backend
+                        .begin_next_dispatch(*cursor, elements.len(), unreachable)?;
+                for element in elements {
+                    self.backend.builder.position_at_end(cases[element.index].1);
+                    let field = self
+                        .backend
+                        .builder
+                        .build_extract_value(
+                            product.into_struct_value(),
+                            element.index as u32,
+                            "next.field",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    let field = self.emit_coercion(
+                        field.as_any_value_enum(),
+                        &element.element,
+                        item,
+                        &element.coercion_plan,
+                        span,
+                    )?;
+                    let field = value_as_basic(field).ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "iterated field is not first-class")
+                    })?;
+                    let next_index = self
+                        .backend
+                        .size_type
+                        .const_int((element.index + 1) as u64, false);
+                    let next_iter = self
+                        .backend
+                        .build_product_value(&[*product, next_index.into()], span.clone())?;
+                    let yielded = self
+                        .backend
+                        .build_product_value(&[field, next_iter], span.clone())?;
+                    let yielded =
+                        self.emit_structural_alternative(yielded, yield_, result, span)?;
+                    self.backend
+                        .builder
+                        .build_store(slot, yielded)
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(merge)
+                        .map_err(compiler_diagnostic)?;
+                }
+                self.backend.builder.position_at_end(merge);
+                self.backend
+                    .builder
+                    .build_load(result_type, slot, "next.value")
+                    .map_err(compiler_diagnostic)?
+            }
+            StructuralBody::Unexpanded => {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "structural artifact plan is unexpanded",
+                ));
+            }
         };
         self.backend
             .builder

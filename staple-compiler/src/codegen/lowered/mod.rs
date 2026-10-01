@@ -3493,7 +3493,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// The declared function of one binding site: a direct instance or a
-    /// structural artifact (whose body stays 5.7's).
+    /// structural artifact.
     fn bound_function(
         &self,
         owner: EmissionOwner,
@@ -3516,7 +3516,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .and_then(|functions| functions.first())
                 .copied()
                 .ok_or_else(|| Diagnostic::new(span.clone(), "bound artifact is not declared")),
-            _ => Err(Diagnostic::new(
+            LoweredBoundTarget::Route(_) => Err(Diagnostic::new(
                 span.clone(),
                 "bound site is not a function",
             )),
@@ -5055,29 +5055,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_product_value(&basic, call.origin.span.clone())
                     .map(|value| value.as_any_value_enum())
             }
-            // Legacy `compile_call_expression`'s trait branch: a direct call
-            // with a null environment, whatever the evidence recipe says.
-            LoweredCallableTarget::TraitImplementation { .. } => {
-                let LoweredBoundTarget::Instance(instance) = binding else {
-                    return Err(unsupported("trait call binding"));
-                };
-                let function = self
-                    .instances
-                    .get(instance)
-                    .copied()
-                    .ok_or_else(|| unsupported("trait function declaration"))?;
-                self.emit_structural_call(owner, &call, function, &values)
-            }
-            LoweredCallableTarget::StructuralTraitMethod { .. } => {
-                let LoweredBoundTarget::Artifact(ordinal) = binding else {
-                    return Err(unsupported("structural call binding"));
-                };
-                let function = self
-                    .artifacts
-                    .get(ordinal)
-                    .and_then(|functions| functions.first())
-                    .copied()
-                    .ok_or_else(|| unsupported("structural function declaration"))?;
+            // Trait implementation selection is already closed into a catalog binding.
+            LoweredCallableTarget::TraitImplementation { .. }
+            | LoweredCallableTarget::StructuralTraitMethod { .. } => {
+                let function =
+                    self.bound_function(owner, LoweredBindingSite::Call(id), &call.origin.span)?;
                 self.emit_structural_call(owner, &call, function, &values)
             }
             LoweredCallableTarget::CompilerHelper { .. } => {
