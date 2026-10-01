@@ -42,6 +42,47 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(values)
     }
 
+    /// Shared ABI preparation for a planned trait delegate.
+    pub(crate) fn build_trait_arguments(
+        &self,
+        function_type: &CheckedFunctionType,
+        values: &[inkwell::values::BasicValueEnum<'context>],
+        span: Span,
+    ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
+        let parameter_types = flattened_parameter_types(&function_type.parameter);
+        if parameter_types.len() != values.len() {
+            return Err(Diagnostic::new(
+                span,
+                "trait method argument layout does not match",
+            ));
+        }
+        let indirect = self.indirect_parameter_mask(function_type);
+        let mutations = mutation_parameter_mask(parameter_types.len(), &function_type.mutations);
+        let mut call_arguments: Vec<inkwell::values::BasicMetadataValueEnum<'context>> =
+            Vec::with_capacity(values.len() + 1);
+        call_arguments.push(
+            self.context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+                .into(),
+        );
+        for (index, value) in values.iter().enumerate() {
+            if indirect[index] && !mutations[index] {
+                let pointer = self
+                    .builder
+                    .build_alloca(self.compile_type(parameter_types[index])?, "trait.argument")
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_store(pointer, *value)
+                    .map_err(compiler_diagnostic)?;
+                call_arguments.push(pointer.into());
+            } else {
+                call_arguments.push((*value).into());
+            }
+        }
+        Ok(call_arguments)
+    }
+
     pub(crate) fn compile_native_function_type(
         &self,
         function_type: &CheckedFunctionType,

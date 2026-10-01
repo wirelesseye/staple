@@ -4596,47 +4596,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     "heterogeneous product has an invalid representation",
                 ));
             };
-            let length = self
-                .size_type
-                .const_int(product.elements.len() as u64, false);
-            let out = self
-                .builder
-                .build_int_compare(
-                    inkwell::IntPredicate::UGE,
-                    *position,
-                    length,
-                    "index.out_of_bounds",
-                )
-                .map_err(compiler_diagnostic)?;
-            self.build_trap_if(out, span.clone())?;
-            let output_type = self.compile_type(output)?;
-            let output_slot = self
-                .builder
-                .build_alloca(output_type, "index.result")
-                .map_err(compiler_diagnostic)?;
-            self.builder
-                .build_store(output_slot, output_type.const_zero())
-                .map_err(compiler_diagnostic)?;
-            let function = self
-                .builder
-                .get_insert_block()
-                .and_then(|block| block.get_parent())
-                .expect("structural index is in a function");
-            let merge = self.context.append_basic_block(function, "index.done");
-            let cases = product
-                .elements
-                .iter()
-                .enumerate()
-                .map(|(index, _)| {
-                    (
-                        self.size_type.const_int(index as u64, false),
-                        self.context.append_basic_block(function, "index.case"),
-                    )
-                })
-                .collect::<Vec<_>>();
-            self.builder
-                .build_switch(*position, merge, &cases)
-                .map_err(compiler_diagnostic)?;
+            let (output_type, output_slot, merge, cases) = self.backend.begin_structural_index(
+                *position,
+                product.elements.len(),
+                output,
+                span.clone(),
+            )?;
             for (index, element) in product.elements.iter().enumerate() {
                 self.builder.position_at_end(cases[index].1);
                 let field = self
@@ -4894,37 +4859,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .ok_or_else(|| {
                 Diagnostic::new(span.clone(), "trait method has no concrete function type")
             })?;
-        let parameter_types = flattened_parameter_types(&function_type.parameter);
-        if parameter_types.len() != values.len() {
-            return Err(Diagnostic::new(
-                span,
-                "trait method argument layout does not match",
-            ));
-        }
-        let indirect = self.indirect_parameter_mask(&function_type);
-        let mutations = mutation_parameter_mask(parameter_types.len(), &function_type.mutations);
-        let mut call_arguments: Vec<inkwell::values::BasicMetadataValueEnum<'context>> =
-            Vec::with_capacity(values.len() + 1);
-        call_arguments.push(
-            self.context
-                .ptr_type(AddressSpace::default())
-                .const_null()
-                .into(),
-        );
-        for (index, value) in values.iter().enumerate() {
-            if indirect[index] && !mutations[index] {
-                let pointer = self
-                    .builder
-                    .build_alloca(self.compile_type(parameter_types[index])?, "trait.argument")
-                    .map_err(compiler_diagnostic)?;
-                self.builder
-                    .build_store(pointer, *value)
-                    .map_err(compiler_diagnostic)?;
-                call_arguments.push(pointer.into());
-            } else {
-                call_arguments.push((*value).into());
-            }
-        }
+        let call_arguments =
+            self.backend
+                .build_trait_arguments(&function_type, values, span.clone())?;
         let function = self.trait_method_code(trait_id, arguments, method, span.clone())?;
         self.builder
             .build_direct_call(function, &call_arguments, name)
@@ -5148,22 +5085,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         element: &CheckedType,
         span: Span,
     ) -> CodeGenerationResult<()> {
-        let out = self
-            .builder
-            .build_int_compare(
-                inkwell::IntPredicate::UGE,
-                position,
-                length,
-                "index.out_of_bounds",
-            )
-            .map_err(compiler_diagnostic)?;
-        self.build_trap_if(out, span.clone())?;
         let llvm_type = self.compile_type(element)?;
-        let slot = unsafe {
-            self.builder
-                .build_gep(llvm_type, pointer, &[position], "index.element")
-        }
-        .map_err(compiler_diagnostic)?;
+        let slot = self.build_index_pointer(pointer, position, length, llvm_type, span.clone())?;
         #[cfg(test)]
         if let Some(record) = self.legacy_structural_stack.last_mut() {
             record.mutate_drop_previous = Some(self.typed_module.type_needs_drop(element));
@@ -6302,12 +6225,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         element: CheckedType,
         span: Span,
     ) -> CodeGenerationResult<BasicValueEnum<'context>> {
-        let element_type = self.compile_type(&element)?;
-        let pointer =
-            self.build_index_pointer(pointer, position, length, element_type, span.clone())?;
-        self.builder
-            .build_load(element_type, pointer, "index.value")
-            .map_err(|error| Diagnostic::new(span, error.to_string()))
+        self.backend
+            .build_index_load(pointer, position, length, &element, span)
     }
 
     fn compile_symbol_value(

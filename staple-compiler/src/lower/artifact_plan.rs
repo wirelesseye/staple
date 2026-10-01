@@ -348,6 +348,7 @@ impl LoweredArtifactPlan {
                 index: _,
                 element,
                 coercion,
+                coercion_plan: _,
             } in elements
             {
                 visit(Value(element));
@@ -959,6 +960,8 @@ pub(crate) struct IndexedElement {
     /// The coercion into the output or item type, as `(from, to)`, recorded
     /// only when the two types differ.
     pub coercion: Option<(CheckedType, CheckedType)>,
+    /// Concrete coercion decisions, computed and revalidated during expansion.
+    pub coercion_plan: super::LoweredCoercionPlan,
 }
 
 /// One `IterStep` alternative.

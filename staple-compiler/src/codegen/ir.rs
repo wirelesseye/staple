@@ -1307,6 +1307,75 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
+    /// Shared bounds-checked structural load.
+    pub(crate) fn build_index_load(
+        &self,
+        pointer: PointerValue<'context>,
+        position: IntValue<'context>,
+        length: IntValue<'context>,
+        element: &crate::CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let element_type = self.compile_type(element)?;
+        let pointer =
+            self.build_index_pointer(pointer, position, length, element_type, span.clone())?;
+        self.builder
+            .build_load(element_type, pointer, "index.value")
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    /// Shared heterogeneous product dispatch; the emitter supplies recorded coercions.
+    pub(crate) fn begin_structural_index(
+        &self,
+        position: IntValue<'context>,
+        length: usize,
+        output: &crate::CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<(
+        BasicTypeEnum<'context>,
+        PointerValue<'context>,
+        BasicBlock<'context>,
+        Vec<(IntValue<'context>, BasicBlock<'context>)>,
+    )> {
+        let llvm_length = self.size_type.const_int(length as u64, false);
+        let out = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::UGE,
+                position,
+                llvm_length,
+                "index.out_of_bounds",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(out, span)?;
+        let output_type = self.compile_type(output)?;
+        let output_slot = self
+            .builder
+            .build_alloca(output_type, "index.result")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(output_slot, output_type.const_zero())
+            .map_err(compiler_diagnostic)?;
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .expect("structural index is in a function");
+        let merge = self.context.append_basic_block(function, "index.done");
+        let cases = (0..length)
+            .map(|index| {
+                (
+                    self.size_type.const_int(index as u64, false),
+                    self.context.append_basic_block(function, "index.case"),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.builder
+            .build_switch(position, merge, &cases)
+            .map_err(compiler_diagnostic)?;
+        Ok((output_type, output_slot, merge, cases))
+    }
+
     /// Shared null-environment call used by structural Debug delegates.
     pub(crate) fn build_debug_delegate(
         &self,

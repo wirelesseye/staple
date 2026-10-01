@@ -663,6 +663,21 @@ fn recorded_coercion(from: &CheckedType, to: &CheckedType) -> Option<(CheckedTyp
     (from != to).then(|| (from.clone(), to.clone()))
 }
 
+fn indexed_element(
+    index: usize,
+    from: &CheckedType,
+    to: &CheckedType,
+    origin: &Origin,
+) -> Result<IndexedElement, Diagnostic> {
+    Ok(IndexedElement {
+        index,
+        element: from.clone(),
+        coercion: recorded_coercion(from, to),
+        coercion_plan: super::LoweredCoercionPlan::plan(from, to)
+            .map_err(|message| Diagnostic::new(origin.span.clone(), message))?,
+    })
+}
+
 /// `Index`: a heterogeneous product switches per element and coerces each into
 /// the output; a homogeneous product loads the element directly.
 fn structural_index_body(
@@ -682,12 +697,8 @@ fn structural_index_body(
             .elements
             .iter()
             .enumerate()
-            .map(|(index, element)| IndexedElement {
-                index,
-                element: element.value_type.clone(),
-                coercion: recorded_coercion(&element.value_type, &output),
-            })
-            .collect();
+            .map(|(index, element)| indexed_element(index, &element.value_type, &output, origin))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(StructuralBody::IndexSwitch { elements, output })
     } else {
         let element = product
@@ -845,12 +856,8 @@ fn structural_next_body(
         .elements
         .iter()
         .enumerate()
-        .map(|(index, element)| IndexedElement {
-            index,
-            element: element.value_type.clone(),
-            coercion: recorded_coercion(&element.value_type, &item),
-        })
-        .collect();
+        .map(|(index, element)| indexed_element(index, &element.value_type, &item, origin))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(StructuralBody::Next {
         product: CheckedType::Product(product.clone()),
         iterator,
@@ -1107,6 +1114,37 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn structural_element_coercion_decisions_are_revalidated() {
+        let (_, mut lowered) = lower(
+            "def pick: (U8, I32) -> (I32 | U8) = pair => pair[0]\nlet picked = pick ((1 satisfies U8), 2)\n",
+        );
+        let mut changed = false;
+        for (_, artifact) in lowered.program.artifacts.iter_mut() {
+            if let Some(LoweredArtifactPlan::StructuralMethod(plan)) = &mut artifact.plan
+                && let StructuralBody::IndexSwitch { elements, .. } = &mut plan.body
+            {
+                assert!(matches!(
+                    elements[0].coercion_plan,
+                    super::super::LoweredCoercionPlan::SumInject { .. }
+                ));
+                elements[0].coercion_plan = super::super::LoweredCoercionPlan::Identity;
+                changed = true;
+                break;
+            }
+        }
+        assert!(changed);
+        let diagnostics = lowered
+            .program
+            .validate_artifact_closure(&super::super::artifact_closure::ProductionHooks);
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("re-expanded to a different plan")),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]
