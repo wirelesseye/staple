@@ -6,7 +6,9 @@
 
 use inkwell::{
     AddressSpace,
-    values::{AnyValue, AnyValueEnum},
+    basic_block::BasicBlock,
+    types::{BasicTypeEnum, StructType},
+    values::{AnyValue, AnyValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue},
 };
 
 use super::{Backend, CodeGenerationResult, Diagnostic, Span, compiler_diagnostic};
@@ -1343,6 +1345,465 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
+    /// Stage 5.6 Step 2: legacy `compile_drop_value`'s runtime releases (a
+    /// dropped `Scheduler`, `Wait`, `Resolver`, or `CompletionToken`). Both
+    /// emitters call it, so the call and its SSA shape are shared.
+    pub(crate) fn build_runtime_release(
+        &self,
+        release: crate::RuntimeRelease,
+        record: PointerValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let name = match release {
+            crate::RuntimeRelease::SchedulerDestroy => "__staple_sched_destroy",
+            crate::RuntimeRelease::WaitDrop => "__staple_completion_wait_drop",
+            crate::RuntimeRelease::ResolverDrop => "__staple_completion_resolver_drop",
+            crate::RuntimeRelease::CompletionTokenRelease => "__staple_completion_token_release",
+        };
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let function = self.declare_named_function(
+            name,
+            self.context.void_type().fn_type(&[pointer.into()], false),
+        );
+        self.builder
+            .build_direct_call(function, &[record.into()], "")
+            .map(|_| ())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    /// Stage 5.6 Step 2: dropping a `Coroutine` value calls the frame's
+    /// idempotent cleanup function through the header slot. Shared so both
+    /// emitters emit the same loads and indirect call.
+    pub(crate) fn build_coroutine_frame_cleanup(
+        &self,
+        frame: PointerValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let header_type = self.coroutine_header_type();
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let cleanup_slot = self
+            .builder
+            .build_struct_gep(
+                header_type,
+                frame,
+                super::layout::CORO_CLEANUP_FN,
+                "coro.cleanup.slot",
+            )
+            .map_err(compiler_diagnostic)?;
+        let cleanup_ptr = self
+            .builder
+            .build_load(pointer, cleanup_slot, "coro.cleanup.fn")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let cleanup_type = self.context.void_type().fn_type(&[pointer.into()], false);
+        self.builder
+            .build_indirect_call(cleanup_type, cleanup_ptr, &[frame.into()], "")
+            .map(|_| ())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    /// Stage 5.6 Step 2: legacy `compile_conditional_drop`'s branch, `drop`
+    /// block, and continue block. Returns `(drop.live, drop.done)` and leaves
+    /// the builder in the drop block with the live flag already cleared. The
+    /// caller expands the glue, then calls [`Self::end_conditional_drop`].
+    pub(crate) fn begin_conditional_drop(
+        &self,
+        live: PointerValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<(BasicBlock<'context>, BasicBlock<'context>)> {
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span, "drop is not in a function"))?;
+        let drop_block = self.context.append_basic_block(function, "drop.live");
+        let done_block = self.context.append_basic_block(function, "drop.done");
+        let condition = self
+            .builder
+            .build_load(self.context.bool_type(), live, "drop.is_live")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        self.builder
+            .build_conditional_branch(condition, drop_block, done_block)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(drop_block);
+        self.builder
+            .build_store(live, self.context.bool_type().const_zero())
+            .map_err(compiler_diagnostic)?;
+        Ok((drop_block, done_block))
+    }
+
+    /// Stage 5.6 Step 2: close the skeleton [`Self::begin_conditional_drop`]
+    /// opened.
+    pub(crate) fn end_conditional_drop(
+        &self,
+        done_block: BasicBlock<'context>,
+    ) -> CodeGenerationResult<()> {
+        self.builder
+            .build_unconditional_branch(done_block)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(done_block);
+        Ok(())
+    }
+
+    /// Stage 5.6 Step 2: legacy `compile_conditional_cell_drop`'s state test
+    /// and load. The caller expands the loaded value's glue, then calls
+    /// [`Self::end_conditional_cell_drop`].
+    pub(crate) fn begin_conditional_cell_drop(
+        &self,
+        cell: PointerValue<'context>,
+        llvm_value_type: BasicTypeEnum<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<CellDropBlocks<'context>> {
+        let cell_type = self
+            .context
+            .struct_type(&[llvm_value_type, self.context.i8_type().into()], false);
+        let state = self
+            .builder
+            .build_struct_gep(cell_type, cell, 1, "cell.drop.state")
+            .map_err(compiler_diagnostic)?;
+        let live = self
+            .builder
+            .build_load(self.context.i8_type(), state, "cell.drop.live")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let live = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                live,
+                self.context.i8_type().const_int(2, false),
+                "cell.drop.is_live",
+            )
+            .map_err(compiler_diagnostic)?;
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span, "cell drop outside a function"))?;
+        let drop_block = self.context.append_basic_block(function, "cell.drop");
+        let continue_block = self
+            .context
+            .append_basic_block(function, "cell.drop.continue");
+        self.builder
+            .build_conditional_branch(live, drop_block, continue_block)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(drop_block);
+        let slot = self
+            .builder
+            .build_struct_gep(cell_type, cell, 0, "cell.drop.value")
+            .map_err(compiler_diagnostic)?;
+        let value = self
+            .builder
+            .build_load(llvm_value_type, slot, "cell.drop.loaded")
+            .map_err(compiler_diagnostic)?;
+        Ok(CellDropBlocks {
+            value,
+            state,
+            continue_block,
+        })
+    }
+
+    /// Stage 5.6 Step 2: clear the cell state and close the skeleton
+    /// [`Self::begin_conditional_cell_drop`] opened.
+    pub(crate) fn end_conditional_cell_drop(
+        &self,
+        blocks: &CellDropBlocks<'context>,
+    ) -> CodeGenerationResult<()> {
+        self.builder
+            .build_store(blocks.state, self.context.i8_type().const_zero())
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_unconditional_branch(blocks.continue_block)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(blocks.continue_block);
+        Ok(())
+    }
+
+    /// Stage 5.6 Step 2: one finalizer function `void(ptr)` declaration.
+    pub(crate) fn add_finalizer_function(&self, name: &str) -> FunctionValue<'context> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let function_type = self.context.void_type().fn_type(&[pointer.into()], false);
+        self.llvm_module.add_function(name, function_type, None)
+    }
+
+    /// Stage 5.6 Step 2: legacy finalizer bodies open with an `entry` block,
+    /// position the builder there, and take the payload pointer parameter.
+    /// Restores the caller's position with
+    /// [`Self::finish_finalizer_function`].
+    pub(crate) fn enter_finalizer_function(
+        &self,
+        function: FunctionValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<FinalizerBody<'context>> {
+        let previous_block = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        let payload = function
+            .get_first_param()
+            .ok_or_else(|| Diagnostic::new(span, "finalizer payload parameter is missing"))?
+            .into_pointer_value();
+        Ok(FinalizerBody {
+            previous_block,
+            payload,
+        })
+    }
+
+    /// Stage 5.6 Step 2: emit the finalizer's `ret void` and restore the
+    /// caller's insertion point.
+    pub(crate) fn finish_finalizer_function(
+        &self,
+        body: &FinalizerBody<'context>,
+    ) -> CodeGenerationResult<()> {
+        self.builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
+        if let Some(block) = body.previous_block {
+            self.builder.position_at_end(block);
+        }
+        Ok(())
+    }
+
+    /// Stage 5.6 Step 2: field 3 of a buffer header, the element data pointer.
+    pub(crate) fn buffer_data_pointer(
+        &self,
+        buffer: PointerValue<'context>,
+        element: BasicTypeEnum<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        self.builder
+            .build_struct_gep(self.buffer_header_type(element), buffer, 3, "buffer.data")
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Stage 5.6 Step 2: legacy `trap_if_buffer_frozen`.
+    pub(crate) fn trap_if_buffer_frozen(
+        &self,
+        buffer: PointerValue<'context>,
+        header: StructType<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let slot = self
+            .builder
+            .build_struct_gep(header, buffer, 2, "buffer.frozen.slot")
+            .map_err(compiler_diagnostic)?;
+        let frozen = self
+            .builder
+            .build_load(self.context.i8_type(), slot, "buffer.frozen")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let frozen = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                frozen,
+                self.context.i8_type().const_zero(),
+                "buffer.is_frozen",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(frozen, span)
+    }
+
+    /// Stage 5.6 Step 2: the capacity overflow trap `Buffer.with_capacity`
+    /// performs before allocating its header.
+    pub(crate) fn trap_if_buffer_capacity_overflows(
+        &self,
+        capacity: IntValue<'context>,
+        llvm_element: BasicTypeEnum<'context>,
+        header: StructType<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let offset = self
+            .target_data
+            .offset_of_element(&header, 3)
+            .expect("Buffer data field has an offset");
+        let stride = self.target_data.get_abi_size(&llvm_element);
+        if stride == 0 {
+            return Ok(());
+        }
+        let maximum = if self.size_type.get_bit_width() == 64 {
+            u64::MAX
+        } else {
+            u32::MAX as u64
+        };
+        let maximum_capacity = (maximum - offset) / stride;
+        let too_large = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::UGT,
+                capacity,
+                self.size_type.const_int(maximum_capacity, false),
+                "buffer.capacity.overflow",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(too_large, span)
+    }
+
+    /// Stage 5.6 Step 2: the header allocation `Buffer.with_capacity` and
+    /// `Buffer.clone` share. `prefix` is `"buffer"` or `"buffer.clone"` so the
+    /// SSA names match each legacy site.
+    pub(crate) fn build_buffer_allocation(
+        &self,
+        capacity: IntValue<'context>,
+        llvm_element: BasicTypeEnum<'context>,
+        header: StructType<'context>,
+        prefix: &str,
+        span: Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let offset = self
+            .target_data
+            .offset_of_element(&header, 3)
+            .expect("Buffer data field has an offset");
+        let stride = self.target_data.get_abi_size(&llvm_element);
+        let bytes = self
+            .builder
+            .build_int_mul(
+                capacity,
+                self.size_type.const_int(stride, false),
+                &format!("{prefix}.element.bytes"),
+            )
+            .map_err(compiler_diagnostic)?;
+        let no_element_bytes = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                bytes,
+                self.size_type.const_zero(),
+                &format!("{prefix}.no.element.bytes"),
+            )
+            .map_err(compiler_diagnostic)?;
+        let bytes = self
+            .builder
+            .build_select(
+                no_element_bytes,
+                self.size_type.const_int(1, false),
+                bytes,
+                &format!("{prefix}.physical.element.bytes"),
+            )
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let bytes = self
+            .builder
+            .build_int_add(
+                bytes,
+                self.size_type.const_int(offset, false),
+                &format!("{prefix}.allocation.bytes"),
+            )
+            .map_err(compiler_diagnostic)?;
+        let buffer =
+            self.build_gc_allocation(bytes, &format!("{prefix}.allocate"), span.clone())?;
+        self.builder
+            .build_memset(
+                buffer,
+                self.target_data.get_abi_alignment(&header),
+                self.context.i8_type().const_zero(),
+                bytes,
+            )
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(buffer)
+    }
+
+    /// Stage 5.6 Step 2: the address of one buffer element within an
+    /// already-computed data pointer.
+    pub(crate) fn build_buffer_element_pointer(
+        &self,
+        data: PointerValue<'context>,
+        llvm_element: BasicTypeEnum<'context>,
+        index: IntValue<'context>,
+        name: &str,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        unsafe { self.builder.build_gep(llvm_element, data, &[index], name) }
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Stage 5.6 Step 2: load one buffer element through its element pointer,
+    /// returning the element's address too (a pop clears it after moving out).
+    pub(crate) fn build_buffer_element_load(
+        &self,
+        data: PointerValue<'context>,
+        llvm_element: BasicTypeEnum<'context>,
+        index: IntValue<'context>,
+        pointer_name: &str,
+        load_name: &str,
+    ) -> CodeGenerationResult<(PointerValue<'context>, BasicValueEnum<'context>)> {
+        let slot = self.build_buffer_element_pointer(data, llvm_element, index, pointer_name)?;
+        let value = self
+            .builder
+            .build_load(llvm_element, slot, load_name)
+            .map_err(compiler_diagnostic)?;
+        Ok((slot, value))
+    }
+
+    /// Stage 5.6 Step 2: store one buffer element through its element pointer.
+    pub(crate) fn build_buffer_element_store(
+        &self,
+        data: PointerValue<'context>,
+        llvm_element: BasicTypeEnum<'context>,
+        index: IntValue<'context>,
+        value: BasicValueEnum<'context>,
+        pointer_name: &str,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let slot = self.build_buffer_element_pointer(data, llvm_element, index, pointer_name)?;
+        self.builder
+            .build_store(slot, value)
+            .map(|_| ())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    /// Stage 5.6 Step 2: load a buffer header length field (field 0).
+    pub(crate) fn build_buffer_length(
+        &self,
+        buffer: PointerValue<'context>,
+        header: StructType<'context>,
+        slot_name: &str,
+        load_name: &str,
+    ) -> CodeGenerationResult<IntValue<'context>> {
+        let slot = self
+            .builder
+            .build_struct_gep(header, buffer, 0, slot_name)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_load(self.size_type, slot, load_name)
+            .map(|value| value.into_int_value())
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Stage 5.6 Step 2: load a buffer header capacity field (field 1).
+    pub(crate) fn build_buffer_capacity(
+        &self,
+        buffer: PointerValue<'context>,
+        header: StructType<'context>,
+        slot_name: &str,
+        load_name: &str,
+    ) -> CodeGenerationResult<IntValue<'context>> {
+        let slot = self
+            .builder
+            .build_struct_gep(header, buffer, 1, slot_name)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_load(self.size_type, slot, load_name)
+            .map(|value| value.into_int_value())
+            .map_err(compiler_diagnostic)
+    }
+
+    /// Stage 5.6 Step 2: store a buffer header capacity field (field 1).
+    pub(crate) fn build_buffer_capacity_store(
+        &self,
+        buffer: PointerValue<'context>,
+        header: StructType<'context>,
+        capacity: IntValue<'context>,
+        slot_name: &str,
+    ) -> CodeGenerationResult<()> {
+        let slot = self
+            .builder
+            .build_struct_gep(header, buffer, 1, slot_name)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(slot, capacity)
+            .map(|_| ())
+            .map_err(compiler_diagnostic)
+    }
+
     /// Stage 5.5 Step 3: the type-independent phi core legacy uses for logical
     /// short-circuits and match merges.
     pub(crate) fn build_phi_value(
@@ -1372,6 +1833,20 @@ pub(crate) struct SumStorageSlot<'context> {
     pub llvm_type: inkwell::types::StructType<'context>,
     pub slot: inkwell::values::PointerValue<'context>,
     pub storage: super::layout::SumStorage<'context>,
+}
+
+/// Stage 5.6 Step 2: the state [`Backend::begin_conditional_cell_drop`] opened:
+/// the loaded cell value, its state byte, and the merge block.
+pub(crate) struct CellDropBlocks<'context> {
+    pub value: BasicValueEnum<'context>,
+    pub state: PointerValue<'context>,
+    pub continue_block: BasicBlock<'context>,
+}
+
+/// Stage 5.6 Step 2: the state [`Backend::enter_finalizer_function`] opened.
+pub(crate) struct FinalizerBody<'context> {
+    pub previous_block: Option<BasicBlock<'context>>,
+    pub payload: PointerValue<'context>,
 }
 
 pub(crate) fn value_as_basic(
