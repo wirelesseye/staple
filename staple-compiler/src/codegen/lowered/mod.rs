@@ -1,6 +1,7 @@
 //! Parallel LLVM emitter over the read-only lowered program view.
 
 mod coroutines;
+mod reactive;
 mod structural;
 
 use std::collections::HashMap;
@@ -1406,10 +1407,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )
             })?;
         let value_type = self.backend.compile_type(&value_type)?;
-        Ok(self
-            .backend
-            .context
-            .struct_type(&[value_type, self.backend.context.i8_type().into()], false))
+        let mut fields = vec![value_type, self.backend.context.i8_type().into()];
+        // Legacy `compile_binding_cell_type`: a signal or derived cell carries
+        // a metadata pointer in field 2.
+        if self
+            .view
+            .symbol(symbol)
+            .is_some_and(|record| record.signal || record.derived)
+        {
+            fields.push(
+                self.backend
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .into(),
+            );
+        }
+        Ok(self.backend.context.struct_type(&fields, false))
     }
 
     /// Legacy `allocate_binding_cell` for a symbol without reactive storage:
@@ -1457,6 +1470,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_store(state, self.backend.context.i8_type().const_zero())
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        // Legacy `allocate_binding_cell`: a signal cell creates its signal
+        // before the value is evaluated and stores it in the metadata field.
+        if self.view.symbol(symbol).is_some_and(|record| record.signal) {
+            let metadata_slot = self
+                .backend
+                .builder
+                .build_struct_gep(cell_type, cell, 2, "signal.metadata")
+                .map_err(compiler_diagnostic)?;
+            let signal = self.emit_signal_create(&staple_syntax::Span::Compiler)?;
+            self.backend
+                .builder
+                .build_store(metadata_slot, signal)
+                .map_err(compiler_diagnostic)?;
+        }
         if captured {
             self.install_cell_finalizer(owner, symbol, cell, span)?;
         } else {
@@ -1839,15 +1866,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::CoroutineCodes(plan) => {
                 self.emit_coroutine_pair(ordinal, plan, &artifact.origin.span)
             }
-            other @ (LoweredArtifactPlan::ReactionRunner(_)
-            | LoweredArtifactPlan::UntilRunner(_)
-            | LoweredArtifactPlan::DerivedRunner(_)) => Err(Diagnostic::new(
-                artifact.origin.span.clone(),
-                format!(
-                    "lowered emitter: {} is not implemented yet",
-                    artifact_family(other)
-                ),
-            )),
+            LoweredArtifactPlan::ReactionRunner(plan)
+            | LoweredArtifactPlan::UntilRunner(plan)
+            | LoweredArtifactPlan::DerivedRunner(plan) => {
+                self.emit_runner_body(ordinal, plan, &artifact.origin.span)
+            }
         }
     }
 
@@ -2067,6 +2090,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     | LoweredArtifactPlan::GcFinalizer(_)
                     | LoweredArtifactPlan::StructuralMethod(_)
                     | LoweredArtifactPlan::CoroutineCodes(_)
+                    | LoweredArtifactPlan::ReactionRunner(_)
+                    | LoweredArtifactPlan::UntilRunner(_)
+                    | LoweredArtifactPlan::DerivedRunner(_)
             ) {
                 continue;
             }
@@ -2432,13 +2458,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if binding.compile_time_only {
                     return Ok(());
                 }
-                if binding.derived || binding.signal {
-                    return Err(unimplemented(if binding.derived {
-                        "derived binding"
-                    } else {
-                        "signal binding"
-                    }));
-                }
                 // The storage-only part of legacy `compile_top_level_item`:
                 // a generic binding records state 1 then 2 and evaluates
                 // nothing; a valued binding records state 1, evaluates,
@@ -2483,8 +2502,74 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )?;
                     self.store_initialization_state(symbol, 1)?;
                 }
+                // A derived binding is created from its evaluator thunk, not
+                // by evaluating the source initializer; a local cell or the
+                // module global receives the output through the create call.
+                if binding.derived {
+                    let symbol = binding
+                        .symbol
+                        .ok_or_else(|| unimplemented("derived binding"))?;
+                    let operation = binding
+                        .reactive
+                        .ok_or_else(|| unimplemented("derived binding"))?;
+                    let (value_slot, metadata_slot) =
+                        if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+                            let cell_type = self.binding_cell_type(owner, symbol)?;
+                            let value_slot = self
+                                .backend
+                                .builder
+                                .build_struct_gep(cell_type, cell, 0, "derived.value")
+                                .map_err(compiler_diagnostic)?;
+                            let metadata_slot = self
+                                .backend
+                                .builder
+                                .build_struct_gep(cell_type, cell, 2, "derived.metadata")
+                                .map_err(compiler_diagnostic)?;
+                            (value_slot, metadata_slot)
+                        } else if let Some(global) = self.storage.get(&symbol).copied() {
+                            let metadata = self
+                                .derived_metadata
+                                .get(&symbol)
+                                .copied()
+                                .ok_or_else(|| unimplemented("derived binding"))?;
+                            (global.as_pointer_value(), metadata.as_pointer_value())
+                        } else {
+                            return Err(unimplemented("derived binding"));
+                        };
+                    self.emit_derived_create(
+                        owner,
+                        operation,
+                        value_slot,
+                        metadata_slot,
+                        environment,
+                        &item.origin.span,
+                    )?;
+                    self.store_local_initialization_state(
+                        owner,
+                        environment,
+                        symbol,
+                        2,
+                        &item.origin.span,
+                    )?;
+                    self.store_initialization_state(symbol, 2)?;
+                    return Ok(());
+                }
                 let value = self.emit_expression(owner, value_id, environment)?;
                 if let Some(symbol) = binding.symbol {
+                    // A module-level signal creates and records its signal
+                    // between the value evaluation and the global store
+                    // (legacy `compile_top_level_item`); a local signal cell
+                    // already created it at allocation.
+                    if binding.signal
+                        && !environment.binding_cells.contains_key(&symbol)
+                        && let Some(metadata) = self.signal_metadata.get(&symbol).copied()
+                    {
+                        let signal = self.emit_signal_create(&item.origin.span)?;
+                        self.backend
+                            .builder
+                            .build_store(metadata.as_pointer_value(), signal)
+                            .map_err(compiler_diagnostic)?;
+                    }
                     if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
                         let cell_type = self.binding_cell_type(owner, symbol)?;
                         let slot = self
@@ -3120,12 +3205,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         expression: &crate::LoweredExpression,
         environment: &mut FunctionEnvironment<'context>,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let unimplemented = |family| {
-            Diagnostic::new(
-                expression.origin.span.clone(),
-                format!("lowered emitter: {family} is not implemented yet"),
-            )
-        };
         match &expression.kind {
             LoweredExpressionKind::Integer(integer) => Ok(self
                 .backend
@@ -3154,9 +3233,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                     "missing reactive read record",
                                 )
                             })?;
-                    let family = match operation.kind {
-                        LoweredReactiveOperationKind::SignalRead { .. } => "signal read",
-                        LoweredReactiveOperationKind::DerivedRead { .. } => "derived read",
+                    match operation.kind {
+                        // A signal or derived read tracks through
+                        // `load_symbol_value`, exactly like legacy's
+                        // `compile_symbol_value`.
+                        LoweredReactiveOperationKind::SignalRead { .. }
+                        | LoweredReactiveOperationKind::DerivedRead { .. } => {}
                         LoweredReactiveOperationKind::SignalCreate { .. }
                         | LoweredReactiveOperationKind::SignalNotify { .. }
                         | LoweredReactiveOperationKind::DerivedCreate { .. }
@@ -3170,8 +3252,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                 "invalid reactive read record",
                             ));
                         }
-                    };
-                    return Err(unimplemented(family));
+                    }
                 }
                 // Legacy `Expression::Name` checks the state whenever the read
                 // requires one or the symbol has mutable storage.
@@ -4828,17 +4909,33 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // Stage 5.6 Step 7: a reactive intrinsic call names the operation it
         // performs. The plain scope call emits through the intrinsic route
         // (its unit argument is evaluated with the other arguments below);
-        // 5.8 owns every other operation.
-        if let Some(reactive) = call.reactive {
+        // every other operation evaluates its own operands in legacy order and
+        // is emitted before the generic argument loop.
+        let reactive_call = if let Some(reactive) = call.reactive {
             let operation = self
                 .view
                 .reactive_operation(owner, reactive)
                 .ok_or_else(|| {
                     Diagnostic::new(call.origin.span.clone(), "missing reactive operation")
                 })?;
-            if !matches!(operation.kind, LoweredReactiveOperationKind::Scope) {
-                return Err(unsupported(reactive_call_family(&operation.kind)));
+            match &operation.kind {
+                LoweredReactiveOperationKind::Scope => None,
+                LoweredReactiveOperationKind::Reaction { .. }
+                | LoweredReactiveOperationKind::Batch { .. }
+                | LoweredReactiveOperationKind::Until { .. }
+                | LoweredReactiveOperationKind::Snapshot => Some(reactive),
+                other => {
+                    return Err(Diagnostic::new(
+                        call.origin.span.clone(),
+                        format!("invalid reactive call record: {other:?}"),
+                    ));
+                }
             }
+        } else {
+            None
+        };
+        if let Some(reactive) = reactive_call {
+            return self.emit_reactive_call(owner, &call, reactive, environment);
         }
         // Legacy checks the callee symbol's initialization before evaluating
         // any argument.
@@ -5910,11 +6007,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.store_local_initialization_state(owner, environment, symbol, 2, &span)?;
             self.store_initialization_state(symbol, 2)?;
         }
-        if assignment.signal_notify.is_some() {
-            return Err(Diagnostic::new(
-                span,
-                "lowered emitter: signal notify is not implemented yet",
-            ));
+        if let Some(operation) = assignment.signal_notify {
+            let symbol = self
+                .view
+                .reactive_operation(owner, operation)
+                .and_then(|record| match &record.kind {
+                    LoweredReactiveOperationKind::SignalNotify { symbol } => Some(*symbol),
+                    _ => None,
+                })
+                .ok_or_else(|| Diagnostic::new(span.clone(), "invalid signal notify record"))?;
+            if let Some(signal) = self.signal_metadata_value(owner, environment, symbol, &span)? {
+                self.backend.build_reactive_runtime_call(
+                    "__staple_signal_notify",
+                    &[signal.into()],
+                    None,
+                    "signal.notify",
+                    span.clone(),
+                )?;
+            }
         }
         Ok(())
     }
@@ -6578,8 +6688,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(*value);
         }
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
-            // Legacy's binding-cell arm: build the state slot, run the shared
-            // check when the read needs one, then load the value slot.
+            // Legacy's binding-cell arm: force a stale derived read, build the
+            // state slot, run the shared check when the read needs one, track
+            // a signal read, then load the value slot.
+            self.force_derived_read(owner, environment, symbol, span)?;
             let cell_type = self.binding_cell_type(owner, symbol)?;
             let state_slot = self
                 .backend
@@ -6596,6 +6708,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .build_struct_gep(cell_type, cell, 0, "binding.value")
                 .map_err(compiler_diagnostic)?;
             let llvm_type = self.backend.compile_type(value_type)?;
+            self.track_signal_read(owner, environment, symbol, span)?;
             return self
                 .backend
                 .builder
@@ -6621,11 +6734,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .storage
             .get(&symbol)
             .ok_or_else(|| Diagnostic::new(span.clone(), "symbol storage is not available here"))?;
+        self.force_derived_read(owner, environment, symbol, span)?;
         if check_initialization && let Some(state) = self.initialization_states.get(&symbol) {
             self.backend
                 .build_initialization_check(state.as_pointer_value(), span.clone())?;
         }
         let llvm_type = self.backend.compile_type(value_type)?;
+        self.track_signal_read(owner, environment, symbol, span)?;
         self.backend
             .builder
             .build_load(llvm_type, global.as_pointer_value(), "global")
@@ -7802,25 +7917,6 @@ fn artifact_family(plan: &LoweredArtifactPlan) -> &'static str {
         LoweredArtifactPlan::UntilRunner(_) => "until runner artifact",
         LoweredArtifactPlan::DerivedRunner(_) => "derived runner artifact",
         LoweredArtifactPlan::ExternAdapter(_) => "extern adapter artifact",
-    }
-}
-
-/// Stage 5.6 Step 1: the construct family of one reactive operation carried by
-/// a call. Only the five reactive intrinsics (scope, reaction, batch, `until`,
-/// snapshot) are ever attached to a call; the binding and name operations are
-/// diagnosed under the general family if one ever appears.
-fn reactive_call_family(kind: &LoweredReactiveOperationKind) -> &'static str {
-    match kind {
-        LoweredReactiveOperationKind::Scope => "reactive scope call",
-        LoweredReactiveOperationKind::Reaction { .. } => "reaction call",
-        LoweredReactiveOperationKind::Batch { .. } => "batch call",
-        LoweredReactiveOperationKind::Until { .. } => "until call",
-        LoweredReactiveOperationKind::Snapshot => "snapshot call",
-        LoweredReactiveOperationKind::SignalCreate { .. }
-        | LoweredReactiveOperationKind::SignalRead { .. }
-        | LoweredReactiveOperationKind::SignalNotify { .. }
-        | LoweredReactiveOperationKind::DerivedRead { .. }
-        | LoweredReactiveOperationKind::DerivedCreate { .. } => "reactive call",
     }
 }
 

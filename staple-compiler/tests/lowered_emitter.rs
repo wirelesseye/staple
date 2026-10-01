@@ -22,36 +22,38 @@ fn compile(source: &str, emitter: Emitter) -> Result<String, Vec<staple_syntax::
     CodeGenerator::with_emitter(&context, emitter).compile_module(&lowered)
 }
 
+/// Stage 5.8 Step 7 closed every construct family, so the selector now
+/// compiles the same reactive body under both emitters; the lowered module is
+/// named from the catalog rather than legacy's syntax keys.
 #[test]
-fn selector_preserves_legacy_and_reports_unported_lowered_body() {
+fn selector_preserves_legacy_and_emits_reactive_body() {
+    let source = concat!(
+        "use std.coroutine.*\n",
+        "def first: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
+        "let a = first ()\n",
+    );
     let llvm = compile("", Emitter::Legacy).unwrap();
     assert!(llvm.contains("define i32 @main()"));
-    // Stage 5.6 Step 8: the empty program now compiles strictly under both
-    // emitters; a body with a still-unported reaction reports the
-    // lowered emitter.
     compile("", Emitter::Lowered).expect("the empty program compiles strictly");
 
-    let diagnostics = compile(
-        concat!(
-            "use std.coroutine.*\n",
-            "def first: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
-        ),
-        Emitter::Lowered,
-    )
-    .unwrap_err();
+    let legacy = compile(source, Emitter::Legacy).expect("legacy reactive body");
+    let lowered = compile(source, Emitter::Lowered).expect("lowered reactive body");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.starts_with("lowered emitter: ")),
-        "{diagnostics:?}"
+        legacy.contains("__staple_reaction_create") && lowered.contains("__staple_reaction_create"),
+        "both emitters emit the reaction runtime call"
+    );
+    assert_ne!(
+        legacy, lowered,
+        "the selector routes through the catalog-named lowered emitter"
     );
 }
 
-/// F8: a failed body no longer stops the compile, so one strict lowered
-/// compile reports every unsupported body it reached.
+/// F8 held while bodies could still fail. Every construct family is now
+/// emitted, so strict lowered compilation of the bodies that used to fail
+/// collects no diagnostic at all.
 #[test]
-fn strict_emission_reports_every_failed_body() {
-    let diagnostics = compile(
+fn strict_emission_compiles_every_reactive_body() {
+    let llvm = compile(
         concat!(
             "use std.coroutine.*\n",
             "def first: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
@@ -59,10 +61,10 @@ fn strict_emission_reports_every_failed_body() {
         ),
         Emitter::Lowered,
     )
-    .unwrap_err();
+    .expect("every reactive body emits strictly");
     assert!(
-        diagnostics.len() > 1,
-        "expected one diagnostic per failed body, got {diagnostics:?}"
+        llvm.matches("call ptr @__staple_reaction_create").count() >= 2,
+        "both reaction bodies emitted"
     );
 }
 
@@ -87,13 +89,10 @@ fn partial_emission_empty_program_verifies() {
     );
 }
 
-/// Stage 5.3 Step 2: partial mode stubs unsupported bodies, stubs the
-/// artifact families without body emitters, and returns a verified module
-/// with the stub/histogram report.
+/// Stage 5.3 Step 2's partial mode with every construct family now emitted:
+/// the same program verifies with no stubbed body and no trap.
 #[test]
-fn partial_emission_stubs_unsupported_sites_and_verifies() {
-    // Stage 5.8 Step 4 emits coro creation, so use still-unported reactions.
-    // The structural and constructor shims remain fully supported siblings.
+fn partial_emission_with_reactive_bodies_verifies() {
     let lowered = prepare(concat!(
         "use std.coroutine.*\n",
         "def first: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
@@ -110,49 +109,16 @@ fn partial_emission_stubs_unsupported_sites_and_verifies() {
     let (ir, report) = CodeGenerator::with_emitter(&context, Emitter::Lowered)
         .compile_lowered_partial(&lowered)
         .expect("partial emission should verify");
-    assert!(ir.contains("@llvm.trap"), "stub bodies call llvm.trap");
+    let _ = ir;
     assert!(
-        report.stubbed().iter().any(|stub| stub.name() == "first"
-            && stub
-                .diagnostic()
-                .message
-                .contains("reaction call is not implemented")),
-        "the unsupported `first` body is stubbed: {:?}",
+        report.stubbed().is_empty(),
+        "every body emits: {:?}",
         report.stubbed()
     );
     assert!(
-        report.stubbed().iter().any(|stub| stub.name() == "second"),
-        "the unsupported `second` body is stubbed"
-    );
-    assert!(
-        report.stubbed().iter().any(|stub| matches!(
-            stub.entry(),
-            staple_compiler::LoweredCatalogEntry::Artifact(_)
-        )),
-        "an artifact whose family has no body emitter is stubbed: {:?}",
-        report.stubbed()
-    );
-    assert!(
-        report
-            .family_histogram()
-            .iter()
-            .any(|(family, count)| family == "reaction call" && *count >= 2),
-        "the histogram counts the reaction family: {:?}",
+        report.family_histogram().is_empty(),
+        "no stub families remain: {:?}",
         report.family_histogram()
     );
-    assert!(
-        report.family_histogram().windows(2).all(|pair| {
-            pair[0].1 > pair[1].1 || (pair[0].1 == pair[1].1 && pair[0].0 < pair[1].0)
-        }),
-        "the histogram is ordered by count then family: {:?}",
-        report.family_histogram()
-    );
-    eprintln!(
-        "fixture: {} stubs, {} families",
-        report.stubbed().len(),
-        report.family_histogram().len()
-    );
-    for (family, count) in report.family_histogram() {
-        eprintln!("{count:5}  {family}");
-    }
+    eprintln!("fixture: {} stubs", report.stubbed().len());
 }

@@ -25,15 +25,30 @@ pub(super) struct CoroutineContext<'context> {
 impl<'program, 'context> LoweredEmitter<'program, 'context> {
     fn coroutine_frame_type(
         &self,
-        owner: EmissionOwner,
         frame: &CoroutineFramePlan,
     ) -> CodeGenerationResult<crate::codegen::ir::CoroutineFrameType<'context>> {
         let cells = frame
             .frame_bindings
             .iter()
             .map(|binding| {
-                self.binding_cell_type(owner, binding.symbol)
-                    .map(Into::into)
+                // The plan's recorded concrete type, not an owner-local
+                // lookup: a binding inside a nested thunk belongs to that
+                // thunk's instance, not the coroutine body's.
+                let value = self.backend.compile_type(&binding.value_type)?;
+                let mut fields = vec![value, self.backend.context.i8_type().into()];
+                if self
+                    .view
+                    .symbol(binding.symbol)
+                    .is_some_and(|record| record.signal || record.derived)
+                {
+                    fields.push(
+                        self.backend
+                            .context
+                            .ptr_type(AddressSpace::default())
+                            .into(),
+                    );
+                }
+                Ok(self.backend.context.struct_type(&fields, false).into())
             })
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         let result = self.backend.compile_type(&frame.result_type)?;
@@ -107,7 +122,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             ));
         };
         let (resume, cleanup) = (*resume, *cleanup);
-        let layout = self.coroutine_frame_type(owner, frame_plan)?;
+        let layout = self.coroutine_frame_type(frame_plan)?;
         let pointer = self.backend.context.ptr_type(AddressSpace::default());
         let header = self.backend.coroutine_header_type();
         let status = self.backend.coroutine_status_type();
@@ -351,7 +366,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let frame_plan = plan.frame.as_ref().ok_or_else(|| {
             Diagnostic::new(span.clone(), "missing coroutine creation frame plan")
         })?;
-        let layout = self.coroutine_frame_type(EmissionOwner::Instance(plan.body), frame_plan)?;
+        let layout = self.coroutine_frame_type(frame_plan)?;
         self.backend
             .build_coroutine_creation(
                 layout.ty,

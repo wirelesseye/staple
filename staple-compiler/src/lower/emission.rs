@@ -245,6 +245,15 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.await_record(self.program, id)
     }
 
+    /// Resolve an owner's reactive callback record (Stage 5.8 Step 7).
+    pub(crate) fn reactive_callback(
+        &self,
+        owner: EmissionOwner,
+        id: super::LoweredReactiveCallbackId,
+    ) -> Option<&'a LoweredReactiveCallback> {
+        self.owner(owner)?.reactive_callback(self.program, id)
+    }
+
     pub(crate) fn binding(
         &self,
         owner: EmissionOwner,

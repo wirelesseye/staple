@@ -1767,6 +1767,98 @@ mod tests {
         );
     }
 
+    /// Stage 5.8 Step 7: the 4.5 reactive fixtures (signals and derived in
+    /// initializers and instances, reaction resources, an explicit callback,
+    /// droppable capture finalizers, `until` inside a coroutine, and nested
+    /// thunk blocks) emit and compare body for body.
+    #[test]
+    fn stage_5_8_reactive_fixtures_match_legacy() {
+        let fixtures = [
+            (
+                "reactive_resources",
+                concat!(
+                    "use std.cinterop.(CString, c_string)\n",
+                    "extern \"c\" { inspect: CString -> I32 }\n",
+                    "type Counter = ctor (value: I32)\n",
+                    "def read_counter: () ->{Counter} I32 = () => (resource Counter).value\n",
+                    "def increment: () ->{mut Counter} () = () => {\n",
+                    "  (resource Counter).value = (resource Counter).value + 1\n",
+                    "}\n",
+                    "def subscribe_plain: () ->{Reactive} () = () => reaction { () }\n",
+                    "def subscribe_value: () ->{Reactive, Counter} () = () => reaction { read_counter (); () }\n",
+                    "def subscribe_mut: () ->{Reactive, mut Counter} () = () => reaction { increment (); () }\n",
+                    "def poke: () -> () = () => ()\n",
+                    "def subscribe_explicit: () ->{Reactive} () = () => reaction poke\n",
+                    "def subscribe_owned: move CString ->{Reactive} () = move value => reaction { inspect value; () }\n",
+                    "let a = with Reactive = reactive_scope () { subscribe_plain () }\n",
+                    "let b = with Counter = Counter (value: 1) { with Reactive = reactive_scope () { subscribe_value () } }\n",
+                    "let c = with mut Counter = Counter (value: 2) { with Reactive = reactive_scope () { subscribe_mut () } }\n",
+                    "let d = with Reactive = reactive_scope () { subscribe_explicit () }\n",
+                    "let e = with Reactive = reactive_scope () { subscribe_owned (c_string \"x\") }\n",
+                ),
+            ),
+            (
+                "signals_derived_and_until",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.cinterop.(CString, c_string)\n",
+                    "extern \"c\" { inspect: CString -> I32 }\n",
+                    "let signal count = 0\n",
+                    "def wait: () -> Coroutine{Reactive} () = () => coro {\n",
+                    "  let _ = await (until { count >= 5 })\n",
+                    "  ()\n",
+                    "}\n",
+                    "let doubled = count + count\n",
+                    "def make: () ->{state.read} I32 = () => {\n",
+                    "  let local = count + count\n",
+                    "  local\n",
+                    "}\n",
+                    "def make_derived: move CString ->{state.read} I32 = move value => {\n",
+                    "  let local = count + inspect value\n",
+                    "  local\n",
+                    "}\n",
+                    "let a = with Reactive = reactive_scope () { wait () }\n",
+                    "let b = make ()\n",
+                    "let c = doubled\n",
+                    "let d = make_derived (c_string \"x\")\n",
+                ),
+            ),
+            (
+                "nested_reactive_blocks",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.cinterop.(CString, c_string)\n",
+                    "extern \"c\" { inspect: CString -> I32 }\n",
+                    "let signal flag = 0\n",
+                    "def nested_blocks: () -> Coroutine{Reactive} () = () => coro {\n",
+                    "  reaction { let seen = c_string \"r\"; inspect seen; () }\n",
+                    "  batch { let staged = c_string \"b\"; inspect staged; () }\n",
+                    "  let _ = await (until { let limit = 1; flag >= limit })\n",
+                    "  ()\n",
+                    "}\n",
+                    "with Reactive = reactive_scope () { nested_blocks () }\n",
+                ),
+            ),
+        ];
+        for (label, source) in fixtures {
+            let lowered = lower(source, &workspace_root());
+            let context = Context::create();
+            let legacy = crate::codegen::legacy_emissions(&context, &lowered)
+                .unwrap_or_else(|diagnostics| panic!("legacy `{label}`: {diagnostics:?}"));
+            let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
+                .unwrap_or_else(|diagnostics| panic!("lowered `{label}`: {diagnostics:?}"));
+            assert!(
+                partial.report.stubbed().is_empty(),
+                "{label}: {:?}",
+                partial.report
+            );
+            let mapping = assert_declaration_parity(label, &lowered, &legacy, &partial);
+            let compared =
+                compare_fully_emitted_bodies(label, &lowered, &mapping, &legacy, &partial);
+            assert!(compared.len() > 20, "`{label}` emits most bodies");
+        }
+    }
+
     /// Stage 5.8 Step 6: scheduler/task intrinsics, `with Tasks`, and every
     /// completion intrinsic emit and compare body for body.
     #[test]
@@ -1971,33 +2063,22 @@ mod tests {
             );
         }
 
-        // Step 5 (awaits and driving) and Step 6 (tasks, schedulers,
-        // completions) own their families: no body may stub at one. The
-        // `reached` census for `spawn`/`pump`/`scheduler`/`task scope` stays
-        // nonzero until Step 7 emits the reactive constructs in those same
-        // stubbed bodies, so only the first-blocker histogram ratchets here.
-        for completed in [
-            "await",
-            "coroutine block_on",
-            "scheduler",
-            "spawn",
-            "pump",
-            "yield_now",
-            "task is_finished",
-            "task cancel",
-            "task scope",
-            "completion",
-            "completion with cancel",
-            "completion token",
-            "completion token resolve",
-            "completion token cancel",
-            "resolver complete",
-            "resolver cancel",
-        ] {
+        // Steps 5–7 own every 5.8 family: no body may stub at one. After Step
+        // 7 the whole corpus is stub-free, so the check covers the reactive
+        // families too and ratchets all of them.
+        for (family, owner) in super::FAMILY_OWNERS {
+            if *owner != "5.8" {
+                continue;
+            }
             assert_eq!(
-                histogram.get(completed).copied().unwrap_or(0),
+                histogram.get(*family).copied().unwrap_or(0),
                 0,
-                "Step 5/6 family {completed} cannot regress"
+                "Step 5/6/7 family {family} cannot regress"
+            );
+            assert_eq!(
+                reached.get(*family).copied().unwrap_or(0),
+                0,
+                "Step 5/6/7 family {family} is no longer a blocker"
             );
         }
 
