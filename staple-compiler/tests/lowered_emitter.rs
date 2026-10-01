@@ -96,7 +96,10 @@ fn partial_emission_stubs_unsupported_sites_and_verifies() {
     assert!(ir.contains("@llvm.trap"), "stub bodies call llvm.trap");
     assert!(
         report.stubbed().iter().any(|stub| stub.name() == "first"
-            && stub.diagnostic().message.contains("coro is not implemented")),
+            && stub
+                .diagnostic()
+                .message
+                .contains("coro is not implemented")),
         "the unsupported `first` body is stubbed: {:?}",
         report.stubbed()
     );

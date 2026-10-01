@@ -46,17 +46,36 @@ struct FunctionEnvironment<'context> {
     resources: HashMap<LoweredResourceProviderId, BoundResource<'context>>,
     reactive_scopes: Vec<PointerValue<'context>>,
     loops: Vec<LoopContext<'context>>,
+    /// Stage 5.6 Step 4 (O3): the owned bindings currently in scope, keyed by
+    /// symbol. `owned_order` is legacy's `owned_order` registration order;
+    /// scope exits drop in reverse from a mark.
+    owned: HashMap<SymbolId, OwnedValue<'context>>,
+    owned_order: Vec<SymbolId>,
     returned: bool,
+}
+
+/// Stage 5.6 Step 4 (O3): one registered owned binding. A `Value` owns its
+/// SSA local with an `i1` live flag; a `Cell` owns its binding cell and is
+/// dropped conditionally on the cell state. `glue` is the drop glue the
+/// owner's `OwnedBinding` use record names.
+#[derive(Clone)]
+struct OwnedValue<'context> {
+    storage: OwnedStorage,
+    glue: ArtifactOrdinal,
+    value: Option<AnyValueEnum<'context>>,
+    live: Option<PointerValue<'context>>,
 }
 
 impl<'context> FunctionEnvironment<'context> {
     /// Legacy `FunctionEnvironment::restore_local_state`: match arms and
-    /// logical operands restore the caller's local bindings after a branch.
-    /// Owned-binding state is 5.6 and has no equivalent here.
+    /// logical operands restore the caller's local bindings, including the
+    /// owned-binding registration order.
     fn restore_local_state(&mut self, snapshot: &Self) {
         self.locals = snapshot.locals.clone();
         self.binding_cells = snapshot.binding_cells.clone();
         self.parameter_pointers = snapshot.parameter_pointers.clone();
+        self.owned = snapshot.owned.clone();
+        self.owned_order = snapshot.owned_order.clone();
     }
 }
 
@@ -93,6 +112,9 @@ struct LoopContext<'context> {
     depth: usize,
     header: BasicBlock<'context>,
     exit: BasicBlock<'context>,
+    /// The owned-binding registration mark at loop entry; `break` and
+    /// `continue` drop back to it.
+    owned_before: usize,
     incoming: Vec<(BasicValueEnum<'context>, BasicBlock<'context>)>,
 }
 
@@ -102,6 +124,10 @@ pub(super) struct LoweredEmitter<'program, 'context> {
     instances: HashMap<FunctionInstanceId, FunctionValue<'context>>,
     artifacts: HashMap<ArtifactOrdinal, Vec<FunctionValue<'context>>>,
     externs: HashMap<SymbolId, FunctionValue<'context>>,
+    /// The declared adapter of each extern symbol used as a first-class value
+    /// (legacy `closure_codes`). A capture or name read of an extern value
+    /// builds this closure instead of looking up local storage.
+    extern_adapters: HashMap<SymbolId, FunctionValue<'context>>,
     /// The declared binding symbol of each function template. A `Stored`
     /// callable value loads its closure from that symbol's storage, mirroring
     /// legacy `compile_symbol_value`.
@@ -125,6 +151,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             instances: HashMap::new(),
             artifacts: HashMap::new(),
             externs: HashMap::new(),
+            extern_adapters: HashMap::new(),
             function_symbols: HashMap::new(),
             storage: HashMap::new(),
             initialization_states: HashMap::new(),
@@ -500,11 +527,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let ty = self
                         .backend
                         .compile_closure_function_type(&plan.callable_type)?;
-                    vec![
+                    let function =
                         self.backend
                             .llvm_module
-                            .add_function(name, ty, Some(Linkage::Internal)),
-                    ]
+                            .add_function(name, ty, Some(Linkage::Internal));
+                    self.extern_adapters.insert(plan.symbol, function);
+                    vec![function]
                 }
             };
             self.artifacts.insert(artifact.ordinal, functions);
@@ -870,29 +898,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.drop_glue_plan(ordinal, span)
     }
 
-    fn guard_owned_bindings(
-        &self,
-        owner: EmissionOwner,
-        span: &staple_syntax::Span,
-    ) -> CodeGenerationResult<()> {
-        let owned = self.view.owned_bindings(owner).is_some_and(|bindings| {
-            bindings
-                .iter()
-                .any(|record| record.glue.is_some() || matches!(record.storage, OwnedStorage::Cell))
-        });
-        let cell_finalizer = self.view.artifact_uses(owner).is_some_and(|uses| {
-            uses.iter()
-                .any(|use_| matches!(use_.site, crate::ArtifactUseSite::CellFinalizer(_)))
-        });
-        if owned || cell_finalizer {
-            return Err(Diagnostic::new(
-                span.clone(),
-                "lowered emitter: owned binding cleanup is not implemented yet",
-            ));
-        }
-        Ok(())
-    }
-
     /// One instance body, or `Ok(())` when the instance declares nothing
     /// emittable (no materialized body, no declaration, or no root block).
     fn emit_instance_body(&mut self, id: FunctionInstanceId) -> CodeGenerationResult<()> {
@@ -909,7 +914,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let Some(root) = body.root else {
             return Ok(());
         };
-        self.guard_owned_bindings(EmissionOwner::Instance(id), &body.origin.span)?;
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         let mut environment = FunctionEnvironment::default();
@@ -937,6 +941,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )?;
         }
         for symbol in &body.body_moved_symbols {
+            if let Some(record) = environment.owned.get(symbol)
+                && let Some(live) = record.live
+            {
+                self.backend
+                    .builder
+                    .build_store(live, self.backend.context.bool_type().const_zero())
+                    .map_err(compiler_diagnostic)?;
+            }
             self.store_local_initialization_state(
                 owner,
                 &mut environment,
@@ -952,6 +964,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "function result is not a first-class value",
                 )
             })?;
+            // Legacy `compile_function`: after the body expression's own
+            // scope drops, drop every remaining owned binding (the
+            // parameters) before returning (O3).
+            self.drop_all_owned(&environment, &body.origin.span)?;
             self.backend
                 .builder
                 .build_return(Some(&result))
@@ -1411,8 +1427,39 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_store(state, self.backend.context.i8_type().const_zero())
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        if captured {
+            self.install_cell_finalizer(owner, symbol, cell, span)?;
+        } else {
+            self.register_owned_binding(owner, environment, symbol, span)?;
+        }
         environment.binding_cells.insert(symbol, cell);
         Ok(cell)
+    }
+
+    /// Stage 5.6 Step 5 install, needed to delete the owned-binding guard: a
+    /// captured droppable binding cell gets the `CellFinalizer` artifact its
+    /// `CellFinalizer` use record names (legacy `ensure_cell_finalizer`). No
+    /// record means the cell needs no finalizer.
+    fn install_cell_finalizer(
+        &self,
+        owner: EmissionOwner,
+        symbol: SymbolId,
+        cell: PointerValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let Some(record) = self.view.artifact_uses(owner).and_then(|uses| {
+            uses.iter()
+                .find(|use_| use_.site == crate::ArtifactUseSite::CellFinalizer(symbol))
+        }) else {
+            return Ok(());
+        };
+        let finalizer = self
+            .artifacts
+            .get(&record.artifact)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing cell finalizer declaration"))?;
+        self.backend.set_gc_finalizer(cell, finalizer)
     }
 
     /// Legacy `store_local_initialization_state`: write a cell-backed symbol's
@@ -1444,6 +1491,158 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
+    /// Stage 5.6 Step 4 (O3): register an owned binding from the owner's
+    /// recorded `owned_bindings`, mirroring legacy `track_symbol_ownership`
+    /// for a value and the owned-cell path of `allocate_binding_cell` for a
+    /// cell. A `Value` registration allocates a fresh `i1` live flag set
+    /// true, like legacy; a cell registration relies on the cell state.
+    fn register_owned_binding(
+        &self,
+        owner: EmissionOwner,
+        environment: &mut FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let Some(record) = self
+            .view
+            .owned_bindings(owner)
+            .and_then(|bindings| bindings.iter().find(|record| record.symbol == symbol))
+        else {
+            return Ok(());
+        };
+        let Some(glue) = record.glue else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "owned binding has no bound drop glue",
+            ));
+        };
+        let newly_owned = !environment.owned_order.contains(&symbol);
+        match record.storage {
+            OwnedStorage::Value => {
+                let Some(value) = environment.locals.get(&symbol).copied() else {
+                    return Ok(());
+                };
+                let live = self
+                    .backend
+                    .builder
+                    .build_alloca(self.backend.context.bool_type(), "drop.live")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(live, self.backend.context.bool_type().const_int(1, false))
+                    .map_err(compiler_diagnostic)?;
+                environment.owned.insert(
+                    symbol,
+                    OwnedValue {
+                        storage: OwnedStorage::Value,
+                        glue,
+                        value: Some(value),
+                        live: Some(live),
+                    },
+                );
+            }
+            OwnedStorage::Cell => {
+                environment.owned.insert(
+                    symbol,
+                    OwnedValue {
+                        storage: OwnedStorage::Cell,
+                        glue,
+                        value: None,
+                        live: None,
+                    },
+                );
+            }
+        }
+        if newly_owned {
+            environment.owned_order.push(symbol);
+        }
+        Ok(())
+    }
+
+    /// Legacy `drop_owned_since`: emit the conditional drop of every owned
+    /// binding registered since `start`, in reverse registration order, and
+    /// remove them from the environment.
+    fn drop_owned_since(
+        &self,
+        environment: &mut FunctionEnvironment<'context>,
+        start: usize,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let symbols = environment.owned_order[start..].to_vec();
+        for symbol in symbols.into_iter().rev() {
+            if let Some(record) = environment.owned.remove(&symbol) {
+                self.emit_owned_binding_drop(environment, symbol, &record, span)?;
+            }
+        }
+        environment.owned_order.truncate(start);
+        Ok(())
+    }
+
+    /// Legacy `drop_all_owned`: emit the conditional drop of every owned
+    /// binding in reverse registration order. The registrations stay in the
+    /// environment, as legacy's do.
+    fn drop_all_owned(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        for symbol in environment.owned_order.iter().rev() {
+            if let Some(record) = environment.owned.get(symbol) {
+                self.emit_owned_binding_drop(environment, *symbol, record, span)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Legacy's compile-time-only cleanup on a diverged branch: forget the
+    /// owned bindings registered since `start` without emitting a drop.
+    fn forget_owned_since(environment: &mut FunctionEnvironment<'context>, start: usize) {
+        let cleanup_start = start.min(environment.owned_order.len());
+        for symbol in &environment.owned_order[cleanup_start..] {
+            environment.owned.remove(symbol);
+        }
+        environment.owned_order.truncate(cleanup_start);
+    }
+
+    /// Stage 5.6 Step 4: one owned binding's conditional drop: the live-flag
+    /// skeleton around a value, or the cell-state skeleton around a cell.
+    fn emit_owned_binding_drop(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        record: &OwnedValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let plan = self.drop_glue_plan(record.glue, span)?;
+        match record.storage {
+            OwnedStorage::Value => {
+                let value = record.value.and_then(value_as_basic).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "owned value is not first-class")
+                })?;
+                let live = record
+                    .live
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "owned value has no live flag"))?;
+                let (_drop_block, done_block) =
+                    self.backend.begin_conditional_drop(live, span.clone())?;
+                self.emit_drop_glue(value, plan, span)?;
+                self.backend.end_conditional_drop(done_block)
+            }
+            OwnedStorage::Cell => {
+                let cell = environment
+                    .binding_cells
+                    .get(&symbol)
+                    .copied()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "owned cell is not available"))?;
+                let llvm_type = self.backend.compile_type(&plan.value_type)?;
+                let blocks =
+                    self.backend
+                        .begin_conditional_cell_drop(cell, llvm_type, span.clone())?;
+                self.emit_drop_glue(blocks.value, plan, span)?;
+                self.backend.end_conditional_cell_drop(&blocks)
+            }
+        }
+    }
+
     /// One module initializer body: entry IO/reactive resources, the lowered
     /// body, then reactive-scope disposal and return.
     fn emit_initializer_body(&mut self, id: InitializerId) -> CodeGenerationResult<()> {
@@ -1451,7 +1650,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let initializer = self.view.initializer(id).ok_or_else(|| {
             Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered initializer")
         })?;
-        self.guard_owned_bindings(EmissionOwner::Initializer(id), &initializer.origin.span)?;
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         let mut environment = FunctionEnvironment::default();
@@ -1903,6 +2101,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let block = self.view.block(owner, id).ok_or_else(|| {
             Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered block")
         })?;
+        // Legacy `compile_block`: every binding the block introduces is owned
+        // until the block's normal exit (O3).
+        let owned_before = environment.owned_order.len();
+        let span = block.origin.span.clone();
         let items = block.items.clone();
         let result = block.result;
         for item in items {
@@ -1911,10 +2113,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 return Ok(self.backend.unit_value());
             }
         }
-        match result {
-            Some(expression) => self.emit_expression(owner, expression, environment),
-            None => Ok(self.backend.unit_value()),
+        let value = match result {
+            Some(expression) => self.emit_expression(owner, expression, environment)?,
+            None => self.backend.unit_value(),
+        };
+        if !environment.returned {
+            self.drop_owned_since(environment, owned_before, &span)?;
         }
+        Ok(value)
     }
 
     fn emit_item(
@@ -1934,6 +2140,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 format!("lowered emitter: {family} is not implemented yet"),
             )
         };
+        let item_span = item.origin.span.clone();
         match item.kind {
             LoweredItemKind::Binding(binding) => {
                 if binding.compile_time_only {
@@ -2018,6 +2225,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         self.store_initialization_state(symbol, 2)?;
                     } else {
                         environment.locals.insert(symbol, value);
+                        self.register_owned_binding(owner, environment, symbol, &item.origin.span)?;
                     }
                 }
                 Ok(())
@@ -2044,7 +2252,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Err(unimplemented("initializer return"));
                 }
                 let value = self.emit_expression(owner, item.value, environment)?;
+                if environment.returned {
+                    return Ok(());
+                }
                 let value = value_as_basic(value).ok_or_else(|| unimplemented("return value"))?;
+                // Legacy `compile_item`'s return: drop every owned binding
+                // before leaving the function (O3).
+                self.drop_all_owned(environment, &item_span)?;
                 self.backend
                     .builder
                     .build_return(Some(&value))
@@ -2088,15 +2302,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 } else {
                     value_as_basic(self.backend.unit_value()).expect("unit is a basic value")
                 };
-                let Some(context) = environment
+                let Some((exit, owned_before)) = environment
                     .loops
-                    .iter_mut()
+                    .iter()
                     .rev()
                     .find(|context| context.depth == break_item.loop_depth)
+                    .map(|context| (context.exit, context.owned_before))
                 else {
                     return Err(unimplemented("break target"));
                 };
-                let exit = context.exit;
+                // Legacy `compile_item`'s break drops every binding owned
+                // since the loop's mark (O3).
+                self.drop_owned_since(environment, owned_before, &item_span)?;
                 self.backend
                     .builder
                     .build_unconditional_branch(exit)
@@ -2106,20 +2323,30 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .get_insert_block()
                     .expect("break block");
-                context.incoming.push((value, predecessor));
+                environment
+                    .loops
+                    .iter_mut()
+                    .rev()
+                    .find(|context| context.depth == break_item.loop_depth)
+                    .expect("break loop context")
+                    .incoming
+                    .push((value, predecessor));
                 environment.returned = true;
                 Ok(())
             }
             LoweredItemKind::Continue(item) => {
-                let Some(header) = environment
+                let Some((header, owned_before)) = environment
                     .loops
                     .iter()
                     .rev()
                     .find(|context| context.depth == item.loop_depth)
-                    .map(|context| context.header)
+                    .map(|context| (context.header, context.owned_before))
                 else {
                     return Err(unimplemented("continue target"));
                 };
+                // Legacy `compile_item`'s continue drops every binding owned
+                // since the loop's mark (O3).
+                self.drop_owned_since(environment, owned_before, &item_span)?;
                 self.backend
                     .builder
                     .build_unconditional_branch(header)
@@ -2263,7 +2490,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return self.store_local_initialization_state(owner, environment, symbol, 2, span);
         }
         environment.locals.insert(symbol, value);
-        Ok(())
+        self.register_owned_binding(owner, environment, symbol, span)
     }
 
     /// Legacy `store_pattern_globals`: after a module-level pattern binding
@@ -2417,9 +2644,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// Legacy `compile_expression`'s `release_moved_ownership`: clear the
-    /// initialization state of every symbol the expression moved out of a
-    /// binding cell. The live-flag store for an owned droppable value is 5.6;
-    /// the Step 1 guard already stopped bodies that own one.
+    /// live flag of every moved owned value, then the initialization state of
+    /// every symbol the expression moved out of a binding cell.
     fn release_moved_ownership(
         &mut self,
         owner: EmissionOwner,
@@ -2427,6 +2653,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         expression: &crate::LoweredExpression,
     ) -> CodeGenerationResult<()> {
         for symbol in &expression.moved_symbols {
+            if let Some(record) = environment.owned.get(symbol)
+                && let Some(live) = record.live
+            {
+                self.backend
+                    .builder
+                    .build_store(live, self.backend.context.bool_type().const_zero())
+                    .map_err(compiler_diagnostic)?;
+            }
             self.store_local_initialization_state(
                 owner,
                 environment,
@@ -3116,6 +3350,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             depth: loop_.depth,
             header,
             exit,
+            owned_before: environment.owned_order.len(),
             incoming: Vec::new(),
         });
         environment.returned = false;
@@ -3199,6 +3434,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut terminating_state = None;
         for arm in &match_.arms {
             environment.restore_local_state(&branch_base);
+            let owned_before = environment.owned_order.len();
             let arm_block = self
                 .backend
                 .context
@@ -3225,8 +3461,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "match arm result is not first-class",
                     )
                 })?;
-                // Legacy `drop_owned_since` here is 5.6; the body guard means
-                // this arm owns nothing.
+                // Legacy `compile_match_expression` drops the arm's pattern
+                // bindings and locals at the arm's normal exit (O3).
+                self.drop_owned_since(environment, owned_before, &arm.origin.span)?;
                 self.backend
                     .builder
                     .build_unconditional_branch(merge_block)
@@ -3239,6 +3476,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 incoming.push((value, predecessor));
                 continuing_state = Some(environment.clone());
             } else {
+                Self::forget_owned_since(environment, owned_before);
                 terminating_state = Some(environment.clone());
             }
             self.backend.builder.position_at_end(failure_block);
@@ -3667,14 +3905,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)?;
         let mut incoming = vec![(left_value, short_circuit_block)];
         self.backend.builder.position_at_end(right_block);
+        let owned_before = environment.owned_order.len();
         environment.returned = false;
         let right = self.emit_expression(owner, logical.right, environment)?;
         if !environment.returned {
             let right_value = value_as_basic(right).ok_or_else(|| {
                 Diagnostic::new(span.clone(), "logical operand is not first-class")
             })?;
-            // Legacy `drop_owned_since` here is 5.6; the guard means the right
-            // operand owns nothing.
+            // Legacy `compile_logical_expression` drops the right operand's
+            // own bindings at the end of its block (O3).
+            self.drop_owned_since(environment, owned_before, &span)?;
             self.backend
                 .builder
                 .build_unconditional_branch(merge_block)
@@ -3685,6 +3925,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .get_insert_block()
                 .expect("logical right block");
             incoming.push((right_value, predecessor));
+        } else {
+            Self::forget_owned_since(environment, owned_before);
         }
         self.backend.builder.position_at_end(merge_block);
         environment.returned = false;
@@ -3782,8 +4024,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         let failure_value = value_as_basic(failure_value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "propagated result is not first-class"))?;
-        // Legacy `drop_all_owned` here is 5.6; the body guard means nothing is
-        // owned on this path.
+        // Legacy `compile_propagating_binding`'s failure path drops every
+        // owned binding before returning the residual value (O3).
+        self.drop_all_owned(environment, &span)?;
         self.backend
             .builder
             .build_return(Some(&failure_value))
@@ -5993,6 +6236,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .build_load(llvm_type, value_slot, "binding")
                 .map(|value| value.as_any_value_enum())
                 .map_err(compiler_diagnostic);
+        }
+        // Legacy `compile_symbol_value`'s `closure_codes` arm: an extern used
+        // as a first-class value is read as its adapter closure (with a null
+        // environment).
+        if let Some(code) = self.extern_adapters.get(&symbol).copied() {
+            let environment_pointer = self
+                .backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null();
+            return self
+                .backend
+                .build_closure_value(code, environment_pointer)
+                .map(|value| value.as_any_value_enum());
         }
         let global = self
             .storage

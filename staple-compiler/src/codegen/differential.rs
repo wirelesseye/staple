@@ -681,15 +681,14 @@ static CORPUS: [DifferentialProgram; 36] = [
                 "def thunk_plain: I32 -> I32 = value => evaluate { value + 1 }\n",
                 // The thunk captures an owned `CString`, so lowering records a
                 // `ThunkArgumentEnvironment` finalizer use. `thunk_env` owns
-                // its moved parameter, so the owned-binding guard stubs it
-                // until 5.6; it joins the focus list then.
+                // its moved parameter; Stage 5.6 Step 4 emits its scope exit.
                 "def thunk_env: move CString -> I32 = move value => evaluate { puts value }\n",
                 "let first = thunk_plain 1\n",
                 "let second = thunk_env (c_string \"thunk\\n\")\n",
             ),
             "5.4",
         ),
-        &["evaluate", "thunk_plain"],
+        &["evaluate", "thunk_plain", "thunk_env"],
     ),
     emits(
         inline(
