@@ -210,6 +210,26 @@ Check each program's syntax against `Staple.md` and the existing fixtures. Use `
 - Note for 5.8 that `CompletionOrphan` and the coroutine `resume` scope exits use the 5.6 drop machinery.
 - Update [TYPED_LOWERING_PLAN.md](TYPED_LOWERING_PLAN.md) with one status note.
 
+**Step 9 notes (complete).** The five `5.6` corpus programs landed (`drop_order`, `drop_glue_shapes`, `finalizers`, `buffers`, `ref_replace`), each `MustRun` with an `emits` list. `drop_order` prints a `Drop` payload across scope exit, early return, propagation failure, `break`/`continue`, match arms, a moved value (one drop), a replaced assignment, a discarded result, and a call temporary; its stdout is identical under both emitters. `buffers` covers every intrinsic including `freeze` and a trap exit; the frozen-push trap is unreachable from source (the checker moves a frozen buffer), so the program traps with an out-of-bounds `get_ref` instead, which exercises the same `llvm.trap` exit path. `finalizers` exercises payload/cell/closure-environment finalizers without printing (GC timing), and `ref_replace` replaces a droppable payload.
+
+**Revised gate (met):**
+
+- Every family owned by 5.6 has zero stubs across the corpus (11658 fully emitted bodies compared; 82 stubs, 8 owned by 5.7 and 74 by 5.8).
+- The owned-binding guard is gone.
+- `rg` finds no `concrete_needs_drop`, `concrete_is_copy`, `type_needs_drop`, or `is_copy` decision in `codegen/lowered/`, outside `LayoutContext`'s ABI use.
+- Every `emits` function across the corpus, including `thunk_env`, is fully emitted and body-identical to legacy.
+- The empty program and `drop_order` are `MustRun` and run identically; every strict-compiling program is flipped to `MustRun` (33 identical, 5 blocked, 3 compile-only, none different).
+- The declaration census holds, and every fully emitted body matches legacy (11658 recorded).
+- The legacy IR comparison is `same` after Step 2.
+- The Contract 6 gates pass (1298 tests).
+
+**Handoff.**
+
+- Remaining stubs: 5.7's 8 structural method bodies; 5.8's 74 coroutine, reactive, task, and completion diagnostics (coroutine pair artifacts 28, `coro` 14, checked or reactive name 12, `until` runner artifacts 5, reactive or cell binding 4, derived runner 3, reaction runner 3, completion 1, scheduler 1, signal notify 1, task cancel 1, `until` call 1).
+- Corpus programs that became `MustRun`: `empty`, `integer_arithmetic`, `module_globals`, `census_constructor_adapters`, `example_c_interop`, `example_hello_world`, `example_language_tour`, `example_list_and_collections`, `example_modules_and_imports`, `example_sums_and_propagation`, `example_traits_and_generics`, `example_types_and_matching`, `calls_generic`, `calls_curried_defaults`, `calls_mutation`, `closures_captures`, `extern_values`, `constructors`, `resources_with`, `numeric_intrinsics`, `thunk_arguments`, `match_sums_products`, `match_strings_literals`, `destructuring`, `coercions`, `loops_values`, `propagation`, `templates`, `drop_order`, `drop_glue_shapes`, `finalizers`, `buffers`, and `ref_replace`. The five still `MayBeBlocked` are `census_structural_methods`, `example_coroutines`, `example_signals_and_reactions`, `example_game_loop`, and `places_assignment`.
+- For 5.8: `CompletionOrphan` (`ResolverComplete`) stays a 5.8 diagnostic; the coroutine `resume` scope exits and frame-binding drops reuse the 5.6 drop machinery (`emit_drop_glue`, the owned scope marks, `drop_owned_since`/`drop_all_owned`, and the conditional variants).
+- [TYPED_LOWERING_PLAN.md](TYPED_LOWERING_PLAN.md) carries the status note.
+
 ## Ordering
 
 ```text
