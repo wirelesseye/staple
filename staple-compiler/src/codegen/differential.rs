@@ -1094,7 +1094,7 @@ static CORPUS: [DifferentialProgram; 41] = [
     must_run(emits(
         inline(
             "buffers",
-concat!(
+            concat!(
                 "use std.buffer.Buffer\n",
                 "use std.slice.Slice\n",
                 "use std.cinterop.(CString, c_string)\n",
