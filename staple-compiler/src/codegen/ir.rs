@@ -2112,4 +2112,4 @@ pub(crate) fn value_as_basic(
 }
 
 mod coroutines;
-pub(crate) use coroutines::{CoroutineResumeEntry, ExternalAwaitKind};
+pub(crate) use coroutines::{CoroutineFrameType, CoroutineResumeEntry, ExternalAwaitKind};

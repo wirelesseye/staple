@@ -1,5 +1,6 @@
 //! Parallel LLVM emitter over the read-only lowered program view.
 
+mod coroutines;
 mod structural;
 
 use std::collections::HashMap;
@@ -54,6 +55,7 @@ struct FunctionEnvironment<'context> {
     owned: HashMap<SymbolId, OwnedValue<'context>>,
     owned_order: Vec<SymbolId>,
     returned: bool,
+    coroutine: Option<coroutines::CoroutineContext<'context>>,
 }
 
 /// Stage 5.6 Step 4 (O3): one registered owned binding. A `Value` owns its
@@ -925,7 +927,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut environment = FunctionEnvironment::default();
         self.bind_parameters(id, function, &mut environment)?;
         let owner = EmissionOwner::Instance(id);
-        let mut value = self.emit_block(owner, root, &mut environment)?;
+        let value = self.emit_instance_root(owner, body, root, &mut environment)?;
+        if !environment.returned {
+            let result = value_as_basic(value).ok_or_else(|| {
+                Diagnostic::new(
+                    body.origin.span.clone(),
+                    "function result is not a first-class value",
+                )
+            })?;
+            // Legacy `compile_function`: after the body expression's own
+            // scope drops, drop every remaining owned binding (the
+            // parameters) before returning (O3).
+            self.drop_all_owned(&environment, &body.origin.span)?;
+            self.backend
+                .builder
+                .build_return(Some(&result))
+                .map_err(compiler_diagnostic)?;
+        }
+        Ok(())
+    }
+
+    fn emit_instance_root(
+        &mut self,
+        owner: EmissionOwner,
+        body: &crate::LoweredInstanceBody,
+        root: BlockId,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let mut value = self.emit_block(owner, root, environment)?;
         // Stage 5.5 Step 7: the body block expression's header, which legacy
         // `compile_expression` applies after the block itself. The moved
         // symbols release on every path, like legacy.
@@ -957,29 +986,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             self.store_local_initialization_state(
                 owner,
-                &mut environment,
+                environment,
                 *symbol,
                 0,
                 &body.origin.span,
             )?;
         }
-        if !environment.returned {
-            let result = value_as_basic(value).ok_or_else(|| {
-                Diagnostic::new(
-                    body.origin.span.clone(),
-                    "function result is not a first-class value",
-                )
-            })?;
-            // Legacy `compile_function`: after the body expression's own
-            // scope drops, drop every remaining owned binding (the
-            // parameters) before returning (O3).
-            self.drop_all_owned(&environment, &body.origin.span)?;
-            self.backend
-                .builder
-                .build_return(Some(&result))
-                .map_err(compiler_diagnostic)?;
-        }
-        Ok(())
+        Ok(value)
     }
 
     /// Strict: attempt every instance body, collecting one diagnostic per
@@ -1072,38 +1085,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // Every capture storage kind, with the same field layout legacy
         // `build_capture_environment` uses (Stage 4.4's `ClosureEnvironment`
         // finalizer plan fixes the order).
-        if !body.captures.is_empty() {
-            let fields = body
-                .captures
-                .iter()
-                .map(|capture| self.capture_field_type(capture))
-                .collect::<CodeGenerationResult<Vec<_>>>()?;
-            let capture_type = self.backend.context.struct_type(&fields, false);
-            let captures = self
-                .backend
-                .builder
-                .build_load(capture_type, environment_pointer, "closure.environment")
-                .map_err(compiler_diagnostic)?
-                .into_struct_value();
-            for (index, capture) in body.captures.iter().enumerate() {
-                let value = self
-                    .backend
-                    .builder
-                    .build_extract_value(captures, index as u32, "capture")
-                    .map_err(compiler_diagnostic)?;
-                let symbol = capture.capture.symbol;
-                if self.capture_stores_pointer(capture) {
-                    let pointer = value.into_pointer_value();
-                    if self.capture_is_parameter_pointer(capture) {
-                        environment.parameter_pointers.insert(symbol, pointer);
-                    } else {
-                        environment.binding_cells.insert(symbol, pointer);
-                    }
-                } else {
-                    environment.locals.insert(symbol, value.as_any_value_enum());
-                }
-            }
-        }
+        self.bind_instance_captures(body, environment_pointer, environment)?;
         let raw = parameters.get(1 + resource_count..).ok_or_else(|| {
             Diagnostic::new(body.origin.span.clone(), "missing function resources")
         })?;
@@ -1301,6 +1283,47 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             _ => None,
         }
+    }
+
+    fn bind_instance_captures(
+        &self,
+        body: &crate::LoweredInstanceBody,
+        environment_pointer: PointerValue<'context>,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        if !body.captures.is_empty() {
+            let fields = body
+                .captures
+                .iter()
+                .map(|capture| self.capture_field_type(capture))
+                .collect::<CodeGenerationResult<Vec<_>>>()?;
+            let capture_type = self.backend.context.struct_type(&fields, false);
+            let captures = self
+                .backend
+                .builder
+                .build_load(capture_type, environment_pointer, "closure.environment")
+                .map_err(compiler_diagnostic)?
+                .into_struct_value();
+            for (index, capture) in body.captures.iter().enumerate() {
+                let value = self
+                    .backend
+                    .builder
+                    .build_extract_value(captures, index as u32, "capture")
+                    .map_err(compiler_diagnostic)?;
+                let symbol = capture.capture.symbol;
+                if self.capture_stores_pointer(capture) {
+                    let pointer = value.into_pointer_value();
+                    if self.capture_is_parameter_pointer(capture) {
+                        environment.parameter_pointers.insert(symbol, pointer);
+                    } else {
+                        environment.binding_cells.insert(symbol, pointer);
+                    }
+                } else {
+                    environment.locals.insert(symbol, value.as_any_value_enum());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Whether one capture's environment field is a pointer: a cell,
@@ -1812,8 +1835,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             // owned by a later substage, so strict emission reports it rather
             // than leaving an undefined declaration behind.
             LoweredArtifactPlan::DropGlue(_) => Ok(()),
-            other @ (LoweredArtifactPlan::CoroutineCodes(_)
-            | LoweredArtifactPlan::ReactionRunner(_)
+            LoweredArtifactPlan::CoroutineCodes(plan) => {
+                self.emit_coroutine_pair(ordinal, plan, &artifact.origin.span)
+            }
+            other @ (LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)) => Err(Diagnostic::new(
                 artifact.origin.span.clone(),
@@ -2040,6 +2065,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     | LoweredArtifactPlan::ExternAdapter(_)
                     | LoweredArtifactPlan::GcFinalizer(_)
                     | LoweredArtifactPlan::StructuralMethod(_)
+                    | LoweredArtifactPlan::CoroutineCodes(_)
             ) {
                 continue;
             }
@@ -3207,7 +3233,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.emit_resource_read(owner, *use_id, environment)
             }
             LoweredExpressionKind::With(with_id) => self.emit_with(owner, *with_id, environment),
-            LoweredExpressionKind::Coro(_) => Err(unimplemented("coro")),
+            LoweredExpressionKind::Coro(id) => {
+                self.emit_coro(owner, *id, environment, &expression.origin.span)
+            }
             LoweredExpressionKind::Await(_) => Err(unimplemented("await")),
         }
     }

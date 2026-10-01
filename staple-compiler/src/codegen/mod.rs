@@ -51,9 +51,9 @@ use layout::LayoutContext;
 use layout::strip_place_wrappers;
 use layout::{
     COMPLETION_CANCEL_ENV, COMPLETION_CANCEL_FN, COMPLETION_FLAGS, COMPLETION_SCHEDULER,
-    COMPLETION_STATE_COMPLETED, COMPLETION_VALUE, CORO_CAPTURE_ENV, CORO_CHILD, CORO_CLEANUP_FN,
-    CORO_HEADER_FIELDS, CORO_PARENT, CORO_RECORD, CORO_RESOURCES, CORO_RESULT_PTR, CORO_STATE,
-    SumStorage, TASK_RECORD_FRAME, TASK_RECORD_RESULT, TASK_RECORD_SCHEDULER,
+    COMPLETION_STATE_COMPLETED, COMPLETION_VALUE, CORO_CAPTURE_ENV, CORO_CHILD, CORO_HEADER_FIELDS,
+    CORO_PARENT, CORO_RECORD, CORO_RESOURCES, CORO_RESULT_PTR, CORO_STATE, SumStorage,
+    TASK_RECORD_FRAME, TASK_RECORD_RESULT, TASK_RECORD_SCHEDULER,
 };
 #[cfg(test)]
 pub(crate) use legacy_recorder::*;
@@ -8007,7 +8007,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let layout = self.coroutine_frame_layout(body_syntax)?;
 
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let i8_type = self.context.i8_type();
         let header_type = self.coroutine_header_type();
         let status_type = self.coroutine_status_type();
 
@@ -8191,112 +8190,21 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 bad_state,
                 plan.resume_points,
             )?;
-            if !plan.wait_await_states.is_empty() || !plan.until_await_states.is_empty() {
-                let abandon = self
-                    .context
-                    .append_basic_block(resume_fn, "cancel.abandon.wait");
-                let child_cleanup = self
-                    .context
-                    .append_basic_block(resume_fn, "cancel.cleanup.until");
-                let unwind_cells = self
-                    .context
-                    .append_basic_block(resume_fn, "cancel.unwind.cells");
-                let mut cases = plan
-                    .wait_await_states
-                    .iter()
-                    .map(|k| (i8_type.const_int(*k as u64, false), abandon))
-                    .collect::<Vec<_>>();
-                cases.extend(
-                    plan.until_await_states
-                        .iter()
-                        .map(|k| (i8_type.const_int(*k as u64, false), child_cleanup)),
-                );
-                let child_slot = self
-                    .builder
-                    .build_struct_gep(header_type, frame, CORO_CHILD, "coro.child.slot")
-                    .map_err(compiler_diagnostic)?;
-                self.builder
-                    .build_switch(state, unwind_cells, &cases)
-                    .map_err(compiler_diagnostic)?;
-
-                // Parked on a `Wait`: run its completion's cancellation teardown.
-                self.builder.position_at_end(abandon);
-                let record = self
-                    .builder
-                    .build_load(ptr_type, child_slot, "cancel.wait.record")
-                    .map_err(compiler_diagnostic)?;
-                let abandon_fn = self.declare_named_function(
-                    "__staple_completion_abandon",
-                    self.context.void_type().fn_type(&[ptr_type.into()], false),
-                );
-                self.builder
-                    .build_direct_call(abandon_fn, &[record.into()], "")
-                    .map_err(compiler_diagnostic)?;
-                self.builder
-                    .build_unconditional_branch(unwind_cells)
-                    .map_err(compiler_diagnostic)?;
-
-                // Parked on a child coroutine: run its `cleanup` so its own
-                // suspended state (e.g. an `until` subscription) is torn down.
-                self.builder.position_at_end(child_cleanup);
-                let child = self
-                    .builder
-                    .build_load(ptr_type, child_slot, "cancel.child.frame")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let cleanup_slot = self
-                    .builder
-                    .build_struct_gep(header_type, child, CORO_CLEANUP_FN, "child.cleanup.slot")
-                    .map_err(compiler_diagnostic)?;
-                let cleanup_ptr = self
-                    .builder
-                    .build_load(ptr_type, cleanup_slot, "child.cleanup.fn")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                self.builder
-                    .build_indirect_call(
-                        self.context.void_type().fn_type(&[ptr_type.into()], false),
-                        cleanup_ptr,
-                        &[child.into()],
-                        "",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                self.builder
-                    .build_unconditional_branch(unwind_cells)
-                    .map_err(compiler_diagnostic)?;
-
-                self.builder.position_at_end(unwind_cells);
-            }
-            if !thunk.captures.is_empty() {
-                let never_ran = self
-                    .builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::EQ,
-                        state,
-                        i8_type.const_zero(),
-                        "coro.cancel.never.ran",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                let drop_caps = self
-                    .context
-                    .append_basic_block(resume_fn, "cancel.drop.captures");
-                let after_caps = self
-                    .context
-                    .append_basic_block(resume_fn, "cancel.after.captures");
-                self.builder
-                    .build_conditional_branch(never_ran, drop_caps, after_caps)
-                    .map_err(compiler_diagnostic)?;
-                self.builder.position_at_end(drop_caps);
+            let finalizer = if !thunk.captures.is_empty() {
                 let environment_type = self.compile_capture_type(&thunk)?;
-                let finalizer = self.ensure_closure_finalizer(&thunk, environment_type)?;
-                self.builder
-                    .build_direct_call(finalizer, &[env_ptr.into()], "")
-                    .map_err(compiler_diagnostic)?;
-                self.builder
-                    .build_unconditional_branch(after_caps)
-                    .map_err(compiler_diagnostic)?;
-                self.builder.position_at_end(after_caps);
-            }
+                Some(self.ensure_closure_finalizer(&thunk, environment_type)?)
+            } else {
+                None
+            };
+            self.build_coroutine_cancel_teardown(
+                resume_fn,
+                frame,
+                state,
+                &plan.wait_await_states,
+                &plan.until_await_states,
+                env_ptr,
+                finalizer,
+            )?;
             for (symbol, field_index) in &layout.cell_fields {
                 let Some(value_type) = self.typed_module.type_of_symbol(*symbol).cloned() else {
                     continue;

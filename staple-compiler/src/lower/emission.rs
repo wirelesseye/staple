@@ -184,6 +184,14 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.callable_value(self.program, id)
     }
 
+    pub(crate) fn coro(
+        &self,
+        owner: EmissionOwner,
+        id: super::LoweredCoroId,
+    ) -> Option<&'a super::LoweredCoro> {
+        self.owner(owner)?.coro(self.program, id)
+    }
+
     /// Resolve an owner's resource provider without exposing either arena
     /// (Stage 5.3 F7 reads a body's `function_providers` through this).
     pub(crate) fn resource_provider(
@@ -900,7 +908,6 @@ impl EmissionView<'_> {
                 expression: &LoweredExpression,
             ) -> Result<(), Vec<Diagnostic>> {
                 let family = match expression.kind {
-                    LoweredExpressionKind::Coro(_) => Some("coro"),
                     LoweredExpressionKind::Await(_) => Some("await"),
                     LoweredExpressionKind::With(id) => self
                         .view

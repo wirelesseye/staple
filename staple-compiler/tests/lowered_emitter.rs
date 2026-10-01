@@ -27,14 +27,14 @@ fn selector_preserves_legacy_and_reports_unported_lowered_body() {
     let llvm = compile("", Emitter::Legacy).unwrap();
     assert!(llvm.contains("define i32 @main()"));
     // Stage 5.6 Step 8: the empty program now compiles strictly under both
-    // emitters; a body with a still-unported construct (`coro`) reports the
+    // emitters; a body with a still-unported reaction reports the
     // lowered emitter.
     compile("", Emitter::Lowered).expect("the empty program compiles strictly");
 
     let diagnostics = compile(
         concat!(
             "use std.coroutine.*\n",
-            "def first: () -> Coroutine{} I32 = () => coro { 1 }\n",
+            "def first: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
         ),
         Emitter::Lowered,
     )
@@ -54,8 +54,8 @@ fn strict_emission_reports_every_failed_body() {
     let diagnostics = compile(
         concat!(
             "use std.coroutine.*\n",
-            "def first: () -> Coroutine{} I32 = () => coro { 1 }\n",
-            "def second: () -> Coroutine{} I32 = () => coro { 2 }\n",
+            "def first: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
+            "def second: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
         ),
         Emitter::Lowered,
     )
@@ -92,12 +92,12 @@ fn partial_emission_empty_program_verifies() {
 /// with the stub/histogram report.
 #[test]
 fn partial_emission_stubs_unsupported_sites_and_verifies() {
-    // Stage 5.6 Step 3 emits drop glue, so the stub fixture uses the
-    // still-unported `coro` expressions and a 5.7 structural Debug artifact.
+    // Stage 5.8 Step 4 emits coro creation, so use still-unported reactions.
+    // The structural and constructor shims remain fully supported siblings.
     let lowered = prepare(concat!(
         "use std.coroutine.*\n",
-        "def first: () -> Coroutine{} I32 = () => coro { 1 }\n",
-        "def second: () -> Coroutine{} I32 = () => coro { 2 }\n",
+        "def first: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
+        "def second: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
         "type Point = ctor (I32, I32)\n",
         "let point: Point = Point (1, 2)\n",
         "let make: () -> ((I32, I32) -> Point) = () => Point\n",
@@ -116,7 +116,7 @@ fn partial_emission_stubs_unsupported_sites_and_verifies() {
             && stub
                 .diagnostic()
                 .message
-                .contains("coro is not implemented")),
+                .contains("reaction call is not implemented")),
         "the unsupported `first` body is stubbed: {:?}",
         report.stubbed()
     );
@@ -136,8 +136,8 @@ fn partial_emission_stubs_unsupported_sites_and_verifies() {
         report
             .family_histogram()
             .iter()
-            .any(|(family, count)| family == "coro" && *count >= 2),
-        "the histogram counts the coro family: {:?}",
+            .any(|(family, count)| family == "reaction call" && *count >= 2),
+        "the histogram counts the reaction family: {:?}",
         report.family_histogram()
     );
     assert!(

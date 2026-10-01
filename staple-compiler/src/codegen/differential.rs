@@ -1641,6 +1641,101 @@ mod tests {
             .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}\n{source}"))
     }
 
+    #[test]
+    fn stage_5_8_coroutine_creation_and_pair_bodies_match_legacy() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "use std.io.(IO, println)\n",
+            "use std.cinterop.(CString, c_string)\n",
+            "extern \"c\" { inspect: CString -> I32 }\n",
+            "def captured: move CString -> Coroutine{IO} I32 = move text => coro {\n",
+            "  let cell = c_string \"local\"\n",
+            "  println \"done\"\n",
+            "  inspect cell\n",
+            "  inspect text\n",
+            "  7\n",
+            "}\n",
+            "let owned = captured (c_string \"capture\")\n",
+            "let empty = coro { 3 }\n",
+        );
+        let lowered = lower(source, &workspace_root());
+        let context = Context::create();
+        let legacy =
+            crate::codegen::legacy_emissions(&context, &lowered).expect("legacy pair fixture");
+        let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
+            .expect("lowered pair fixture verifies");
+        assert!(partial.report.stubbed().is_empty(), "{:?}", partial.report);
+        let mapping = assert_declaration_parity("coroutine_pair", &lowered, &legacy, &partial);
+        let compared =
+            compare_fully_emitted_bodies("coroutine_pair", &lowered, &mapping, &legacy, &partial);
+        let mut pairs = 0;
+        for (_, artifact) in lowered.program().artifacts() {
+            if matches!(
+                artifact.plan,
+                Some(crate::LoweredArtifactPlan::CoroutineCodes(_))
+            ) {
+                let names = lowered
+                    .program()
+                    .planned_coroutine_pair_names(artifact.ordinal)
+                    .expect("planned pair names");
+                assert!(compared.contains(&names.0) && compared.contains(&names.1));
+                pairs += 1;
+            }
+        }
+        assert_eq!(
+            pairs, 2,
+            "captured/resource/frame-drop and empty pairs both compare"
+        );
+    }
+
+    #[test]
+    fn stage_5_8_partial_coroutine_pair_stubs_both_functions_on_body_failure() {
+        let source = concat!(
+            "use std.coroutine.*\n",
+            "let parent = coro { let child = coro { 1 }; await child }\n",
+        );
+        let lowered = lower(source, &workspace_root());
+        let context = Context::create();
+        let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
+            .expect("failed pair is replaced by verified stubs");
+        let stubbed = partial
+            .report
+            .stubbed()
+            .iter()
+            .map(|stub| stub.name())
+            .collect::<HashSet<_>>();
+        let mut suspended = 0;
+        for (_, artifact) in lowered.program().artifacts() {
+            if let Some(crate::LoweredArtifactPlan::CoroutineCodes(pair)) = &artifact.plan {
+                let names = lowered
+                    .program()
+                    .planned_coroutine_pair_names(artifact.ordinal)
+                    .expect("planned pair");
+                if pair.frame.as_ref().expect("expanded frame").resume_points > 0 {
+                    assert!(
+                        stubbed.contains(names.0.as_str()) && stubbed.contains(names.1.as_str())
+                    );
+                    suspended += 1;
+                } else {
+                    assert!(
+                        !stubbed.contains(names.0.as_str()) && !stubbed.contains(names.1.as_str())
+                    );
+                }
+            }
+        }
+        assert_eq!(suspended, 1);
+        assert_eq!(stubbed.len(), 2);
+        assert_eq!(
+            partial
+                .report
+                .family_histogram()
+                .iter()
+                .find(|(family, _)| family == "await")
+                .map(|(_, count)| *count),
+            Some(2)
+        );
+    }
+
     /// A constant reference compares by the constant's content: the same
     /// literal under different LLVM numbering matches, a different literal
     /// under the same stripped name does not.
@@ -1793,6 +1888,19 @@ mod tests {
             assert!(structural_bodies.contains(body), "5.7 corpus misses {body}");
         }
 
+        for completed in ["coro", "coroutine pair artifact"] {
+            assert_eq!(
+                histogram.get(completed).copied().unwrap_or(0),
+                0,
+                "Step 4 family {completed} cannot regress"
+            );
+            assert_eq!(
+                reached.get(completed).copied().unwrap_or(0),
+                0,
+                "Step 4 family {completed} is no longer a blocker"
+            );
+        }
+
         // The zero-stub ratchet: a completed substage's families can never
         // stub again anywhere in the corpus.
         for completed in super::COMPLETED_SUBSTAGES {
@@ -1936,7 +2044,92 @@ mod tests {
                 let lowered_body = lowered_functions.get(&planned).unwrap_or_else(|| {
                     panic!("the lowered module has no body for `{planned}` ({label})")
                 });
-                let expected = normalize_function(legacy_body, &renames, &legacy_constants);
+                // D5: a creation in a different concrete owner uses its own
+                // pair, while legacy's syntax cache keeps the first pair.
+                // Normalize only the census-proven CoroCreation references;
+                // compare every other instruction in this owner's body.
+                use crate::lower::graph_validation::tests::LegacyCatalogEntry;
+                let owner = match entry {
+                    LegacyCatalogEntry::Instance(id) => {
+                        Some(crate::lower::EmissionOwner::Instance(*id))
+                    }
+                    LegacyCatalogEntry::Artifact { ordinal, .. } => program
+                        .artifacts()
+                        .find(|(_, artifact)| artifact.ordinal == *ordinal)
+                        .and_then(|(_, artifact)| match &artifact.plan {
+                            Some(crate::LoweredArtifactPlan::CoroutineCodes(pair)) => {
+                                Some(crate::lower::EmissionOwner::Instance(pair.body))
+                            }
+                            _ => None,
+                        }),
+                    LegacyCatalogEntry::Initializer(module) => program
+                        .initializers()
+                        .find(|(_, initializer)| initializer.module == *module)
+                        .map(|(id, _)| crate::lower::EmissionOwner::Initializer(id)),
+                    _ => None,
+                };
+                let mut expected_renames = std::borrow::Cow::Borrowed(&renames);
+                if let Some(owner) = owner {
+                    for use_ in program.artifact_uses(owner).unwrap_or(&[]) {
+                        if !matches!(use_.site, crate::ArtifactUseSite::CoroCreation(_))
+                            || !mapping.aliased_artifacts.contains(&use_.artifact)
+                        {
+                            continue;
+                        }
+                        let alias = program
+                            .artifacts()
+                            .find(|(_, artifact)| artifact.ordinal == use_.artifact)
+                            .and_then(|(_, artifact)| artifact.plan.as_ref());
+                        let Some(crate::LoweredArtifactPlan::CoroutineCodes(alias)) = alias else {
+                            continue;
+                        };
+                        let alias_template = program
+                            .instance(alias.body)
+                            .expect("aliased pair body")
+                            .template;
+                        let mut found = 0;
+                        for (name, target) in &mapping.symbol_names {
+                            let LegacyCatalogEntry::Artifact { ordinal, slot } = target else {
+                                continue;
+                            };
+                            let Some(crate::LoweredArtifactPlan::CoroutineCodes(pair)) = program
+                                .artifacts()
+                                .find(|(_, artifact)| artifact.ordinal == *ordinal)
+                                .and_then(|(_, artifact)| artifact.plan.as_ref())
+                            else {
+                                continue;
+                            };
+                            if program
+                                .instance(pair.body)
+                                .expect("mapped pair body")
+                                .template
+                                != alias_template
+                            {
+                                continue;
+                            }
+                            let names = planned_names_for(
+                                program,
+                                &LegacyCatalogEntry::Artifact {
+                                    ordinal: use_.artifact,
+                                    slot: *slot,
+                                },
+                            );
+                            let [target] = names.as_slice() else {
+                                panic!("aliased pair slot has exactly one planned name");
+                            };
+                            expected_renames
+                                .to_mut()
+                                .insert(name.clone(), target.clone());
+                            found += 1;
+                        }
+                        assert_eq!(
+                            found, 2,
+                            "census-confirmed alias has one legacy pair ({label})"
+                        );
+                    }
+                }
+                let expected =
+                    normalize_function(legacy_body, &expected_renames, &legacy_constants);
                 let actual = normalize_function(lowered_body, &renames, &lowered_constants);
                 assert_eq!(
                     actual, expected,

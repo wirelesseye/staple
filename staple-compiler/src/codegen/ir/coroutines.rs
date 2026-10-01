@@ -1238,3 +1238,124 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 }
+
+impl<'program, 'context> Backend<'program, 'context> {
+    pub(crate) fn build_coroutine_cancel_teardown(
+        &mut self,
+        resume_fn: FunctionValue<'context>,
+        frame: PointerValue<'context>,
+        state: IntValue<'context>,
+        wait_states: &[usize],
+        until_states: &[usize],
+        env_ptr: PointerValue<'context>,
+        finalizer: Option<FunctionValue<'context>>,
+    ) -> CodeGenerationResult<()> {
+        let header_type = self.coroutine_header_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+        if !wait_states.is_empty() || !until_states.is_empty() {
+            let abandon = self
+                .context
+                .append_basic_block(resume_fn, "cancel.abandon.wait");
+            let child_cleanup = self
+                .context
+                .append_basic_block(resume_fn, "cancel.cleanup.until");
+            let unwind_cells = self
+                .context
+                .append_basic_block(resume_fn, "cancel.unwind.cells");
+            let mut cases = wait_states
+                .iter()
+                .map(|k| (i8_type.const_int(*k as u64, false), abandon))
+                .collect::<Vec<_>>();
+            cases.extend(
+                until_states
+                    .iter()
+                    .map(|k| (i8_type.const_int(*k as u64, false), child_cleanup)),
+            );
+            let child_slot = self
+                .builder
+                .build_struct_gep(header_type, frame, CORO_CHILD, "coro.child.slot")
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_switch(state, unwind_cells, &cases)
+                .map_err(compiler_diagnostic)?;
+
+            // Parked on a `Wait`: run its completion's cancellation teardown.
+            self.builder.position_at_end(abandon);
+            let record = self
+                .builder
+                .build_load(ptr_type, child_slot, "cancel.wait.record")
+                .map_err(compiler_diagnostic)?;
+            let abandon_fn = self.declare_named_function(
+                "__staple_completion_abandon",
+                self.context.void_type().fn_type(&[ptr_type.into()], false),
+            );
+            self.builder
+                .build_direct_call(abandon_fn, &[record.into()], "")
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_unconditional_branch(unwind_cells)
+                .map_err(compiler_diagnostic)?;
+
+            // Parked on a child coroutine: run its `cleanup` so its own
+            // suspended state (e.g. an `until` subscription) is torn down.
+            self.builder.position_at_end(child_cleanup);
+            let child = self
+                .builder
+                .build_load(ptr_type, child_slot, "cancel.child.frame")
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+            let cleanup_slot = self
+                .builder
+                .build_struct_gep(header_type, child, CORO_CLEANUP_FN, "child.cleanup.slot")
+                .map_err(compiler_diagnostic)?;
+            let cleanup_ptr = self
+                .builder
+                .build_load(ptr_type, cleanup_slot, "child.cleanup.fn")
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+            self.builder
+                .build_indirect_call(
+                    self.context.void_type().fn_type(&[ptr_type.into()], false),
+                    cleanup_ptr,
+                    &[child.into()],
+                    "",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_unconditional_branch(unwind_cells)
+                .map_err(compiler_diagnostic)?;
+
+            self.builder.position_at_end(unwind_cells);
+        }
+        if let Some(finalizer) = finalizer {
+            let never_ran = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    state,
+                    i8_type.const_zero(),
+                    "coro.cancel.never.ran",
+                )
+                .map_err(compiler_diagnostic)?;
+            let drop_caps = self
+                .context
+                .append_basic_block(resume_fn, "cancel.drop.captures");
+            let after_caps = self
+                .context
+                .append_basic_block(resume_fn, "cancel.after.captures");
+            self.builder
+                .build_conditional_branch(never_ran, drop_caps, after_caps)
+                .map_err(compiler_diagnostic)?;
+            self.builder.position_at_end(drop_caps);
+            self.builder
+                .build_direct_call(finalizer, &[env_ptr.into()], "")
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_unconditional_branch(after_caps)
+                .map_err(compiler_diagnostic)?;
+            self.builder.position_at_end(after_caps);
+        }
+        Ok(())
+    }
+}
