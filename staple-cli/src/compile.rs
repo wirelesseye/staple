@@ -4648,6 +4648,13 @@ mod tests {
                     "`{}` behaves differently under the lowered emitter",
                     program.name
                 );
+                if let Some(expected) = program.expected_stdout {
+                    assert_eq!(
+                        legacy.1, expected,
+                        "`{}` prints unexpected output under both emitters",
+                        program.name
+                    );
+                }
                 identical += 1;
                 continue;
             };

@@ -105,8 +105,7 @@ struct BoundResource<'context> {
 
 /// Stage 5.5 Step 8: one active loop's context. Legacy
 /// `LoopCodegenContext` carries the header, exit, cleanup marks, and the
-/// break-value phi inputs; the lowered emitter has no owned bindings (5.6),
-/// so only the first, second, and last are needed.
+/// break-value phi inputs.
 #[derive(Clone)]
 struct LoopContext<'context> {
     depth: usize,
@@ -115,6 +114,9 @@ struct LoopContext<'context> {
     /// The owned-binding registration mark at loop entry; `break` and
     /// `continue` drop back to it.
     owned_before: usize,
+    /// The reactive-scope depth at loop entry; `break` and `continue`
+    /// dispose every scope opened since, before the owned drops.
+    reactive_before: usize,
     incoming: Vec<(BasicValueEnum<'context>, BasicBlock<'context>)>,
 }
 
@@ -2457,8 +2459,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Ok(());
                 }
                 let value = value_as_basic(value).ok_or_else(|| unimplemented("return value"))?;
-                // Legacy `compile_item`'s return: drop every owned binding
-                // before leaving the function (O3).
+                // Legacy `compile_item`'s return: dispose every reactive
+                // scope, then drop every owned binding before leaving the
+                // function (O3).
+                self.dispose_reactive_scopes(environment, 0, &item_span)?;
                 self.drop_all_owned(environment, &item_span)?;
                 self.backend
                     .builder
@@ -2503,17 +2507,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 } else {
                     value_as_basic(self.backend.unit_value()).expect("unit is a basic value")
                 };
-                let Some((exit, owned_before)) = environment
+                let Some((exit, owned_before, reactive_before)) = environment
                     .loops
                     .iter()
                     .rev()
                     .find(|context| context.depth == break_item.loop_depth)
-                    .map(|context| (context.exit, context.owned_before))
+                    .map(|context| (context.exit, context.owned_before, context.reactive_before))
                 else {
                     return Err(unimplemented("break target"));
                 };
-                // Legacy `compile_item`'s break drops every binding owned
-                // since the loop's mark (O3).
+                // Legacy `compile_item`'s break disposes the reactive scopes
+                // and drops every binding owned since the loop's marks (O3).
+                self.dispose_reactive_scopes(environment, reactive_before, &item_span)?;
                 self.drop_owned_since(environment, owned_before, &item_span)?;
                 self.backend
                     .builder
@@ -2536,17 +2541,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredItemKind::Continue(item) => {
-                let Some((header, owned_before)) = environment
+                let Some((header, owned_before, reactive_before)) = environment
                     .loops
                     .iter()
                     .rev()
                     .find(|context| context.depth == item.loop_depth)
-                    .map(|context| (context.header, context.owned_before))
+                    .map(|context| {
+                        (
+                            context.header,
+                            context.owned_before,
+                            context.reactive_before,
+                        )
+                    })
                 else {
                     return Err(unimplemented("continue target"));
                 };
-                // Legacy `compile_item`'s continue drops every binding owned
-                // since the loop's mark (O3).
+                // Legacy `compile_item`'s continue disposes the reactive scopes
+                // and drops every binding owned since the loop's marks (O3).
+                self.dispose_reactive_scopes(environment, reactive_before, &item_span)?;
                 self.drop_owned_since(environment, owned_before, &item_span)?;
                 self.backend
                     .builder
@@ -3552,6 +3564,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             header,
             exit,
             owned_before: environment.owned_order.len(),
+            reactive_before: environment.reactive_scopes.len(),
             incoming: Vec::new(),
         });
         environment.returned = false;

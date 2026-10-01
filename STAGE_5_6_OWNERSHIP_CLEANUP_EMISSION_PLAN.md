@@ -244,3 +244,19 @@ Step 1 → Step 2 → Step 3 → Step 4 → Step 5 → Step 8 → Step 9
 - Step 7 is independent and small.
 - Step 8 needs everything that blocks the empty program: Steps 6 and 7, plus Steps 3–5 for whatever cleanup the standard library's eager bodies reach.
 - None of the steps needs a separate plan file. Steps 3 and 4 carry the most risk, because cleanup order is behavior. Land them as small commits and keep the in-process harness green after each one; the body comparison checks drop positions per site. The 5.5 review found that the Stage 4.4 legacy comparison cannot do that. `drop_order`'s printed output is the end-to-end check.
+
+## Post-gate review fixes
+
+The review confirmed that drop-glue expansion, owned scopes, moves, replaced values, call temporaries, and the finalizer bodies mirror legacy. It also confirmed that legacy IR is unchanged since Step 1 (`same` over every example and the probes; `coroutines.sta` keeps its four variants at 16 runs). It found that the Step 9 gate claim was wrong: the CLI harness failed on every run. These fixes close the gate.
+
+- **`thunk_arguments` printed a heap pointer under both emitters.** `thunk_env` called the captured `puts` extern value. A closure call passes a borrowed `CString` by pointer (`borrow.temporary`), but the extern adapter forwards its raw parameter to `puts`, so both emitters printed the bytes of the string pointer. The bytes changed per run, so the Step 8 `MustRun` flip made the harness fail every time.
+  - This is a legacy ABI defect that the lowered emitter correctly mirrors. It affects every extern used as a first-class value with a by-pointer argument, so it is now the third D5 defect, fixed in 5.11 (see the breakdown).
+  - `thunk_env` now reads its capture through a Staple function, `measure`, which joins the focus list. It keeps the owned-`CString` thunk capture and its `ThunkArgumentEnvironment` finalizer.
+- **Reactive scopes were not disposed on early exits.** Legacy `return` disposes every reactive scope, and `break`/`continue` dispose back to the loop's mark, before the owned drops. The lowered emitter did neither, so a `return` or `break` inside `with Reactive = reactive_scope () { … }` compiled strictly and leaked the scope. `LoopContext` now carries `reactive_before`, and the three exits call `dispose_reactive_scopes` in legacy's order. The new `reactive_exits` corpus entry (`MustRun`, focus `early`, `broken`, `continued`) covers all three exits.
+- **The zero-stub gate is now enforced.** The in-process harness asserts that no family owned by a completed substage stubs anywhere in the corpus. `COMPLETED_SUBSTAGES` lists 5.3–5.6, and each later substage appends itself when its gate closes.
+- **`drop_order` pins its output.** Corpus entries can carry `expected_stdout`, which the CLI harness asserts under both emitters, so a defect mirrored by both cannot pass as parity.
+  - `drop_order` pins its full drop sequence.
+  - It gains an owned binding inside a match arm, which drops before the enclosing scope's binding, and one inside a logical right operand. The `logical` function joins the focus list.
+- The stale comment that called the 5.4 entries `MayBeBlocked` is updated.
+
+Results: 11939 fully emitted bodies compared, 82 stubs (8 owned by 5.7, 74 by 5.8). The CLI harness reports 34 identical, 5 blocked, 3 compile-only. The full suite passes 1298 tests.

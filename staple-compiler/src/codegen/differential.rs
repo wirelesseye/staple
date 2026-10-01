@@ -60,6 +60,9 @@ pub struct DifferentialProgram {
     /// body-identical to legacy. This is the per-feature gate that does not
     /// need a runnable program.
     pub emits: &'static [&'static str],
+    /// The exact stdout a `MustRun` program prints. The CLI harness asserts it
+    /// under both emitters, so a defect mirrored by both cannot pass as parity.
+    pub expected_stdout: Option<&'static str>,
 }
 
 const fn inline(
@@ -73,6 +76,7 @@ const fn inline(
         substage,
         expectation: DifferentialExpectation::MayBeBlocked,
         emits: &[],
+        expected_stdout: None,
     }
 }
 
@@ -87,6 +91,7 @@ const fn file(
         substage,
         expectation: DifferentialExpectation::MayBeBlocked,
         emits: &[],
+        expected_stdout: None,
     }
 }
 
@@ -100,6 +105,15 @@ const fn compile_only(mut program: DifferentialProgram) -> DifferentialProgram {
 /// under both emitters must never regress to blocked.
 const fn must_run(mut program: DifferentialProgram) -> DifferentialProgram {
     program.expectation = DifferentialExpectation::MustRun;
+    program
+}
+
+/// Pins the exact stdout a `MustRun` entry prints under both emitters.
+const fn expect_stdout(
+    mut program: DifferentialProgram,
+    stdout: &'static str,
+) -> DifferentialProgram {
+    program.expected_stdout = Some(stdout);
     program
 }
 
@@ -261,6 +275,12 @@ pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     ("yield_now", "5.8"),
 ];
 
+/// The substages whose gates have closed. The in-process harness asserts that
+/// none of their families stubs anywhere in the corpus; each later substage
+/// appends itself when its gate closes.
+#[cfg(test)]
+const COMPLETED_SUBSTAGES: &[&str] = &["5.3", "5.4", "5.5", "5.6"];
+
 /// The substage that owns one diagnostic family, or `None` for a diagnostic
 /// that is not a construct family at all (an internal invariant the emitter
 /// should never report on a corpus program).
@@ -282,7 +302,7 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 41] = [
+static CORPUS: [DifferentialProgram; 42] = [
     must_run(inline("empty", "", "5.3")),
     must_run(inline(
         "integer_arithmetic",
@@ -485,9 +505,8 @@ static CORPUS: [DifferentialProgram; 41] = [
     ),
     must_run(
         // Stage 5.4: calls, callable values, closures, resources, and intrinsics.
-        // Each entry names the functions its `emits` list must fully emit; the
-        // program as a whole stays `MayBeBlocked` for the later substages'
-        // constructs.
+        // Each entry names the functions its `emits` list must fully emit;
+        // Stage 5.6 Step 8 flipped every one of them to `MustRun`.
         emits(
             inline(
                 "calls_generic",
@@ -683,21 +702,22 @@ static CORPUS: [DifferentialProgram; 41] = [
             "thunk_arguments",
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
-                "extern \"c\" {\n",
-                "    puts: CString -> I32\n",
-                "}\n",
                 "def evaluate: (() -> I32) -> I32 = callback => callback ()\n",
                 "def thunk_plain: I32 -> I32 = value => evaluate { value + 1 }\n",
+                "def measure: CString -> I32 = text => 1\n",
                 // The thunk captures an owned `CString`, so lowering records a
                 // `ThunkArgumentEnvironment` finalizer use. `thunk_env` owns
                 // its moved parameter; Stage 5.6 Step 4 emits its scope exit.
-                "def thunk_env: move CString -> I32 = move value => evaluate { puts value }\n",
+                // It reads the capture through a Staple function: calling the
+                // `puts` extern value here would hit the legacy extern adapter
+                // ABI defect (D5, fixed in 5.11) and print a heap address.
+                "def thunk_env: move CString -> I32 = move value => evaluate { measure value }\n",
                 "let first = thunk_plain 1\n",
                 "let second = thunk_env (c_string \"thunk\\n\")\n",
             ),
             "5.4",
         ),
-        &["evaluate", "thunk_plain", "thunk_env"],
+        &["evaluate", "thunk_plain", "measure", "thunk_env"],
     )),
     must_run(emits(
         inline(
@@ -924,101 +944,108 @@ static CORPUS: [DifferentialProgram; 41] = [
         &["show", "debug", "both"],
     )),
     // Stage 5.6: ownership cleanup, finalizers, and buffers.
-    must_run(emits(
-        inline(
-            "drop_order",
-            concat!(
-                "use std.cinterop.(CString, c_string)\n",
-                "extern \"c\" { puts: CString -> I32 }\n",
-                "type Tag = ctor CString\n",
-                "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
-                "\n",
-                "def scoped: () -> () = () => {\n",
-                "    let a = Tag (c_string \"scope\\n\")\n",
-                "    ()\n",
-                "}\n",
-                "\n",
-                "def early: () -> I32 = () => {\n",
-                "    let b = Tag (c_string \"early\\n\")\n",
-                "    return 1\n",
-                "}\n",
-                "\n",
-                "type Ok = ctor I32\n",
-                "type Bad = ctor CString\n",
-                "impl Drop Bad { def drop = Bad text => { puts text; () } }\n",
-                "def fails: () -> Ok | Bad = () => Bad (c_string \"failure\\n\")\n",
-                "def propagated: () -> Ok | Bad = () => {\n",
-                "    let c = Tag (c_string \"propagate\\n\")\n",
-                "    let Ok(value)? = fails ()\n",
-                "    Ok value\n",
-                "}\n",
-                "\n",
-                "def looped: () -> I32 = () => {\n",
-                "    let mut index = 0\n",
-                "    loop {\n",
-                "        let d = Tag (c_string \"loop\\n\")\n",
-                "        if (index == 1) { break 0 }\n",
-                "        let e = Tag (c_string \"continue\\n\")\n",
-                "        index = index + 1\n",
-                "        continue\n",
-                "    }\n",
-                "}\n",
-                "\n",
-                "def matched: Bool -> I32 = condition => {\n",
-                "    let f = Tag (c_string \"match\\n\")\n",
-                "    match condition {\n",
-                "        True => 1,\n",
-                "        False => 0,\n",
-                "    }\n",
-                "}\n",
-                "\n",
-                "def moved: () -> () = () => {\n",
-                "    let g = Tag (c_string \"moved\\n\")\n",
-                "    let h = g\n",
-                "    ()\n",
-                "}\n",
-                "\n",
-                "def replaced: () -> () = () => {\n",
-                "    let mut i = Tag (c_string \"replace old\\n\")\n",
-                "    i = Tag (c_string \"replace new\\n\")\n",
-                "    ()\n",
-                "}\n",
-                "\n",
-                "def discarded: () -> () = () => {\n",
-                "    Tag (c_string \"discard\\n\")\n",
-                "    ()\n",
-                "}\n",
-                "\n",
-                "def bump: mut Tag -> () = mut target => ()\n",
-                "def called: () -> () = () => {\n",
-                "    bump (Tag (c_string \"temporary\\n\"))\n",
-                "}\n",
-                "\n",
-                "scoped ()\n",
-                "early ()\n",
-                "propagated ()\n",
-                "looped ()\n",
-                "matched True\n",
-                "moved ()\n",
-                "replaced ()\n",
-                "discarded ()\n",
-                "called ()\n",
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "drop_order",
+                concat!(
+                    "use std.cinterop.(CString, c_string)\n",
+                    "extern \"c\" { puts: CString -> I32 }\n",
+                    "type Tag = ctor CString\n",
+                    "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
+                    "\n",
+                    "def scoped: () -> () = () => {\n",
+                    "    let a = Tag (c_string \"scope\")\n",
+                    "    ()\n",
+                    "}\n",
+                    "\n",
+                    "def early: () -> I32 = () => {\n",
+                    "    let b = Tag (c_string \"early\")\n",
+                    "    return 1\n",
+                    "}\n",
+                    "\n",
+                    "type Ok = ctor I32\n",
+                    "type Bad = ctor CString\n",
+                    "impl Drop Bad { def drop = Bad text => { puts text; () } }\n",
+                    "def fails: () -> Ok | Bad = () => Bad (c_string \"failure\")\n",
+                    "def propagated: () -> Ok | Bad = () => {\n",
+                    "    let c = Tag (c_string \"propagate\")\n",
+                    "    let Ok(value)? = fails ()\n",
+                    "    Ok value\n",
+                    "}\n",
+                    "\n",
+                    "def looped: () -> I32 = () => {\n",
+                    "    let mut index = 0\n",
+                    "    loop {\n",
+                    "        let d = Tag (c_string \"loop\")\n",
+                    "        if (index == 1) { break 0 }\n",
+                    "        let e = Tag (c_string \"continue\")\n",
+                    "        index = index + 1\n",
+                    "        continue\n",
+                    "    }\n",
+                    "}\n",
+                    "\n",
+                    "def matched: Bool -> I32 = condition => {\n",
+                    "    let f = Tag (c_string \"match\")\n",
+                    "    match condition {\n",
+                    "        True => { let arm = Tag (c_string \"match arm\"); 1 },\n",
+                    "        False => 0,\n",
+                    "    }\n",
+                    "}\n",
+                    "\n",
+                    "def logical: Bool -> Bool = flag => flag && { let right = Tag (c_string \"logical\"); True }\n",
+                    "\n",
+                    "def moved: () -> () = () => {\n",
+                    "    let g = Tag (c_string \"moved\")\n",
+                    "    let h = g\n",
+                    "    ()\n",
+                    "}\n",
+                    "\n",
+                    "def replaced: () -> () = () => {\n",
+                    "    let mut i = Tag (c_string \"replace old\")\n",
+                    "    i = Tag (c_string \"replace new\")\n",
+                    "    ()\n",
+                    "}\n",
+                    "\n",
+                    "def discarded: () -> () = () => {\n",
+                    "    Tag (c_string \"discard\")\n",
+                    "    ()\n",
+                    "}\n",
+                    "\n",
+                    "def bump: mut Tag -> () = mut target => ()\n",
+                    "def called: () -> () = () => {\n",
+                    "    bump (Tag (c_string \"temporary\"))\n",
+                    "}\n",
+                    "\n",
+                    "scoped ()\n",
+                    "early ()\n",
+                    "propagated ()\n",
+                    "looped ()\n",
+                    "matched True\n",
+                    "logical True\n",
+                    "moved ()\n",
+                    "replaced ()\n",
+                    "discarded ()\n",
+                    "called ()\n",
+                ),
+                "5.6",
             ),
-            "5.6",
+            &[
+                "scoped",
+                "early",
+                "propagated",
+                "fails",
+                "looped",
+                "matched",
+                "moved",
+                "replaced",
+                "discarded",
+                "called",
+                "bump",
+                "logical",
+            ],
         ),
-        &[
-            "scoped",
-            "early",
-            "propagated",
-            "fails",
-            "looped",
-            "matched",
-            "moved",
-            "replaced",
-            "discarded",
-            "called",
-            "bump",
-        ],
+        "scope\nearly\npropagate\nfailure\ncontinue\nloop\nloop\nmatch arm\nmatch\nlogical\nmoved\nreplace old\nreplace new\ndiscard\ntemporary\n",
     )),
     must_run(emits(
         inline(
@@ -1151,6 +1178,39 @@ static CORPUS: [DifferentialProgram; 41] = [
             "5.6",
         ),
         &["basics", "transfer", "clone_tags", "freeze", "trapped"],
+    )),
+    must_run(emits(
+        inline(
+            "reactive_exits",
+            concat!(
+                // `return`, `break`, and `continue` dispose the reactive
+                // scopes opened since their target, before the owned drops.
+                "def early: Bool -> I32 = flag => with Reactive = reactive_scope () {\n",
+                "    if (flag) { return 1 }\n",
+                "    0\n",
+                "}\n",
+                "\n",
+                "def broken: () -> I32 = () => loop {\n",
+                "    with Reactive = reactive_scope () { break 2 }\n",
+                "}\n",
+                "\n",
+                "def continued: () -> I32 = () => {\n",
+                "    let mut index = 0\n",
+                "    loop {\n",
+                "        index = index + 1\n",
+                "        if (index == 3) { break index }\n",
+                "        with Reactive = reactive_scope () { continue }\n",
+                "    }\n",
+                "}\n",
+                "\n",
+                "let first = early True\n",
+                "let second = early False\n",
+                "let third = broken ()\n",
+                "let fourth = continued ()\n",
+            ),
+            "5.6",
+        ),
+        &["early", "broken", "continued"],
     )),
     must_run(emits(
         inline(
@@ -1508,6 +1568,15 @@ mod tests {
             compared += compared_names.len();
         }
 
+        // The zero-stub ratchet: a completed substage's families can never
+        // stub again anywhere in the corpus.
+        for completed in super::COMPLETED_SUBSTAGES {
+            assert_eq!(
+                owner_totals.get(completed).copied().unwrap_or(0),
+                0,
+                "completed substage {completed} has stubbed bodies in the corpus"
+            );
+        }
         let mut owners = owner_totals.into_iter().collect::<Vec<_>>();
         owners.sort_by(|left, right| left.0.cmp(right.0));
         let mut families = histogram.into_iter().collect::<Vec<_>>();
