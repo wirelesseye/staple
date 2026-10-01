@@ -343,7 +343,7 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 53] = [
+static CORPUS: [DifferentialProgram; 60] = [
     must_run(inline("empty", "", "5.3")),
     must_run(inline(
         "integer_arithmetic",
@@ -492,11 +492,11 @@ static CORPUS: [DifferentialProgram; 53] = [
         "staple-compiler/examples/c_interop.sta",
         "5.3",
     )),
-    file(
+    must_run(file(
         "example_coroutines",
         "staple-compiler/examples/coroutines.sta",
         "5.3",
-    ),
+    )),
     must_run(file(
         "example_hello_world",
         "staple-compiler/examples/hello_world.sta",
@@ -517,11 +517,11 @@ static CORPUS: [DifferentialProgram; 53] = [
         "staple-compiler/examples/modules_and_imports.sta",
         "5.3",
     )),
-    file(
+    must_run(file(
         "example_signals_and_reactions",
         "staple-compiler/examples/signals_and_reactions.sta",
         "5.3",
-    ),
+    )),
     must_run(file(
         "example_sums_and_propagation",
         "staple-compiler/examples/sums_and_propagation.sta",
@@ -539,11 +539,11 @@ static CORPUS: [DifferentialProgram; 53] = [
     )),
     // A two-module program: `main.sta` resolves `use game.*` against its own
     // directory.
-    file(
+    must_run(file(
         "example_game_loop",
         "staple-compiler/examples/game_loop/main.sta",
         "5.3",
-    ),
+    )),
     must_run(
         // Stage 5.4: calls, callable values, closures, resources, and intrinsics.
         // Each entry names the functions its `emits` list must fully emit;
@@ -1522,6 +1522,209 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         DifferentialD5::DerivedRunners,
     ),
+    // Stage 5.8 Step 9: the 4.5 fixture set as runnable programs, plus the
+    // cancellation drop-order fixture.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "coroutine_nested_child_awaits",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "def leaf: () -> Coroutine{IO} I32 = () => coro { println \"leaf\"; 1 }\n",
+                    "def middle: () -> Coroutine{IO} I32 = () => coro {\n",
+                    "  let a = await (leaf ())\n",
+                    "  let b = await (coro { println \"inner\"; 2 })\n",
+                    "  a + b\n",
+                    "}\n",
+                    "let value = block_on (middle ())\n",
+                    "println \"value ${value:?}\"\n",
+                ),
+                "5.8",
+            ),
+            &["leaf", "middle"],
+        ),
+        "leaf\ninner\nvalue 3\n",
+    )),
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "coroutine_cancellation",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "def worker: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "  println \"worker start\"\n",
+                    "  let _ = await (yield_now ())\n",
+                    "  println \"worker end\"\n",
+                    "}\n",
+                    "let sched = scheduler ()\n",
+                    "with Tasks = task_scope (sched) {\n",
+                    "  let doomed = spawn (worker ())\n",
+                    "  let _ = pump (sched, 4)\n",
+                    "  Task.cancel doomed\n",
+                    "  let _ = pump (sched, 4)\n",
+                    "  println \"finished ${Task.is_finished doomed:?}\"\n",
+                    "}\n",
+                ),
+                "5.8",
+            ),
+            &["worker"],
+        ),
+        "worker start\nfinished True\n",
+    )),
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "coroutine_wait_and_until_states",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "let signal flag = 0\n",
+                    "def waiter: move Wait I32 ->{IO} Coroutine{IO} () = move pending => coro {\n",
+                    "  let outcome = await pending\n",
+                    "  match outcome {\n",
+                    "    Completed value => println \"wait ${value:?}\",\n",
+                    "    Cancelled() => println \"wait cancelled\",\n",
+                    "  }\n",
+                    "}\n",
+                    "def waiting: () -> Coroutine{Reactive, IO} () = () => coro {\n",
+                    "  let _ = await (until { flag >= 1 })\n",
+                    "  println \"until done\"\n",
+                    "}\n",
+                    "def make_completion: Scheduler -> (wait: Wait I32, resolver: Resolver I32) = s => completion s\n",
+                    "let sched = scheduler ()\n",
+                    "with Reactive = reactive_scope () {\n",
+                    "  with Tasks = task_scope (sched) {\n",
+                    "    let (wait, resolver) = make_completion sched\n",
+                    "    let _ = spawn (waiter wait)\n",
+                    "    let _ = spawn (waiting ())\n",
+                    "    let _ = pump (sched, 8)\n",
+                    "    Resolver.complete resolver 9\n",
+                    "    flag = 1\n",
+                    "    let _ = pump (sched, 8)\n",
+                    "    let _ = pump (sched, 8)\n",
+                    "  }\n",
+                    "}\n",
+                ),
+                "5.8",
+            ),
+            &["waiter", "waiting", "make_completion"],
+        ),
+        "wait 9\nuntil done\n",
+    )),
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "reaction_resource",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "type Counter = ctor (n: I32)\n",
+                    "def read: () ->{Counter} I32 = () => (resource Counter).n\n",
+                    "def subscribe: () ->{Reactive, Counter, IO} () = () => reaction { println \"count ${read ():?}\"; () }\n",
+                    "with Counter = Counter (n: 5) {\n",
+                    "  with Reactive = reactive_scope () {\n",
+                    "    subscribe ()\n",
+                    "  }\n",
+                    "}\n",
+                ),
+                "5.8",
+            ),
+            &["read", "subscribe"],
+        ),
+        "count 5\n",
+    )),
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "derived_initializer_and_instance",
+                concat!(
+                    "use std.io.(IO, println)\n",
+                    "let signal count = 0\n",
+                    "let doubled = count + count\n",
+                    "def make: () ->{state.read, IO} I32 = () => {\n",
+                    "  let local = count * 3\n",
+                    "  println \"local ${local:?}\"\n",
+                    "  local\n",
+                    "}\n",
+                    "count = 2\n",
+                    "println \"doubled ${doubled:?}\"\n",
+                    "let result = make ()\n",
+                ),
+                "5.8",
+            ),
+            &["make"],
+        ),
+        "doubled 4\nlocal 6\n",
+    )),
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "derived_droppable_capture",
+                concat!(
+                    "use std.cinterop.(CString, c_string)\n",
+                    "use std.io.(IO, println)\n",
+                    "let signal base = 0\n",
+                    "def render: (CString, I32) -> String = (text, extra) => CString.to_string text\n",
+                    "def make: move CString ->{state.read, IO} String = move text => {\n",
+                    "  let derived = render (text, base)\n",
+                    "  println \"derived ${derived}\"\n",
+                    "  derived\n",
+                    "}\n",
+                    "base = 3\n",
+                    "let value = make (c_string \"len\")\n",
+                    "println \"value ${value}\"\n",
+                ),
+                "5.8",
+            ),
+            &["render", "make"],
+        ),
+        "derived len\nvalue len\n",
+    )),
+    // K2/D5: the cancel unwind drops the frame bindings in plan order
+    // (`first` then `second`); the completed sibling's `kept` frame binding is
+    // never dropped — the mirrored completed-coroutine leak (D5).
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "coroutine_drop_order",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.cinterop.(CString, c_string)\n",
+                    "use std.io.(IO, println)\n",
+                    "extern \"c\" { puts: CString -> I32 }\n",
+                    "type Tag = ctor CString\n",
+                    "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
+                    "def tag: move CString -> Tag = move text => Tag text\n",
+                    "def with_tags: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "  let first = tag (c_string \"first\")\n",
+                    "  let second = tag (c_string \"second\")\n",
+                    "  println \"tags ready\"\n",
+                    "  let _ = await (yield_now ())\n",
+                    "  ()\n",
+                    "}\n",
+                    "def completing: () -> Coroutine{IO} () = () => coro {\n",
+                    "  let kept = tag (c_string \"leaked\")\n",
+                    "  println \"completing\"\n",
+                    "}\n",
+                    "let sched = scheduler ()\n",
+                    "with Tasks = task_scope (sched) {\n",
+                    "  let doomed = spawn (with_tags ())\n",
+                    "  let _ = spawn (completing ())\n",
+                    "  let _ = pump (sched, 8)\n",
+                    "  Task.cancel doomed\n",
+                    "  let _ = pump (sched, 8)\n",
+                    "  println \"cancelled ${Task.is_finished doomed:?}\"\n",
+                    "}\n",
+                    "println \"scope closed\"\n",
+                ),
+                "5.8",
+            ),
+            &["tag", "with_tags", "completing"],
+        ),
+        "tags ready\ncompleting\nfirst\nsecond\ncancelled True\nscope closed\n",
+    )),
 ];
 
 /// Extract every `define`d function body from one module's IR text, keyed by

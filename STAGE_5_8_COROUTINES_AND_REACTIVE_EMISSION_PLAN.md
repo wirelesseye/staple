@@ -338,6 +338,10 @@ The in-process harness asserts every `LoweredOnly` entry fully emits and that it
 - **Add a `coroutine_drop_order` entry.** It cancels a coroutine with two droppable frame bindings and pins the unwind order (plan order, K2). A completed sibling prints nothing for its frame bindings: the mirrored leak, with a comment naming D5.
 - **Flip** `example_coroutines`, `example_signals_and_reactions`, and `example_game_loop` to `MustRun`.
 
+**Step 9 notes (complete).** Seven `MustRun` 5.8 entries joined the corpus with pinned stdout and focus `emits` lists: `coroutine_nested_child_awaits` (`leaf`/`inner`/`value 3`), `coroutine_cancellation` (a spawned worker parked at `yield_now` is cancelled; `finished True`, no `worker end`), `coroutine_wait_and_until_states` (a `Wait I32` resolved by a resolver and an `until { flag >= 1 }` child inside a spawned coroutine; `wait 9`, `until done`), `reaction_resource` (a `Counter` resource read by a reaction; `count 5`), `derived_initializer_and_instance` (a module derived binding and a function-local derived binding; `doubled 4`, `local 6`), `derived_droppable_capture` (a derived evaluator capturing a `CString`; `derived len`, `value len`), and `coroutine_drop_order` (a cancelled coroutine with two droppable frame bindings drops them in plan order `first` then `second`, while the completed sibling's `leaked` binding is never dropped — the mirrored D5 completed-coroutine leak, named in a comment). `example_coroutines`, `example_signals_and_reactions`, and `example_game_loop` flipped to `MustRun`.
+
+Corpus: 60 programs; **16050 fully emitted bodies compared (+2043), zero stubs across zero families**. CLI harness: **0 blocked, 53 identical, 3 compile-only, 4 lowered-only (4 legacy-rejected), none different** — every former `MayBeBlocked` program now runs and behaves identically. All Contract 6 gates pass (1311 tests; both workspace checks; formatting/diff checks). Step 10 closes the gate and hands off.
+
 ### Step 10: Gate and handoff
 
 **Gate:**
