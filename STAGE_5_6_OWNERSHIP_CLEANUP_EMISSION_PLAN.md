@@ -168,6 +168,8 @@ Port `RefReplace` (`compile_structural_replace`); the previous value's drop come
 
 Emit the `Scope` reactive operation: evaluate the unit argument, then call `__staple_reactive_scope_create` through `build_reactive_runtime_call`, exactly as legacy does. The runtime requirement set already installs `reactive.ll` when a scope exists. The other reactive operations stay 5.8 diagnostics under their split family names.
 
+**Step 7 notes (complete).** `emit_call` no longer diagnoses a reactive call whose recorded operation is `Scope`; its unit argument is evaluated with the other call arguments, and the `IntrinsicFunction::ReactiveScope` arm creates the scope through `build_reactive_runtime_call` exactly as legacy `compile_intrinsic_call` (same call name and `reactive.scope`). The other operations still diagnose under their split 5.8 family names. Result: 10223 fully emitted bodies compared (+72), 82 stubs (-72), with **zero 5.6-owned stubs** (only 5.7's structural methods and 5.8's coroutine/reactive/task work remain). The full suite passes 1298 tests.
+
 ### Step 8: Runnable programs and the ratchet
 
 After Steps 1–7, the empty program should compile strictly. Confirm that the CLI harness compiles, links, and runs it under both emitters with identical stdout and exit status, then flip the `empty` corpus entry to `DifferentialExpectation::MustRun`.

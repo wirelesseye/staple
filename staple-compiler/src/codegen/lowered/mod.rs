@@ -4675,8 +4675,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // materializes.)
         let by_value_route =
             matches!(call.target, LoweredCallableTarget::Intrinsic { .. }) || native_extern;
-        // Stage 5.6 Step 1: a reactive intrinsic call names the operation it
-        // performs (5.6 ports the plain scope call; 5.8 owns the rest).
+        // Stage 5.6 Step 7: a reactive intrinsic call names the operation it
+        // performs. The plain scope call emits through the intrinsic route
+        // (its unit argument is evaluated with the other arguments below);
+        // 5.8 owns every other operation.
         if let Some(reactive) = call.reactive {
             let operation = self
                 .view
@@ -4684,7 +4686,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .ok_or_else(|| {
                     Diagnostic::new(call.origin.span.clone(), "missing reactive operation")
                 })?;
-            return Err(unsupported(reactive_call_family(&operation.kind)));
+            if !matches!(operation.kind, LoweredReactiveOperationKind::Scope) {
+                return Err(unsupported(reactive_call_family(&operation.kind)));
+            }
         }
         // Legacy checks the callee symbol's initialization before evaluating
         // any argument.
@@ -6886,7 +6890,31 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )?;
                 Ok(self.backend.unit_value())
             }
-            IntrinsicFunction::ReactiveScope => Err(unsupported("reactive scope")),
+            IntrinsicFunction::ReactiveScope => {
+                // Legacy `compile_intrinsic_call`: the unit argument is
+                // evaluated by the call route; then create the ambient scope.
+                Ok(self
+                    .backend
+                    .build_reactive_runtime_call(
+                        "__staple_reactive_scope_create",
+                        &[],
+                        Some(
+                            self.backend
+                                .context
+                                .ptr_type(AddressSpace::default())
+                                .into(),
+                        ),
+                        "reactive.scope",
+                        span.clone(),
+                    )?
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            call.origin.span.clone(),
+                            "reactive scope creation returned no value",
+                        )
+                    })?
+                    .as_any_value_enum())
+            }
             IntrinsicFunction::Reaction => Err(unsupported("reaction")),
             IntrinsicFunction::Batch => Err(unsupported("batch")),
             IntrinsicFunction::Snapshot => Err(unsupported("snapshot")),
