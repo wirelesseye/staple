@@ -1796,6 +1796,45 @@ impl<'a> BodyCloner<'a> {
             argument.drops_after_call =
                 mutation && argument.place.is_none() && self.program.concrete_needs_drop(&expected);
         }
+        // A generic whole-product borrow records one shared operand with
+        // one record per ABI slot. Once every concrete slot passes by value,
+        // evaluate that operand once and explicitly unpack all final slots.
+        if !whole_mutation
+            && call.arguments.len() > 1
+            && let Some(expression) = call.arguments[0].expression
+            && call.arguments.iter().enumerate().all(|(slot, argument)| {
+                argument.expression == Some(expression)
+                    && argument.slot == Some(slot)
+                    && argument.pass_mode == super::LoweredArgumentPassMode::Value
+            })
+            && call
+                .steps
+                .iter()
+                .filter(|step| matches!(step, LoweredCallStep::Argument { .. }))
+                .count()
+                == 1
+            && !call.steps.iter().any(|step| {
+                matches!(
+                    step,
+                    LoweredCallStep::ProductElement { .. }
+                        | LoweredCallStep::ProductSpread { .. }
+                        | LoweredCallStep::NamedProductSpread { .. }
+                        | LoweredCallStep::Default { .. }
+                )
+            })
+        {
+            for step in &mut call.steps {
+                if matches!(step, LoweredCallStep::Argument { argument: 0 }) {
+                    *step = LoweredCallStep::ProductSpread {
+                        argument: 0,
+                        expression,
+                        mappings: (0..call.arguments.len())
+                            .map(|slot| super::LoweredSpreadMapping { source: slot, slot })
+                            .collect(),
+                    };
+                }
+            }
+        }
     }
 
     /// Recomputes a `with` provider's borrow and storage from the concrete
@@ -3870,6 +3909,33 @@ impl<'a> BodyValidator<'a> {
                 }
             }
         }
+        // Concrete ABI argument records must all have an evaluation step.
+        // A spread evaluates its operand once and supplies every mapped slot.
+        let mut supplied = std::collections::HashSet::new();
+        for step in &call.steps {
+            match step {
+                LoweredCallStep::Argument { argument }
+                | LoweredCallStep::ProductElement { argument, .. }
+                | LoweredCallStep::Default { argument, .. } => {
+                    supplied.insert(*argument);
+                }
+                LoweredCallStep::ProductSpread { mappings, .. } => {
+                    supplied.extend(mappings.iter().map(|mapping| mapping.slot));
+                }
+                LoweredCallStep::NamedProductSpread { mappings, .. } => {
+                    supplied.extend(mappings.iter().map(|mapping| mapping.slot));
+                }
+                LoweredCallStep::Callee { .. }
+                | LoweredCallStep::Resource { .. }
+                | LoweredCallStep::Invoke => {}
+            }
+        }
+        if (0..call.arguments.len()).any(|argument| !supplied.contains(&argument)) {
+            self.report(
+                origin.span.clone(),
+                "call argument records have an unfilled evaluation slot",
+            );
+        }
         let passes_hidden = call.target.records_resources();
         if passes_hidden
             && call.resource_bindings.len() != call.function_type.effects.resources.len()
@@ -4706,6 +4772,47 @@ mod tests {
             assert!(!contains_type_parameter(&place.value_type));
         }
         let _ = program;
+    }
+
+    #[test]
+    fn concrete_product_call_slots_are_recorded_and_revalidated() {
+        let module = checked_program(concat!(
+            "trait Merge Left Right Output { merge: (Left, Right) -> Output }\n",
+            "impl Merge I32 I32 I32 { def merge = (left, right) => left + right }\n",
+            "def combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\n",
+            "let total: I32 = combine (20, 22)\n",
+        ));
+        let mut lowered = crate::Lowerer::new()
+            .lower(&module)
+            .expect("product call lowers");
+        let call = lowered
+            .program
+            .instances
+            .iter_mut()
+            .filter_map(|(_, instance)| instance.body.as_mut())
+            .flat_map(|body| body.calls.iter_mut().map(|(_, call)| call))
+            .find(|call| {
+                call.arguments.len() == 2
+                    && call.arguments[0].expression == call.arguments[1].expression
+                    && call.steps.iter().any(|step| {
+                        matches!(step,
+                    LoweredCallStep::ProductSpread { mappings, .. } if mappings.len() == 2)
+                    })
+            })
+            .expect("concrete whole-product call has two projected slots");
+        let step = call
+            .steps
+            .iter_mut()
+            .find(|step| matches!(step, LoweredCallStep::ProductSpread { .. }))
+            .unwrap();
+        *step = LoweredCallStep::Argument { argument: 0 };
+        let diagnostics = lowered.program.validate_instance_bodies();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("unfilled evaluation slot")),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

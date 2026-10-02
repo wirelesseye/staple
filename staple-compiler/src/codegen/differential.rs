@@ -1824,11 +1824,14 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         "use std.io.(IO, println)\ndef twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\ndef output: () ->{IO} () = () => println \"hello\"\ntwice output\n",
         "5.9",
     ),
-    inline(
-        "product_trait_argument",
-        "trait Merge Left Right Output { merge: (Left, Right) -> Output }\nimpl Merge I32 I32 I32 { def merge = (left, right) => left + right }\ndef combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\nlet total: I32 = combine (20, 22)\n",
-        "5.9",
-    ),
+    must_run(expect_stdout(
+        inline(
+            "product_trait_argument",
+            "trait Merge Left Right Output { merge: (Left, Right) -> Output }\nimpl Merge I32 I32 I32 { def merge = (left, right) => left + right }\ndef combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\nlet total: I32 = combine (20, 22)\n",
+            "5.9",
+        ),
+        "",
+    )),
     must_run(expect_stdout(
         inline(
             "nested_expression_return",
