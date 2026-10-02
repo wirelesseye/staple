@@ -19,6 +19,14 @@ LLVM generation consumes lowered IR and no longer infers types, selects trait im
 - **Stage 5.11 follows the cutover.** Mirrored defects remain for that stage; Stage 5 is still in progress. The [77-method Stage 6 handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) identifies surviving lowering/frontend/LSP/test uses and unused queries. `drop_method_for` now has only test callers and produces the one deferred checker warning; codegen is warning-free.
 - Current suite command: `CARGO_INCREMENTAL=0 cargo nextest run --workspace`. No emitter feature or selector exists.
 
+### Known defects
+
+- **A parenthesized effectful call does not lower (found in the Stage 5.10 review; predates Stage 5).**
+  - **Symptom:** `(println "x")` (a top-level statement, a `let` value, a function body, or a `match` arm) type-checks, but lowering rejects it with "too many positional elements in product" (`lower.rs`, product lowering), followed by cascading "not reachable from any runtime root" diagnostics.
+  - **What works:** the unparenthesized call and a pure parenthesized call such as `(inc 1)`. The parenthesized single-element product around a call with a hidden effect resource (`IO`) is what fails.
+  - **Workaround and tracking:** `examples/macros.sta` uses block arguments for its `choose` calls until this is fixed. Stage 5.10 Step 1 changed them from the parenthesized form, which the example was written to show.
+  - **Reproduction:** `tests/compiler.rs::a_parenthesized_effectful_call_lowers` is `#[ignore]`d. Remove the attribute, and restore the example's parenthesized form, with the fix.
+
 ## Public Interfaces
 
 - Add an owned, opaque `LoweredModule` and public entry point:

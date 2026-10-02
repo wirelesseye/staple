@@ -164,6 +164,10 @@ macro identity = value: Expr => quote { $value }
 let true_condition: Bool = True
 let false_condition: Bool = False
 
+// Block arguments here work around a known lowering defect: a parenthesized
+// effectful call such as `(println "short form")` type-checks but is rejected
+// by lowering (see TYPED_LOWERING_PLAN.md, "Known defects", and the ignored
+// `a_parenthesized_effectful_call_lowers` test).
 choose true_condition { println "short form" }
 choose false_condition { println "not selected" } else { println "else form" }
 

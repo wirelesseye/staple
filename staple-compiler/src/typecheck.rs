@@ -1659,6 +1659,10 @@ impl TypedModule {
         type_needs_drop(value_type, self.drop_trait, &self.trait_implementations)
     }
 
+    /// Only lowering tests still compare against this checker query; legacy
+    /// codegen was its last production caller. Stage 6 decides whether to
+    /// replace those tests and delete it.
+    #[cfg(test)]
     pub(crate) fn drop_method_for(&self, value_type: &CheckedType) -> Option<FunctionId> {
         let drop_trait = self.drop_trait?;
         self.trait_implementations
