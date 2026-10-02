@@ -1799,11 +1799,14 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "tags ready\ncompleting\nfirst\nsecond\ncancelled True\nscope closed\n",
     )),
-    inline(
-        "slice_ref_coercion",
-        "use std.slice.Slice\nlet fixed: Ref (I32; 3) = Ref (1, 2, 3)\nlet values: Slice I32 = fixed\n",
-        "5.9",
-    ),
+    must_run(expect_stdout(
+        inline(
+            "slice_ref_coercion",
+            "use std.slice.Slice\nlet fixed: Ref (I32; 3) = Ref (1, 2, 3)\nlet values: Slice I32 = fixed\n",
+            "5.9",
+        ),
+        "",
+    )),
     must_run(expect_stdout(
         inline(
             "local_recursive_cells",

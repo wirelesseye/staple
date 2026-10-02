@@ -3332,12 +3332,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     }
                 }
                 // Legacy `Expression::Name` checks the state whenever the read
-                // requires one or the symbol has mutable storage.
+                // requires one or the symbol has mutable storage. The load
+                // reads the recorded uncoerced representation; emit_expression
+                // applies the coercion afterward.
                 self.load_symbol_value(
                     owner,
                     name.symbol,
                     name.requires_initialization_check || name.mutable,
-                    &expression.value_type,
+                    expression
+                        .coercion
+                        .as_ref()
+                        .map_or(&expression.value_type, |coercion| &coercion.source),
                     &expression.origin.span,
                     environment,
                 )
