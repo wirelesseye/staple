@@ -123,6 +123,10 @@ struct LoopContext<'context> {
     /// The reactive-scope depth at loop entry; `break` and `continue`
     /// dispose every scope opened since, before the owned drops.
     reactive_before: usize,
+    /// The task-scope depth at loop entry; `break` and `continue` close every
+    /// scope opened since, right after the reactive disposal and before the
+    /// owned drops (Stage 5.11 M3).
+    tasks_before: usize,
     incoming: Vec<(BasicValueEnum<'context>, BasicBlock<'context>)>,
 }
 
@@ -2517,9 +2521,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 let value = value_as_basic(value).ok_or_else(|| unimplemented("return value"))?;
                 // Legacy `compile_item`'s return: dispose every reactive
-                // scope, then drop every owned binding before leaving the
-                // function (O3).
+                // scope, close every task scope, then drop every owned binding
+                // before leaving the function (O3, M3).
                 self.dispose_reactive_scopes(environment, 0, &item_span)?;
+                self.close_task_scopes(environment, 0)?;
                 self.drop_all_owned(environment, &item_span)?;
                 self.backend
                     .builder
@@ -2567,18 +2572,27 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 } else {
                     value_as_basic(self.backend.unit_value()).expect("unit is a basic value")
                 };
-                let Some((exit, owned_before, reactive_before)) = environment
+                let Some((exit, owned_before, reactive_before, tasks_before)) = environment
                     .loops
                     .iter()
                     .rev()
                     .find(|context| context.depth == break_item.loop_depth)
-                    .map(|context| (context.exit, context.owned_before, context.reactive_before))
+                    .map(|context| {
+                        (
+                            context.exit,
+                            context.owned_before,
+                            context.reactive_before,
+                            context.tasks_before,
+                        )
+                    })
                 else {
                     return Err(unimplemented("break target"));
                 };
-                // Legacy `compile_item`'s break disposes the reactive scopes
-                // and drops every binding owned since the loop's marks (O3).
+                // Legacy `compile_item`'s break disposes the reactive scopes,
+                // closes the task scopes, and drops every binding owned since
+                // the loop's marks (O3, M3).
                 self.dispose_reactive_scopes(environment, reactive_before, &item_span)?;
+                self.close_task_scopes(environment, tasks_before)?;
                 self.drop_owned_since(environment, owned_before, &item_span)?;
                 self.backend
                     .builder
@@ -2601,7 +2615,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredItemKind::Continue(item) => {
-                let Some((header, owned_before, reactive_before)) = environment
+                let Some((header, owned_before, reactive_before, tasks_before)) = environment
                     .loops
                     .iter()
                     .rev()
@@ -2611,14 +2625,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             context.header,
                             context.owned_before,
                             context.reactive_before,
+                            context.tasks_before,
                         )
                     })
                 else {
                     return Err(unimplemented("continue target"));
                 };
-                // Legacy `compile_item`'s continue disposes the reactive scopes
-                // and drops every binding owned since the loop's marks (O3).
+                // Legacy `compile_item`'s continue disposes the reactive
+                // scopes, closes the task scopes, and drops every binding
+                // owned since the loop's marks (O3, M3).
                 self.dispose_reactive_scopes(environment, reactive_before, &item_span)?;
+                self.close_task_scopes(environment, tasks_before)?;
                 self.drop_owned_since(environment, owned_before, &item_span)?;
                 self.backend
                     .builder
@@ -3679,6 +3696,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             exit,
             owned_before: environment.owned_order.len(),
             reactive_before: environment.reactive_scopes.len(),
+            tasks_before: environment.task_scopes.len(),
             incoming: Vec::new(),
         });
         environment.returned = false;
@@ -6573,8 +6591,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// Legacy `close_task_scopes`: close every scope from `keep` on, in
-    /// reverse order. Only a `with Tasks` normal exit calls it; early exits
-    /// deliberately leave the scopes open (K4, a mirrored legacy behavior).
+    /// reverse order. Stage 5.11 (M3) closes abandoned scopes on `return`,
+    /// `break`, and `continue`, right after reactive disposal and before the
+    /// owned drops; a `with Tasks` normal exit still closes its own scope.
     fn close_task_scopes(
         &self,
         environment: &FunctionEnvironment<'context>,

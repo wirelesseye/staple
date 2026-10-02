@@ -33,6 +33,13 @@ Line references are against `5194cf9` and will drift; re-locate code by name. Bu
 - Fixture: `signal_field_writes` (5.11) pins `seen 0`, `seen 5`, `seen 7` over a signal product field, a nested field write, and a field write through a captured `mut` cell.
 - M1: no baseline-corpus path changes for F2 (the baseline corpus has no signal field write); F1's two `DIFF`s remain. The full workspace suite passes 1302 tests.
 
+### Step 4 — complete (F3)
+
+- `LoopContext` gained `tasks_before`; `return`, `break`, and `continue` close every task scope opened since their target, right after reactive-scope disposal and before the owned drops. A `with Tasks` normal exit is unchanged.
+- Fixtures: `task_scope_break_exit` (a break abandons the inner scope; the cancelled child reports `finished True` and never reaches its trailing output), `task_scope_continue_exit` (the abandoned child never reaches its trailing output), and `task_scope_return_exit` (a return closes an open scope before its owned drops).
+- The checker's effect inference leaves `spawn`'s effect variable unresolved outside a coroutine or top-level statement, so the return fixture carries an empty scope; the break/continue fixtures prove child cancellation. The emitted `__staple_task_scope_close` on the return path is verified in the IR.
+- M1: no baseline-corpus path changes for F3. The full workspace suite passes 1302 tests.
+
 ## Starting Point
 
 There is one emitter, and the suite passes 1302 tests. Stage 5.11 is the only part of Stage 5 that intentionally changes behavior. Five defects are queued:

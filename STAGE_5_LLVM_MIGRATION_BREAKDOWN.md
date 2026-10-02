@@ -422,6 +422,8 @@ This runs after the cutover, so each fix lands in one backend (D5). It is the on
 
 **Progress (Step 3, F2 complete).** A field write's assignment root follows `ProductElement` to its base, so it records `SignalNotify` on the base signal and a reaction over the field re-runs; the field projection never writes the base's initialization state. The `signal_field_writes` 5.11 entry pins `seen 0`/`seen 5`/`seen 7`, a nested field write, and a captured-`mut`-cell field write. M1: no baseline-corpus path changes; F1's two `DIFF`s remain. Suite: 1302 tests.
 
+**Progress (Step 4, F3 complete).** `return`, `break`, and `continue` close every task scope opened since their target (`LoopContext::tasks_before`), immediately after reactive disposal and before the owned drops; the `with Tasks` normal exit is unchanged. The `task_scope_break_exit` and `task_scope_continue_exit` entries prove a cancelled child never reaches its trailing output, and `task_scope_return_exit` covers the return path. M1: no baseline-corpus path changes. Suite: 1302 tests.
+
 **Gate (superseded by the plan's Step 7; kept for history):** The new fixtures print the corrected drop output. The full gate set (Contract 6) passes. The checker/lowering drop-agreement test passes. **Only now may Stage 5 be marked complete.**
 
 ## Ordering and Parallelism

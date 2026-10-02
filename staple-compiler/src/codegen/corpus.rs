@@ -138,7 +138,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 77] = [
+static CORPUS: [CorpusProgram; 80] = [
     expect_stdout(must_run(inline("empty", "", "5.3")), ""),
     expect_stdout(
         must_run(inline(
@@ -1918,6 +1918,112 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             &["captured"],
         ),
         "seen 0\nseen 5\nseen 7\nnested 0\nnested 4\ncaptured 9\n",
+    )),
+    // Stage 5.11 (M3): an early exit closes every task scope opened since its
+    // target, right after reactive disposal and before owned drops. A `break`
+    // out of the loop abandons the inner scope, cancelling its child before
+    // its next resume.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "task_scope_break_exit",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "def worker: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "    println \"task start\"\n",
+                    "    let _ = await (yield_now ())\n",
+                    "    println \"task end\"\n",
+                    "}\n",
+                    "def abandoning: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "    let sched = scheduler ()\n",
+                    "    let handle = loop {\n",
+                    "        with Tasks = task_scope (sched) {\n",
+                    "            let child = spawn (worker ())\n",
+                    "            let _ = pump (sched, 1)\n",
+                    "            break child\n",
+                    "        }\n",
+                    "    }\n",
+                    "    println \"break finished ${Task.is_finished handle:?}\"\n",
+                    "    ()\n",
+                    "}\n",
+                    "let sched = scheduler ()\n",
+                    "with Tasks = task_scope (sched) {\n",
+                    "    let _ = spawn (abandoning ())\n",
+                    "    let _ = pump (sched, 16)\n",
+                    "}\n",
+                    "println \"done\"\n",
+                ),
+                "5.11",
+            ),
+            &["worker", "abandoning"],
+        ),
+        "task start\nbreak finished True\ndone\n",
+    )),
+    // The same cancellation through `continue`: the abandoned child never
+    // reaches its trailing output.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "task_scope_continue_exit",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "def worker: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "    println \"task start\"\n",
+                    "    let _ = await (yield_now ())\n",
+                    "    println \"task end\"\n",
+                    "}\n",
+                    "def continuing: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "    let sched = scheduler ()\n",
+                    "    let mut index = 0\n",
+                    "    loop {\n",
+                    "        index = index + 1\n",
+                    "        with Tasks = task_scope (sched) {\n",
+                    "            let child = spawn (worker ())\n",
+                    "            let _ = pump (sched, 1)\n",
+                    "            if (index == 1) { continue }\n",
+                    "            println \"second finished ${Task.is_finished child:?}\"\n",
+                    "            break\n",
+                    "        }\n",
+                    "    }\n",
+                    "    ()\n",
+                    "}\n",
+                    "let sched = scheduler ()\n",
+                    "with Tasks = task_scope (sched) {\n",
+                    "    let _ = spawn (continuing ())\n",
+                    "    let _ = pump (sched, 16)\n",
+                    "}\n",
+                    "println \"done\"\n",
+                ),
+                "5.11",
+            ),
+            &["worker", "continuing"],
+        ),
+        "task start\nsecond finished False\ndone\n",
+    )),
+    // `return` closes the open scope before the owned drops. The checker's
+    // effect inference leaves `spawn`'s effect variable unresolved outside a
+    // coroutine or top-level statement, so this fixture carries an empty
+    // scope; the break/continue entries prove child cancellation.
+    must_run(expect_stdout(
+        inline(
+            "task_scope_return_exit",
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "def early: () -> I32 = () => {\n",
+                "    let sched = scheduler ()\n",
+                "    with Tasks = task_scope (sched) {\n",
+                "        return 1\n",
+                "    }\n",
+                "    0\n",
+                "}\n",
+                "println \"returned ${early ()}\"\n",
+            ),
+            "5.11",
+        ),
+        "returned 1\n",
     )),
 ];
 
