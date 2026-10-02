@@ -1,5 +1,7 @@
 # Stage 5.4 Plan: Calls, Callable Values, Closures, and Resources
 
+> **Current execution after Stage 5.10:** use `CARGO_INCREMENTAL=0 cargo nextest run --workspace` and `cargo check --workspace`, without emitter features. The permanent harnesses are `codegen::corpus::tests::corpus_emits_catalog_definitions` and `compile::tests::codegen_corpus_compiles_links_and_runs`. Selector, shadow and body-comparison descriptions below are implementation history; those APIs and gates have been retired. See the [cutover results](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md).
+
 This is the separate plan the Stage 5.4 section of [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md) requires. Read the breakdown's Migration Contract (items 1–7), Decisions D1–D6, the [Stage 5.3 plan](STAGE_5_3_EMITTER_SKELETON_PLAN.md), and the breakdown's Stage 5.3 **Post-gate review fixes** first. This plan's revised gate (Step 10) supersedes the **Gate** paragraph in the breakdown's 5.4 section.
 
 Line references are against `71be158` and will drift; re-locate code by function name.

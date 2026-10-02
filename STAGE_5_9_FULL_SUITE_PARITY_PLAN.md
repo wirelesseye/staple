@@ -1,5 +1,7 @@
 # Stage 5.9 Plan: Full-Suite Parity and New-Emitter Census
 
+> **Current execution after Stage 5.10:** use `CARGO_INCREMENTAL=0 cargo nextest run --workspace` and `cargo check --workspace`, without emitter features. The permanent harnesses are `codegen::corpus::tests::corpus_emits_catalog_definitions` and `compile::tests::codegen_corpus_compiles_links_and_runs`. Selector, shadow and body-comparison descriptions below are implementation history; those APIs and gates have been retired. See the [cutover results](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md).
+
 This is the plan for the Stage 5.9 section of [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md). First read:
 
 - the breakdown's Migration Contract (items 1–7) and Decisions D1–D6, especially D2 (planned names) and D5 (mirrored defects);
@@ -13,7 +15,8 @@ Line references are against `f19f4d9` and will drift; re-locate code by function
 
 Stages 5.3–5.8 closed against the differential corpus. It has 62 programs, compares 16350 fully emitted bodies with zero stubs, and its CLI harness has 54 identical, 3 compile-only, and 5 lowered-only programs. The corpus is not the whole suite, though. With the lowered emitter as the default,
 
-```bash
+```text
+Historical baseline command (before cutover):
 cargo nextest run --workspace --no-fail-fast --features staple-compiler/lowered-emitter
 ```
 
@@ -80,14 +83,11 @@ cargo nextest run --workspace --no-fail-fast --features staple-compiler/lowered-
 
 ## Steps
 
-Each step ends with both suite gates and a commit:
+The original steps below used both emitter gates, whose results are preserved in their execution notes. The current suite has one command:
 
 ```bash
-cargo nextest run --workspace
-cargo nextest run --workspace --features staple-compiler/lowered-emitter
+CARGO_INCREMENTAL=0 cargo nextest run --workspace
 ```
-
-The default gate must stay green throughout. The feature gate's failure count must only fall, and each step's notes record it.
 
 ### Step 1: Baseline and triage
 
@@ -295,10 +295,4 @@ The review re-ran all three gates and found them green: default 1318/1318, `lowe
 
 - **A mirrored defect was missing from the 5.11 list.** Step 5 made field writes skip signal notification and initialization, matching legacy. That is correct for parity but is a defect: under both emitters, a reaction over a signal product's field does not re-run after `point.x = 5`. It is now a 5.11 item with fixtures, and the handoff above is corrected.
 - **The census's effect-less pair fallback took the first match.** If one coroutine body were specialized at two effect rows that legacy records without an effect, the fallback could map legacy's pair to the wrong lowered pair and explain the other as aliased. The fallback now accepts a candidate only when it is the unique effect-less match; otherwise the census reports the pair as unmapped.
-- **The gate commands and the shadow feature's role are now documented.** `differential-shadow` is test instrumentation, never a build configuration. Every feature combination gets its own build tree, so use `CARGO_INCREMENTAL=0` to bound disk use. The three gates are:
-
-  ```bash
-  cargo nextest run --workspace
-  cargo nextest run --workspace --features staple-compiler/lowered-emitter
-  cargo nextest run --workspace --features staple-compiler/differential-shadow,staple-compiler/lowered-emitter
-  ```
+- **Historical gate role:** the three migration-era suites passed as recorded above. Shadow instrumentation and both emitter features were deleted in Stage 5.10. To run the surviving gates today, use `CARGO_INCREMENTAL=0 cargo nextest run --workspace`; there is no feature-specific suite.

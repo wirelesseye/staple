@@ -1,5 +1,7 @@
 # Stage 5.8 Plan: Coroutines, Tasks, and Reactive Code
 
+> **Current execution after Stage 5.10:** use `CARGO_INCREMENTAL=0 cargo nextest run --workspace` and `cargo check --workspace`, without emitter features. The permanent harnesses are `codegen::corpus::tests::corpus_emits_catalog_definitions` and `compile::tests::codegen_corpus_compiles_links_and_runs`. Selector, shadow and body-comparison descriptions below are implementation history; those APIs and gates have been retired. See the [cutover results](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md).
+
 This is the separate plan the Stage 5.8 section of [STAGE_5_LLVM_MIGRATION_BREAKDOWN.md](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md) requires. First read:
 
 - the breakdown's Migration Contract (items 1–7) and Decisions D1–D6, especially D2 (planned names), D5 (mirrored defects), and D6 (runtime gating);

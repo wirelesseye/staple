@@ -131,7 +131,7 @@ const fn emits(mut program: CorpusProgram, templates: &'static [&'static str]) -
 /// integer-arithmetic program, a two-module program with module globals and
 /// initialization state, the Stage 4.7 census programs plus an
 /// every-artifact-family fixture, `staple-compiler/examples/*.sta` (excluding
-/// `macros.sta`, which fails during lowering), and the two-module `game_loop`
+/// `macros.sta`, covered by the standalone example gate), and `game_loop`
 /// example.
 #[doc(hidden)]
 pub fn codegen_corpus() -> &'static [CorpusProgram] {

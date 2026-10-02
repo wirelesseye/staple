@@ -7,7 +7,7 @@ This is the plan for the Stage 5.10 section of [STAGE_5_LLVM_MIGRATION_BREAKDOWN
 
 This plan's gate (Step 8) supersedes the **Gate** paragraph in the breakdown's 5.10 section.
 
-Line references are against `1501270` and will drift; re-locate code by name. Build with `CARGO_INCREMENTAL=0`: each feature combination gets its own build tree, and Stage 5.9 filled the disk.
+Line references are against `1501270` and will drift; re-locate code by name. Build with `CARGO_INCREMENTAL=0` to bound disk use. Migration-era feature builds are historical; only the default emitter exists now.
 
 ## Execution Notes
 
@@ -41,6 +41,10 @@ The legacy declaration census, alias/fallback mapping and specialization matcher
 ### Step 6 — complete
 
 Lowering's output no longer carries or clones `TypedModule`; its private bridge accessor is gone. The layout agreement test locally retains its checked input and passes. Historical codegen comments are reworded, and the mechanical forbidden-symbol/AST-import check is clean. Debug formatting remains only in test-side D5 owner diagnostics, not in emitted symbol names. The 77-method Stage 6 inventory below records surviving callers and the exact unused/test-only queries without deleting them. The default suite passes 1301 tests (one ignored helper skipped), all 86 four-run R1 paths match, and workspace check, formatting and diff checks pass. Codegen has no warnings; the one checker-only warning is recorded for Stage 6. Logs: `/private/tmp/staple-5-10-step6-{default,ir}.log`. Step 7 is next.
+
+### Step 7 — complete
+
+The main plan now reports general current progress; the breakdown and substage plans separate historical migration results from the single-emitter commands and retired APIs. Current notes link to the 36-entry R2 verdicts and 77-method Stage 6 handoff, preserve the D2/D5 differences, and leave Stage 5.11 pending. The default suite passes 1301 tests (one ignored helper skipped), all 86 four-run R1 paths match, and formatting, plan-link and diff checks pass. Logs: `/private/tmp/staple-5-10-step7-{default,ir}.log`. Step 8 is next.
 
 ### Step 2 — test verdicts (R2)
 
@@ -87,7 +91,7 @@ The audit covers the original 31 entries (including the shared compiler assertio
 
 **Drop/ownership audit:** the 4.4 comparison checks registration order and storage but cannot see emitted drop positions. `cleanup_scanner_records_sites_and_owned_bindings` directly checks value/cell registrations, nested/loop order and determinism; `drop_order` pins actual scope/early/propagation/break/continue/logical/match/move/replacement/call-temporary drops, including two loop locals. The 4.5 transition compares unwind drops as a set; `coroutine_drop_order` pins their emitted order. Its mirrored empty scope ownership assertion is retained as a converted test. Extern transition tests have no drop-position or ownership-registration assertions. No uncovered position is silently dropped.
 
-## Starting Point
+## Starting Point (historical pre-cutover inventory)
 
 The lowered emitter is complete and proven against legacy:
 
