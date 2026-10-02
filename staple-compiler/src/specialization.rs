@@ -3382,6 +3382,7 @@ mod tests {
             LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
                 symbol: SymbolId(1),
                 callable_type: simple_callable(),
+                indirect_parameters: Vec::new(),
                 declaration: None,
             }),
         ];
@@ -3477,6 +3478,7 @@ mod tests {
                 LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
                     symbol: SymbolId(2),
                     callable_type: simple_callable(),
+                    indirect_parameters: Vec::new(),
                     declaration: None,
                 }),
                 ArtifactRequestKey::ExternAdapter(ExternAdapterKey {

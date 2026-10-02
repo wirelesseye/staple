@@ -2087,7 +2087,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// Legacy `declare_external_functions`'s adapter body: forward the closure
-    /// parameters (after the environment) to the foreign symbol.
+    /// parameters (after the environment) to the foreign symbol. Stage 5.11
+    /// (F1) gives the adapter the closure ABI's parameter shapes, so every
+    /// by-pointer parameter is loaded before the native call.
     fn emit_extern_adapter_body(
         &mut self,
         ordinal: ArtifactOrdinal,
@@ -2104,14 +2106,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.externs.get(&plan.symbol).copied().ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing foreign symbol declaration")
             })?;
+        if plan
+            .callable_type
+            .mutations
+            .contains(&CheckedMutation::Whole)
+        {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "extern adapter cannot forward a whole-mutation parameter",
+            ));
+        }
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
-        let arguments = function
-            .get_params()
-            .into_iter()
-            .skip(1)
-            .map(Into::into)
-            .collect::<Vec<_>>();
+        let arguments = self.adapter_foreign_arguments(plan, function, span)?;
         let call = self
             .backend
             .builder
@@ -2125,6 +2132,45 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_return(Some(&result))
             .map_err(compiler_diagnostic)?;
         Ok(())
+    }
+
+    /// The adapter's foreign-call arguments: the closure parameters loaded
+    /// where the recorded pass mode says the caller passed a pointer.
+    fn adapter_foreign_arguments(
+        &self,
+        plan: &crate::ExternAdapterPlan,
+        function: FunctionValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<Vec<BasicMetadataValueEnum<'context>>> {
+        let parameter_types = flattened_parameter_types(&plan.callable_type.parameter);
+        let parameters = function.get_params();
+        let parameters = parameters.get(1..).unwrap_or_default();
+        if parameters.len() != parameter_types.len()
+            || plan.indirect_parameters.len() != parameter_types.len()
+        {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "extern adapter parameter layout does not match its recorded ABI",
+            ));
+        }
+        let mut arguments = Vec::with_capacity(parameters.len());
+        for (index, parameter) in parameters.iter().enumerate() {
+            if plan.indirect_parameters[index] {
+                let loaded = self
+                    .backend
+                    .builder
+                    .build_load(
+                        self.backend.compile_type(parameter_types[index])?,
+                        parameter.clone().into_pointer_value(),
+                        "extern.argument",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                arguments.push(loaded.into());
+            } else {
+                arguments.push(parameter.clone().into());
+            }
+        }
+        Ok(arguments)
     }
 
     fn emit_main(&mut self) -> CodeGenerationResult<()> {
@@ -5049,10 +5095,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut values = hidden;
         values.extend(slots.into_iter().map(Option::unwrap));
         // A C-string temporary is the first visible argument (legacy's
-        // `scoped_c_string_temporary` check).
+        // `scoped_c_string_temporary` check). The direct extern route passes
+        // the CString value itself; a closure route passes a pointer to the
+        // borrowed CString slot (Stage 5.11 F1), so the temporary's value is
+        // loaded before it is released.
         let cleanup_c_string = if call.c_string_temporary {
             match values.first() {
-                Some(BasicMetadataValueEnum::PointerValue(pointer)) => Some(*pointer),
+                Some(BasicMetadataValueEnum::PointerValue(pointer)) if native_extern => {
+                    Some(*pointer)
+                }
+                Some(BasicMetadataValueEnum::PointerValue(pointer)) => Some(
+                    self.backend
+                        .builder
+                        .build_load(
+                            self.backend.compile_type(&CheckedType::CString)?,
+                            *pointer,
+                            "c_string.temporary",
+                        )
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value(),
+                ),
                 _ => None,
             }
         } else {

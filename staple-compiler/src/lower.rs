@@ -7047,6 +7047,27 @@ impl LoweredProgram {
                             )
                         })?,
                 };
+                // Stage 5.11 (F1): a closure call to a statically-known extern
+                // binding that borrows a CString temporary releases it after
+                // the call, exactly like the direct extern route. An unknown
+                // callable may be a consuming one (`CString.to_string` takes
+                // ownership of its argument), so only the known adapter frees
+                // here; a `move` parameter takes ownership instead and the
+                // callee's own drop releases it.
+                c_string_temporary = module
+                    .symbol_for(callee_syntax)
+                    .is_some_and(|symbol| resolved.is_external_symbol(symbol))
+                    && module
+                        .type_of_expression(call.argument.syntax().id)
+                        .is_some_and(|value_type| *value_type == CheckedType::CString)
+                    && module.symbol_for(call.argument.syntax().id).is_none()
+                    && !mutation_slot_mask(
+                        flattened_parameter_types(&function_type.parameter).len(),
+                        &function_type.moves,
+                    )
+                    .first()
+                    .copied()
+                    .unwrap_or(false);
                 (
                     LoweredCallableTarget::IndirectClosure { callee },
                     Some(callee),

@@ -11,6 +11,21 @@ This plan's gate (Step 7) supersedes the **Gate** paragraph in the breakdown's 5
 
 Line references are against `5194cf9` and will drift; re-locate code by name. Build with `CARGO_INCREMENTAL=0`.
 
+## Execution Notes
+
+### Step 1 — complete
+
+- Built the pre-fix reference at `5194cf9` (`CARGO_INCREMENTAL=0 cargo build --release -p staple --target-dir <scratch>`) and dumped the 75-entry corpus with the ignored `dump_corpus_sources` helper (`STAPLE_CORPUS_DUMP=<scratch>/corpus`). All 87 paths (11 examples, `game_loop`, and the 75 corpus entries) self-compare as single variants.
+- Defect pins recorded: `thunk_arguments` (F1) and `coroutine_drop_order` (F4). No corpus or standard-library program declares a generic `Drop` implementation; the only generic ones are the 4.4 test fixtures, so no corpus entry is F5-sensitive.
+
+### Step 2 — complete (F1)
+
+- `ExternAdapterPlan` records `indirect_parameters`, one flag per flattened value slot, computed by `adapter_indirect_parameters` from the shared `concrete_is_copy` decision. The callable-value scanner and the family expander compute the same vector, so `check_stage_4_6`'s re-expansion rejects a disagreement.
+- `emit_extern_adapter_body` loads every recorded by-pointer argument (`extern.argument`) before the unchanged native call. A whole-mutation callable is rejected; no extern binding can produce one.
+- The closure route records `c_string_temporary` for an indirect call only when the callee is a statically known extern binding and its first slot is not moved, and the emitter loads the borrowed `CString` slot before releasing it. This is narrower than the plan's "caller always frees": `CString.to_string` consumes its argument (Staple.md, "C interop"), so a blanket caller free would double-free the conversion's own release (an owned `CString` passed to `CString.to_string` already aborts on the baseline). The adapter leak is fixed; an unknown callable that borrows a temporary can still leak, exactly as today.
+- Fixtures: the new `extern_adapter_abi` 5.11 entry (extern callback, captured adapter in a closure, stored adapter, implicit thunk with a moved capture, and an implicit thunk with a literal temporary) and the restored `thunk_arguments` (`puts value`, pinned `thunk\n\n`).
+- M1: 85 of 87 paths are `same` over four runs. The two `DIFF`s are `census_coroutines_and_runners` and `extern_values`, each differing only in the adapter body (`%extern.argument = load ptr, ptr %1`). The full workspace suite passes 1302 tests.
+
 ## Starting Point
 
 There is one emitter, and the suite passes 1302 tests. Stage 5.11 is the only part of Stage 5 that intentionally changes behavior. Five defects are queued:

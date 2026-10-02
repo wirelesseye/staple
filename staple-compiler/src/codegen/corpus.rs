@@ -138,7 +138,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 75] = [
+static CORPUS: [CorpusProgram; 76] = [
     expect_stdout(must_run(inline("empty", "", "5.3")), ""),
     expect_stdout(
         must_run(inline(
@@ -610,22 +610,21 @@ static CORPUS: [CorpusProgram; 75] = [
                     "use std.cinterop.(CString, c_string)\n",
                     "def evaluate: (() -> I32) -> I32 = callback => callback ()\n",
                     "def thunk_plain: I32 -> I32 = value => evaluate { value + 1 }\n",
-                    "def measure: CString -> I32 = text => 1\n",
+                    "extern \"c\" { puts: CString -> I32 }\n",
                     // The thunk captures an owned `CString`, so lowering records a
                     // `ThunkArgumentEnvironment` finalizer use. `thunk_env` owns
                     // its moved parameter; Stage 5.6 Step 4 emits its scope exit.
-                    // It reads the capture through a Staple function: calling the
-                    // `puts` extern value here would hit the legacy extern adapter
-                    // ABI defect (D5, fixed in 5.11) and print a heap address.
-                    "def thunk_env: move CString -> I32 = move value => evaluate { measure value }\n",
+                    // Stage 5.11 (F1) fixed the extern adapter ABI, so the thunk
+                    // can now call the `puts` extern value and print the text.
+                    "def thunk_env: move CString -> I32 = move value => evaluate { puts value }\n",
                     "let first = thunk_plain 1\n",
                     "let second = thunk_env (c_string \"thunk\\n\")\n",
                 ),
                 "5.4",
             ),
-            &["evaluate", "thunk_plain", "measure", "thunk_env"],
+            &["evaluate", "thunk_plain", "thunk_env"],
         )),
-        "",
+        "thunk\n\n",
     ),
     expect_stdout(
         must_run(emits(
@@ -1842,6 +1841,48 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             &["show"],
         ),
         "effectful\n1 2 3 4\n(5, 6)\n7\n()\n",
+    )),
+    // Stage 5.11 (F1): every route that reaches an extern callable value
+    // receives closure-shaped parameters, so the adapter loads a borrowed
+    // `CString` before the native call; the caller releases the temporary.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "extern_adapter_abi",
+                concat!(
+                    "use std.cinterop.(CString, c_string)\n",
+                    "extern \"c\" { puts: CString -> I32 }\n",
+                    "def evaluate: (() -> I32) -> I32 = callback => callback ()\n",
+                    "def call_it: (CString -> I32) -> I32 = callback => callback (c_string \"callback\")\n",
+                    "def direct: CString -> I32 = value => puts value\n",
+                    "def value: () -> (CString -> I32) = () => puts\n",
+                    "def captured: () -> (() -> I32) = () => {\n",
+                    "    let adapter = puts\n",
+                    "    () => adapter (c_string \"closure\")\n",
+                    "}\n",
+                    "def thunk_env: move CString -> I32 = move value => evaluate { puts value }\n",
+                    "def thunk_temporary: () -> I32 = () => evaluate { puts (c_string \"temporary\"); 1 }\n",
+                    "let first = call_it direct\n",
+                    "let adapter = value ()\n",
+                    "let second = adapter (c_string \"value\")\n",
+                    "let third = captured ()\n",
+                    "let fourth = third ()\n",
+                    "let fifth = thunk_env (c_string \"thunk\")\n",
+                    "let sixth = thunk_temporary ()\n",
+                ),
+                "5.11",
+            ),
+            &[
+                "evaluate",
+                "call_it",
+                "direct",
+                "value",
+                "captured",
+                "thunk_env",
+                "thunk_temporary",
+            ],
+        ),
+        "callback\nvalue\nclosure\nthunk\ntemporary\n",
     )),
 ];
 

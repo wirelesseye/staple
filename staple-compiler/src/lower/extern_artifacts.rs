@@ -72,14 +72,36 @@ pub(super) fn expand_extern_adapter(
         arity: declared_arity(&plan),
         eagerly_declared: true,
     };
+    let indirect_parameters = adapter_indirect_parameters(program, &plan.callable_type);
     Ok((
         LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
             symbol: plan.symbol,
             callable_type: plan.callable_type,
+            indirect_parameters,
             declaration: Some(declaration),
         }),
         Vec::new(),
     ))
+}
+
+/// The adapter's closure-ABI pass modes: whether each flattened value
+/// parameter is a pointer that the adapter must load before the native call.
+/// This mirrors `Backend::indirect_parameter_mask` over the same `Copy`
+/// decision the backend's `LayoutContext` uses.
+fn adapter_indirect_parameters(
+    program: &LoweredProgram,
+    callable_type: &crate::CheckedFunctionType,
+) -> Vec<bool> {
+    let types = super::flattened_parameter_types(&callable_type.parameter);
+    let mutation_mask = super::mutation_slot_mask(types.len(), &callable_type.mutations);
+    let move_mask = super::mutation_slot_mask(types.len(), &callable_type.moves);
+    types
+        .iter()
+        .enumerate()
+        .map(|(index, value_type)| {
+            mutation_mask[index] || (!move_mask[index] && !program.concrete_is_copy(value_type))
+        })
+        .collect()
 }
 
 /// The adapter's declared arity, mirroring legacy's overloaded `name.arityN`
@@ -140,6 +162,7 @@ pub(super) fn scan_instance(program: &LoweredProgram, instance: FunctionInstance
         return Ok(Vec::new());
     };
     let mut visitor = ExternScanVisitor {
+        program,
         requests: Vec::new(),
     };
     walk_owner(program, OwnerArenas::Instance(body), &mut visitor)?;
@@ -152,6 +175,7 @@ pub(super) fn scan_initializer(program: &LoweredProgram, initializer: Initialize
         return Ok(Vec::new());
     }
     let mut visitor = ExternScanVisitor {
+        program,
         requests: Vec::new(),
     };
     walk_owner(program, OwnerArenas::Initializer(initializer), &mut visitor)?;
@@ -160,11 +184,12 @@ pub(super) fn scan_initializer(program: &LoweredProgram, initializer: Initialize
 
 /// The scanning visitor: every extern callable value becomes one adapter
 /// request with its exact use site.
-struct ExternScanVisitor {
+struct ExternScanVisitor<'program> {
+    program: &'program LoweredProgram,
     requests: Vec<ClosureRequest>,
 }
 
-impl LoweredOwnerVisitor for ExternScanVisitor {
+impl LoweredOwnerVisitor for ExternScanVisitor<'_> {
     fn callable_value_site(
         &mut self,
         id: LoweredCallableValueId,
@@ -190,6 +215,10 @@ impl LoweredOwnerVisitor for ExternScanVisitor {
             plan: LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
                 symbol: *symbol,
                 callable_type: value.function_type.clone(),
+                indirect_parameters: adapter_indirect_parameters(
+                    self.program,
+                    &value.function_type,
+                ),
                 declaration: None,
             }),
             kind: LoweredArtifactDependencyKind::ExternAdapter,

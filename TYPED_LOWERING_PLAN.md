@@ -16,7 +16,7 @@ LLVM generation consumes lowered IR and no longer infers types, selects trait im
 - **Stage 5.1–5.9 are complete.** The backend helper layers and complete lowered emitter passed the migration gates. Historical results remain in the [Stage 5 breakdown](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md) and substage plans.
 - **Stage 5.10 is complete.** The lowered emitter is the only emitter. Lowering's output owns the concrete program and carries no checked-module copy. The selector, features, legacy emission/recorder/census and body comparator are gone. The 74-entry corpus retains strict/catalog/D5 and pinned-output/trap checks. The default suite passes 1301 tests; all 86 four-run LLVM comparisons matched the pre-cutover lowered reference, which is now removed. All 36 example LLVM/object/run paths pass; the fresh corpus export is verified.
 - The [36-entry test verdict table](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#step-2--test-verdicts-r2) records retained coverage for every legacy test. No new emission differences were introduced; D2 planned names and D5 per-instance artifacts are the existing intended differences from legacy.
-- **Stage 5.11 follows the cutover.** Mirrored defects remain for that stage; Stage 5 is still in progress. The [77-method Stage 6 handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) identifies surviving lowering/frontend/LSP/test uses and unused queries. `drop_method_for` now has only test callers and produces the one deferred checker warning; codegen is warning-free.
+- **Stage 5.11 is in progress after the cutover.** F1 (the extern-value adapter ABI) is fixed: the adapter takes the closure ABI's parameter shapes and loads each borrowed argument, and a closure call to a known extern binding releases a `CString` temporary. F2–F5 remain; Stage 5 is still in progress. The [77-method Stage 6 handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) identifies surviving lowering/frontend/LSP/test uses and unused queries. `drop_method_for` now has only test callers and produces the one deferred checker warning; codegen is warning-free.
 - Current suite command: `CARGO_INCREMENTAL=0 cargo nextest run --workspace`. No emitter feature or selector exists.
 
 ### Fixed defects
@@ -26,6 +26,12 @@ LLVM generation consumes lowered IR and no longer infers types, selects trait im
   - **Fix:** lowering now treats a plain one-element product (no spread, designation, or named spread) as its element in a one-element shape, which emission collapses to the value. Instance specialization substitutes that shape element by element, so `(v)` with `v: T` works at pair, scalar, and unit instantiations.
   - **Identical output:** every program that already compiled produces identical IR. All 86 paths (11 examples, `game_loop`, and the 74 corpus programs) compare `same` against the pre-fix binary.
   - **Coverage:** `a_parenthesized_effectful_call_lowers` runs again, the `parenthesized_singletons` corpus entry pins the behavior, and `examples/macros.sta` is back to its original parenthesized `choose` form.
+
+- **The extern-value adapter ABI was wrong (D5's third mirrored defect; found in the Stage 5.6 review; fixed in Stage 5.11 Step 2).**
+  - **Symptom:** an extern used as a first-class value is called through its `ExternAdapter` closure. A closure call passes a non-`Copy` borrowed argument by pointer, but the adapter forwarded its raw parameter to C, so `puts` received the address of the `CString` slot and printed pointer bytes.
+  - **Fix:** `ExternAdapterPlan` records each flattened value parameter's closure pass mode, the adapter loads every by-pointer argument before the unchanged native call, and a closure call to a statically known extern binding releases its `CString` temporary after the call. `CString.to_string` consumes its argument, so the release stays restricted to known extern callees and avoids a double free.
+  - **Containment:** the 87-path four-run comparison reports 85 `same`; only `census_coroutines_and_runners` and `extern_values` differ, and only in the adapter load.
+  - **Coverage:** `extern_adapter_abi` (5.11) and the restored `thunk_arguments` pin the corrected text.
 
 ## Public Interfaces
 

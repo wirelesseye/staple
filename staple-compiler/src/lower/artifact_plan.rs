@@ -620,6 +620,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::ExternAdapter(ExternAdapterPlan {
                 symbol: _,
                 callable_type,
+                indirect_parameters: _,
                 declaration: _,
             }) => visit(Function(callable_type)),
         }
@@ -1314,6 +1315,12 @@ pub(crate) struct RunnerResourceSlot {
 pub(crate) struct ExternAdapterPlan {
     pub symbol: SymbolId,
     pub callable_type: CheckedFunctionType,
+    /// Whether each flattened value parameter passes by pointer in the
+    /// adapter's closure signature, mirroring `indirect_parameter_mask`. The
+    /// adapter loads each by-pointer argument before the native extern call.
+    /// The vector is empty for a whole-mutation callable, which no extern
+    /// binding can produce.
+    pub indirect_parameters: Vec<bool>,
     /// The foreign-symbol declaration facts. `None` at request time; the
     /// family expander fills it.
     pub declaration: Option<ExternDeclaration>,

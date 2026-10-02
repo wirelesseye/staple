@@ -418,6 +418,8 @@ This runs after the cutover, so each fix lands in one backend (D5). It is the on
   - Fixtures: an extern with a `CString` parameter passed as a callback, captured in a closure, and captured in an implicit thunk. Each prints the right text. Restore the `thunk_arguments` corpus entry's `puts` call, which the 5.6 review replaced with `measure` to keep the harness deterministic.
 - Update [TYPED_LOWERING_PLAN.md](TYPED_LOWERING_PLAN.md), this file, and the 4.4/4.5 plans' latent-defect notes to say where each defect was fixed.
 
+**Progress (Step 2, F1 complete).** The extern-adapter plan records each flattened value parameter's closure pass mode, the adapter loads every by-pointer argument before the native extern call, and the closure route releases a `CString` temporary when the callee is a statically known extern binding. The 5.4 `thunk_arguments` entry is restored to call the `puts` extern value and pins `thunk\n\n`; the new `extern_adapter_abi` entry covers the callback, captured-closure, stored-adapter, and implicit-thunk routes. M1: 85 of 87 paths `same`; the two `DIFF`s (`census_coroutines_and_runners`, `extern_values`) differ only in the adapter load. Suite: 1302 tests.
+
 **Gate (superseded by the plan's Step 7; kept for history):** The new fixtures print the corrected drop output. The full gate set (Contract 6) passes. The checker/lowering drop-agreement test passes. **Only now may Stage 5 be marked complete.**
 
 ## Ordering and Parallelism
