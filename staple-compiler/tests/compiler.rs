@@ -1,7 +1,7 @@
 use inkwell::context::Context;
 use staple_compiler::{
     CheckedMutation, CheckedType, CodeGenerator, LoweredModule, Lowerer, NameResolver,
-    ProgramLoader, RecursiveConstruction, TypeChecker,
+    PlannedArtifactFamily, ProgramLoader, RecursiveConstruction, TypeChecker,
 };
 use staple_syntax::{Diagnostic, Item, Type, parse};
 use std::path::Path;
@@ -146,6 +146,28 @@ fn lower(module: &staple_compiler::TypedModule) -> LoweredModule {
     Lowerer::new()
         .lower(module)
         .expect("checked module should lower")
+}
+
+/// D2 assertions use catalog names under the lowered default and retain the
+/// legacy oracle's spelling while it remains the default emitter.
+fn assert_artifact_definition(
+    llvm: &str,
+    lowered: &LoweredModule,
+    family: PlannedArtifactFamily,
+    legacy: &str,
+) {
+    if cfg!(feature = "lowered-emitter") {
+        let names = lowered.planned_artifact_names(family);
+        assert!(!names.is_empty(), "expected a planned {family:?} artifact");
+        assert!(
+            names.iter().any(|name| llvm
+                .lines()
+                .any(|line| line.starts_with("define ") && line.contains(&format!("@{name}(")))),
+            "expected a defined {family:?} artifact: {names:?}"
+        );
+    } else {
+        assert!(llvm.contains(legacy));
+    }
 }
 
 /// Slices the LLVM definition of the function named `name` out of `llvm`,
@@ -422,14 +444,23 @@ fn a_block_tail_coroutine_is_returned_instead_of_destroyed() {
         "let held = f ()\n",
     ));
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("a block-tail coroutine should lower");
     let body = function_definition(&llvm, "f");
     // Storing the `cleanup` pointer into the frame header is construction;
     // loading it back (`coro.cleanup.fn`) is what discarding the value emits.
     assert!(
-        body.contains("store ptr @__staple_coro_"),
+        if cfg!(feature = "lowered-emitter") {
+            lowered
+                .planned_artifact_names(PlannedArtifactFamily::CoroutineCodes)
+                .iter()
+                .filter(|name| name.ends_with("_cleanup"))
+                .any(|name| body.contains(&format!("store ptr @{name}")))
+        } else {
+            body.contains("store ptr @__staple_coro_")
+        },
         "the block tail should construct a coroutine frame"
     );
     assert!(
@@ -451,13 +482,19 @@ fn dropping_an_unstarted_coroutine_emits_a_cleanup_call() {
         "let _ = build ()\n",
     ));
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("an unstarted coroutine should lower");
     // The coroutine's cleanup exists and its drop path calls the closure
     // finalizer that frees the captured CString.
     assert!(llvm.contains("_cleanup(ptr"));
-    assert!(llvm.contains("__staple_gc_finalize_closure_"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::GcClosureFinalizer,
+        "__staple_gc_finalize_closure_",
+    );
 }
 
 #[test]
@@ -2817,11 +2854,17 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         "}\n",
     ));
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("move-only mutable cells should generate LLVM");
     assert!(llvm.contains("cell.drop.is_live"));
-    assert!(llvm.contains("__staple_gc_finalize_cell_"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::GcCellFinalizer,
+        "__staple_gc_finalize_cell_",
+    );
     assert!(llvm.contains("ref.replace.old"));
 }
 
@@ -2907,11 +2950,22 @@ fn derives_trait_delegated_product_indexing() {
     );
     let module = type_check(source);
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("derived indexing traits should generate LLVM");
-    assert!(llvm.contains("structural_Index"));
-    assert!(llvm.contains("structural_MutateIndex"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::StructuralIndex,
+        "structural_Index",
+    );
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::StructuralMutateIndex,
+        "structural_MutateIndex",
+    );
     assert!(llvm.contains("index.case"));
 }
 
@@ -3240,11 +3294,22 @@ fn derives_structural_iteration_for_products() {
     );
     let module = type_check(source);
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("derived iteration traits should generate LLVM");
-    assert!(llvm.contains("structural_IntoIterator"));
-    assert!(llvm.contains("structural_Iterator"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::StructuralIntoIterator,
+        "structural_IntoIterator",
+    );
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::StructuralIterator,
+        "structural_Iterator",
+    );
     assert!(llvm.contains("next.case"));
     assert!(llvm.contains("loop.body"));
 }
@@ -4676,8 +4741,9 @@ fn buffer_intrinsics_type_check_and_compile() {
         "}\n",
     ));
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("Buffer operations should compile");
     assert!(llvm.contains("buffer.allocate"));
     assert!(llvm.contains("buffer.push.slot"));
@@ -4693,10 +4759,16 @@ fn buffer_intrinsics_type_check_and_compile() {
         "()\n",
         "}\n",
     ));
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("Buffer should own non-Default, non-Copy elements");
-    assert!(llvm.contains("__staple_gc_finalize_buffer_"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::GcBufferFinalizer,
+        "__staple_gc_finalize_buffer_",
+    );
 }
 
 #[test]
@@ -8643,10 +8715,24 @@ fn adapts_non_variadic_externs_used_as_function_values() {
         "apply (puts, c_string \"hello\")\n",
     ));
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("external function adapter should compile");
-    assert!(llvm.contains("define internal i32 @__staple_extern_puts"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::ExternAdapter,
+        "define internal i32 @__staple_extern_puts",
+    );
+    if cfg!(feature = "lowered-emitter") {
+        assert!(
+            lowered
+                .planned_artifact_names(PlannedArtifactFamily::ExternAdapter)
+                .iter()
+                .any(|name| llvm.contains(&format!("define internal i32 @{name}(")))
+        );
+    }
     assert!(llvm.contains("call i32 @puts"));
 }
 
@@ -8771,10 +8857,19 @@ fn type_checks_generic_aliases_and_functions() {
             .any(|function| function.name == "identity")
     );
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("generic functions should be monomorphized");
-    assert!(llvm.matches("identity__").count() >= 2);
+    if cfg!(feature = "lowered-emitter") {
+        let names = lowered.planned_instance_names("identity");
+        assert!(names.len() >= 2);
+        for name in names {
+            function_definition(&llvm, &name);
+        }
+    } else {
+        assert!(llvm.matches("identity__").count() >= 2);
+    }
 }
 
 #[test]
@@ -8846,10 +8941,16 @@ fn provides_formatter_display_debug_and_structural_product_debug() {
         "()\n}\n",
     ));
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("formatting protocols should generate LLVM");
-    assert!(llvm.contains("__staple_structural_Debug"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::StructuralDebug,
+        "__staple_structural_Debug",
+    );
     assert!(llvm.contains("formatter.write"));
 }
 
@@ -8863,10 +8964,16 @@ fn provides_structural_debug_for_sum_types() {
         "let string_debug: String = Formatter.debug string\n",
     ));
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("sum Debug should generate LLVM");
-    assert!(llvm.contains("__staple_structural_Debug"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::StructuralDebug,
+        "__staple_structural_Debug",
+    );
     assert!(llvm.contains("debug.sum.fmt"));
 }
 
@@ -8882,11 +8989,17 @@ fn derives_debug_for_nominal_representations() {
         "let box_debug: String = Formatter.debug (Box 7)\n",
     ));
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("derived Debug implementations should generate LLVM");
     assert!(llvm.contains("formatter.write"));
-    assert!(llvm.contains("__staple_structural_Debug"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::StructuralDebug,
+        "__staple_structural_Debug",
+    );
 }
 
 #[test]
@@ -10388,13 +10501,19 @@ fn lowers_custom_drop_and_gc_finalizer_glue() {
         "def managed = () => Ref (Resource 9)\n",
     ));
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("Drop glue should compile");
 
     assert!(llvm.contains("drop.call"));
     assert!(llvm.contains("__staple_gc_set_finalizer"));
-    assert!(llvm.contains("__staple_gc_finalize_"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::GcFinalizer,
+        "__staple_gc_finalize_",
+    );
 }
 
 #[test]
@@ -10481,10 +10600,16 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
         "def make = (move value: CString) => { let callback = () => inspect value; callback }\n",
     ));
     let context = Context::create();
+    let lowered = lower(&module);
     let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
+        .compile_module(&lowered)
         .expect("a move-only capture should get managed finalizer glue");
-    assert!(llvm.contains("__staple_gc_finalize_closure_"));
+    assert_artifact_definition(
+        &llvm,
+        &lowered,
+        PlannedArtifactFamily::GcClosureFinalizer,
+        "__staple_gc_finalize_closure_",
+    );
 
     for source in [
         concat!(

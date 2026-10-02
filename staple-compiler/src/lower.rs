@@ -14007,7 +14007,95 @@ pub struct LoweredModule {
     typed: Box<TypedModule>,
 }
 
+/// Catalog families used by integration tests without exposing lowering arenas.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub enum PlannedArtifactFamily {
+    StructuralDebug,
+    StructuralIndex,
+    StructuralMutateIndex,
+    StructuralIntoIterator,
+    StructuralIterator,
+    GcFinalizer,
+    GcCellFinalizer,
+    GcClosureFinalizer,
+    GcBufferFinalizer,
+    ExternAdapter,
+    CoroutineCodes,
+}
+
 impl LoweredModule {
+    /// Planned emitted names for every instance of a named source template.
+    /// A bare source name also selects module-qualified templates.
+    #[doc(hidden)]
+    pub fn planned_instance_names(&self, template: &str) -> Vec<String> {
+        self.program
+            .instances
+            .iter()
+            .filter_map(|(_, instance)| {
+                self.program
+                    .functions
+                    .get(instance.template)
+                    .filter(|function| {
+                        function.name == template
+                            || function.name.ends_with(&format!(".{template}"))
+                    })
+                    .map(|_| instance.name.clone())
+            })
+            .collect()
+    }
+
+    /// Planned emitted names selected by the catalog's artifact keys.
+    /// Coroutine artifacts own two definitions, so both pair names are returned.
+    #[doc(hidden)]
+    pub fn planned_artifact_names(&self, family: PlannedArtifactFamily) -> Vec<String> {
+        use crate::specialization::{ArtifactRequestKey, GcFinalizerKey};
+        use PlannedArtifactFamily::*;
+        let mut names = Vec::new();
+        for (_, artifact) in self.program.artifacts.iter() {
+            let Some(key) = self.program.specializations.artifact(artifact.ordinal) else {
+                continue;
+            };
+            let selected = match (family, key) {
+                (StructuralDebug, ArtifactRequestKey::StructuralMethod(method)) => {
+                    method.structural == StructuralTraitMethod::Debug
+                }
+                (StructuralIndex, ArtifactRequestKey::StructuralMethod(method)) => {
+                    method.structural == StructuralTraitMethod::Index
+                }
+                (StructuralMutateIndex, ArtifactRequestKey::StructuralMethod(method)) => {
+                    method.structural == StructuralTraitMethod::MutateIndex
+                }
+                (StructuralIntoIterator, ArtifactRequestKey::StructuralMethod(method)) => {
+                    method.structural == StructuralTraitMethod::IntoIterator
+                }
+                (StructuralIterator, ArtifactRequestKey::StructuralMethod(method)) => {
+                    method.structural == StructuralTraitMethod::Iterator
+                }
+                (GcFinalizer, ArtifactRequestKey::GcFinalizer(_))
+                | (GcCellFinalizer, ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(_)))
+                | (
+                    GcClosureFinalizer,
+                    ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment { .. }),
+                )
+                | (GcBufferFinalizer, ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(_)))
+                | (ExternAdapter, ArtifactRequestKey::ExternAdapter(_))
+                | (CoroutineCodes, ArtifactRequestKey::CoroutineCodes(_)) => true,
+                _ => false,
+            };
+            if !selected {
+                continue;
+            }
+            if matches!(key, ArtifactRequestKey::CoroutineCodes(_)) {
+                names.push(format!("{}_resume", artifact.name));
+                names.push(format!("{}_cleanup", artifact.name));
+            } else {
+                names.push(artifact.name.clone());
+            }
+        }
+        names
+    }
+
     pub(crate) fn typed(&self) -> &TypedModule {
         self.typed.as_ref()
     }

@@ -45,7 +45,7 @@ impl Fixture {
         fs::write(path, source).expect("module should be written");
     }
 
-    fn compile(&self) -> Result<String, String> {
+    fn lower(&self) -> Result<staple_compiler::LoweredModule, String> {
         let program = ProgramLoader::new()
             .with_standard_library_root(
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -60,7 +60,11 @@ impl Fixture {
         let typed = TypeChecker::new()
             .check(resolved)
             .map_err(format_diagnostics)?;
-        let lowered = Lowerer::new().lower(&typed).map_err(format_diagnostics)?;
+        Lowerer::new().lower(&typed).map_err(format_diagnostics)
+    }
+
+    fn compile(&self) -> Result<String, String> {
+        let lowered = self.lower()?;
         let context = Context::create();
         CodeGenerator::new(&context)
             .compile_module(&lowered)
@@ -1443,10 +1447,25 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
             "let text: String = identity \"hello\"\n",
         ),
     );
-    let llvm = fixture
-        .compile()
+    let lowered = fixture
+        .lower()
+        .expect("public generic functions should lower");
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&lowered)
         .expect("public generic functions should specialize");
-    assert!(llvm.matches("identity__").count() >= 2);
+    if cfg!(feature = "lowered-emitter") {
+        let names = lowered.planned_instance_names("identity");
+        assert!(names.len() >= 2);
+        for name in names {
+            assert!(
+                llvm.lines()
+                    .any(|line| line.starts_with("define ") && line.contains(&format!("@{name}(")))
+            );
+        }
+    } else {
+        assert!(llvm.matches("identity__").count() >= 2);
+    }
 
     fixture.write(
         "main.sta",
