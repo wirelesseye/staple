@@ -349,13 +349,15 @@ The full suite passes 1301 tests. The legacy IR sweep against the pre-fix binary
 
 ## Stage 5.9 - Full-Suite Parity and New-Emitter Census
 
+> **Plan:** [STAGE_5_9_FULL_SUITE_PARITY_PLAN.md](STAGE_5_9_FULL_SUITE_PARITY_PLAN.md). Its decisions P1–P6 and its Step 9 gate supersede the **Gate** paragraph below. The baseline is 30 failures under `--features staple-compiler/lowered-emitter`: 14 real emission bugs across 8 causes the corpus never reached, and 16 assertions on legacy-only spellings.
+
 - Run the **entire** workspace suite with `--features staple-compiler/lowered-emitter`. Fix every failure in lowering or the new emitter, never by consulting `TypedModule`.
 - Update the IR-text assertions that name legacy-only symbols to planned-name prefixes (D2). These are the `tests/compiler.rs` assertions on `__staple_structural_Debug`, `__staple_gc_finalize_closure_`, `__staple_coro_`, and similar. Where the IR shape legitimately differs because of D5, state the reason in the test.
 - Add a permanent **new-emitter census**: every function the new module defines outside the runtime modules maps to exactly one catalog instance or artifact (or to `main`/the UTF-8 validator), and every catalog entry is defined or explained (inlined drop glue, coroutine body thunks inside `resume`, coroutine-body instances). This replaces the Stage 4.7 legacy census.
 - Remove every "not implemented yet" diagnostic arm. `rg "not implemented yet" codegen/lowered` is empty.
 - Run the differential harness over the full union corpus plus the standard library. Require identical LLVM function types for every mapped function and identical run behavior for every CLI run test.
 
-**Gate:** The full suite passes on both emitters. The census passes. The differential harness passes with only D5-listed differences.
+**Gate (superseded by the plan's Step 9; kept for history):** The full suite passes on both emitters. The census passes. The differential harness passes with only D5-listed differences.
 
 ## Stage 5.10 - Cutover and Removal
 
