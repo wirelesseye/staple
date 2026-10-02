@@ -22,30 +22,22 @@ fn compile(source: &str, emitter: Emitter) -> Result<String, Vec<staple_syntax::
     CodeGenerator::with_emitter(&context, emitter).compile_module(&lowered)
 }
 
-/// Stage 5.8 Step 7 closed every construct family, so the selector now
-/// compiles the same reactive body under both emitters; the lowered module is
-/// named from the catalog rather than legacy's syntax keys.
+/// The default emitter emits the empty entry harness and a reactive body.
 #[test]
-fn selector_preserves_legacy_and_emits_reactive_body() {
-    let source = concat!(
+fn default_emitter_emits_the_entry_harness_and_reactive_body() {
+    let context = Context::create();
+    let empty = prepare("");
+    let llvm = CodeGenerator::new(&context).compile_module(&empty).unwrap();
+    assert!(llvm.contains("define i32 @main()"));
+    let reactive = prepare(concat!(
         "use std.coroutine.*\n",
         "def first: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
         "let a = first ()\n",
-    );
-    let llvm = compile("", Emitter::Legacy).unwrap();
-    assert!(llvm.contains("define i32 @main()"));
-    compile("", Emitter::Lowered).expect("the empty program compiles strictly");
-
-    let legacy = compile(source, Emitter::Legacy).expect("legacy reactive body");
-    let lowered = compile(source, Emitter::Lowered).expect("lowered reactive body");
-    assert!(
-        legacy.contains("__staple_reaction_create") && lowered.contains("__staple_reaction_create"),
-        "both emitters emit the reaction runtime call"
-    );
-    assert_ne!(
-        legacy, lowered,
-        "the selector routes through the catalog-named lowered emitter"
-    );
+    ));
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&reactive)
+        .unwrap();
+    assert!(llvm.contains("call ptr @__staple_reaction_create"));
 }
 
 /// F8 held while bodies could still fail. Every construct family is now

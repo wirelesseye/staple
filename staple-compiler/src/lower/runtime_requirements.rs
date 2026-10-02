@@ -442,7 +442,10 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                         .record(RuntimeRequirement::InteriorNulCheck);
                 }
                 IntrinsicFunction::StringAdd => self.gc(),
-                IntrinsicFunction::BufferWithCapacity | IntrinsicFunction::BufferClone => self.gc(),
+                IntrinsicFunction::BufferWithCapacity
+                | IntrinsicFunction::BufferClone
+                | IntrinsicFunction::BufferGet
+                | IntrinsicFunction::BufferFreeze => self.gc(),
                 IntrinsicFunction::CoroutineBlockOn
                 | IntrinsicFunction::SchedulerCreate
                 | IntrinsicFunction::TaskScope

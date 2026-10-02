@@ -1454,17 +1454,13 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
     let llvm = CodeGenerator::new(&context)
         .compile_module(&lowered)
         .expect("public generic functions should specialize");
-    if cfg!(feature = "lowered-emitter") {
-        let names = lowered.planned_instance_names("identity");
-        assert!(names.len() >= 2);
-        for name in names {
-            assert!(
-                llvm.lines()
-                    .any(|line| line.starts_with("define ") && line.contains(&format!("@{name}(")))
-            );
-        }
-    } else {
-        assert!(llvm.matches("identity__").count() >= 2);
+    let names = lowered.planned_instance_names("identity");
+    assert!(names.len() >= 2);
+    for name in names {
+        assert!(
+            llvm.lines()
+                .any(|line| line.starts_with("define ") && line.contains(&format!("@{name}(")))
+        );
     }
 
     fixture.write(

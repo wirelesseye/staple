@@ -423,14 +423,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
 impl<'context> CodeGenerator<'context> {
     pub fn new(context: &'context inkwell::context::Context) -> Self {
-        Self::with_emitter(
-            context,
-            if cfg!(feature = "lowered-emitter") {
-                Emitter::Lowered
-            } else {
-                Emitter::Legacy
-            },
-        )
+        Self::with_emitter(context, Emitter::Lowered)
     }
 
     #[doc(hidden)]
@@ -517,7 +510,7 @@ impl<'context> CodeGenerator<'context> {
                     .unwrap_or_else(|diagnostics| {
                         panic!("shadow lowered emission failed for a legacy-compiled program: {diagnostics:?}")
                     });
-                let lowered_emissions = snapshot_lowered(&lowered);
+                let lowered_emissions = snapshot_lowered(&lowered, module);
                 self.shadow_compare(module, &emissions, &lowered_emissions)?;
                 Ok(llvm)
             }
@@ -525,7 +518,7 @@ impl<'context> CodeGenerator<'context> {
                 let llvm =
                     lowered::LoweredEmitter::new(self.context, module.program(), target_machine)
                         .compile(target_machine)?;
-                let lowered_emissions = snapshot_lowered(&llvm);
+                let lowered_emissions = snapshot_lowered(&llvm, module);
                 let emissions = match legacy_module_with_emissions(&scratch, module, target_machine)
                 {
                     Ok((_, emissions)) => emissions,
@@ -645,14 +638,19 @@ fn legacy_module_with_emissions<'context>(
             .collect(),
         runtime_surfaces: {
             let mut surfaces: Vec<String> = Vec::new();
-            for (symbol, _) in referenced_runtime_symbols(&emitter) {
+            for (symbol, _) in
+                referenced_runtime_symbols(&emitter.llvm_module, &emitter.legacy_runtime_internal)
+            {
                 if !surfaces.contains(&symbol) {
                     surfaces.push(symbol);
                 }
             }
             surfaces
         },
-        runtime_references: referenced_runtime_symbols(&emitter),
+        runtime_references: referenced_runtime_symbols(
+            &emitter.llvm_module,
+            &emitter.legacy_runtime_internal,
+        ),
         emitted_functions: emitter
             .llvm_module
             .get_functions()
@@ -691,6 +689,9 @@ pub(crate) struct LoweredEmissions {
     pub(crate) function_linkages: HashMap<String, bool>,
     /// Every function the module defines.
     pub(crate) defined_functions: HashSet<String>,
+    /// Ground truth references outside runtime internals and the entry harness.
+    #[cfg(test)]
+    pub(crate) runtime_references: Vec<(String, String)>,
     /// The whole module's IR text, for body-level comparison.
     pub(crate) module_ir: String,
 }
@@ -703,11 +704,11 @@ pub(crate) fn lowered_emissions(
     let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
     lowered::LoweredEmitter::new(context, module.program(), &target_machine)
         .compile(&target_machine)
-        .map(|llvm_module| snapshot_lowered(&llvm_module))
+        .map(|llvm_module| snapshot_lowered(&llvm_module, module))
 }
 
 #[cfg(any(test, feature = "differential-shadow"))]
-fn snapshot_lowered(llvm_module: &LlvmModule<'_>) -> LoweredEmissions {
+fn snapshot_lowered(llvm_module: &LlvmModule<'_>, _module: &LoweredModule) -> LoweredEmissions {
     LoweredEmissions {
         function_types: llvm_module
             .get_functions()
@@ -736,6 +737,32 @@ fn snapshot_lowered(llvm_module: &LlvmModule<'_>) -> LoweredEmissions {
             .filter(|function| function.count_basic_blocks() > 0)
             .filter_map(|function| function.get_name().to_str().ok().map(str::to_owned))
             .collect(),
+        #[cfg(test)]
+        runtime_references: {
+            let view = _module.program();
+            let mut catalog = view
+                .instances()
+                .filter_map(|(id, _)| view.planned_name(id).map(str::to_owned))
+                .collect::<HashSet<_>>();
+            for (_, artifact) in view.artifacts() {
+                if let Some((resume, cleanup)) = view.planned_coroutine_pair_names(artifact.ordinal)
+                {
+                    catalog.extend([resume, cleanup]);
+                } else if let Some(name) = view.planned_artifact_name(artifact.ordinal) {
+                    catalog.insert(name.to_owned());
+                }
+            }
+            catalog.extend(
+                view.initializers()
+                    .map(|(_, initializer)| initializer.name.clone()),
+            );
+            let excluded = llvm_module
+                .get_functions()
+                .filter_map(|function| function.get_name().to_str().ok().map(str::to_owned))
+                .filter(|name| !catalog.contains(name))
+                .collect();
+            referenced_runtime_symbols(llvm_module, &excluded)
+        },
         module_ir: llvm_module.print_to_string().to_string(),
     }
 }
@@ -746,7 +773,10 @@ fn snapshot_lowered(llvm_module: &LlvmModule<'_>) -> LoweredEmissions {
 /// expression or global initializer) counts, conservatively, under an empty
 /// function name.
 #[cfg(any(test, feature = "differential-shadow"))]
-fn referenced_runtime_symbols(emitter: &ModuleEmitter<'_, '_>) -> Vec<(String, String)> {
+fn referenced_runtime_symbols(
+    llvm_module: &LlvmModule<'_>,
+    excluded_functions: &HashSet<String>,
+) -> Vec<(String, String)> {
     use inkwell::values::{AnyValueEnum, InstructionValue};
 
     fn user_instruction(user: AnyValueEnum<'_>) -> Option<InstructionValue<'_>> {
@@ -765,7 +795,7 @@ fn referenced_runtime_symbols(emitter: &ModuleEmitter<'_, '_>) -> Vec<(String, S
     }
 
     let mut references = Vec::new();
-    for function in emitter.llvm_module.get_functions() {
+    for function in llvm_module.get_functions() {
         let Ok(name) = function.get_name().to_str() else {
             continue;
         };
@@ -782,9 +812,9 @@ fn referenced_runtime_symbols(emitter: &ModuleEmitter<'_, '_>) -> Vec<(String, S
                 .and_then(|instruction| instruction.get_parent())
                 .and_then(|block| block.get_parent())
                 .and_then(|parent| parent.get_name().to_str().ok().map(str::to_string));
-            let excluded = parent.as_deref().is_some_and(|parent| {
-                parent == "main" || emitter.legacy_runtime_internal.contains(parent)
-            });
+            let excluded = parent
+                .as_deref()
+                .is_some_and(|parent| parent == "main" || excluded_functions.contains(parent));
             if !excluded {
                 let reference = (name.to_string(), parent.unwrap_or_default());
                 if !references.contains(&reference) {

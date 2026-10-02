@@ -479,7 +479,7 @@ mod tests {
             .join("stdlib")
     }
 
-    fn lowered(source: &str) -> LoweredModule {
+    fn checked(source: &str) -> crate::TypedModule {
         let root = standard_library_root();
         let program = ProgramLoader::new()
             .with_standard_library_root(&root)
@@ -491,9 +491,7 @@ mod tests {
         let module = TypeChecker::new()
             .check(resolved)
             .expect("test source should type check");
-        Lowerer::new()
-            .lower(&module)
-            .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}"))
+        module
     }
 
     /// Every concrete type an instance body's signature and bindings name:
@@ -606,8 +604,8 @@ mod tests {
                 "}\n",
             ),
         ] {
-            let module = lowered(source);
-            let typed = module.typed();
+            let typed = checked(source);
+            let module = Lowerer::new().lower(&typed).expect("source should lower");
             let context = LayoutContext::new(module.program());
             let types = signature_types(&module);
             assert!(!types.is_empty(), "the fixture must emit concrete types");
