@@ -525,6 +525,7 @@ impl<'context> CodeGenerator<'context> {
                 let llvm =
                     lowered::LoweredEmitter::new(self.context, module.program(), target_machine)
                         .compile(target_machine)?;
+                let lowered_emissions = snapshot_lowered(&llvm);
                 let emissions = match legacy_module_with_emissions(&scratch, module, target_machine)
                 {
                     Ok((_, emissions)) => emissions,
@@ -539,10 +540,14 @@ impl<'context> CodeGenerator<'context> {
                             "shadow legacy rejection needs a D5 explanation: {diagnostics:?}"
                         );
                         differential::record_shadow_rejection();
+                        crate::lower::census::assert_catalog_census(
+                            "differential-shadow",
+                            module,
+                            &lowered_emissions,
+                        );
                         return Ok(llvm);
                     }
                 };
-                let lowered_emissions = snapshot_lowered(&llvm);
                 self.shadow_compare(module, &emissions, &lowered_emissions)?;
                 Ok(llvm)
             }
@@ -660,11 +665,11 @@ fn legacy_module_with_emissions<'context>(
     Ok((emitter.backend.llvm_module, emissions))
 }
 
-/// Test-only Stage 5.3 declaration snapshot. This stops before body emission
-/// so unported expression families do not hide catalog signature regressions.
-/// Each entry is the LLVM type and whether the declaration is internal, so the
-/// comparison covers linkage as well as the ABI (F2).
-#[cfg(test)]
+/// Declaration snapshot: the LLVM type and linkage the catalog signatures
+/// compile to, taken before any body is emitted. Each entry is the LLVM type
+/// and whether the declaration is internal, so the comparison covers linkage
+/// as well as the ABI (F2).
+#[cfg(any(test, feature = "differential-shadow"))]
 pub(crate) fn lowered_catalog_types(
     context: &inkwell::context::Context,
     module: &LoweredModule,
@@ -678,6 +683,7 @@ pub(crate) fn lowered_catalog_types(
 /// Declaration census input: the lowered module's function types, linkage,
 /// and defined-function set.
 #[cfg(any(test, feature = "differential-shadow"))]
+#[derive(Clone)]
 pub(crate) struct LoweredEmissions {
     /// LLVM function types keyed by final planned name.
     pub(crate) function_types: HashMap<String, String>,

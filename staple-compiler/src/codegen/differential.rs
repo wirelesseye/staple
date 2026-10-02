@@ -2312,6 +2312,7 @@ mod tests {
                 // lowered module's structure is asserted. If legacy did
                 // compile one, the second artifact must be census-explained.
                 assert_distinct_d5_artifacts(program, &lowered);
+                crate::lower::census::assert_catalog_census(program.name, &lowered, &emitted);
                 if let Ok(legacy) = legacy {
                     let mapping =
                         assert_declaration_parity(program.name, &lowered, &legacy, &emitted);
@@ -2374,6 +2375,63 @@ mod tests {
         assert!(
             compared > 0,
             "the corpus must have emitted functions to compare"
+        );
+    }
+
+    /// The legacy-free catalog census rejects an unplanned function, a
+    /// missing catalog function, and a mistyped declaration.
+    #[test]
+    fn catalog_census_rejects_corrupted_emissions() {
+        use crate::lower::census::assert_catalog_census;
+        let lowered = lower(
+            "def twice: I32 -> I32 = value => value + value\nlet answer = twice 21\n",
+            &workspace_root(),
+        );
+        let context = Context::create();
+        let emitted = crate::codegen::lowered_emissions(&context, &lowered).expect("strict");
+        assert_catalog_census("clean", &lowered, &emitted);
+        let name = lowered
+            .program()
+            .instances()
+            .find_map(|(id, instance)| {
+                (instance.body.is_some())
+                    .then(|| lowered.program().planned_name(id).map(str::to_owned))
+                    .flatten()
+                    .filter(|name| emitted.defined_functions.contains(name))
+            })
+            .expect("a defined instance");
+        let corrupt = |mutate: &dyn Fn(&mut crate::codegen::LoweredEmissions)| {
+            let mut copy = emitted.clone();
+            mutate(&mut copy);
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                assert_catalog_census("corrupt", &lowered, &copy)
+            }))
+            .expect_err("a corrupted module must fail the census")
+        };
+        let message = |payload: Box<dyn std::any::Any + Send>| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert!(
+            message(corrupt(&|copy| {
+                copy.defined_functions.insert("unplanned".to_owned());
+            }))
+            .contains("no catalog entry plans")
+        );
+        assert!(
+            message(corrupt(&|copy| {
+                copy.defined_functions.remove(&name);
+            }))
+            .contains("neither defined nor explained")
+        );
+        assert!(
+            message(corrupt(&|copy| {
+                copy.function_types
+                    .insert(name.clone(), "void ()".to_owned());
+            }))
+            .contains("catalog signature")
         );
     }
 

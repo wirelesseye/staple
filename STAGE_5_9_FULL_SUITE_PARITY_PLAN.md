@@ -242,3 +242,17 @@ Three reduced corpus entries (`local_recursive_call_state_slot`, `captured_mut_f
 `compile_lowered_partial`, `LoweredEmissionReport`, the stub records and catalog entries, the emitter's partial/stub paths (`compile_partial`, the `*_partial` body loops, `emit_artifact_stubs`, `emit_stub_body`, `detach_uses`), the test-only blocker census (`stage58_blockers`), `FAMILY_OWNERS`, `COMPLETED_SUBSTAGES`, `family_owner`, and the reached-family and stub-total reporting are deleted. The `MayBeBlocked` expectation is gone: every corpus entry is `MustRun`, `LoweredOnly`, or `CompileOnly`, and the CLI harness (renamed `stage_5_3_cli_differential_harness_compares_emitters`) panics on a strict-emission failure, including for `CompileOnly` entries. The in-process harness, the census tests, and the focus-emission check emit strictly (`lowered_emissions`) and compare every mapped body. The two partial-mode tests in `tests/lowered_emitter.rs` became strict-emission tests that also check no trap placeholder body exists.
 
 The eleven remaining diagnostic closures now report `internal invariant violated: <record> is missing or malformed`. The indexed-place invariant keeps its dedicated check, so a borrowed argument never silently materializes a copy. `rg "not implemented yet" staple-compiler/src/codegen/lowered` is empty. Default: **1317/1317 pass**; lowered: **1317/1317 pass**. Both workspace checks (including the shadow feature) and formatting pass. Step 7 is next.
+
+### Step 7 — the new-emitter census (complete)
+
+`assert_catalog_census` (in `lower/census.rs`) needs only the catalog and the emitted module:
+
+- **Every defined function maps to exactly one catalog entry.** Each non-runtime function the module defines is the planned name of one instance, artifact function (both names of a coroutine pair), or initializer, or is `main` or `__staple_is_valid_utf8`. Planned names are also checked for uniqueness across entries.
+- **Every catalog entry is defined or explained.** The explanations are: drop glue (inlined, D3); a coroutine body-thunk instance (emitted inside its pair's `resume`, so it has no function); an instance without a lowered body (declared but bodiless, so it must not be defined).
+- **Declared types and linkage.** Each catalog function's emitted LLVM type and linkage equal the declaration its catalog signature compiles to (`lowered_catalog_types`, now also available under the shadow feature).
+
+It runs from `assert_declaration_parity` (so beside the legacy census in every corpus, census, and shadow program), for `LoweredOnly` fixtures, and for shadow programs legacy rejects under D5. `catalog_census_rejects_corrupted_emissions` shows it rejects an unplanned function, a missing catalog function, and a mistyped declaration. No new explanation categories were needed.
+
+Gates: default **1318/1318**, lowered **1318/1318**, and the shadow run (lowered default) **1318/1318**, now covering **589 programs and 166552 bodies** with the same 8 D5-explained legacy rejections. Step 8 is next.
+
+The build directory had grown to 26 GB across feature combinations and filled the disk mid-run. I removed `target/` contents and rebuilt with `CARGO_INCREMENTAL=0`; no source was affected.
