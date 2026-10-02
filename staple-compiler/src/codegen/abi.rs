@@ -1,9 +1,9 @@
 //! Stage 5.2: the backend-local calling-convention layer.
 //!
 //! These functions build the LLVM function types and argument classifications
-//! both emitters share. They are parameterized by [`LayoutContext`] for the
+//! the emitter uses. They are parameterized by [`LayoutContext`] for the
 //! `Copy` decisions that decide indirect parameter slots; they never consult
-//! the checker or the `TypedModule`.
+//! checked-program queries.
 
 use inkwell::{AddressSpace, types::BasicTypeEnum};
 

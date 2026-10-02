@@ -1,4 +1,4 @@
-//! Parallel LLVM emitter over the read-only lowered program view.
+//! LLVM emitter over the read-only lowered program view.
 
 mod coroutines;
 mod reactive;

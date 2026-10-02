@@ -38,6 +38,10 @@ The legacy declaration census, alias/fallback mapping and specialization matcher
 
 `ModuleEmitter`, its AST/checked-program emission state and helper functions, `Emitter`, `with_emitter`, and both `lowered-emitter` features are deleted. `CodeGenerator` directly invokes the only emitter. Four newly unused shared helpers (`add_finalizer_function`, `build_fn_type`, `coroutine_resource_bundle_type`, `variadic_argument_count_matches`) and unused imports are deleted. The `lowered/` directory remains: it groups emission away from the backend helper layers, and a rename would add no useful boundary change. No warning is suppressed. The only new warning is the checker query `drop_method_for`, retained for the explicitly deferred Stage 6 inventory because tests still call it. Codegen itself has no warnings. The single default suite passes 1301 tests (one ignored helper skipped); all 86 four-run R1 paths match; workspace check, formatting and diff checks pass. Logs: `/private/tmp/staple-5-10-step5-{default,ir}.log`. Step 6 is next.
 
+### Step 6 — complete
+
+Lowering's output no longer carries or clones `TypedModule`; its private bridge accessor is gone. The layout agreement test locally retains its checked input and passes. Historical codegen comments are reworded, and the mechanical forbidden-symbol/AST-import check is clean. Debug formatting remains only in test-side D5 owner diagnostics, not in emitted symbol names. The 77-method Stage 6 inventory below records surviving callers and the exact unused/test-only queries without deleting them. The default suite passes 1301 tests (one ignored helper skipped), all 86 four-run R1 paths match, and workspace check, formatting and diff checks pass. Codegen has no warnings; the one checker-only warning is recorded for Stage 6. Logs: `/private/tmp/staple-5-10-step6-{default,ir}.log`. Step 7 is next.
+
 ### Step 2 — test verdicts (R2)
 
 The audit covers the original 31 entries (including the shared compiler assertion helper) and five additional tests found in source: **36 entries**. Verdicts are recorded before deletions. `convert (Step 3)` means the retained corpus harness is renamed and converted together with its shared definitions in Step 3.
@@ -246,3 +250,87 @@ Step 1 → Step 2 → Step 3 → Step 4 → Step 5 → Step 6 → Step 7 → Ste
 - **Step 2 is the only step needing judgment** (the R2 verdicts). Every later step is mechanical under R1.
 - **Highest risk:** a transition test whose fact nothing else checks. That is why Step 2 inspects drop and ownership positions explicitly.
 - **Disk.** Steps 1–2 build up to three feature trees, but after Step 5 a single configuration remains. Delete the scratch reference build at the end of Step 8.
+
+## Stage 6 handoff: checked-program method inventory
+
+All **77** public or crate-visible methods declared in `impl TypedModule` are listed below. Each live row gives a representative surviving caller (line numbers at Step 6); overloaded spellings such as `syntax`, `symbol_for`, and `function_by_id` were checked against the actual receiver. No production emission reads these queries; the layout agreement test keeps its own checker input. Methods remain in place for Stage 6. `drop_method_for` lost its sole production caller with legacy codegen and retains five lowering-test calls; Stage 6 can move it behind `cfg(test)` or replace those tests before removing it. `state_accesses_of_expression` has no callers and was already unused before cutover. `syntax`, `state_accesses_of_function`, `is_io_type`, and `is_task_type` retain only test uses (`is_io_type`/`is_task_type` already have `cfg(test)`). Other methods retain production use, including internal checker queries. The existing broad lowering-schema dead-code allowance is outside this cutover and remains a Stage 6 cleanup candidate; no allowance is added here.
+
+| Method | Surviving use | Representative evidence |
+| --- | --- | --- |
+| `coroutine_plan` | lowering | `staple-compiler/src/lower.rs:3298` |
+| `resolved` | lowering | `staple-compiler/src/lower.rs:2886` |
+| `has_mutable_storage` | lowering | `staple-compiler/src/lower.rs:3179` |
+| `is_mutated_parameter` | lowering | `staple-compiler/src/lower.rs:3213` |
+| `is_move_parameter` | lowering | `staple-compiler/src/lower.rs:3214` |
+| `syntax` | tests only | `staple-compiler/tests/compiler.rs:250` |
+| `functions` | lowering | `staple-compiler/src/lower.rs:3097` |
+| `implicit_thunks` | lowering | `staple-compiler/src/lower.rs:13563` |
+| `implicit_thunks_in_id_order` | lowering | `staple-compiler/src/lower.rs:3099` |
+| `derived_evaluators_in_symbol_order` | lowering | `staple-compiler/src/lower.rs:3236` |
+| `trait_method_types_in_id_order` | lowering | `staple-compiler/src/lower.rs:2939` |
+| `trait_parameter_arguments_in_id_order` | lowering | `staple-compiler/src/lower.rs:2934` |
+| `trait_functional_dependencies` | lowering | `staple-compiler/src/lower.rs:2994` |
+| `checked_trait_implementations` | lowering | `staple-compiler/src/lower.rs:3036` |
+| `type_representation` | lowering | `staple-compiler/src/lower.rs:2918` |
+| `type_parameter_templates` | lowering | `staple-compiler/src/lower.rs:2917` |
+| `trait_prerequisites` | lowering | `staple-compiler/src/lower.rs:2993` |
+| `semantic_ids` | lowering | `staple-compiler/src/lower.rs:2843` |
+| `implicit_thunk_for` | lowering | `staple-compiler/src/lower.rs:4259` |
+| `is_derived_symbol` | lowering | `staple-compiler/src/lower.rs:3177` |
+| `derived_evaluator` | lowering | `staple-compiler/src/lower.rs:4145` |
+| `function_by_id` | frontend analysis/diagnostics | `staple-compiler/src/ownership.rs:649` |
+| `symbol_for` | lowering | `staple-compiler/src/lower.rs:3733` |
+| `function_for` | lowering | `staple-compiler/src/lower.rs:6540` |
+| `function_for_symbol` | lowering | `staple-compiler/src/lower.rs:3172` |
+| `type_of_expression` | lowering | `staple-compiler/src/lower.rs:4271` |
+| `product_default_plan` | lowering | `staple-compiler/src/lower.rs:5475` |
+| `curried_default_plan` | lowering | `staple-compiler/src/lower.rs:6309` |
+| `juxtaposed_call_plan` | lowering | `staple-compiler/src/lower.rs:6287` |
+| `companion_type_of_expression` | LSP/tooling | `staple-cli/src/lsp/completion.rs:680` |
+| `effects_of_expression` | lowering | `staple-compiler/src/lower.rs:4908` |
+| `state_accesses_of_expression` | unused | No call sites; already unused before cutover (legacy had no call). |
+| `state_accesses_of_function` | tests only | `staple-compiler/tests/compiler.rs:1011` |
+| `resource_for_expression` | lowering | `staple-compiler/src/lower.rs:4039` |
+| `coercion_for` | lowering | `staple-compiler/src/lower.rs:4911` |
+| `propagation_for` | lowering | `staple-compiler/src/lower.rs:3785` |
+| `match_for` | lowering | `staple-compiler/src/lower.rs:6151` |
+| `string_formatting` | lowering | `staple-compiler/src/lower.rs:2873` |
+| `logical_for` | lowering | `staple-compiler/src/lower.rs:5860` |
+| `access_for` | lowering | `staple-compiler/src/lower.rs:4476` |
+| `type_of_pattern` | lowering | `staple-compiler/src/lower.rs:4708` |
+| `string_representation` | lowering | `staple-compiler/src/lower.rs:2870` |
+| `is_copy_type` | checker query internals | `staple-compiler/src/typecheck.rs:1687` |
+| `is_copy_in_function` | lowering | `staple-compiler/src/lower.rs:3981` |
+| `is_io_type` | tests only | `staple-compiler/src/codegen/layout.rs:596` |
+| `is_reactive_type` | lowering | `staple-compiler/src/lower.rs:3918` |
+| `is_coroutine_type` | checker query internals | `staple-compiler/src/typecheck.rs:1651` |
+| `is_task_type` | tests only | `staple-compiler/src/codegen/layout.rs:605` |
+| `is_scheduler_type` | checker query internals | `staple-compiler/src/typecheck.rs:1652` |
+| `is_tasks_type` | lowering | `staple-compiler/src/lower.rs:3920` |
+| `is_wait_type` | frontend analysis/diagnostics | `staple-compiler/src/coroutine_lower.rs:123` |
+| `is_resolver_type` | checker query internals | `staple-compiler/src/typecheck.rs:1654` |
+| `is_completion_token_type` | checker query internals | `staple-compiler/src/typecheck.rs:1655` |
+| `wait_result` | lowering | `staple-compiler/src/lower.rs:5148` |
+| `coroutine_parts` | lowering | `staple-compiler/src/lower.rs:3317` |
+| `task_result` | lowering | `staple-compiler/src/lower.rs:5140` |
+| `io_resource` | lowering | `staple-compiler/src/lower.rs:2868` |
+| `reactive_resource` | lowering | `staple-compiler/src/lower.rs:2869` |
+| `entry_reactive_required` | lowering | `staple-compiler/src/lower.rs:2871` |
+| `is_drop_method` | frontend analysis/diagnostics | `staple-compiler/src/ownership.rs:192` |
+| `type_needs_drop` | lowering | `staple-compiler/src/lower.rs:3836` |
+| `drop_method_for` | tests only; production now unused | `staple-compiler/src/lower/cleanup_artifacts.rs:2192` |
+| `structural_trait_method` | lowering | `staple-compiler/src/lower.rs:6364` |
+| `resolve_trait_obligation` | checker query internals | `staple-compiler/src/typecheck.rs:1689` |
+| `moved_symbols` | lowering | `staple-compiler/src/lower.rs:4927` |
+| `is_non_owning_symbol` | lowering | `staple-compiler/src/lower.rs:3210` |
+| `is_borrowed_capture` | lowering | `staple-compiler/src/lower.rs:3413` |
+| `type_of_symbol` | lowering | `staple-compiler/src/lower.rs:3194` |
+| `declared_type_of_symbol` | lowering | `staple-compiler/src/lower.rs:3166` |
+| `companion_type_of_symbol` | LSP/tooling | `staple-cli/src/lsp/completion.rs:422` |
+| `is_companion_method` | LSP/tooling | `staple-cli/src/lsp/completion.rs:426` |
+| `type_of_function` | lowering | `staple-compiler/src/lower.rs:3362` |
+| `bounds_of_function` | lowering | `staple-compiler/src/lower.rs:3425` |
+| `trait_dispatch_for` | lowering | `staple-compiler/src/lower.rs:3822` |
+| `trait_impl_method` | lowering | `staple-compiler/src/lower.rs:6358` |
+| `complete_trait_arguments` | lowering | `staple-compiler/src/lower.rs:6027` |
+| `instantiated_trait_method_type` | lowering | `staple-compiler/src/lower.rs:6032` |

@@ -1,8 +1,8 @@
 //! Stage 5.2: the backend-local pure-IR layer.
 //!
-//! Small IR constructs both emitters share: GC allocation, finalizer and root
+//! Small IR constructs the emitter uses: GC allocation, finalizer and root
 //! registration, traps, unit values, and the byte helpers the UTF-8 validator
-//! uses. Nothing here consults the checker or the `TypedModule`.
+//! uses. Nothing here consults checked-program queries.
 
 use inkwell::{
     AddressSpace,
@@ -529,7 +529,7 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     /// Legacy's float binary builder with its SSA names
     /// (`{type}.add`/`.subtract`/`.multiply`/`.divide`). Stage 5.4 Step 2:
-    /// both emitters share it, so the lower emitter's `FloatBinary` output is
+    /// the emitter uses it, so the lower emitter's `FloatBinary` output is
     /// identical to legacy's.
     pub(crate) fn build_float_binary(
         &self,

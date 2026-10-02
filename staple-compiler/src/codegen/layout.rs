@@ -4,10 +4,9 @@
 //! type without consulting the checker: integer, float, product, sum, closure,
 //! slice, buffer-header, coroutine-frame, task-record, and completion-record
 //! layouts, plus the fixed field indices of the runtime records these types
-//! describe. Both the legacy emitter and the Stage 5 lowered emitter share it.
+//! describe. The emitter reads only recorded lowering decisions.
 //!
-//! [`LayoutContext`] replaces the `TypedModule` predicates the legacy
-//! `compile_type` used. It is built from the lowered program's semantic IDs
+//! [`LayoutContext`] is built from the lowered program's semantic IDs
 //! (the type catalog) and `runtime_opaque_kind`, so layout decisions have one
 //! source: the lowering records, never the checker.
 
@@ -461,21 +460,6 @@ mod tests {
             .join("stdlib")
     }
 
-    fn checked(source: &str) -> crate::TypedModule {
-        let root = standard_library_root();
-        let program = ProgramLoader::new()
-            .with_standard_library_root(&root)
-            .load_source(source, &root)
-            .expect("test source should load");
-        let resolved = NameResolver::new()
-            .resolve_program(program)
-            .expect("test source should resolve");
-        let module = TypeChecker::new()
-            .check(resolved)
-            .expect("test source should type check");
-        module
-    }
-
     /// Every concrete type an instance body's signature and bindings name:
     /// result, parameters, resources, captures, and parameters.
     /// An absent semantic ID never matches: without it, `None == None` would
@@ -586,7 +570,17 @@ mod tests {
                 "}\n",
             ),
         ] {
-            let typed = checked(source);
+            let root = standard_library_root();
+            let program = ProgramLoader::new()
+                .with_standard_library_root(&root)
+                .load_source(source, &root)
+                .expect("test source should load");
+            let resolved = NameResolver::new()
+                .resolve_program(program)
+                .expect("test source should resolve");
+            let typed = TypeChecker::new()
+                .check(resolved)
+                .expect("test source should type check");
             let module = Lowerer::new().lower(&typed).expect("source should lower");
             let context = LayoutContext::new(module.program());
             let types = signature_types(&module);

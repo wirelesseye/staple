@@ -1,9 +1,8 @@
 //! Typed lowering boundary and owned lowered representation.
 //!
 //! Lowering owns the transition from a successfully checked program to the
-//! representation consumed by code generation. The explicit arenas are being
-//! populated incrementally during Stage 2. The existing typed module remains
-//! a temporary, private backend bridge until code generation is migrated.
+//! owned representation consumed by code generation. The output carries the
+//! closed specialization catalog and concrete emission plans.
 
 #![allow(dead_code)] // Stage 2 populates and consumes this schema incrementally.
 
@@ -13999,11 +13998,10 @@ fn invalid_reference(origin: &Origin, owner: &str, target: &str, index: usize) -
 /// A program accepted by the lowering phase and ready for code generation.
 ///
 /// The fields are intentionally private: callers may pass this value to later
-/// compiler phases, but cannot depend on the transitional representation.
+/// compiler phases, but consume only the read-only emission view.
 #[derive(Debug, Clone)]
 pub struct LoweredModule {
     program: LoweredProgram,
-    typed: Box<TypedModule>,
 }
 
 /// Catalog families used by integration tests without exposing lowering arenas.
@@ -14095,13 +14093,7 @@ impl LoweredModule {
         names
     }
 
-    pub(crate) fn typed(&self) -> &TypedModule {
-        self.typed.as_ref()
-    }
-
-    /// Stage 5.1: the read-only backend view of the lowered program. The
-    /// emitter receives this instead of the private arenas; the legacy
-    /// `typed()` bridge is removed at Stage 5.10.
+    /// The read-only backend view of the owned lowered program.
     pub(crate) fn program(&self) -> emission::EmissionView<'_> {
         self.program.emission_view()
     }
@@ -14204,10 +14196,7 @@ impl Lowerer {
             diagnostics.extend(program.validate_source_coverage(module));
         }
         if diagnostics.is_empty() {
-            Ok(LoweredModule {
-                program,
-                typed: Box::new(module.clone()),
-            })
+            Ok(LoweredModule { program })
         } else {
             Err(diagnostics)
         }

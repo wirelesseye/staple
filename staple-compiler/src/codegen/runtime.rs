@@ -1,9 +1,7 @@
 //! Stage 5.2: the backend-local runtime layer.
 //!
 //! Installs the hand-written `.ll` runtime modules, declares the lazily
-//! referenced libc/runtime helpers, and emits the fixed UTF-8 validator. Both
-//! emitters share these helpers; none of them reads the checker or the
-//! `TypedModule`.
+//! referenced libc/runtime helpers, and emits the fixed UTF-8 validator. These helpers depend only on LLVM and recorded layouts.
 
 use inkwell::{AddressSpace, memory_buffer::MemoryBuffer};
 
