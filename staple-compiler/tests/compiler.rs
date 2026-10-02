@@ -426,14 +426,11 @@ fn coroutines_lower_to_resume_and_cleanup_functions() {
     assert!(llvm.contains("coro.result"));
 }
 
-/// Known lowering defect (recorded in TYPED_LOWERING_PLAN.md): a parenthesized
-/// call to a function with a hidden effect resource, such as `(println "x")`,
-/// type-checks but lowering rejects it with "too many positional elements in
-/// product". The unparenthesized call and a pure `(inc 1)` both lower. The
-/// `choose` calls in `examples/macros.sta` use block arguments until this is
-/// fixed; remove `#[ignore]` with the fix.
+/// A plain one-element product `(e)` is its element even when `e`'s type is a
+/// product: `(println "x")` has type `()`. Lowering once read that type as
+/// the parenthesized product's layout and rejected the program ("too many
+/// positional elements in product").
 #[test]
-#[ignore = "known lowering defect: parenthesized effectful call"]
 fn a_parenthesized_effectful_call_lowers() {
     let module = type_check(concat!(
         "use std.io.println\n",

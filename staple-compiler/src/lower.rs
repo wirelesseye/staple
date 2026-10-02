@@ -5471,6 +5471,38 @@ impl LoweredProgram {
         context: ExpressionContext,
         product: &staple_syntax::ProductExpression,
     ) -> Result<LoweredProduct, Diagnostic> {
+        // The checker normalizes a plain one-element product `(e)` to its
+        // element: the expression's type is `e`'s type, which may itself be a
+        // product (`()` or a pair). Lower it as that element in a one-element
+        // shape, which emission collapses to the value itself, rather than
+        // reading the element's own product type as this product's layout.
+        if let [element] = product.elements.as_slice()
+            && !element.spread
+            && !element.designated
+            && !element.named_spread
+        {
+            let expression = self.lower_expression(module, owner, context, &element.value)?;
+            let value_type = self
+                .expressions
+                .get(expression)
+                .map(|expression| expression.value_type.clone())
+                .unwrap_or(CheckedType::Never);
+            return Ok(LoweredProduct {
+                final_type: CheckedProductType {
+                    elements: vec![crate::CheckedTypeElement {
+                        name: element.name.clone(),
+                        value_type,
+                        default: None,
+                    }],
+                    variadic: false,
+                },
+                fields: vec![expression],
+                steps: vec![LoweredProductStep::Positional {
+                    expression,
+                    slot: 0,
+                }],
+            });
+        }
         let checked = module.type_of_expression(product.syntax.id).cloned();
         let plan = module.product_default_plan(product.syntax.id).cloned();
         let final_type = match &plan {

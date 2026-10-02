@@ -369,3 +369,5 @@ Three follow-ups, all fixed:
   - The example carries a comment pointing to both.
 - **`drop_method_for` produced the only production build warning.** Its remaining callers are lowering tests, so it is now `#[cfg(test)]`, with a note for Stage 6. `cargo build --workspace` is warning-free.
 - **The verdict table used the converted tests' old names.** Each converted row now names its new test (`coroutine_frame_bindings_have_only_unwind_ownership`, `extern_adapter_plans_cover_used_values_and_deduplicate_sites`, `runtime_requirements_cover_lowered_surfaces`, `planned_names_preserve_unreserved_declarations`).
+
+**Follow-up fix.** The parenthesized-expression defect is fixed in lowering; see "Fixed defects" in TYPED_LOWERING_PLAN.md. It was broader than first recorded: any plain `(e)` whose own type is a product, effectful or not. Every program that already compiled produces identical IR: all 86 R1 paths compare `same` against the pre-fix binary. `examples/macros.sta` is restored to its original form, the reproduction test runs again, and the corpus gains `parenthesized_singletons`, so it now has 75 entries.

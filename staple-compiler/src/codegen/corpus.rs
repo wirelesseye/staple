@@ -138,7 +138,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 74] = [
+static CORPUS: [CorpusProgram; 75] = [
     expect_stdout(must_run(inline("empty", "", "5.3")), ""),
     expect_stdout(
         must_run(inline(
@@ -1811,6 +1811,38 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "",
     ),
+    // Post-5.10 fix: a plain one-element product `(e)` is its element even
+    // when `e`'s own type is a product (`()` or a pair); lowering used to read
+    // that type as the parenthesized product's layout and reject the program.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "parenthesized_singletons",
+                concat!(
+                    "use std.io.(IO, println)\n",
+                    "def nothing: () -> () = () => ()\n",
+                    "def pair: () -> (I32, I32) = () => (1, 2)\n",
+                    "def show: <T where Copy T, Debug T> T ->{IO} () = value => {\n",
+                    "    let same = (value)\n",
+                    "    println \"${same:?}\"\n",
+                    "}\n",
+                    "(println \"effectful\")\n",
+                    "let unit = (nothing ())\n",
+                    "let empty = (())\n",
+                    "let (a, b) = (pair ())\n",
+                    "let p = (3, 4)\n",
+                    "let (c, d) = (p)\n",
+                    "println \"${a:?} ${b:?} ${c:?} ${d:?}\"\n",
+                    "show (5, 6)\n",
+                    "show 7\n",
+                    "show ()\n",
+                ),
+                "5.10",
+            ),
+            &["show"],
+        ),
+        "effectful\n1 2 3 4\n(5, 6)\n7\n()\n",
+    )),
 ];
 
 /// Extract every `define`d function body from one module's IR text, keyed by

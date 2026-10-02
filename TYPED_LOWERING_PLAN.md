@@ -19,13 +19,13 @@ LLVM generation consumes lowered IR and no longer infers types, selects trait im
 - **Stage 5.11 follows the cutover.** Mirrored defects remain for that stage; Stage 5 is still in progress. The [77-method Stage 6 handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) identifies surviving lowering/frontend/LSP/test uses and unused queries. `drop_method_for` now has only test callers and produces the one deferred checker warning; codegen is warning-free.
 - Current suite command: `CARGO_INCREMENTAL=0 cargo nextest run --workspace`. No emitter feature or selector exists.
 
-### Known defects
+### Fixed defects
 
-- **A parenthesized effectful call does not lower (found in the Stage 5.10 review; predates Stage 5).**
-  - **Symptom:** `(println "x")` (a top-level statement, a `let` value, a function body, or a `match` arm) type-checks, but lowering rejects it with "too many positional elements in product" (`lower.rs`, product lowering), followed by cascading "not reachable from any runtime root" diagnostics.
-  - **What works:** the unparenthesized call and a pure parenthesized call such as `(inc 1)`. The parenthesized single-element product around a call with a hidden effect resource (`IO`) is what fails.
-  - **Workaround and tracking:** `examples/macros.sta` uses block arguments for its `choose` calls until this is fixed. Stage 5.10 Step 1 changed them from the parenthesized form, which the example was written to show.
-  - **Reproduction:** `tests/compiler.rs::a_parenthesized_effectful_call_lowers` is `#[ignore]`d. Remove the attribute, and restore the example's parenthesized form, with the fix.
+- **A parenthesized expression whose own type is a product did not lower (found in the Stage 5.10 review; predated Stage 5; fixed after 5.10).**
+  - **Symptom:** the checker normalizes a plain one-element product `(e)` to its element, so `(println "x")` has type `()`. `lower_product` instead read the expression's type as the product's layout. Unit has zero elements, so lowering reported "too many positional elements in product"; for `(pair ())` or `(p)` with `p` a pair, it reported "missing product element at position 1". Effects were never involved: `(nothing ())` and `(())` failed too. `(inc 1)` worked only because `I32` is not a product.
+  - **Fix:** lowering now treats a plain one-element product (no spread, designation, or named spread) as its element in a one-element shape, which emission collapses to the value. Instance specialization substitutes that shape element by element, so `(v)` with `v: T` works at pair, scalar, and unit instantiations.
+  - **Identical output:** every program that already compiled produces identical IR. All 86 paths (11 examples, `game_loop`, and the 74 corpus programs) compare `same` against the pre-fix binary.
+  - **Coverage:** `a_parenthesized_effectful_call_lowers` runs again, the `parenthesized_singletons` corpus entry pins the behavior, and `examples/macros.sta` is back to its original parenthesized `choose` form.
 
 ## Public Interfaces
 
