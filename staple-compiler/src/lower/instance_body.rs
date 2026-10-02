@@ -1742,20 +1742,19 @@ impl<'a> BodyCloner<'a> {
             }
         }
         call.resource_bindings = bindings;
-        if matches!(call.target, LoweredCallableTarget::Intrinsic { .. }) {
-            call.steps
-                .retain(|step| !matches!(step, LoweredCallStep::Resource { .. }));
-            let invoke = call
-                .steps
-                .iter()
-                .position(|step| matches!(step, LoweredCallStep::Invoke))
-                .unwrap_or(call.steps.len());
-            call.steps.splice(
-                invoke..invoke,
-                (0..call.resource_bindings.len())
-                    .map(|resource| LoweredCallStep::Resource { resource }),
-            );
-        }
+        // Every effect-aware call must rebuild its ABI resource steps.
+        call.steps
+            .retain(|step| !matches!(step, LoweredCallStep::Resource { .. }));
+        let invoke = call
+            .steps
+            .iter()
+            .position(|step| matches!(step, LoweredCallStep::Invoke))
+            .unwrap_or(call.steps.len());
+        call.steps.splice(
+            invoke..invoke,
+            (0..call.resource_bindings.len())
+                .map(|resource| LoweredCallStep::Resource { resource }),
+        );
     }
 
     /// Recomputes concrete-sensitive call-argument pass decisions from the
@@ -3937,6 +3936,22 @@ impl<'a> BodyValidator<'a> {
             );
         }
         let passes_hidden = call.target.records_resources();
+        if passes_hidden {
+            let resource_steps = call
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    LoweredCallStep::Resource { resource } => Some(*resource),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if resource_steps != (0..call.resource_bindings.len()).collect::<Vec<_>>() {
+                self.report(
+                    origin.span.clone(),
+                    "call hidden-resource evaluation steps disagree with the concrete bindings",
+                );
+            }
+        }
         if passes_hidden
             && call.resource_bindings.len() != call.function_type.effects.resources.len()
         {
@@ -4772,6 +4787,44 @@ mod tests {
             assert!(!contains_type_parameter(&place.value_type));
         }
         let _ = program;
+    }
+
+    #[test]
+    fn specialized_effect_call_steps_are_recorded_and_revalidated() {
+        let module = checked_program(concat!(
+            "use std.io.(IO, println)\n",
+            "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+            "def output: () ->{IO} () = () => println \"hello\"\n",
+            "twice output\n",
+        ));
+        let mut lowered = crate::Lowerer::new()
+            .lower(&module)
+            .expect("effect call lowers");
+        let call = lowered
+            .program
+            .instances
+            .iter_mut()
+            .filter_map(|(_, instance)| instance.body.as_mut())
+            .flat_map(|body| body.calls.iter_mut().map(|(_, call)| call))
+            .find(|call| {
+                matches!(call.target, LoweredCallableTarget::IndirectClosure { .. })
+                    && !call.resource_bindings.is_empty()
+            })
+            .expect("closure call with IO");
+        assert!(
+            call.steps
+                .iter()
+                .any(|step| matches!(step, LoweredCallStep::Resource { resource: 0 }))
+        );
+        call.steps
+            .retain(|step| !matches!(step, LoweredCallStep::Resource { .. }));
+        let diagnostics = lowered.program.validate_instance_bodies();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("hidden-resource evaluation steps disagree")),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

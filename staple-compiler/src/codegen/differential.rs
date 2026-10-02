@@ -1819,11 +1819,14 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\nlet repeated: (I32; 3) = repeat 7 3\n",
         "5.9",
     ),
-    inline(
-        "effect_closure_resources",
-        "use std.io.(IO, println)\ndef twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\ndef output: () ->{IO} () = () => println \"hello\"\ntwice output\n",
-        "5.9",
-    ),
+    must_run(expect_stdout(
+        inline(
+            "effect_closure_resources",
+            "use std.io.(IO, println)\ndef twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\ndef output: () ->{IO} () = () => println \"hello\"\ntwice output\n",
+            "5.9",
+        ),
+        "hello\nhello\n",
+    )),
     must_run(expect_stdout(
         inline(
             "product_trait_argument",
