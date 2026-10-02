@@ -394,6 +394,8 @@ The full suite passes 1301 tests. The legacy IR sweep against the pre-fix binary
 
 ## Stage 5.11 - Fix the Mirrored Defects
 
+> **Plan:** [STAGE_5_11_MIRRORED_DEFECTS_PLAN.md](STAGE_5_11_MIRRORED_DEFECTS_PLAN.md), including the generic `Drop` design note. Its decisions M1–M4 and its Step 7 gate supersede the **Gate** paragraph below. The task-scope early exit is decided as a defect and fixed (M3). Fix order: extern adapter ABI, signal field writes, task scopes, the coroutine completion leak, then generic `Drop`.
+
 This runs after the cutover, so each fix lands in one backend (D5). It is the only part of Stage 5 that intentionally changes behavior, and each fix is its own commit with fixtures that assert the corrected behavior. No separate plan is needed for the coroutine fix. The generic `Drop` fix should write a short design note in this section before it starts, because it changes checker semantics.
 
 - **Completed-coroutine frame-binding leak (4.5).** Today a completed coroutine body never drops its droppable frame bindings. Only the cancel unwind drops them, through the pair plan's `unwind_drop`.
@@ -416,7 +418,7 @@ This runs after the cutover, so each fix lands in one backend (D5). It is the on
   - Fixtures: an extern with a `CString` parameter passed as a callback, captured in a closure, and captured in an implicit thunk. Each prints the right text. Restore the `thunk_arguments` corpus entry's `puts` call, which the 5.6 review replaced with `measure` to keep the harness deterministic.
 - Update [TYPED_LOWERING_PLAN.md](TYPED_LOWERING_PLAN.md), this file, and the 4.4/4.5 plans' latent-defect notes to say where each defect was fixed.
 
-**Gate:** The new fixtures print the corrected drop output. The full gate set (Contract 6) passes. The checker/lowering drop-agreement test passes. **Only now may Stage 5 be marked complete.**
+**Gate (superseded by the plan's Step 7; kept for history):** The new fixtures print the corrected drop output. The full gate set (Contract 6) passes. The checker/lowering drop-agreement test passes. **Only now may Stage 5 be marked complete.**
 
 ## Ordering and Parallelism
 
