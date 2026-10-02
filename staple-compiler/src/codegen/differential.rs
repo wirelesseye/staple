@@ -1829,11 +1829,14 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         "trait Merge Left Right Output { merge: (Left, Right) -> Output }\nimpl Merge I32 I32 I32 { def merge = (left, right) => left + right }\ndef combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\nlet total: I32 = combine (20, 22)\n",
         "5.9",
     ),
-    inline(
-        "nested_expression_return",
-        "def identity = (value: I32) => value\ndef answer = () => { identity { return 42; }; 0; }\nanswer ()\n",
-        "5.9",
-    ),
+    must_run(expect_stdout(
+        inline(
+            "nested_expression_return",
+            "def identity = (value: I32) => value\ndef answer = () => { identity { return 42; }; 0; }\nanswer ()\n",
+            "5.9",
+        ),
+        "",
+    )),
     must_run(expect_stdout(
         inline(
             "sibling_initializer_names",

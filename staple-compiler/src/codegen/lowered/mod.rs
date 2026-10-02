@@ -2646,6 +2646,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 // evaluate, bind, module-global stores, state 2.
                 self.store_pattern_initialization_state(owner, binding.pattern, 1)?;
                 let value = self.emit_expression(owner, binding.value, environment)?;
+                if environment.returned {
+                    return Ok(());
+                }
                 if binding.propagating {
                     let value = value_as_basic(value).ok_or_else(|| {
                         Diagnostic::new(
@@ -5013,6 +5016,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // materialized lazily at the first resource step (or after the loop).
         let mut callee_parts: Option<(PointerValue<'context>, PointerValue<'context>)> = None;
         for step in &call.steps {
+            // An argument may return from the enclosing function. Do not
+            // evaluate another step or invoke the callee after its terminator.
+            if environment.returned {
+                return Ok(self.backend.unit_value());
+            }
             match step {
                 LoweredCallStep::Invoke => {
                     invoked = true;
@@ -5020,6 +5028,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 LoweredCallStep::Callee { expression } => {
                     let value = self.emit_expression(owner, *expression, environment)?;
+                    if environment.returned {
+                        return Ok(self.backend.unit_value());
+                    }
                     let AnyValueEnum::StructValue(closure) = value else {
                         return Err(unsupported("indirect closure value"));
                     };
@@ -5502,6 +5513,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let value = self.emit_expression(owner, expression, environment)?;
+        if environment.returned {
+            return Ok(value_as_basic(self.backend.unit_value())
+                .expect("unit is basic")
+                .into());
+        }
         let value = value_as_basic(value).ok_or_else(|| {
             Diagnostic::new(
                 self.view
@@ -5705,6 +5721,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         slots: &mut [Option<BasicMetadataValueEnum<'context>>],
     ) -> CodeGenerationResult<()> {
         let value = self.emit_expression(owner, expression, environment)?;
+        if environment.returned {
+            return Ok(());
+        }
         let Some(BasicValueEnum::StructValue(product)) = value_as_basic(value) else {
             return Err(Diagnostic::new(
                 call.origin.span.clone(),
