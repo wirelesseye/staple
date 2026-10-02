@@ -375,12 +375,14 @@ The full suite passes 1301 tests. The legacy IR sweep against the pre-fix binary
 
 ## Stage 5.10 - Cutover and Removal
 
+> **Plan:** [STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md). Its decisions R1–R5 and its Step 8 gate supersede the **Gate** paragraph below. Parity across the cutover is lowered-IR identity against a frozen pre-cutover reference binary, and each of the 31 tests that touch legacy gets a recorded keep, convert, or delete verdict.
+
 - Make the lowered emitter the only emitter. Delete the legacy `ModuleEmitter` and every legacy-only helper, the D1 selector and feature, the `#[cfg(test)]` legacy recorder and `legacy_emissions`, and the transition tests that compare against legacy recordings (the per-family 4.3–4.6 comparisons, the Stage 3.5 queue comparison, and the 4.7 census). The plan-level validators and the new-emitter census keep their guarantees. Before deleting each transition test, check whether it asserts a plan-content fact that no validator re-checks. If it does, convert it into a lowering-only test instead of dropping it.
 - Remove `typed: Box<TypedModule>` and `LoweredModule::typed`. `Lowerer::lower` still reads `&TypedModule`; only its output stops carrying it.
 - Mechanical checks: in `staple-compiler/src/codegen*`, `rg` finds none of `TypedModule`, `typed_module`, `ResolvedModule`, `resolved()`, `staple_syntax::{Expression,Item,Pattern,CallExpression,ProductExpression,RepeatedProductExpression}`, `SyntaxId`, `DefaultHasher`, `active_type_substitutions`, `expression_type_overrides`, `specialization_queue`, `infer_type_parameters`, `substitute_type`, `contains_type_parameter`, `standard_function_name_matches`, or `{:?}` inside a symbol name.
 - Update [TYPED_LOWERING_PLAN.md](TYPED_LOWERING_PLAN.md) and this file with what passed and the observed differences. Also record the Stage 6 hand-off: the `TypedModule` accessors that are now unused outside lowering, diagnostics, and tooling.
 
-**Gate:** The full gate set (Contract 6) passes on the single emitter. Representative LLVM from before and after (the 5.2 corpus) shows no function-type changes and no duplicate instances. The CLI `--emit llvm`, `--emit object`, and `run` paths pass with the worktree standard library. The migration is complete; Stage 5.11 follows.
+**Gate (superseded by the plan's Step 8; kept for history):** The full gate set (Contract 6) passes on the single emitter. Representative LLVM from before and after (the 5.2 corpus) shows no function-type changes and no duplicate instances. The CLI `--emit llvm`, `--emit object`, and `run` paths pass with the worktree standard library. The migration is complete; Stage 5.11 follows.
 
 ## Stage 5.11 - Fix the Mirrored Defects
 
