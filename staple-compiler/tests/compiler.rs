@@ -501,7 +501,7 @@ fn awaiting_a_task_lowers_to_a_waiter_park_and_outcome_branch() {
         "use std.coroutine.*\n",
         "use std.io.(IO, println)\n",
         "def leaf: () -> Coroutine{} I32 = () => coro { 9 }\n",
-        "def waiter: () -> Coroutine{Tasks} I32 = () => coro {\n",
+        "def waiter: () -> Coroutine{Tasks, IO} I32 = () => coro {\n",
         "    let t = spawn (leaf ())\n",
         "    let r = await t\n",
         "    match r {\n",
@@ -737,6 +737,66 @@ fn spawn_type_checks_inside_an_ordinary_function() {
         "}\n",
         "let value = early (scheduler ())\n",
     ));
+}
+
+/// A coroutine's declared row is an upper bound on its body, like a function
+/// declaration's: an over-declared `coro` takes the declared row (its frame's
+/// resource bundle and every awaiter use it), so the coroutine type is the
+/// declared one.
+#[test]
+fn a_declared_coroutine_row_bounds_its_body() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "use std.io.(IO, println)\n",
+        "def quiet: () -> Coroutine{Tasks, IO} I32 = () => coro { 5 }\n",
+        "def outer: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+        "    let v = await (quiet ())\n",
+        "    println \"awaited ${v:?}\"\n",
+        "}\n",
+        "let sched = scheduler ()\n",
+        "with Tasks = task_scope (sched) {\n",
+        "    let _ = spawn (outer ())\n",
+        "    let _ = pump (sched, 8)\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("an over-declared coroutine should lower and compile");
+}
+
+/// A body that needs effects beyond its declared row is still rejected, both
+/// directly and when the extra effect only appears once effect inference
+/// converges (a later, unannotated helper).
+#[test]
+fn a_coroutine_body_may_not_exceed_its_declared_row() {
+    let direct = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.coroutine.*\n",
+            "use std.io.(IO, println)\n",
+            "def leaf: () -> Coroutine{} I32 = () => coro { println \"x\"; 9 }\n",
+        )))
+        .expect_err_diagnostics("a direct effect beyond the declared row");
+    assert!(
+        direct.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("expected `Coroutine{} I32`, found `Coroutine{IO} I32`")),
+        "unexpected diagnostics: {direct:?}",
+    );
+    let converged = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.coroutine.*\n",
+            "use std.io.(IO, println)\n",
+            "def leaf: () -> Coroutine{} I32 = () => coro { helper (); 9 }\n",
+            "def helper = () => println \"x\"\n",
+        )))
+        .expect_err_diagnostics("an inferred effect beyond the declared row");
+    assert!(
+        converged.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("coroutine body requires effects {IO}")),
+        "unexpected diagnostics: {converged:?}",
+    );
 }
 
 #[test]

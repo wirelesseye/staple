@@ -2655,6 +2655,21 @@ def build: () -> Coroutine{IO} () = () => coro { println "hi" }
 Omitting the row is the empty set, exactly as for an effect-parameterized type
 declaration: `Coroutine T` is `Coroutine{} T`.
 
+When a `coro` is checked against an expected `Coroutine{E} T`, such as a declared
+result type, `E` is an upper bound on the body's effects, exactly as a function
+declaration's effect row bounds its body. The coroutine takes the declared row,
+so starting or awaiting it supplies every effect in `E` even if the body uses
+fewer. A body that needs an effect outside `E` is an error:
+
+```staple
+// Accepted: the body is pure, but the declared row may be larger.
+def quiet: () -> Coroutine{IO} I32 = () => coro { 5 }
+```
+
+Without an expected type, or when the expected row is still an effect variable to
+infer (as for a generic parameter such as `block_on`'s), the row is exactly the
+body's inferred effects.
+
 `await` on a `Coroutine{E} T` runs it as a child continuation of the current
 coroutine, yields `T`, and folds `E` into the awaiting body's effect row:
 

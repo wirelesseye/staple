@@ -138,7 +138,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 83] = [
+static CORPUS: [CorpusProgram; 84] = [
     expect_stdout(must_run(inline("empty", "", "5.3")), ""),
     expect_stdout(
         must_run(inline(
@@ -1750,7 +1750,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
     must_run(expect_stdout(
         inline(
             "await_task_effect_pair",
-            "use std.coroutine.*\nuse std.io.(IO, println)\ndef leaf: () -> Coroutine{} I32 = () => coro { 9 }\ndef waiter: () -> Coroutine{Tasks} I32 = () => coro {\n    let t = spawn (leaf ())\n    let r = await t\n    match r {\n        Completed v => v,\n        Cancelled() => 0,\n    }\n}\nlet sched = scheduler ()\nwith Tasks = task_scope (sched) {\n    let _ = spawn (waiter ())\n    let _ = pump (sched, 8)\n}\n",
+            "use std.coroutine.*\nuse std.io.(IO, println)\ndef leaf: () -> Coroutine{} I32 = () => coro { 9 }\ndef waiter: () -> Coroutine{Tasks, IO} I32 = () => coro {\n    let t = spawn (leaf ())\n    let r = await t\n    match r {\n        Completed v => v,\n        Cancelled() => 0,\n    }\n}\nlet sched = scheduler ()\nwith Tasks = task_scope (sched) {\n    let _ = spawn (waiter ())\n    let _ = pump (sched, 8)\n}\n",
             "5.9",
         ),
         "",
@@ -1936,7 +1936,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "    let _ = await (yield_now ())\n",
                     "    println \"task end\"\n",
                     "}\n",
-                    "def abandoning: () -> Coroutine{IO} () = () => coro {\n",
+                    "def abandoning: () -> Coroutine{Tasks, IO} () = () => coro {\n",
                     "    let sched = scheduler ()\n",
                     "    let handle = loop {\n",
                     "        with Tasks = task_scope (sched) {\n",
@@ -1975,7 +1975,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "    let _ = await (yield_now ())\n",
                     "    println \"task end\"\n",
                     "}\n",
-                    "def continuing: () -> Coroutine{IO} () = () => coro {\n",
+                    "def continuing: () -> Coroutine{Tasks, IO} () = () => coro {\n",
                     "    let sched = scheduler ()\n",
                     "    let mut index = 0\n",
                     "    loop {\n",
@@ -2232,6 +2232,36 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ],
         ),
         "wrapper\nwrapper\nwrapper\nwrapper\nwrapper\nwrapper\nouter\ninner\ndone\n",
+    )),
+    // A coroutine's declared row bounds its body, as a function declaration's
+    // does: over-declared coroutines take the declared row and run when
+    // awaited, spawned, and driven by `block_on`.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "over_declared_coroutines",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "def quiet: () -> Coroutine{Tasks, IO} I32 = () => coro { 5 }\n",
+                    "def outer: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "    let v = await (quiet ())\n",
+                    "    println \"awaited ${v:?}\"\n",
+                    "}\n",
+                    "def wide: () -> Coroutine{IO} I32 = () => coro { 3 }\n",
+                    "let sched = scheduler ()\n",
+                    "with Tasks = task_scope (sched) {\n",
+                    "    let _ = spawn (outer ())\n",
+                    "    let _ = spawn (quiet ())\n",
+                    "    let _ = pump (sched, 8)\n",
+                    "}\n",
+                    "println \"block_on ${block_on (wide ()):?}\"\n",
+                ),
+                "5.11",
+            ),
+            &["quiet", "outer", "wide"],
+        ),
+        "awaited 5\nblock_on 3\n",
     )),
 ];
 

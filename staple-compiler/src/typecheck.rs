@@ -2086,6 +2086,10 @@ pub struct TypeChecker {
     /// (may move/drop it) rather than implicitly borrowing it.
     move_parameter_symbols: HashSet<SymbolId>,
     implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
+    /// `coro` body thunks checked against an expected `Coroutine{E} T`: the
+    /// expected row is their declared effect set, an upper bound on the body,
+    /// exactly as a function declaration's row bounds its body.
+    declared_coroutine_rows: HashMap<FunctionId, CheckedEffectSet>,
     derived_symbols: HashSet<SymbolId>,
     derived_evaluators: HashMap<SymbolId, SyntaxId>,
     next_implicit_function: usize,
@@ -4729,6 +4733,11 @@ impl TypeChecker {
                     })
                 })
             })
+            .chain(
+                self.declared_coroutine_rows
+                    .iter()
+                    .map(|(thunk, row)| (*thunk, row.clone())),
+            )
             .collect::<HashMap<_, _>>();
 
         let effect_function_count = module.functions().len() + self.implicit_thunks.len();
@@ -4831,10 +4840,15 @@ impl TypeChecker {
             if let Some(allowed) = declared.get(&function.id)
                 && !actual.is_subset_of(allowed)
             {
+                let body = if self.declared_coroutine_rows.contains_key(&function.id) {
+                    "coroutine body"
+                } else {
+                    "function body"
+                };
                 self.diagnostics.push(Diagnostic::new(
                     function.body.syntax().span.clone(),
                     format!(
-                        "function body requires effects {}, which are not contained in its \
+                        "{body} requires effects {}, which are not contained in its \
                          declared effect set {}",
                         actual, allowed
                     ),
@@ -9259,9 +9273,13 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         };
-        // A `Coroutine{E} T` annotation supplies the body's expected yield type.
-        let expected_result =
-            expected.and_then(|ty| self.coroutine_parts(ty).map(|(_, result)| result.clone()));
+        // A `Coroutine{E} T` annotation supplies the body's expected yield type
+        // and its declared effect row.
+        let expected_parts = expected.and_then(|ty| {
+            self.coroutine_parts(ty)
+                .map(|(effects, result)| (effects.clone(), result.clone()))
+        });
+        let expected_result = expected_parts.as_ref().map(|(_, result)| result.clone());
         let body = Expression::Block(coro.body.clone());
         // The body is a suspension-permitting scope. Its `await` permission is
         // independent of the enclosing context in both directions.
@@ -9272,10 +9290,32 @@ impl TypeChecker {
         // Lower the body to an implicit nullary thunk so its deferred effect
         // row is inferred and converges separately from the enclosing
         // function; the row rides on the coroutine type, not the caller.
-        let deferred = match self.make_implicit_thunk(module, &body, body_result.clone()) {
+        let mut deferred = match self.make_implicit_thunk(module, &body, body_result.clone()) {
             CheckedType::Function(function) => function.effects,
             _ => CheckedEffectSet::default(),
         };
+        // A declared row is an upper bound on the body, as for a function
+        // declaration: the coroutine takes the declared row (its frame's
+        // resource bundle and every awaiter use it), and `infer_effects`
+        // re-checks the converged body against it. A body that already
+        // exceeds the row keeps its own row, so the mismatch is reported. A
+        // row with an effect variable (a generic callee's `Coroutine{E} T`
+        // parameter, as in `block_on (coro { … })`) is a placeholder to infer,
+        // not a declaration, so the body's own row stands.
+        if let Some((declared, _)) = &expected_parts
+            && declared.variable.is_none()
+            && deferred.is_subset_of(declared)
+            && let Some(thunk) = self
+                .implicit_thunks
+                .get(&body.syntax().id)
+                .map(|thunk| thunk.id)
+        {
+            deferred = declared.clone();
+            if let Some(function_type) = self.function_types.get_mut(&thunk) {
+                function_type.effects = declared.clone();
+            }
+            self.declared_coroutine_rows.insert(thunk, declared.clone());
+        }
         CheckedType::Opaque {
             id: coroutine_id,
             name: "Coroutine".to_owned(),
