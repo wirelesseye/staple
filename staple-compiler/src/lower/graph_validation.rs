@@ -5736,14 +5736,15 @@ pub(crate) mod tests {
         let mut compared_initializers = 0;
         for (name, origin) in &legacy.defined_functions {
             if let LegacyFunctionOrigin::Initializer(module) = origin {
-                let prefix = &lowered
+                let planned = &lowered
                     .program
-                    .modules
-                    .get(*module)
-                    .expect("module metadata")
-                    .symbol_prefix;
-                let planned = format!("__staple_init_m{prefix}");
-                let lowered_declaration = lowered_types.get(&planned).unwrap_or_else(|| {
+                    .initializers
+                    .iter()
+                    .find(|(_, initializer)| initializer.module == *module)
+                    .expect("module initializer")
+                    .1
+                    .name;
+                let lowered_declaration = lowered_types.get(planned).unwrap_or_else(|| {
                     panic!("catalog did not declare `{planned}` for legacy `{name}`")
                 });
                 assert_eq!(
@@ -5925,10 +5926,14 @@ pub(crate) mod tests {
                     }
                 }
             },
-            LegacyCatalogEntry::Initializer(module) => vec![format!(
-                "__staple_init_m{}",
-                view.module(*module).expect("module metadata").symbol_prefix
-            )],
+            LegacyCatalogEntry::Initializer(module) => vec![
+                view.initializers()
+                    .find(|(_, initializer)| initializer.module == *module)
+                    .expect("mapped initializer exists")
+                    .1
+                    .name
+                    .clone(),
+            ],
             LegacyCatalogEntry::Main => vec!["main".to_owned()],
             LegacyCatalogEntry::Utf8Validator => vec!["__staple_is_valid_utf8".to_owned()],
         }

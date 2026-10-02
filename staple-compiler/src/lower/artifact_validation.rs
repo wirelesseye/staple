@@ -21,6 +21,15 @@ impl LoweredProgram {
     pub(super) fn validate_closed_catalog(&self) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         self.check_plan_types(&mut diagnostics);
+        for (id, expected) in self.planned_initializer_names() {
+            let initializer = self.initializers.get(id).expect("initializer exists");
+            if initializer.name != expected {
+                diagnostics.push(Diagnostic::new(
+                    initializer.origin.span.clone(),
+                    "initializer name disagrees with the collision-free plan",
+                ));
+            }
+        }
         diagnostics
     }
 
@@ -121,6 +130,41 @@ mod tests {
         "}\n",
         "let done = discard_twice ()\n",
     );
+
+    #[test]
+    fn initializer_names_are_unique_and_revalidated() {
+        let mut lowered = lower(concat!(
+            "let a: I32 = { mod foo { pub let value: I32 = 1 }; foo.value }\n",
+            "let b: I32 = { mod foo { pub let value: I32 = 2 }; foo.value }\n",
+        ));
+        let names = lowered
+            .program
+            .initializers
+            .iter()
+            .map(|(_, initializer)| initializer.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names.iter().collect::<std::collections::HashSet<_>>().len(),
+            names.len()
+        );
+        assert!(lowered.program.validate_closed_catalog().is_empty());
+        lowered
+            .program
+            .initializers
+            .iter_mut()
+            .next()
+            .expect("initializer")
+            .1
+            .name
+            .clear();
+        assert!(
+            lowered
+                .program
+                .validate_closed_catalog()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("initializer name disagrees"))
+        );
+    }
 
     #[test]
     fn a_plan_carrying_a_placeholder_type_is_diagnosed() {

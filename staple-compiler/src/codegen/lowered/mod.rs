@@ -627,19 +627,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     fn declare_initializers(&mut self) -> CodeGenerationResult<()> {
         let function_type = self.backend.context.void_type().fn_type(&[], false);
         for (id, initializer) in self.view.initializers() {
-            let prefix = self.module_prefix(initializer.module)?;
-            let name = format!("__staple_init_m{prefix}");
-            if self.backend.llvm_module.get_function(&name).is_some() {
+            let name = &initializer.name;
+            if self.backend.llvm_module.get_function(name).is_some() {
                 return Err(Diagnostic::new(
                     initializer.origin.span.clone(),
                     format!("initializer name `{name}` collides with a function"),
                 ));
             }
-            let function = self.backend.llvm_module.add_function(
-                &name,
-                function_type,
-                Some(Linkage::Internal),
-            );
+            let function =
+                self.backend
+                    .llvm_module
+                    .add_function(name, function_type, Some(Linkage::Internal));
             self.initializers.insert(id, function);
         }
         Ok(())

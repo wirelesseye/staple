@@ -1834,11 +1834,14 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         "def identity = (value: I32) => value\ndef answer = () => { identity { return 42; }; 0; }\nanswer ()\n",
         "5.9",
     ),
-    inline(
-        "sibling_initializer_names",
-        "let a: I32 = { mod foo { pub let value: I32 = 1 }; foo.value }\nlet b: I32 = { mod foo { pub let value: I32 = 2 }; foo.value }\n",
-        "5.9",
-    ),
+    must_run(expect_stdout(
+        inline(
+            "sibling_initializer_names",
+            "let a: I32 = { mod foo { pub let value: I32 = 1 }; foo.value }\nlet b: I32 = { mod foo { pub let value: I32 = 2 }; foo.value }\n",
+            "5.9",
+        ),
+        "",
+    )),
     inline(
         "block_tail_coroutine",
         "use std.coroutine.*\ndef f: () -> Coroutine{} I32 = () => { coro { 42 } }\nlet held = f ()\n",
@@ -2753,6 +2756,26 @@ mod tests {
                 renames.insert(legacy_name.clone(), planned.clone());
             }
         }
+        // Planned names can also be legacy names for a different catalog
+        // entry (sibling module initializers). Never apply the legacy map to
+        // lowered symbols; preserve all catalog spellings on that side.
+        let mut lowered_renames = HashMap::new();
+        for (_, instance) in program.instances() {
+            lowered_renames.insert(instance.name.clone(), instance.name.clone());
+        }
+        for (_, artifact) in program.artifacts() {
+            lowered_renames.insert(artifact.name.clone(), artifact.name.clone());
+            if let Some(crate::LoweredArtifactPlan::CoroutineCodes(_)) = artifact.plan {
+                let (resume, cleanup) = program
+                    .planned_coroutine_pair_names(artifact.ordinal)
+                    .expect("pair has names");
+                lowered_renames.insert(resume.clone(), resume);
+                lowered_renames.insert(cleanup.clone(), cleanup);
+            }
+        }
+        for (_, initializer) in program.initializers() {
+            lowered_renames.insert(initializer.name.clone(), initializer.name.clone());
+        }
         let stubbed = partial
             .report
             .stubbed()
@@ -2862,7 +2885,7 @@ mod tests {
                 }
                 let expected =
                     normalize_function(legacy_body, &expected_renames, &legacy_constants);
-                let actual = normalize_function(lowered_body, &renames, &lowered_constants);
+                let actual = normalize_function(lowered_body, &lowered_renames, &lowered_constants);
                 assert_eq!(
                     actual, expected,
                     "normalized body differs for legacy `{legacy_name}` -> `{planned}` ({label})"

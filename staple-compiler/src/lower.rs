@@ -2480,6 +2480,8 @@ pub(crate) struct LoweredEntryResource {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredInitializer {
+    /// Collision-free symbol assigned after catalog closure.
+    pub name: String,
     pub origin: Origin,
     pub module: ModuleId,
     pub executable_entry: bool,
@@ -3432,6 +3434,7 @@ impl LoweredProgram {
                 result: None,
             });
             let initializer = self.initializers.push(LoweredInitializer {
+                name: String::new(),
                 origin: origin.clone(),
                 module: module_id,
                 executable_entry: is_entry,
@@ -13991,6 +13994,53 @@ impl LoweredModule {
     }
 }
 
+impl LoweredProgram {
+    /// Keep legacy initializer spellings when free, and use deterministic
+    /// suffixes when separate modules share a prefix or a catalog symbol.
+    fn planned_initializer_names(&self) -> Vec<(InitializerId, String)> {
+        let mut used = self.reserved_symbol_names();
+        used.extend(
+            self.instances
+                .iter()
+                .map(|(_, instance)| instance.name.clone()),
+        );
+        for (_, artifact) in self.artifacts.iter() {
+            used.insert(artifact.name.clone());
+            if matches!(artifact.plan, Some(LoweredArtifactPlan::CoroutineCodes(_))) {
+                used.insert(format!("{}_resume", artifact.name));
+                used.insert(format!("{}_cleanup", artifact.name));
+            }
+        }
+        self.initializers
+            .iter()
+            .map(|(id, initializer)| {
+                let prefix = self
+                    .modules
+                    .get(initializer.module)
+                    .map(|module| module.symbol_prefix.as_str())
+                    .unwrap_or("");
+                let base = format!("__staple_init_m{prefix}");
+                let mut name = base.clone();
+                let mut suffix = 1;
+                while !used.insert(name.clone()) {
+                    name = format!("{base}.{suffix}");
+                    suffix += 1;
+                }
+                (id, name)
+            })
+            .collect()
+    }
+
+    fn assign_initializer_names(&mut self) {
+        for (id, name) in self.planned_initializer_names() {
+            self.initializers
+                .get_mut(id)
+                .expect("initializer exists")
+                .name = name;
+        }
+    }
+}
+
 /// Converts checked compiler state into the code-generation input.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Lowerer;
@@ -14015,6 +14065,9 @@ impl Lowerer {
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.close_artifact_catalog(&ProductionHooks));
+        }
+        if diagnostics.is_empty() {
+            program.assign_initializer_names();
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.validate_instance_bodies());
@@ -16164,6 +16217,7 @@ mod tests {
         let entry_id = program.modules.entries.values[0].key;
         let body = program.initializers.values[0].body;
         program.initializers.push(LoweredInitializer {
+            name: String::new(),
             origin: Origin::compiler(),
             module: entry_id,
             executable_entry: false,
