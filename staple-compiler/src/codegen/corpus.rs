@@ -89,7 +89,7 @@ const fn file(name: &'static str, path: &'static str, topic: &'static str) -> Co
     }
 }
 
-/// A generic generic fixture only the lowered emitter runs.
+/// Requires distinct artifacts for multiple concrete generic instantiations.
 const fn generic_artifact_fixture(
     mut program: CorpusProgram,
     generic_artifacts: CorpusGenericArtifacts,
@@ -1338,10 +1338,8 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ))),
         "",
     ),
-    // the generic generic fixtures. The emitter rejects each of these
-    // (an unspecialized type parameter reaches its emitter), so only the
-    // lowered emitter runs them; each instantiates its artifact twice and
-    // prints proof that the second instantiation used its own pair or runner.
+    // Generic fixtures instantiate each artifact twice and print proof that
+    // the second instantiation uses its own coroutine pair or runner.
     generic_artifact_fixture(
         expect_stdout(
             inline(
@@ -1362,11 +1360,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         CorpusGenericArtifacts::CoroutinePairs,
     ),
-    // the generic case the emitter compiles but gets wrong. The
-    // result type is concrete while the capture is `T`, so the emitter's
-    // syntax-keyed cache reuses the `I32` pair for the `(U8, U8)` creation
-    // and prints `513` (the bytes `01 02` read as an `I32`). The lowered
-    // emitter runs each instantiation's own pair.
+    // A concrete result type does not make generic capture layouts identical.
+    // I32 and (U8, U8) captures need distinct coroutine pairs; otherwise the
+    // second frame can be read through the first frame's incompatible layout.
     generic_artifact_fixture(
         expect_stdout(
             inline(
@@ -1729,10 +1725,8 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "",
     )),
-    // Regression coverage: a stored-closure callee builds the emitter's unused
-    // state slot, a captured `mut` field write checks its base without
-    // initializing it, and an await/until body's effect-less the emitter pair maps
-    // to its effect-specialized instance.
+    // Regressions for stored-closure state slots, captured mutable field
+    // initialization checks, and effect-specialized await/until bodies.
     must_run(expect_stdout(
         inline(
             "local_recursive_call_state_slot",
@@ -2465,7 +2459,7 @@ mod tests {
         assert!(defined > 0, "the corpus must define functions");
     }
 
-    /// The emitter-free catalog census rejects an unplanned function, a
+    /// The catalog census rejects an unplanned function, a
     /// missing catalog function, and a mistyped declaration.
     #[test]
     fn catalog_census_rejects_corrupted_emissions() {

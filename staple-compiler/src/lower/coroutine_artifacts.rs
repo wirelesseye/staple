@@ -717,7 +717,7 @@ fn plan_original(
         .artifacts
         .get(artifact)
         .and_then(|record| record.plan.clone())
-        .unwrap_or_else(|| panic!("artifact {} has a plan while validating", artifact.index()))
+        .expect("internal invariant violated: artifact plan was present when validation cloned it")
 }
 
 /// Every `CoroCreation` use names the body instance its site resolves to.

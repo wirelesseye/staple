@@ -884,12 +884,12 @@ impl<'a> WorklistBuilder<'a> {
             .recorder
             .instances
             .get(instance)
-            .expect("worklist queue holds interned instances");
+            .expect("internal invariant violated: worklist queue holds interned instances");
         let key = self
             .recorder
             .catalog
             .instance(record.ordinal)
-            .expect("interned instance has a catalog key")
+            .expect("internal invariant violated: interned instance has a catalog key")
             .clone();
         ResolvedInstanceRequest {
             key,

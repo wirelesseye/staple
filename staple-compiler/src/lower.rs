@@ -3501,7 +3501,12 @@ impl LoweredProgram {
             .get(body)
             .map(|expression| &expression.kind)
         {
-            let expression = self.expressions.get(body).expect("lowered body");
+            let expression = self.expressions.get(body).ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: body ID refers to an allocated expression",
+                )
+            })?;
             return Ok((
                 *block,
                 expression.coercion.clone(),
@@ -4248,10 +4253,12 @@ impl LoweredProgram {
             }
             ReactiveIntrinsicRoute::Until => {
                 let predicate = self.lower_reactive_callback(module, owner, call)?;
-                let predicate_record = self
-                    .reactive_callbacks
-                    .get(predicate)
-                    .expect("the predicate callback was just recorded");
+                let predicate_record = self.reactive_callbacks.get(predicate).ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: the predicate callback was just recorded",
+                    )
+                })?;
                 // Pure apart from reading signals.
                 if !predicate_record.function_type.effects.resources.is_empty()
                     || matches!(
@@ -4846,7 +4853,12 @@ impl LoweredProgram {
             ExpressionDisposition::ResourceCoroutine(route) => {
                 self.lower_resource_expression(module, owner, context, route, expression)?
             }
-            ExpressionDisposition::Rejected => unreachable!("rejected above"),
+            ExpressionDisposition::Rejected => {
+                return Err(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    "internal invariant violated: rejected expressions exit before dispatch",
+                ));
+            }
         };
         let id = self.expressions.push(LoweredExpression {
             key,
@@ -5450,10 +5462,10 @@ impl LoweredProgram {
                 fields: steps
                     .iter()
                     .map(|step| match step {
-                        LoweredProductStep::Positional { expression, .. } => *expression,
-                        _ => unreachable!("fallback products are positional"),
+                        LoweredProductStep::Positional { expression, .. } => Ok(*expression),
+                        _ => Err(Diagnostic::new(product.syntax.span.clone(), "internal invariant violated: fallback products contain only positional steps")),
                     })
-                    .collect(),
+                    .collect::<Result<Vec<_>, Diagnostic>>()?,
                 steps,
             });
         };
@@ -5524,10 +5536,12 @@ impl LoweredProgram {
         for element in &product.elements {
             let expression = self.lower_expression(module, owner, context, &element.value)?;
             if element.designated {
-                let name = element
-                    .name
-                    .clone()
-                    .expect("designators always have a name");
+                let name = element.name.clone().ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: designators always have a name",
+                    )
+                })?;
                 let Some(slot) = final_type
                     .elements
                     .iter()
@@ -6352,10 +6366,18 @@ impl LoweredProgram {
                 (target, function_type, adapter, closure, evidence)
             }
             CallableValueRoute::Constructor => {
-                let symbol = symbol.expect("constructor values are symbol-selected");
-                let type_id = resolved
-                    .constructor_type(symbol)
-                    .expect("checked constructor symbol");
+                let symbol = symbol.ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: constructor values are symbol-selected",
+                    )
+                })?;
+                let type_id = resolved.constructor_type(symbol).ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: selected constructor symbol has a registered type",
+                    )
+                })?;
                 let function_type = checked_function_type
                     .or_else(|| symbol_function_type(module, symbol))
                     .ok_or_else(|| {
@@ -6377,7 +6399,12 @@ impl LoweredProgram {
                 )
             }
             CallableValueRoute::External => {
-                let symbol = symbol.expect("extern values are symbol-selected");
+                let symbol = symbol.ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: extern values are symbol-selected",
+                    )
+                })?;
                 let function_type = checked_function_type
                     .or_else(|| symbol_function_type(module, symbol))
                     .ok_or_else(|| {
@@ -6395,10 +6422,18 @@ impl LoweredProgram {
                 )
             }
             CallableValueRoute::Intrinsic => {
-                let symbol = symbol.expect("intrinsic values are symbol-selected");
-                let intrinsic = resolved
-                    .intrinsic_function(symbol)
-                    .expect("checked intrinsic symbol");
+                let symbol = symbol.ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: intrinsic values are symbol-selected",
+                    )
+                })?;
+                let intrinsic = resolved.intrinsic_function(symbol).ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: selected intrinsic symbol has a registered intrinsic",
+                    )
+                })?;
                 let function_type = checked_function_type
                     .or_else(|| symbol_function_type(module, symbol))
                     .ok_or_else(|| {
@@ -6816,10 +6851,18 @@ impl LoweredProgram {
         let mut evidence = None;
         let (target, callee, function_type) = match route {
             CallRoute::GenericDirect => {
-                let symbol = symbol.expect("generic direct calls are symbol-selected");
-                let function = module
-                    .function_for_symbol(symbol)
-                    .expect("checked generic function symbol");
+                let symbol = symbol.ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: generic direct calls are symbol-selected",
+                    )
+                })?;
+                let function = module.function_for_symbol(symbol).ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: generic call symbol has a registered function",
+                    )
+                })?;
                 let function_type = checked_call_function_type(module, call, &origin)?;
                 let template = module.type_of_function(function).cloned().ok_or_else(|| {
                     Diagnostic::new(
@@ -6847,7 +6890,12 @@ impl LoweredProgram {
                 )
             }
             CallRoute::External => {
-                let symbol = symbol.expect("extern calls are symbol-selected");
+                let symbol = symbol.ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: extern calls are symbol-selected",
+                    )
+                })?;
                 let function_type = checked_call_function_type(module, call, &origin)?;
                 c_string_temporary = module
                     .type_of_expression(call.argument.syntax().id)
@@ -6860,10 +6908,18 @@ impl LoweredProgram {
                 )
             }
             CallRoute::Intrinsic => {
-                let symbol = symbol.expect("intrinsic calls are symbol-selected");
-                let intrinsic = resolved
-                    .intrinsic_function(symbol)
-                    .expect("checked intrinsic symbol");
+                let symbol = symbol.ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: intrinsic calls are symbol-selected",
+                    )
+                })?;
+                let intrinsic = resolved.intrinsic_function(symbol).ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: selected intrinsic symbol has a registered intrinsic",
+                    )
+                })?;
                 let function_type = checked_call_function_type(module, call, &origin)?;
                 (
                     LoweredCallableTarget::Intrinsic { symbol, intrinsic },
@@ -6929,10 +6985,18 @@ impl LoweredProgram {
                 )
             }
             CallRoute::Constructor => {
-                let symbol = symbol.expect("constructor calls are symbol-selected");
-                let type_id = resolved
-                    .constructor_type(symbol)
-                    .expect("checked constructor symbol");
+                let symbol = symbol.ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: constructor calls are symbol-selected",
+                    )
+                })?;
+                let type_id = resolved.constructor_type(symbol).ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: selected constructor symbol has a registered type",
+                    )
+                })?;
                 let function_type = checked_call_function_type(module, call, &origin)?;
                 (
                     LoweredCallableTarget::Constructor {
@@ -7020,7 +7084,12 @@ impl LoweredProgram {
                 evidence = Some(recipe);
                 (target, None, function_type)
             }
-            _ => unreachable!("non-concrete call routes defer above"),
+            _ => {
+                return Err(Diagnostic::new(
+                    origin.span.clone(),
+                    "internal invariant violated: non-concrete call routes exit before concrete dispatch",
+                ));
+            }
         };
         let (arguments, mut steps) = if matches!(
             route,
@@ -7490,10 +7559,12 @@ impl LoweredProgram {
         let mut positional = 0usize;
         for element in &product.elements {
             if element.designated {
-                let name = element
-                    .name
-                    .clone()
-                    .expect("designated elements always have a name");
+                let name = element.name.clone().ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: designated elements always have a name",
+                    )
+                })?;
                 let Some(slot) = final_type
                     .elements
                     .iter()
@@ -13994,7 +14065,9 @@ impl LoweredProgram {
         for (id, name) in self.planned_initializer_names() {
             self.initializers
                 .get_mut(id)
-                .expect("initializer exists")
+                .expect(
+                    "internal invariant violated: initializer naming iterates existing arena IDs",
+                )
                 .name = name;
         }
     }

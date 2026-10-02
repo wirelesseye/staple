@@ -628,7 +628,7 @@ impl EnvironmentBuilder {
             .iter()
             .next()
             .copied()
-            .expect("a cycle has at least one remaining node");
+            .expect("internal invariant violated: a cycle has at least one remaining node");
         let mut path = Vec::new();
         let mut visited = HashSet::new();
         let mut current = start;
@@ -1357,7 +1357,12 @@ impl<'a> TraitSelectionContext<'a> {
                 .program
                 .trait_implementations
                 .get(self.implementation_ids[index])
-                .expect("matched implementation is in the catalog");
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        origin.span.clone(),
+                        "internal invariant violated: matched implementation is in the catalog",
+                    )
+                })?;
             let function = metadata
                 .methods
                 .iter()

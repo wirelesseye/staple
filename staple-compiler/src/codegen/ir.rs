@@ -24,7 +24,12 @@ impl<'program, 'context> Backend<'program, 'context> {
         let register = self
             .llvm_module
             .get_function("__staple_gc_register_root")
-            .expect("GC root registration function");
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: GC root registration runtime is linked before emission",
+                )
+            })?;
         self.builder
             .build_direct_call(
                 register,
@@ -1067,9 +1072,12 @@ impl<'program, 'context> Backend<'program, 'context> {
             .builder
             .build_struct_gep(llvm_type, slot, 1, "sum.target.payload")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let payload_type = llvm_type
-            .get_field_type_at_index(1)
-            .expect("sum payload field");
+        let payload_type = llvm_type.get_field_type_at_index(1).ok_or_else(|| {
+            Diagnostic::new(
+                staple_syntax::Span::Compiler,
+                "internal invariant violated: sum layout has a payload field at index 1",
+            )
+        })?;
         let alignment = self.target_data.get_abi_alignment(&payload_type);
         Ok(SumStorageSlot {
             llvm_type,
@@ -1157,9 +1165,12 @@ impl<'program, 'context> Backend<'program, 'context> {
             .builder
             .build_struct_gep(sum_type, sum_slot, 1, "sum.extract.payload")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        let payload_type = sum_type
-            .get_field_type_at_index(1)
-            .expect("sum payload field");
+        let payload_type = sum_type.get_field_type_at_index(1).ok_or_else(|| {
+            Diagnostic::new(
+                staple_syntax::Span::Compiler,
+                "internal invariant violated: sum layout has a payload field at index 1",
+            )
+        })?;
         let alternative = sum.alternatives.get(index).ok_or_else(|| {
             Diagnostic::new(span.clone(), "sum alternative index is out of bounds")
         })?;
@@ -1240,7 +1251,12 @@ impl<'program, 'context> Backend<'program, 'context> {
             )
             .map_err(compiler_diagnostic)?;
         let compare = self.context.append_basic_block(
-            success.get_parent().expect("match function"),
+            success.get_parent().ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: match block belongs to an LLVM function",
+                )
+            })?,
             "match.string.compare",
         );
         self.builder
@@ -1810,7 +1826,12 @@ impl<'program, 'context> Backend<'program, 'context> {
         let offset = self
             .target_data
             .offset_of_element(&header, 3)
-            .expect("Buffer data field has an offset");
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: buffer header layout has a data pointer at field 3",
+                )
+            })?;
         let stride = self.target_data.get_abi_size(&llvm_element);
         if stride == 0 {
             return Ok(());
@@ -1846,7 +1867,12 @@ impl<'program, 'context> Backend<'program, 'context> {
         let offset = self
             .target_data
             .offset_of_element(&header, 3)
-            .expect("Buffer data field has an offset");
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: buffer header layout has a data pointer at field 3",
+                )
+            })?;
         let stride = self.target_data.get_abi_size(&llvm_element);
         let bytes = self
             .builder

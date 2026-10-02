@@ -92,7 +92,12 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.builder.position_at_end(entry);
         let frame = function
             .get_first_param()
-            .expect("resume frame parameter")
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: coroutine resume signature has a frame parameter",
+                )
+            })?
             .into_pointer_value();
 
         Ok(CoroutineResumeEntry {
@@ -285,7 +290,12 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.builder.position_at_end(entry);
         let frame = function
             .get_first_param()
-            .expect("cleanup frame parameter")
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: coroutine cleanup signature has a frame parameter",
+                )
+            })?
             .into_pointer_value();
         let state_slot = self
             .builder
@@ -348,7 +358,12 @@ impl<'program, 'context> Backend<'program, 'context> {
         let unregister = self
             .llvm_module
             .get_function("__staple_gc_unregister_root")
-            .expect("GC root unregistration function");
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: GC root unregistration runtime is linked before cleanup emission",
+                )
+            })?;
         self.build_runtime_call(unregister, &[frame.into()], "")?;
         self.builder
             .build_store(state_slot, i8_type.const_int(CORO_STATE_FREED, false))
@@ -519,7 +534,15 @@ impl<'program, 'context> Backend<'program, 'context> {
         let done = self.context.append_basic_block(runner, "done");
 
         self.builder.position_at_end(entry);
-        let payload = runner.get_first_param().unwrap().into_pointer_value();
+        let payload = runner
+            .get_first_param()
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: reactive runner has a payload parameter",
+                )
+            })?
+            .into_pointer_value();
         let load_field = |emitter: &Self, index: u32, name: &str| {
             let slot = emitter
                 .builder
@@ -615,7 +638,15 @@ impl<'program, 'context> Backend<'program, 'context> {
     ) -> CodeGenerationResult<()> {
         let entry = self.context.append_basic_block(runner, "entry");
         self.builder.position_at_end(entry);
-        let payload_argument = runner.get_first_param().unwrap().into_pointer_value();
+        let payload_argument = runner
+            .get_first_param()
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: reactive runner has a payload parameter",
+                )
+            })?
+            .into_pointer_value();
         let callback_slot = self
             .builder
             .build_struct_gep(payload_type, payload_argument, 0, "reaction.callback")
@@ -673,7 +704,15 @@ impl<'program, 'context> Backend<'program, 'context> {
         let pointer_type = self.context.ptr_type(AddressSpace::default());
         let entry = self.context.append_basic_block(runner, "entry");
         self.builder.position_at_end(entry);
-        let payload_argument = runner.get_first_param().unwrap().into_pointer_value();
+        let payload_argument = runner
+            .get_first_param()
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: reactive runner has a payload parameter",
+                )
+            })?
+            .into_pointer_value();
         let callback_slot = self
             .builder
             .build_struct_gep(payload_type, payload_argument, 0, "derived.callback")
@@ -787,7 +826,12 @@ impl<'program, 'context> Backend<'program, 'context> {
         let drive = self
             .llvm_module
             .get_function("__staple_coro_drive")
-            .expect("coroutine driver");
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: coroutine driver runtime is linked before emission",
+                )
+            })?;
         let status = self
             .build_runtime_call(drive, &[frame.into(), leaf_out.into()], "coro.drive")?
             .try_as_basic_value()
@@ -1054,7 +1098,12 @@ impl<'program, 'context> Backend<'program, 'context> {
                 let sched_join = self
                     .context
                     .append_basic_block(function, "await.sched.join");
-                let entry_block = self.builder.get_insert_block().expect("await block");
+                let entry_block = self.builder.get_insert_block().ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: await emission has a current LLVM block",
+                    )
+                })?;
                 self.builder
                     .build_conditional_branch(has_record, sched_from_record, sched_join)
                     .map_err(compiler_diagnostic)?;

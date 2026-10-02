@@ -1980,14 +1980,13 @@ fn enclosing_request(
     program: &LoweredProgram,
     instance: FunctionInstanceId,
 ) -> ResolvedInstanceRequest {
-    let record = program
-        .instances
-        .get(instance)
-        .expect("instance body materialization starts from interned instances");
+    let record = program.instances.get(instance).expect(
+        "internal invariant violated: instance body materialization starts from interned instances",
+    );
     let key = program
         .specializations
         .instance(record.ordinal)
-        .expect("interned instance has a catalog key")
+        .expect("internal invariant violated: interned instance has a catalog key")
         .clone();
     ResolvedInstanceRequest {
         key,

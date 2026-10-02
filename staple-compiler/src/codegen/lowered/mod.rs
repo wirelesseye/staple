@@ -243,10 +243,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .values()
             .chain(self.artifacts.values().flatten())
         {
-            let name = function
-                .get_name()
-                .to_str()
-                .expect("planned names are UTF-8");
+            let name = function.get_name().to_str().map_err(|_| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: planned names are UTF-8",
+                )
+            })?;
             types.insert(
                 name.to_owned(),
                 (
@@ -256,10 +258,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             );
         }
         for function in self.initializers.values() {
-            let name = function
-                .get_name()
-                .to_str()
-                .expect("initializer names are UTF-8");
+            let name = function.get_name().to_str().map_err(|_| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: initializer names are UTF-8",
+                )
+            })?;
             types.insert(
                 name.to_owned(),
                 (
@@ -978,7 +982,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .view
             .instance(instance)
             .and_then(|record| record.body.as_ref())
-            .expect("emitted instance has a body");
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: emitted instance has a body",
+                )
+            })?;
         let parameters = function.get_params();
         let environment_pointer = parameters
             .first()
@@ -2162,7 +2171,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .backend
             .llvm_module
             .get_function("__staple_gc_set_stack_bottom")
-            .expect("GC runtime stack initializer");
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: GC stack initializer runtime is linked before entry emission",
+                )
+            })?;
         self.backend
             .builder
             .build_direct_call(set_stack_bottom, &[stack_bottom.into()], "")
@@ -2538,7 +2552,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         )
                     })?
                 } else {
-                    value_as_basic(self.backend.unit_value()).expect("unit is a basic value")
+                    value_as_basic(self.backend.unit_value()).ok_or_else(|| {
+                        Diagnostic::new(
+                            staple_syntax::Span::Compiler,
+                            "internal invariant violated: Unit has an LLVM basic-value representation",
+                        )
+                    })?
                 };
                 let Some((exit, owned_before, reactive_before, tasks_before)) = environment
                     .loops
@@ -2566,17 +2585,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_unconditional_branch(exit)
                     .map_err(compiler_diagnostic)?;
-                let predecessor = self
-                    .backend
-                    .builder
-                    .get_insert_block()
-                    .expect("break block");
+                let predecessor = self.backend.builder.get_insert_block().ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: break emission has a current LLVM block",
+                    )
+                })?;
                 environment
                     .loops
                     .iter_mut()
                     .rev()
                     .find(|context| context.depth == break_item.loop_depth)
-                    .expect("break loop context")
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            staple_syntax::Span::Compiler,
+                            "internal invariant violated: break depth names an active loop context",
+                        )
+                    })?
                     .incoming
                     .push((value, predecessor));
                 environment.returned = true;
@@ -3407,7 +3432,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         slots[slot] = Some(element);
                     }
                 }
-                (None, None) => unreachable!("product steps always place or spread"),
+                (None, None) => {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "internal invariant violated: product steps always place or spread",
+                    ));
+                }
             }
         }
         let values = slots
@@ -3681,10 +3711,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .map(|_| ())
                 .map_err(compiler_diagnostic)?;
         }
-        let context = environment
-            .loops
-            .pop()
-            .expect("loop code generation context");
+        let context = environment.loops.pop().ok_or_else(|| {
+            Diagnostic::new(
+                staple_syntax::Span::Compiler,
+                "internal invariant violated: loop context remains active until its body is emitted",
+            )
+        })?;
         self.backend.builder.position_at_end(exit);
         if context.incoming.is_empty() {
             self.backend
@@ -3772,11 +3804,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_unconditional_branch(merge_block)
                     .map_err(compiler_diagnostic)?;
-                let predecessor = self
-                    .backend
-                    .builder
-                    .get_insert_block()
-                    .expect("match arm block");
+                let predecessor = self.backend.builder.get_insert_block().ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: continuing match arm has a current LLVM block",
+                    )
+                })?;
                 incoming.push((value, predecessor));
                 continuing_state = Some(environment.clone());
             } else {
@@ -3893,7 +3926,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     };
                     let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
                     let selected = self.backend.context.append_basic_block(
-                        success.get_parent().expect("match function"),
+                        success.get_parent().ok_or_else(|| {
+                            Diagnostic::new(
+                                staple_syntax::Span::Compiler,
+                                "internal invariant violated: match block belongs to an LLVM function",
+                            )
+                        })?,
                         "match.typed.selected",
                     );
                     let matches =
@@ -3950,7 +3988,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     };
                     let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
                     let selected = self.backend.context.append_basic_block(
-                        success.get_parent().expect("match function"),
+                        success.get_parent().ok_or_else(|| {
+                            Diagnostic::new(
+                                staple_syntax::Span::Compiler,
+                                "internal invariant violated: match block belongs to an LLVM function",
+                            )
+                        })?,
                         "match.string.selected",
                     );
                     let matches =
@@ -4018,7 +4061,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         success
                     } else {
                         self.backend.context.append_basic_block(
-                            success.get_parent().expect("match function"),
+                            success.get_parent().ok_or_else(|| {
+                                Diagnostic::new(
+                                    staple_syntax::Span::Compiler,
+                                    "internal invariant violated: match block belongs to an LLVM function",
+                                )
+                            })?,
                             "match.pattern",
                         )
                     };
@@ -4082,7 +4130,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     };
                     let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
                     let selected = self.backend.context.append_basic_block(
-                        success.get_parent().expect("match function"),
+                        success.get_parent().ok_or_else(|| {
+                            Diagnostic::new(
+                                staple_syntax::Span::Compiler,
+                                "internal invariant violated: match block belongs to an LLVM function",
+                            )
+                        })?,
                         "match.selected",
                     );
                     let matches =
@@ -4221,11 +4274,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .builder
                 .build_unconditional_branch(merge_block)
                 .map_err(compiler_diagnostic)?;
-            let predecessor = self
-                .backend
-                .builder
-                .get_insert_block()
-                .expect("logical right block");
+            let predecessor = self.backend.builder.get_insert_block().ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: continuing logical operand has a current LLVM block",
+                )
+            })?;
             incoming.push((right_value, predecessor));
         } else {
             Self::forget_owned_since(environment, owned_before);
@@ -5402,7 +5456,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let value = self.emit_expression(owner, expression, environment)?;
         if environment.returned {
             return Ok(value_as_basic(self.backend.unit_value())
-                .expect("unit is basic")
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "internal invariant violated: Unit has an LLVM basic-value representation",
+                    )
+                })?
                 .into());
         }
         let value = value_as_basic(value).ok_or_else(|| {
@@ -5966,7 +6025,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<()> {
         let span = place.origin.span.clone();
         let crate::LoweredPlaceKind::Indexed { base, index } = &place.kind else {
-            unreachable!("indexed assignment is dispatched for an indexed place")
+            return Err(Diagnostic::new(
+                span,
+                "internal invariant violated: indexed assignment dispatch requires an indexed place",
+            ));
         };
         let binding = self
             .view
@@ -7264,9 +7326,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_struct_gep(option_type, result_slot, 1, "buffer.pop.payload")
             .map_err(compiler_diagnostic)?;
-        let payload_type = option_type
-            .get_field_type_at_index(1)
-            .expect("Option payload");
+        let payload_type = option_type.get_field_type_at_index(1).ok_or_else(|| {
+            Diagnostic::new(
+                staple_syntax::Span::Compiler,
+                "internal invariant violated: Option layout has a payload field at index 1",
+            )
+        })?;
         let storage = super::layout::SumStorage {
             tag: tag_slot,
             payload: payload_slot,

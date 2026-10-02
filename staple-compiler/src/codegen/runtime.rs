@@ -184,8 +184,24 @@ impl<'program, 'context> Backend<'program, 'context> {
         let leading_valid = self.context.append_basic_block(function, "leading.valid");
         let invalid_block = self.context.append_basic_block(function, "invalid");
 
-        let pointer = function.get_nth_param(0).unwrap().into_pointer_value();
-        let length = function.get_nth_param(1).unwrap().into_int_value();
+        let pointer = function
+            .get_nth_param(0)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: UTF-8 validator has a pointer parameter",
+                )
+            })?
+            .into_pointer_value();
+        let length = function
+            .get_nth_param(1)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    "internal invariant violated: UTF-8 validator has a length parameter",
+                )
+            })?
+            .into_int_value();
         let byte_type = self.context.i8_type();
         self.builder.position_at_end(entry);
         let index_slot = self

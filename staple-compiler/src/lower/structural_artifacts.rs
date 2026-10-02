@@ -347,7 +347,10 @@ pub(super) fn select_concrete_trait_method_with_kind(
             })
         }
         TraitEvidence::DeclaredBound { .. } => {
-            unreachable!("checked above")
+            return Err(Diagnostic::new(
+                origin.span.clone(),
+                "internal invariant violated: trait evidence was resolved before artifact selection",
+            ));
         }
     }
 }
@@ -693,7 +696,7 @@ fn structural_index_body(
     } else {
         let element = product
             .homogeneous_element()
-            .expect("checked above")
+            .ok_or_else(|| Diagnostic::new(origin.span.clone(), "internal invariant violated: homogeneous product was checked before index expansion"))?
             .clone();
         Ok(StructuralBody::IndexLoad {
             element,

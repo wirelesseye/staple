@@ -16,7 +16,10 @@ impl LoweredProgram {
         let mut diagnostics = Vec::new();
         self.check_plan_types(&mut diagnostics);
         for (id, expected) in self.planned_initializer_names() {
-            let initializer = self.initializers.get(id).expect("initializer exists");
+            let initializer = self
+                .initializers
+                .get(id)
+                .expect("internal invariant violated: initializer exists");
             if initializer.name != expected {
                 diagnostics.push(Diagnostic::new(
                     initializer.origin.span.clone(),

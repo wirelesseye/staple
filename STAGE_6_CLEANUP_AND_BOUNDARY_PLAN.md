@@ -266,3 +266,107 @@ Formatting and whitespace checks pass. All 96 paths are `same` against
 `9428582` (the 12 example paths sampled twice; all 84 dumped corpus entries
 compared as single variants). The required mechanical scans, plus compact
 stage-prefix and substage scans, are empty.
+
+### Step 4: Diagnostics and executable defect reproduction (complete)
+
+Audited 63 explicit production panic sites, plus two UTF-8 expects in the test-only catalog
+ABI helper. Every production site is an internal invariant: classification
+establishes symbol kinds, arena/catalog traversal establishes lookup identity,
+and codegen operates on declared signatures, validated plans, and blocks it
+creates itself. No well-typed source program can violate these preconditions.
+54 production sites (and both test-helper name sites) now return diagnostics;
+nine non-Result production sites retain named invariant expects.
+Functions returning `Result` now return `internal invariant violated: ...`
+diagnostics instead of panicking. Non-Result bookkeeping helpers retain
+`expect` messages naming their invariant. The seven census/test-only sites
+are not production panics and remain test assertions.
+
+The following inventory lists every production site before conversion. Repeated
+rows are distinct occurrences, even when their invariant message is identical.
+
+| File / function | Original site | Guarantee | Disposition |
+| --- | --- | --- | --- |
+| `lower.rs` / `lower_function_body` | lowered body | ID comes from the same arena traversal | internal diagnostic |
+| `lower.rs` / `lower_reactive_intrinsic_operation` | the predicate callback was just recorded | callback was inserted immediately before lookup | internal diagnostic |
+| `lower.rs` / `lower_expression_occurrence` | rejected above | earlier dispatch rejects this branch | internal diagnostic |
+| `lower.rs` / `lower_product` | fallback products are positional | fallback builder appends only positional steps | internal diagnostic |
+| `lower.rs` / `lower_designated_product` | designators always have a name | designated syntax carries its name | internal diagnostic |
+| `lower.rs` / `lower_callable_value` | constructor values are symbol-selected | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_callable_value` | checked constructor symbol | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_callable_value` | extern values are symbol-selected | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_callable_value` | intrinsic values are symbol-selected | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_callable_value` | checked intrinsic symbol | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_call` | generic direct calls are symbol-selected | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_call` | checked generic function symbol | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_call` | extern calls are symbol-selected | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_call` | intrinsic calls are symbol-selected | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_call` | checked intrinsic symbol | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_call` | constructor calls are symbol-selected | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_call` | checked constructor symbol | route classifiers establish symbol kind | internal diagnostic |
+| `lower.rs` / `lower_call` | non-concrete call routes defer above | earlier dispatch rejects this branch | internal diagnostic |
+| `lower.rs` / `place_call_arguments` | designated elements always have a name | designated syntax carries its name | internal diagnostic |
+| `lower.rs` / `assign_initializer_names` | initializer exists | ID comes from the same arena traversal | named invariant expect |
+| `lower/structural_artifacts.rs` / `select_concrete_trait_method_with_kind` | checked above | preceding concrete-evidence / homogeneous-product check | internal diagnostic |
+| `lower/structural_artifacts.rs` / `structural_index_body` | checked above | preceding concrete-evidence / homogeneous-product check | internal diagnostic |
+| `lower/runtime_requirements.rs` / `position` | every requirement is listed in ALL | exhaustive requirement enum and ALL list | named invariant expect |
+| `lower/instance_resolution.rs` / `find_cycle` | a cycle has at least one remaining node | nonempty cycle remainder | named invariant expect |
+| `lower/instance_resolution.rs` / `select_method` | matched implementation is in the catalog | matched index comes from the owned implementation catalog | internal diagnostic |
+| `lower/coroutine_artifacts.rs` / `plan_original` | artifact {} has a plan while validating | validator cloned this plan from an existing artifact | named invariant expect |
+| `lower/artifact_validation.rs` / `validate_closed_catalog` | initializer exists | initializer names enumerate existing initializer IDs | named invariant expect |
+| `lower/instance_body.rs` / `enclosing_request` | instance body materialization starts from interned instances | catalog reservation precedes queue insertion and body materialization | named invariant expect |
+| `lower/instance_body.rs` / `enclosing_request` | interned instance has a catalog key | catalog reservation precedes queue insertion and body materialization | named invariant expect |
+| `lower/worklist.rs` / `resolved_request` | worklist queue holds interned instances | catalog reservation precedes queue insertion and body materialization | named invariant expect |
+| `lower/worklist.rs` / `resolved_request` | interned instance has a catalog key | catalog reservation precedes queue insertion and body materialization | named invariant expect |
+| `codegen/runtime.rs` / `build_utf8_validator` | fixed runtime parameter exists | helper declares its fixed pointer/length signature | internal diagnostic |
+| `codegen/runtime.rs` / `build_utf8_validator` | fixed runtime parameter exists | helper declares its fixed pointer/length signature | internal diagnostic |
+| `codegen/ir.rs` / `register_gc_root_region` | GC root registration function | recorded GC runtime is linked | internal diagnostic |
+| `codegen/ir.rs` / `begin_sum_storage` | sum payload field | fixed sum/buffer layout | internal diagnostic |
+| `codegen/ir.rs` / `extract_sum_alternative` | sum payload field | fixed sum/buffer layout | internal diagnostic |
+| `codegen/ir.rs` / `build_string_literal_pattern_compare` | match function | match block was appended to a function | internal diagnostic |
+| `codegen/ir.rs` / `trap_if_buffer_capacity_overflows` | Buffer data field has an offset | fixed sum/buffer layout | internal diagnostic |
+| `codegen/ir.rs` / `build_buffer_allocation` | Buffer data field has an offset | fixed sum/buffer layout | internal diagnostic |
+| `codegen/lowered/mod.rs` / `bind_parameters` | emitted instance has a body | validated instance has a materialized body | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_main` | GC runtime stack initializer | recorded GC runtime is linked | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_item` | unit is a basic value | Unit is emitted as an LLVM basic value | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_item` | break block | emitter creates and positions this control-flow block/context | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_item` | break loop context | emitter creates and positions this control-flow block/context | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_product` | product steps always place or spread | validated product steps place or spread | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_loop` | loop code generation context | emitter creates and positions this control-flow block/context | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_match` | match arm block | emitter creates and positions this control-flow block/context | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_match_pattern_branch` | match function | emitter creates and positions this control-flow block/context | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_match_pattern_branch` | match function | emitter creates and positions this control-flow block/context | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_match_pattern_branch` | match function | emitter creates and positions this control-flow block/context | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_match_pattern_branch` | match function | emitter creates and positions this control-flow block/context | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_logical` | logical right block | emitter creates and positions this control-flow block/context | internal diagnostic |
+| `codegen/lowered/mod.rs` / `assemble_call_argument` | unit is basic | Unit is emitted as an LLVM basic value | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_mutate_index_assignment` | indexed assignment is dispatched for an indexed place | assignment dispatcher matched indexed place | internal diagnostic |
+| `codegen/lowered/mod.rs` / `emit_buffer_pop` | Option payload | fixed Option tag/payload layout | internal diagnostic |
+| `codegen/ir/coroutines.rs` / `begin_coroutine_resume` | resume frame parameter | declared frame/payload signature | internal diagnostic |
+| `codegen/ir/coroutines.rs` / `build_coroutine_cleanup` | cleanup frame parameter | declared frame/payload signature | internal diagnostic |
+| `codegen/ir/coroutines.rs` / `build_coroutine_cleanup` | GC root unregistration function | recorded runtime requirement is linked before emission | internal diagnostic |
+| `codegen/ir/coroutines.rs` / `build_until_runner` | fixed runtime parameter exists | declared frame/payload signature | internal diagnostic |
+| `codegen/ir/coroutines.rs` / `build_reaction_runner` | fixed runtime parameter exists | declared frame/payload signature | internal diagnostic |
+| `codegen/ir/coroutines.rs` / `build_derived_runner` | fixed runtime parameter exists | declared frame/payload signature | internal diagnostic |
+| `codegen/ir/coroutines.rs` / `build_coroutine_drive` | coroutine driver | recorded runtime requirement is linked before emission | internal diagnostic |
+| `codegen/ir/coroutines.rs` / `build_external_await_suspend` | await block | emitter positioned the builder in the await block | internal diagnostic |
+
+The test-only catalog-name sites are also converted to internal diagnostics:
+
+| File / function | Original site | Guarantee | Disposition |
+| --- | --- | --- | --- |
+| `codegen/lowered/mod.rs` / `declared_catalog_types` | planned names are UTF-8 | planned names originate as Rust UTF-8 strings | internal diagnostic |
+| `codegen/lowered/mod.rs` / `declared_catalog_types` | initializer names are UTF-8 | planned names originate as Rust UTF-8 strings | internal diagnostic |
+
+`cstring_temporary_through_borrowed_callback_leaks` is an ignored CLI test that
+compiles, links, and runs the known leaking program twice. It calls a borrowed
+non-extern callback that delegates to libc `strlen`. Its comment specifies the
+allocation/release accounting a fixed test must assert. A successful run alone
+does not prove the leak is fixed; the defect remains documented in `lower_call`
+and `LoweredCall::c_string_temporary`.
+
+**Results:** 1301 workspace tests pass (two intentionally ignored tests). The
+ignored leak reproduction also passes when selected explicitly, including the
+asserted `strlen` results from both invocations. The workspace and test builds
+are warning-free. All 96 reference comparisons are `same`. Formatting and
+whitespace checks pass. Corpus prose was reviewed again to remove descriptions
+of removed-backend failures that could otherwise read as current behavior.

@@ -87,7 +87,7 @@ impl RuntimeRequirement {
         RuntimeRequirement::ALL
             .iter()
             .position(|candidate| *candidate == self)
-            .expect("every requirement is listed in ALL")
+            .expect("internal invariant violated: every requirement is listed in ALL")
     }
 
     #[cfg(test)]

@@ -4635,6 +4635,54 @@ mod tests {
         );
     }
 
+    /// Reproduces the outstanding CString temporary leak through a borrowed
+    /// callback. The callback passes the temporary to strlen and never owns it.
+    /// A fix must instrument malloc/free and assert one allocation and one
+    /// release per call, including repeated calls. Successful execution alone
+    /// does not prove release; this test deliberately stays ignored until
+    /// allocator accounting can make that assertion. The lowering call record
+    /// documents why freeing every callable argument would double-free
+    /// consuming conversions such as CString.to_string.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "known CString callback temporary leak; needs allocator accounting"]
+    fn cstring_temporary_through_borrowed_callback_leaks() {
+        use staple_compiler::{Lowerer, NameResolver, ProgramLoader, TypeChecker};
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler workspace root");
+        let source = concat!(
+            "use std.cinterop.*\n",
+            "use std.io.println\n",
+            "extern \"c\" { strlen: CString -> USize }\n",
+            "def apply: (CString -> USize) -> USize = f => f (c_string \"x\")\n",
+            "def borrow: CString -> USize = value => strlen value\n",
+            "let first = apply borrow\n",
+            "let second = apply borrow\n",
+            "println \"lengths: ${first:?},${second:?}\"\n",
+        );
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("leak reproduction loads");
+        let resolved = NameResolver::new()
+            .resolve_program(program)
+            .expect("leak reproduction resolves");
+        let checked = TypeChecker::new()
+            .check(resolved)
+            .expect("leak reproduction type checks");
+        let lowered = Lowerer::new()
+            .lower(&checked)
+            .expect("leak reproduction lowers");
+        let options = parse_options([std::ffi::OsString::from("cstring-leak.sta")])
+            .expect("leak reproduction link options");
+        let (exit, stdout) =
+            compile_link_run(&lowered, &options).expect("leak reproduction compiles and runs");
+        assert_eq!(exit, Some(0));
+        assert_eq!(stdout, "lengths: 1,1\n");
+    }
+
     /// Compile one lowered program, emit an object, link it, run
     /// it, and return `(exit code, stdout)`.
     #[cfg(unix)]
