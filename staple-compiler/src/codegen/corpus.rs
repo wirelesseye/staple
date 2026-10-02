@@ -1750,7 +1750,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
     must_run(expect_stdout(
         inline(
             "await_task_effect_pair",
-            "use std.coroutine.*\nuse std.io.(IO, println)\ndef leaf: () -> Coroutine{} I32 = () => coro { 9 }\ndef waiter: () -> Coroutine{Tasks, IO} I32 = () => coro {\n    let t = spawn (leaf ())\n    let r = await t\n    match r {\n        Completed v => v,\n        Cancelled() => 0,\n    }\n}\nlet sched = scheduler ()\nwith Tasks = task_scope (sched) {\n    let _ = spawn (waiter ())\n    let _ = pump (sched, 8)\n}\n",
+            "use std.coroutine.*\nuse std.io.(IO, println)\ndef leaf: () -> Coroutine{} I32 = () => coro { 9 }\ndef waiter: () -> Coroutine{Tasks} I32 = () => coro {\n    let t = spawn (leaf ())\n    let r = await t\n    match r {\n        Completed v => v,\n        Cancelled() => 0,\n    }\n}\nlet sched = scheduler ()\nwith Tasks = task_scope (sched) {\n    let _ = spawn (waiter ())\n    let _ = pump (sched, 8)\n}\n",
             "5.9",
         ),
         "",
@@ -1936,7 +1936,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "    let _ = await (yield_now ())\n",
                     "    println \"task end\"\n",
                     "}\n",
-                    "def abandoning: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "def abandoning: () -> Coroutine{IO} () = () => coro {\n",
                     "    let sched = scheduler ()\n",
                     "    let handle = loop {\n",
                     "        with Tasks = task_scope (sched) {\n",
@@ -1975,7 +1975,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "    let _ = await (yield_now ())\n",
                     "    println \"task end\"\n",
                     "}\n",
-                    "def continuing: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                    "def continuing: () -> Coroutine{IO} () = () => coro {\n",
                     "    let sched = scheduler ()\n",
                     "    let mut index = 0\n",
                     "    loop {\n",
@@ -2003,28 +2003,37 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "task start\nsecond finished False\ndone\n",
     )),
-    // `return` closes the open scope before the owned drops. The checker's
-    // effect inference leaves `spawn`'s effect variable unresolved outside a
-    // coroutine or top-level statement, so this fixture carries an empty
-    // scope; the break/continue entries prove child cancellation.
+    // `return` closes the open scope before the owned drops, cancelling the
+    // child it spawned: after the return, pumping the scheduler never reaches
+    // the child's trailing output. (An ordinary function can spawn since the
+    // `spawn` effect-variable fix.)
     must_run(expect_stdout(
         inline(
             "task_scope_return_exit",
             concat!(
                 "use std.coroutine.*\n",
                 "use std.io.(IO, println)\n",
-                "def early: () -> I32 = () => {\n",
-                "    let sched = scheduler ()\n",
+                "def worker: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                "    println \"task start\"\n",
+                "    let _ = await (yield_now ())\n",
+                "    println \"task end\"\n",
+                "}\n",
+                "def early: Scheduler ->{IO} I32 = sched => {\n",
                 "    with Tasks = task_scope (sched) {\n",
+                "        let child = spawn (worker ())\n",
+                "        let _ = pump (sched, 1)\n",
                 "        return 1\n",
                 "    }\n",
                 "    0\n",
                 "}\n",
-                "println \"returned ${early ()}\"\n",
+                "let sched = scheduler ()\n",
+                "println \"returned ${early sched}\"\n",
+                "let _ = pump (sched, 16)\n",
+                "println \"done\"\n",
             ),
             "5.11",
         ),
-        "returned 1\n",
+        "task start\nreturned 1\ndone\n",
     )),
     // Stage 5.11 (F4): a coroutine that completes normally drops its live
     // frame bindings in plan order, before the result is published. The cell

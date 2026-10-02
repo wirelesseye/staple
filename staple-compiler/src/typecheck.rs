@@ -4404,28 +4404,30 @@ impl TypeChecker {
                 let mut result = callee_effects.union(&argument_effects);
                 if let Some(function_type) = &called_type {
                     // The callee's effect row may still carry a generic
-                    // effect variable (e.g. `reaction`'s `<effect E>`) that
-                    // was never resolved back onto `function_types` for the
-                    // generic declaration itself. Instantiate it here from
-                    // the actual argument's function type so the variable's
-                    // effects (not just the callee's own fixed resources)
-                    // are attributed to this call.
+                    // effect variable (e.g. `reaction`'s `<effect E>` or
+                    // `spawn`'s `Coroutine{E} T`) that was never resolved
+                    // back onto `function_types` for the generic declaration
+                    // itself. Instantiate it here from the actual argument's
+                    // type, whatever its shape (a callback's function type or
+                    // a coroutine value's effect argument), so the variable's
+                    // effects (not just the callee's own fixed resources) are
+                    // attributed to this call.
                     let mut substitutions = HashMap::new();
                     if function_type.effects.variable.is_some() {
                         let argument_type = self
                             .implicit_thunks
                             .get(&value.argument.syntax().id)
                             .and_then(|thunk| self.function_types.get(&thunk.id).cloned())
+                            .map(CheckedType::Function)
                             .or_else(|| {
-                                match self.expression_types.get(&value.argument.syntax().id) {
-                                    Some(CheckedType::Function(argument)) => Some(argument.clone()),
-                                    _ => None,
-                                }
+                                self.expression_types
+                                    .get(&value.argument.syntax().id)
+                                    .cloned()
                             });
                         if let Some(argument_type) = argument_type {
                             infer_type_parameters(
                                 &function_type.parameter,
-                                &CheckedType::Function(argument_type),
+                                &argument_type,
                                 &mut substitutions,
                             );
                         }

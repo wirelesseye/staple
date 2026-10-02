@@ -501,7 +501,7 @@ fn awaiting_a_task_lowers_to_a_waiter_park_and_outcome_branch() {
         "use std.coroutine.*\n",
         "use std.io.(IO, println)\n",
         "def leaf: () -> Coroutine{} I32 = () => coro { 9 }\n",
-        "def waiter: () -> Coroutine{Tasks, IO} I32 = () => coro {\n",
+        "def waiter: () -> Coroutine{Tasks} I32 = () => coro {\n",
         "    let t = spawn (leaf ())\n",
         "    let r = await t\n",
         "    match r {\n",
@@ -713,13 +713,11 @@ fn a_return_inside_a_task_scope_closes_it() {
     assert!(close < ret, "the close precedes the return:\n{body}");
 }
 
-/// Known checker defect (TYPED_LOWERING_PLAN.md, "Known defects"): inside an
-/// ordinary function, `spawn`'s effect variable `E` is never resolved, even
-/// when the coroutine's type is annotated, so the body "requires effects {E}".
-/// The same call checks at top level and inside a coroutine. Remove
-/// `#[ignore]` with the fix, and give `task_scope_return_exit` a spawned child.
+/// `spawn`'s effect variable `E` is inferred from its coroutine argument
+/// (`Coroutine{E} T`) inside an ordinary function, so the body's effect row is
+/// the resolved one, not `{E}`. Effect-variable inference once considered only
+/// function-typed arguments (such as `reaction`'s callback).
 #[test]
-#[ignore = "known checker defect: spawn's effect variable in a function body"]
 fn spawn_type_checks_inside_an_ordinary_function() {
     type_check(concat!(
         "use std.coroutine.*\n",

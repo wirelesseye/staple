@@ -21,16 +21,22 @@ LLVM generation consumes lowered IR and no longer infers types, selects trait im
 
 ### Known defects
 
-- **`spawn` does not type-check inside an ordinary function (found in the Stage 5.11 review).**
-  - **Symptom:** in a plain `def` that declares its effects, `spawn` (`<T, effect E> Coroutine{E} T ->{Tasks, E} Task T`) leaves `E` unresolved, so the body "requires effects {E}". This happens even when the coroutine argument is annotated `Coroutine{Tasks, IO} ()`. The same call type-checks at top level and inside a coroutine body.
-  - **Effect:** a function cannot spawn from inside `with Tasks`, so `task_scope_return_exit` cannot prove that an early `return` cancels a live child. The IR test `a_return_inside_a_task_scope_closes_it` covers the return-path close.
-  - **Reproduction:** `tests/compiler.rs::spawn_type_checks_inside_an_ordinary_function` is `#[ignore]`d. Remove the attribute with the fix, and give the return fixture a spawned child.
 - **A temporary `CString` passed through an unknown callable leaks (Stage 5.11 F1 residual).**
   - **Symptom:** a temporary `CString` argument is released after the call only when the callee is a statically known extern binding. Through an arbitrary closure, such as a callback parameter, the temporary is never freed.
   - **Why it is narrow:** `CString.to_string` releases its own argument, so a blanket caller free would double-free `apply CString.to_string`.
   - **Fix direction:** record whether the callee's parameter consumes its `CString` (a move or a releasing conversion), and free only when it borrows.
 
 ### Fixed defects
+
+- **`spawn` did not type-check inside an ordinary function (found in the Stage 5.11 review; fixed after 5.11).**
+  - **Symptom:** in a plain `def`, `spawn` (`<T, effect E> Coroutine{E} T ->{Tasks, E} Task T`) left `E` unresolved, so the body "required effects {E}", even with an annotated coroutine argument. At top level and inside a coroutine body the unresolved `E` was silently absorbed instead.
+  - **Cause:** the checker infers a callee's effect variable from its argument's type in `expression_effects_now`, but considered only function-typed arguments (such as `reaction`'s callback), never a `Coroutine{E} T` value.
+  - **Fix:** the inference now uses the argument's recorded type, whatever its shape.
+  - **Consequence for existing programs:** a coroutine's effect row must equal its body's deferred effects (Staple.md, "Deferred effects"). The leaked variable used to unify with whatever a declared row lacked, so five programs over-declared their rows:
+    - Three declared `Coroutine{Tasks, IO}` for a body that only spawns an effect-free child: the `awaiting_a_task_lowers_to_a_waiter_park_and_outcome_branch` test, the CLI scheduler-drain test, and the `await_task_effect_pair` corpus entry. They now declare `Coroutine{Tasks}`.
+    - Two declared `Coroutine{Tasks, IO}` for a body whose own `with Tasks` provides `Tasks` locally, so only `IO` is deferred: the 5.11 `task_scope_break_exit` and `task_scope_continue_exit` corpus entries. They now declare `Coroutine{IO}`.
+    - Every example and every other corpus program type-checks unchanged.
+  - **Coverage:** `spawn_type_checks_inside_an_ordinary_function` runs again, and `task_scope_return_exit` now spawns a child that an early `return` cancels (`task end` never prints).
 
 - **A parenthesized expression whose own type is a product did not lower (found in the Stage 5.10 review; predated Stage 5; fixed after 5.10).**
   - **Symptom:** the checker normalizes a plain one-element product `(e)` to its element, so `(println "x")` has type `()`. `lower_product` instead read the expression's type as the product's layout. Unit has zero elements, so lowering reported "too many positional elements in product"; for `(pair ())` or `(p)` with `p` a pair, it reported "missing product element at position 1". Effects were never involved: `(nothing ())` and `(())` failed too. `(inc 1)` worked only because `I32` is not a product.

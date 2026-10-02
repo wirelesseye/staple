@@ -2045,7 +2045,7 @@ mod tests {
                 "use std.coroutine.*\n",
                 "use std.io.(IO, println)\n",
                 "def child: () -> Coroutine{} I32 = () => coro { 7 }\n",
-                "def waiter: () -> Coroutine{Tasks, IO} I32 = () => coro {\n",
+                "def waiter: () -> Coroutine{Tasks} I32 = () => coro {\n",
                 "    let c = spawn (child ())\n",
                 "    let r = await c\n",
                 "    match r { Completed v => v, Cancelled() => 0 }\n",
