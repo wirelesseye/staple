@@ -2779,8 +2779,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredPatternKind::Binding { symbol: None, .. } => Ok(()),
             LoweredPatternKind::Binding {
                 symbol: Some(symbol),
+                name,
                 ..
-            } => self.bind_symbol(owner, *symbol, value, environment, &span),
+            } => {
+                // Legacy names every ordinary binding; singleton patterns
+                // above bind no value. LLVM value names are not ABI symbols.
+                if let Some(value) = value_as_basic(value) {
+                    value.set_name(name);
+                }
+                self.bind_symbol(owner, *symbol, value, environment, &span)
+            }
             LoweredPatternKind::Product { elements, .. } => match elements.len() {
                 0 => Ok(()),
                 1 => self.bind_pattern(owner, elements[0], value, environment),

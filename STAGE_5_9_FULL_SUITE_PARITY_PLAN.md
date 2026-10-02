@@ -192,3 +192,9 @@ Root-cause audit:
 All twelve unfinished diagnostic sites were audited: eleven family diagnostic closures and one writeback branch. All four constructors of `LoweredCallArgument` set `writeback: false`, with no subsequent writes. The field and unreachable emission branch are removed; eleven diagnostic sites remain for Step 6.
 
 Baseline: default **1312/1312 pass**; lowered **1282 pass, 30 fail**. Post-step gates reproduce exactly those counts. The expanded in-process corpus compares **16642 fully emitted bodies with zero stubs**. Both workspace checks, formatting, and `git diff --check` pass. The CLI corpus harness passes under both defaults (LLVM compilation, object emission, linking, and execution with the worktree standard library). Step 2 is next.
+
+### Step 2 — parameter names (complete)
+
+`LoweredPatternKind::Binding::name` retains the source spelling and instance cloning preserves it. `bind_pattern` applies it to ordinary LLVM binding values before storing them, just as legacy does. Singleton patterns bind nothing and remain unnamed. The four parameter-name assertions are unchanged.
+
+P2 wording correction: legacy's skip is `resolved().type_for_pattern(...)`, which identifies a singleton pattern, not a binding's type annotation. Typed ordinary bindings are named as well; the implementation mirrors the actual legacy rule. Both workspace checks, formatting, and whitespace checks pass. Default gate: **1312/1312 pass**; lowered gate: **1286 pass, 26 fail** (four fewer). All four original parameter-name tests pass unchanged, and the expanded corpus normalized body comparison passes unchanged. Both CLI corpus harnesses pass. Step 3 starts with cause G.

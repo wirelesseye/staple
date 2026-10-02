@@ -2200,6 +2200,8 @@ fn pattern_plan_shape(
 pub(crate) enum LoweredPatternKind {
     Wildcard,
     Binding {
+        /// Source spelling retained for LLVM value names (Stage 5.9 P2).
+        name: String,
         /// The symbol this pattern binds. Absent for singleton patterns such
         /// as `True`, which name an existing value instead of binding one.
         symbol: Option<SymbolId>,
@@ -4726,6 +4728,7 @@ impl LoweredProgram {
         let kind = match pattern {
             Pattern::Wildcard(_) => LoweredPatternKind::Wildcard,
             Pattern::Binding(binding) => LoweredPatternKind::Binding {
+                name: binding.name.clone(),
                 symbol: resolved.symbol_for(binding.syntax.id),
                 singleton: resolved.type_for_pattern(binding.syntax.id),
                 mutable: binding.mutable,

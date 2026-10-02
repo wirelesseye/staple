@@ -1454,11 +1454,13 @@ impl<'a> BodyCloner<'a> {
         let kind = match pattern.kind {
             LoweredPatternKind::Wildcard => LoweredPatternKind::Wildcard,
             LoweredPatternKind::Binding {
+                name,
                 symbol,
                 singleton,
                 mutable,
                 moved,
             } => LoweredPatternKind::Binding {
+                name,
                 symbol,
                 singleton,
                 mutable,
