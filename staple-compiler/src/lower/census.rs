@@ -599,14 +599,20 @@ pub(crate) fn census_mapping(
                             // effect parameter through its enclosing
                             // signature; the lowered instance still records
                             // the effect it was specialized with.
+                            // The fallback must be unambiguous: a body
+                            // specialized at two effect rows that legacy
+                            // cannot tell apart maps to neither, so the
+                            // census reports it instead of guessing.
                             .or_else(|| {
-                                candidates.iter().find(|(id, _)| {
+                                let mut matches = candidates.iter().filter(|(id, _)| {
                                     instance_substitutions_match_omitting_effects(
                                         program,
                                         *id,
                                         &pair.substitutions,
                                     )
-                                })
+                                });
+                                let first = matches.next()?;
+                                matches.next().is_none().then_some(first)
                             })
                     })
                     .and_then(|(id, _)| {

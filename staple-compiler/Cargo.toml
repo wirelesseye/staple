@@ -5,7 +5,10 @@ edition = "2024"
 
 [features]
 lowered-emitter = []
-# Test instrumentation: compare every emitted module with the other emitter.
+# Test instrumentation only, never a build configuration: every emitted
+# module is also emitted by the other backend and compared (Stage 5.9 gate:
+# `cargo nextest run --workspace --features
+# staple-compiler/differential-shadow,staple-compiler/lowered-emitter`).
 differential-shadow = []
 
 [dependencies]

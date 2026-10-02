@@ -287,4 +287,18 @@ Depend on legacy and need an explicit decision in 5.10:
 - `tests/compiler.rs`: `assert_artifact_definition` and the other `cfg!(feature = "lowered-emitter")` branches keep a legacy-spelling `else` arm that disappears with the legacy default. `tests/lowered_emitter.rs::selector_preserves_legacy_and_emits_reactive_body` compares both emitters directly.
 - `Emitter`, `CodeGenerator::with_emitter`, and the `lowered-emitter` feature, which exist only to choose between the two.
 
-Mirrored behavior left for 5.11: unchanged (the 5.9 fixes changed lowering, never legacy behavior).
+Mirrored behavior left for 5.11: one addition. Step 5's lowering change mirrors legacy's rule that a field write neither notifies a signal nor initializes its base. The 5.9 review confirmed this is a real defect (a reaction over `point.x` does not re-run after `point.x = 5`) and added it to the breakdown's 5.11 list. The 5.9 fixes otherwise changed lowering, never legacy behavior.
+
+## Post-gate review fixes
+
+The review re-ran all three gates and found them green: default 1318/1318, `lowered-emitter` 1318/1318, and `differential-shadow,lowered-emitter` 1318/1318. It confirmed legacy IR unchanged against the pre-5.9 binary. Three follow-ups:
+
+- **A mirrored defect was missing from the 5.11 list.** Step 5 made field writes skip signal notification and initialization, matching legacy. That is correct for parity but is a defect: under both emitters, a reaction over a signal product's field does not re-run after `point.x = 5`. It is now a 5.11 item with fixtures, and the handoff above is corrected.
+- **The census's effect-less pair fallback took the first match.** If one coroutine body were specialized at two effect rows that legacy records without an effect, the fallback could map legacy's pair to the wrong lowered pair and explain the other as aliased. The fallback now accepts a candidate only when it is the unique effect-less match; otherwise the census reports the pair as unmapped.
+- **The gate commands and the shadow feature's role are now documented.** `differential-shadow` is test instrumentation, never a build configuration. Every feature combination gets its own build tree, so use `CARGO_INCREMENTAL=0` to bound disk use. The three gates are:
+
+  ```bash
+  cargo nextest run --workspace
+  cargo nextest run --workspace --features staple-compiler/lowered-emitter
+  cargo nextest run --workspace --features staple-compiler/differential-shadow,staple-compiler/lowered-emitter
+  ```
