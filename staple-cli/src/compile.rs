@@ -4543,25 +4543,17 @@ mod tests {
         let _ = std::fs::remove_file(output);
         assert!(status.success(), "string-add executable returned {status}");
     }
-    /// Stage 5.3 Step 6 CLI harness: compile, link, and run every corpus
-    /// program with both emitters and compare stdout and exit status. Each
-    /// program's `DifferentialExpectation` decides what is required:
-    /// - `CompileOnly` programs cannot link under either emitter, so only
-    ///   compilation is checked (both emitters must compile them);
-    /// - `MustRun` programs must compile strictly and behave identically, and
-    ///   print their pinned stdout where one is recorded;
-    /// - `LoweredOnly` D5 fixtures run only under the lowered emitter and must
-    ///   print their pinned stdout; legacy must fail to compile or behave
-    ///   differently, and the run records which.
+    /// Strictly compile every corpus entry, then link and run runnable entries
+    /// and assert pinned stdout, successful exits, and expected traps.
     #[cfg(unix)]
     #[test]
-    fn stage_5_3_cli_differential_harness_compares_emitters() {
+    fn codegen_corpus_compiles_links_and_runs() {
         use std::path::Path;
 
         use inkwell::context::Context;
         use staple_compiler::{
-            CodeGenerator, DifferentialExpectation, DifferentialSource, Emitter, Lowerer,
-            NameResolver, ProgramLoader, TypeChecker,
+            CodeGenerator, CorpusExpectation, CorpusSource, Lowerer, NameResolver, ProgramLoader,
+            TypeChecker,
         };
 
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -4569,17 +4561,12 @@ mod tests {
         let options = parse_options([std::ffi::OsString::from("corpus.sta")])
             .expect("corpus link options should parse");
 
-        let mut identical = 0usize;
+        let mut runnable = 0usize;
         let mut compile_only = 0usize;
-        let mut lowered_only = 0usize;
-        let mut legacy_rejected = 0usize;
-        let mut legacy_different = 0usize;
-        for program in staple_compiler::differential_corpus() {
+        for program in staple_compiler::codegen_corpus() {
             let (source, root) = match program.source {
-                DifferentialSource::Inline(source) => {
-                    (source.to_owned(), workspace_root.to_path_buf())
-                }
-                DifferentialSource::File(path) => {
+                CorpusSource::Inline(source) => (source.to_owned(), workspace_root.to_path_buf()),
+                CorpusSource::File(path) => {
                     let full = workspace_root.join(path);
                     let source = std::fs::read_to_string(&full)
                         .unwrap_or_else(|error| panic!("`{path}` should read: {error}"));
@@ -4614,121 +4601,51 @@ mod tests {
                 });
 
             let context = Context::create();
-            let strict =
-                CodeGenerator::with_emitter(&context, Emitter::Lowered).compile_module(&lowered);
-            if program.expectation == DifferentialExpectation::CompileOnly {
-                // Unlinkable under either emitter: both must compile it.
-                assert!(
-                    strict.is_ok(),
-                    "`{}` must emit strictly under the lowered emitter: {:?}",
-                    program.name,
-                    strict.err()
-                );
-                CodeGenerator::with_emitter(&context, Emitter::Legacy)
-                    .compile_module(&lowered)
-                    .unwrap_or_else(|diagnostics| {
-                        panic!(
-                            "`{}` should compile with legacy: {diagnostics:?}",
-                            program.name
-                        )
-                    });
+            CodeGenerator::new(&context)
+                .compile_module(&lowered)
+                .unwrap_or_else(|diagnostics| {
+                    panic!("`{}` must emit strictly: {diagnostics:?}", program.name)
+                });
+            if program.expectation == CorpusExpectation::CompileOnly {
                 compile_only += 1;
                 continue;
             }
-            if program.expectation == DifferentialExpectation::LoweredOnly {
-                // A D5 generic fixture: legacy aliases or rejects it, so only
-                // the lowered emitter's behavior is required. Legacy must
-                // fail to compile or differ, and the run records which.
-                assert!(
-                    strict.is_ok(),
-                    "`{}` must emit strictly under the lowered emitter: {:?}",
-                    program.name,
-                    strict.err()
-                );
-                let lowered_behavior = compile_link_run(&lowered, Emitter::Lowered, &options)
-                    .unwrap_or_else(|error| {
-                        panic!("`{}` should run with lowered: {error}", program.name)
-                    });
-                let expected = program
-                    .expected_stdout
-                    .expect("a LoweredOnly program pins its stdout");
-                assert_eq!(
-                    lowered_behavior.1, expected,
-                    "`{}` prints unexpected output under the lowered emitter",
-                    program.name
-                );
-                match compile_link_run(&lowered, Emitter::Legacy, &options) {
-                    Err(_) => legacy_rejected += 1,
-                    Ok(legacy) => {
-                        assert_ne!(
-                            legacy, lowered_behavior,
-                            "`{}`: legacy must fail to compile or behave differently",
-                            program.name
-                        );
-                        legacy_different += 1;
-                    }
-                }
-                lowered_only += 1;
-                continue;
-            }
-            if let Err(diagnostics) = strict {
-                panic!(
-                    "`{}` must emit strictly under the lowered emitter: {diagnostics:?}",
-                    program.name
-                );
-            }
-            let legacy =
-                compile_link_run(&lowered, Emitter::Legacy, &options).unwrap_or_else(|error| {
-                    panic!("`{}` should link with legacy: {error}", program.name)
-                });
-            let lowered_behavior = compile_link_run(&lowered, Emitter::Lowered, &options)
-                .unwrap_or_else(|error| {
-                    panic!("`{}` should run with lowered: {error}", program.name)
-                });
+            let behavior = compile_link_run(&lowered, &options)
+                .unwrap_or_else(|error| panic!("`{}` should link and run: {error}", program.name));
             assert_eq!(
-                lowered_behavior, legacy,
-                "`{}` behaves differently under the lowered emitter",
+                behavior.0,
+                if program.traps { None } else { Some(0) },
+                "`{}` has unexpected exit status",
                 program.name
             );
-            if program.traps {
-                assert_eq!(
-                    legacy.0, None,
-                    "`{}` must end in a trap under both emitters",
-                    program.name
-                );
-            }
-            if let Some(expected) = program.expected_stdout {
-                assert_eq!(
-                    legacy.1, expected,
-                    "`{}` prints unexpected output under both emitters",
-                    program.name
-                );
-            }
-            identical += 1;
+            let expected = program
+                .expected_stdout
+                .expect("a runnable program pins its stdout");
+            assert_eq!(
+                behavior.1, expected,
+                "`{}` prints unexpected output",
+                program.name
+            );
+            runnable += 1;
         }
-        eprintln!(
-            "stage 5.3 CLI harness: {identical} identical, {compile_only} compile-only, \
-{lowered_only} lowered-only ({legacy_rejected} legacy-rejected, {legacy_different} legacy-different)"
-        );
+        eprintln!("codegen CLI corpus: {runnable} runnable, {compile_only} compile-only");
         assert_eq!(
-            identical + compile_only + lowered_only,
-            staple_compiler::differential_corpus().len(),
-            "every corpus program is identical, compile-only, or lowered-only"
+            runnable + compile_only,
+            staple_compiler::codegen_corpus().len()
         );
     }
 
-    /// Compile one lowered program with `emitter`, emit an object, link it, run
+    /// Compile one lowered program, emit an object, link it, run
     /// it, and return `(exit code, stdout)`.
     #[cfg(unix)]
     fn compile_link_run(
         lowered: &staple_compiler::LoweredModule,
-        emitter: staple_compiler::Emitter,
         options: &Options,
     ) -> Result<(Option<i32>, String), String> {
-        let object = TemporaryArtifact::new("differential-object", "o");
-        let executable = TemporaryArtifact::new("differential-executable", executable_extension());
+        let object = TemporaryArtifact::new("corpus-object", "o");
+        let executable = TemporaryArtifact::new("corpus-executable", executable_extension());
         let context = inkwell::context::Context::create();
-        staple_compiler::CodeGenerator::with_emitter(&context, emitter)
+        staple_compiler::CodeGenerator::new(&context)
             .emit_object(lowered, object.path(), None)
             .map_err(format_diagnostics)?;
         link_executable(object.path(), executable.path(), options)?;

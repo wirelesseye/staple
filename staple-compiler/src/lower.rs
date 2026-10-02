@@ -28,7 +28,7 @@ use crate::{
 mod artifact_closure;
 mod artifact_plan;
 mod artifact_validation;
-#[cfg(any(test, feature = "differential-shadow"))]
+#[cfg(test)]
 pub(crate) mod census;
 mod cleanup_artifacts;
 mod coroutine_artifacts;

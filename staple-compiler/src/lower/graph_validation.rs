@@ -477,7 +477,7 @@ fn body_evidence_origin(
     }
 }
 
-#[cfg(any(test, feature = "differential-shadow"))]
+#[cfg(test)]
 impl LoweredProgram {
     /// Test-only: the interned instance whose template, concrete callable
     /// type, and substitutions reproduce one legacy specialization. The

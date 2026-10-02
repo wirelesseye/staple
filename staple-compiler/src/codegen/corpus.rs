@@ -1,28 +1,9 @@
-//! Stage 5.3 Step 6: the differential-harness corpus and its in-process test.
-//!
-//! One ordered corpus list is shared by the in-process body comparison here
-//! and the CLI behavior harness in `staple-cli`. Each entry is tagged with the
-//! substage that added it; later substages only append.
-//!
-//! The in-process test emits every program with the legacy backend and with
-//! the strict lowered emitter, verifies both modules, runs the Stage 5.3
-//! declaration census, and compares the normalized body of every function the
-//! lowered emitter emitted with its mapped legacy function.
-//! Normalization renames symbols through the census map, renumbers SSA values
-//! and block labels in order of appearance, and sorts
-//! `__staple_gc_register_root` calls.
-
-#[cfg(any(test, feature = "differential-shadow"))]
-use crate::LoweredModule;
-#[cfg(any(test, feature = "differential-shadow"))]
-use crate::lower::census::CensusMapping;
-#[cfg(any(test, feature = "differential-shadow"))]
-use std::collections::{HashMap, HashSet};
+//! Shared code-generation corpus and strict emission/structure tests.
 
 /// Where one corpus program's source comes from.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DifferentialSource {
+pub enum CorpusSource {
     /// Source text inline in the corpus.
     Inline(&'static str),
     /// A path relative to the workspace root.
@@ -32,24 +13,18 @@ pub enum DifferentialSource {
 /// What the CLI harness requires of one corpus program.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DifferentialExpectation {
+pub enum CorpusExpectation {
     /// The program declares a C symbol no library defines (the census
-    /// programs' `inspect`), so it can never link or run under either
-    /// emitter. The CLI harness only checks that both emitters compile it.
+    /// programs' `inspect`), so it cannot link or run. The CLI harness checks strict compilation.
     CompileOnly,
-    /// The program must compile strictly and behave exactly like legacy.
+    /// The program must compile strictly and match the pinned behavior.
     MustRun,
-    /// The D5 generic fixtures: legacy aliases or rejects the program, so only
-    /// the lowered emitter is run and its pinned stdout is required. Legacy
-    /// must fail to compile or behave differently under the test, which
-    /// records which.
-    LoweredOnly,
 }
 
-/// The D5 artifact family a `LoweredOnly` fixture must instantiate twice.
+/// The D5 artifact family a `MustRun` fixture must instantiate twice.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DifferentialD5 {
+pub enum CorpusD5 {
     /// A generic coroutine's `resume`/`cleanup` pair.
     CoroutinePairs,
     /// A generic reaction's runner.
@@ -60,44 +35,40 @@ pub enum DifferentialD5 {
     DerivedRunners,
 }
 
-/// One differential corpus program.
+/// One code-generation corpus program.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
-pub struct DifferentialProgram {
+pub struct CorpusProgram {
     /// Stable label used in reports and failure messages.
     pub name: &'static str,
-    pub source: DifferentialSource,
+    pub source: CorpusSource,
     /// The substage that added the entry.
     pub substage: &'static str,
     /// What the CLI harness requires of the program.
-    pub expectation: DifferentialExpectation,
+    pub expectation: CorpusExpectation,
     /// Stage 5.4 Step 1: template names from the program's own module
     /// (matched against `LoweredFunction::name`). Every instance of each
     /// listed template must be fully emitted by the lowered emitter and
-    /// body-identical to legacy. This is the per-feature gate that does not
+    /// defined with its catalog name. This is the per-feature gate that does not
     /// need a runnable program.
     pub emits: &'static [&'static str],
     /// The exact stdout a `MustRun` program prints. The CLI harness asserts it
-    /// under both emitters, so a defect mirrored by both cannot pass as parity.
+    /// under the default emitter.
     pub expected_stdout: Option<&'static str>,
     /// A `MustRun` program that must end in an `llvm.trap` (killed by a
-    /// signal, so no exit code) under both emitters.
+    /// signal, so no exit code) under the default emitter.
     pub traps: bool,
-    /// A `LoweredOnly` program's D5 artifact family: the in-process harness
+    /// A `MustRun` program's D5 artifact family: the in-process harness
     /// requires two distinct artifacts of it.
-    pub d5: Option<DifferentialD5>,
+    pub d5: Option<CorpusD5>,
 }
 
-const fn inline(
-    name: &'static str,
-    source: &'static str,
-    substage: &'static str,
-) -> DifferentialProgram {
-    DifferentialProgram {
+const fn inline(name: &'static str, source: &'static str, substage: &'static str) -> CorpusProgram {
+    CorpusProgram {
         name,
-        source: DifferentialSource::Inline(source),
+        source: CorpusSource::Inline(source),
         substage,
-        expectation: DifferentialExpectation::MustRun,
+        expectation: CorpusExpectation::MustRun,
         emits: &[],
         expected_stdout: None,
         traps: false,
@@ -105,16 +76,12 @@ const fn inline(
     }
 }
 
-const fn file(
-    name: &'static str,
-    path: &'static str,
-    substage: &'static str,
-) -> DifferentialProgram {
-    DifferentialProgram {
+const fn file(name: &'static str, path: &'static str, substage: &'static str) -> CorpusProgram {
+    CorpusProgram {
         name,
-        source: DifferentialSource::File(path),
+        source: CorpusSource::File(path),
         substage,
-        expectation: DifferentialExpectation::MustRun,
+        expectation: CorpusExpectation::MustRun,
         emits: &[],
         expected_stdout: None,
         traps: false,
@@ -123,62 +90,55 @@ const fn file(
 }
 
 /// Stage 5.8 Step 8: a D5 generic fixture only the lowered emitter runs.
-const fn lowered_only(mut program: DifferentialProgram, d5: DifferentialD5) -> DifferentialProgram {
-    program.expectation = DifferentialExpectation::LoweredOnly;
+const fn d5_fixture(mut program: CorpusProgram, d5: CorpusD5) -> CorpusProgram {
+    program.expectation = CorpusExpectation::MustRun;
     program.d5 = Some(d5);
     program
 }
 
-/// Marks a corpus entry as unlinkable under either emitter.
-const fn compile_only(mut program: DifferentialProgram) -> DifferentialProgram {
-    program.expectation = DifferentialExpectation::CompileOnly;
+/// Marks a corpus entry as unlinkable because its external symbol is undefined.
+const fn compile_only(mut program: CorpusProgram) -> CorpusProgram {
+    program.expectation = CorpusExpectation::CompileOnly;
     program
 }
 
-/// An entry that compiles strictly and runs identically under both emitters.
-const fn must_run(mut program: DifferentialProgram) -> DifferentialProgram {
-    program.expectation = DifferentialExpectation::MustRun;
+/// An entry that compiles strictly and runs identically under the default emitter.
+const fn must_run(mut program: CorpusProgram) -> CorpusProgram {
+    program.expectation = CorpusExpectation::MustRun;
     program
 }
 
-/// Requires a `MustRun` entry to end in a trap under both emitters.
-const fn expect_trap(mut program: DifferentialProgram) -> DifferentialProgram {
+/// Requires a `MustRun` entry to end in a trap under the default emitter.
+const fn expect_trap(mut program: CorpusProgram) -> CorpusProgram {
     program.traps = true;
     program
 }
 
-/// Pins the exact stdout a `MustRun` entry prints under both emitters.
-const fn expect_stdout(
-    mut program: DifferentialProgram,
-    stdout: &'static str,
-) -> DifferentialProgram {
+/// Pins the exact stdout a `MustRun` entry prints under the default emitter.
+const fn expect_stdout(mut program: CorpusProgram, stdout: &'static str) -> CorpusProgram {
     program.expected_stdout = Some(stdout);
     program
 }
 
 /// Stage 5.4 Step 1: names the functions the entry must fully emit. Step 10
 /// attaches the list to the 5.4 corpus entries.
-#[allow(dead_code)]
-const fn emits(
-    mut program: DifferentialProgram,
-    templates: &'static [&'static str],
-) -> DifferentialProgram {
+const fn emits(mut program: CorpusProgram, templates: &'static [&'static str]) -> CorpusProgram {
     program.emits = templates;
     program
 }
 
-/// Stage 5.3's differential corpus: the empty program, a non-generic
+/// The shared code-generation corpus: the empty program, a non-generic
 /// integer-arithmetic program, a two-module program with module globals and
 /// initialization state, the Stage 4.7 census programs plus an
 /// every-artifact-family fixture, `staple-compiler/examples/*.sta` (excluding
 /// `macros.sta`, which fails during lowering), and the two-module `game_loop`
 /// example.
 #[doc(hidden)]
-pub fn differential_corpus() -> &'static [DifferentialProgram] {
+pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 74] = [
+static CORPUS: [CorpusProgram; 74] = [
     expect_stdout(must_run(inline("empty", "", "5.3")), ""),
     expect_stdout(
         must_run(inline(
@@ -1381,7 +1341,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
     // (an unspecialized type parameter reaches its emitter), so only the
     // lowered emitter runs them; each instantiates its artifact twice and
     // prints proof that the second instantiation used its own pair or runner.
-    lowered_only(
+    d5_fixture(
         expect_stdout(
             inline(
                 "generic_coro_pair",
@@ -1399,14 +1359,14 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ),
             "a=7 b=1\n",
         ),
-        DifferentialD5::CoroutinePairs,
+        CorpusD5::CoroutinePairs,
     ),
     // Stage 5.8 review: the D5 case legacy compiles but gets wrong. The
     // result type is concrete while the capture is `T`, so legacy's
     // syntax-keyed cache reuses the `I32` pair for the `(U8, U8)` creation
     // and prints `513` (the bytes `01 02` read as an `I32`). The lowered
     // emitter runs each instantiation's own pair.
-    lowered_only(
+    d5_fixture(
         expect_stdout(
             inline(
                 "generic_coro_alias",
@@ -1426,9 +1386,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ),
             "7\n(1, 2)\n",
         ),
-        DifferentialD5::CoroutinePairs,
+        CorpusD5::CoroutinePairs,
     ),
-    lowered_only(
+    d5_fixture(
         expect_stdout(
             inline(
                 "generic_reaction_runner",
@@ -1446,9 +1406,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ),
             "reaction 7\nreaction 1\n",
         ),
-        DifferentialD5::ReactionRunners,
+        CorpusD5::ReactionRunners,
     ),
-    lowered_only(
+    d5_fixture(
         expect_stdout(
             inline(
                 "generic_until_runner",
@@ -1474,9 +1434,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ),
             "until 7\nuntil 1\n",
         ),
-        DifferentialD5::UntilRunners,
+        CorpusD5::UntilRunners,
     ),
-    lowered_only(
+    d5_fixture(
         expect_stdout(
             inline(
                 "generic_derived_runner",
@@ -1499,7 +1459,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ),
             "derived 7 0\nderived 1 0\nresults 0 0\n",
         ),
-        DifferentialD5::DerivedRunners,
+        CorpusD5::DerivedRunners,
     ),
     // Stage 5.8 Step 9: the 4.5 fixture set as runnable programs, plus the
     // cancellation drop-order fixture.
@@ -1855,201 +1815,16 @@ let value = at (Ref (1, 2), (5 satisfies USize))
 
 /// Extract every `define`d function body from one module's IR text, keyed by
 /// the function's final symbol name.
-#[cfg(any(test, feature = "differential-shadow"))]
-fn module_functions(ir: &str) -> HashMap<String, Vec<String>> {
-    let lines = ir.lines().collect::<Vec<_>>();
-    let mut functions = HashMap::new();
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index];
-        if line.starts_with("define ") && !line.ends_with('}') {
-            let after_at = line
-                .find('@')
-                .unwrap_or_else(|| panic!("define names a symbol: {line}"));
-            let rest = &line[after_at + 1..];
-            let end = rest
-                .find(|character: char| character == '(' || character == ' ')
-                .unwrap_or(rest.len());
-            let mut body = vec![line.to_string()];
-            index += 1;
-            while index < lines.len() {
-                body.push(lines[index].to_string());
-                if lines[index] == "}" {
-                    break;
-                }
-                index += 1;
-            }
-            functions.insert(rest[..end].to_string(), body);
-        }
-        index += 1;
-    }
-    functions
-}
-
-/// Every module-level constant (`@name = ... constant ...`), keyed by name,
-/// with its definition after `=`. LLVM numbers constants such as
-/// `@c_string.literal.3` in creation order, which differs between the two
-/// emitters, so a body comparison must compare what a referenced constant
-/// holds, never its name.
-#[cfg(any(test, feature = "differential-shadow"))]
-fn module_constants(ir: &str) -> HashMap<String, String> {
-    let mut constants = HashMap::new();
-    for line in ir.lines() {
-        let Some(rest) = line.strip_prefix('@') else {
-            continue;
-        };
-        let Some((name, definition)) = rest.split_once(" = ") else {
-            continue;
-        };
-        if definition.contains(" constant ") || definition.starts_with("constant ") {
-            constants.insert(name.trim_matches('"').to_owned(), definition.to_owned());
-        }
-    }
-    constants
-}
-
-#[cfg(any(test, feature = "differential-shadow"))]
-fn identifier_char(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '$' | '.' | '_' | '-')
-}
-
-/// Normalize one function body for comparison: rename `@` symbols through
-/// `renames`, replace a reference to a module constant with that constant's
-/// definition from `constants` (the body's own module), canonicalize `%`
-/// locals and block labels in order of first appearance, and sort
-/// `__staple_gc_register_root` calls to the end.
-#[cfg(any(test, feature = "differential-shadow"))]
-fn normalize_function(
-    lines: &[String],
-    renames: &HashMap<String, String>,
-    constants: &HashMap<String, String>,
-) -> Vec<String> {
-    let mut locals: HashMap<String, String> = HashMap::new();
-    let mut body = Vec::new();
-    let mut roots = Vec::new();
-    for line in lines {
-        let mut output = String::new();
-        let mut chars = line.chars().peekable();
-        // A label definition starts the line at column zero.
-        let mut label = String::new();
-        let mut lookahead = line.chars();
-        while let Some(character) = lookahead.next() {
-            if identifier_char(character) {
-                label.push(character);
-            } else {
-                break;
-            }
-        }
-        let is_label = !label.is_empty() && line[label.len()..].starts_with(':');
-        if is_label {
-            output.push_str(&canonical_name(&mut locals, &label));
-            for _ in 0..label.len() {
-                chars.next();
-            }
-        }
-        while let Some(character) = chars.next() {
-            if character == '%' || character == '@' {
-                let mut token = String::new();
-                while let Some(next) = chars.peek().copied() {
-                    if identifier_char(next) {
-                        token.push(next);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                if character == '%' {
-                    output.push('%');
-                    output.push_str(&canonical_name(&mut locals, &token));
-                } else {
-                    output.push('@');
-                    output.push_str(&canonical_symbol(&token, renames, constants));
-                }
-            } else {
-                output.push(character);
-            }
-        }
-        // LLVM pads a block label's `; preds = ...` comment to the widest line
-        // in the function, and the two emitters' pre-normalization names have
-        // different lengths. The padding is not part of the body.
-        if is_label && let Some(index) = output.find(';') {
-            let (head, tail) = output.split_at(index);
-            output = format!("{} {}", head.trim_end(), tail);
-        }
-        if output.contains("call void @__staple_gc_register_root") {
-            roots.push(output);
-        } else {
-            body.push(output);
-        }
-    }
-    roots.sort();
-    body.extend(roots);
-    body
-}
-
-#[cfg(any(test, feature = "differential-shadow"))]
-/// The comparison name of one `@` symbol: its planned name through the
-/// census map when it is a mapped function, otherwise its base name with the
-/// internal disambiguator removed. Decision D2 lets the legacy backend
-/// disambiguate a module global with LLVM's `.N` suffix while the lowered
-/// backend uses `unique_global_name`'s `.global.<symbol>`; both denote the
-/// same catalog symbol.
-#[cfg(any(test, feature = "differential-shadow"))]
-fn canonical_symbol(
-    token: &str,
-    renames: &HashMap<String, String>,
-    constants: &HashMap<String, String>,
-) -> String {
-    if let Some(planned) = renames.get(token) {
-        return planned.clone();
-    }
-    // A constant compares by content: two emitters number the same literal
-    // differently, and a stripped `.N` alone would equate different literals.
-    if let Some(definition) = constants.get(token) {
-        return format!("constant{{{definition}}}");
-    }
-    if let Some(index) = token.rfind(".global.")
-        && token[index + ".global.".len()..]
-            .chars()
-            .all(|character| character.is_ascii_digit())
-    {
-        return token[..index].to_owned();
-    }
-    if let Some(index) = token.rfind('.')
-        && !token[index + 1..].is_empty()
-        && token[index + 1..]
-            .chars()
-            .all(|character| character.is_ascii_digit())
-    {
-        return token[..index].to_owned();
-    }
-    token.to_owned()
-}
-
-#[cfg(any(test, feature = "differential-shadow"))]
-fn canonical_name(locals: &mut HashMap<String, String>, token: &str) -> String {
-    if let Some(name) = locals.get(token) {
-        return name.clone();
-    }
-    let name = format!("v{}", locals.len());
-    locals.insert(token.to_owned(), name.clone());
-    name
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::path::Path;
 
     use inkwell::context::Context;
 
-    use crate::lower::census::assert_declaration_parity;
     use crate::{LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker};
 
-    use super::{
-        DifferentialProgram, DifferentialSource, compare_fully_emitted_bodies, differential_corpus,
-        module_constants, normalize_function,
-    };
+    use super::{CorpusProgram, CorpusSource, codegen_corpus};
 
     fn workspace_root() -> &'static Path {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2074,21 +1849,21 @@ mod tests {
             }
         }
 
-        for program in differential_corpus() {
+        for program in codegen_corpus() {
             let directory = destination.join(program.name);
             std::fs::create_dir_all(&directory).unwrap();
             match program.source {
-                DifferentialSource::Inline(source) => {
+                CorpusSource::Inline(source) => {
                     std::fs::write(directory.join("main.sta"), source).unwrap();
                 }
-                DifferentialSource::File(path) => {
+                CorpusSource::File(path) => {
                     let source = workspace_root().join(path);
                     copy_sources(source.parent().unwrap(), &directory);
                     std::fs::copy(source, directory.join("main.sta")).unwrap();
                 }
             }
         }
-        eprintln!("dumped {} corpus programs", differential_corpus().len());
+        eprintln!("dumped {} corpus programs", codegen_corpus().len());
     }
 
     #[test]
@@ -2103,12 +1878,10 @@ mod tests {
     /// The program source and the directory its `use` paths resolve against:
     /// a file entry resolves relative to its own directory (so a directory of
     /// side modules works), an inline entry against the workspace root.
-    fn program_source(program: &DifferentialProgram) -> (String, std::path::PathBuf) {
+    fn program_source(program: &CorpusProgram) -> (String, std::path::PathBuf) {
         match program.source {
-            DifferentialSource::Inline(source) => {
-                (source.to_owned(), workspace_root().to_path_buf())
-            }
-            DifferentialSource::File(path) => {
+            CorpusSource::Inline(source) => (source.to_owned(), workspace_root().to_path_buf()),
+            CorpusSource::File(path) => {
                 let full = workspace_root().join(path);
                 let source = std::fs::read_to_string(&full)
                     .unwrap_or_else(|error| panic!("`{path}` should read: {error}"));
@@ -2141,58 +1914,18 @@ mod tests {
             .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}\n{source}"))
     }
 
-    /// A constant reference compares by the constant's content: the same
-    /// literal under different LLVM numbering matches, a different literal
-    /// under the same stripped name does not.
+    /// Strictly emit the full corpus and check catalog definitions, focus instances,
+    /// structural coverage, and distinct D5 artifacts.
     #[test]
-    fn normalization_compares_constants_by_content() {
-        let body = |constant: &str| {
-            vec![
-                "define void @f() {".to_owned(),
-                format!("  %0 = call ptr @use(ptr @{constant})"),
-                "  ret void".to_owned(),
-                "}".to_owned(),
-            ]
-        };
-        let legacy = module_constants(concat!(
-            "@c_string.literal = private unnamed_addr constant [3 x i8] c\"hi\\00\", align 1\n",
-            "@c_string.literal.1 = private unnamed_addr constant [3 x i8] c\"no\\00\", align 1\n",
-        ));
-        let lowered = module_constants(concat!(
-            "@c_string.literal.4 = private unnamed_addr constant [3 x i8] c\"hi\\00\", align 1\n",
-            "@c_string.literal.5 = private unnamed_addr constant [3 x i8] c\"xx\\00\", align 1\n",
-        ));
-        let renames = HashMap::new();
-        assert_eq!(
-            normalize_function(&body("c_string.literal"), &renames, &legacy),
-            normalize_function(&body("c_string.literal.4"), &renames, &lowered),
-            "the same literal under different numbering matches"
-        );
-        assert_ne!(
-            normalize_function(&body("c_string.literal.1"), &renames, &legacy),
-            normalize_function(&body("c_string.literal.5"), &renames, &lowered),
-            "a different literal must not match after `.N` stripping"
-        );
-    }
-
-    /// Over the whole corpus, emit both modules strictly, run the
-    /// declaration census, compare every function's normalized body with its
-    /// mapped legacy function, and check each entry's focus `emits`
-    /// templates.
-    #[test]
-    fn stage_5_3_differential_harness_reports_and_matches_bodies() {
+    fn corpus_emits_catalog_definitions() {
         let mut structural_kinds = std::collections::HashSet::new();
         let mut structural_bodies = std::collections::HashSet::new();
-        let mut compared = 0;
+        let mut defined = 0;
         // The frozen oracle: every runnable entry pins the stdout (and, for a
         // trap, the missing exit status) legacy produced, so the behavior
         // check survives the deletion of the legacy emitter.
-        for program in differential_corpus() {
-            if matches!(
-                program.expectation,
-                super::DifferentialExpectation::MustRun
-                    | super::DifferentialExpectation::LoweredOnly
-            ) {
+        for program in codegen_corpus() {
+            if matches!(program.expectation, super::CorpusExpectation::MustRun) {
                 assert!(
                     program.expected_stdout.is_some(),
                     "runnable corpus entry `{}` does not pin its output",
@@ -2200,7 +1933,7 @@ mod tests {
                 );
             }
         }
-        for program in differential_corpus() {
+        for program in codegen_corpus() {
             let (source, root) = program_source(program);
             let lowered = lower(&source, &root);
             if program.substage == "5.7" {
@@ -2227,7 +1960,6 @@ mod tests {
                 }
             }
             let context = Context::create();
-            let legacy = crate::codegen::legacy_emissions(&context, &lowered);
             let emitted = crate::codegen::lowered_emissions(&context, &lowered).unwrap_or_else(
                 |diagnostics| {
                     panic!(
@@ -2236,40 +1968,12 @@ mod tests {
                     )
                 },
             );
-            let lowered_only = program.expectation == super::DifferentialExpectation::LoweredOnly;
-            if lowered_only {
-                // Legacy rejects or aliases these programs, so only the
-                // lowered module's structure is asserted. If legacy did
-                // compile one, the second artifact must be census-explained.
+            if program.d5.is_some() {
                 assert_distinct_d5_artifacts(program, &lowered);
-                crate::lower::census::assert_catalog_census(program.name, &lowered, &emitted);
-                if let Ok(legacy) = legacy {
-                    let mapping =
-                        assert_declaration_parity(program.name, &lowered, &legacy, &emitted);
-                    assert!(
-                        !mapping.aliased_artifacts.is_empty(),
-                        "`{}`: legacy compiled a LoweredOnly fixture without aliasing an artifact",
-                        program.name
-                    );
-                }
-            } else {
-                let legacy = legacy.unwrap_or_else(|diagnostics| {
-                    panic!(
-                        "the legacy backend should compile `{}`: {diagnostics:?}\n{source}",
-                        program.name
-                    )
-                });
-                let mapping = assert_declaration_parity(program.name, &lowered, &legacy, &emitted);
-                let compared_names = compare_fully_emitted_bodies(
-                    program.name,
-                    &lowered,
-                    &mapping,
-                    &legacy,
-                    &emitted,
-                );
-                assert_focus_emissions(program, &lowered, &compared_names);
-                compared += compared_names.len();
             }
+            crate::lower::census::assert_catalog_census(program.name, &lowered, &emitted);
+            assert_focus_emissions(program, &lowered, &emitted.defined_functions);
+            defined += emitted.defined_functions.len();
         }
 
         use crate::StructuralTraitMethod;
@@ -2301,11 +2005,8 @@ mod tests {
             assert!(structural_bodies.contains(body), "5.7 corpus misses {body}");
         }
 
-        eprintln!("differential corpus: {compared} bodies compared");
-        assert!(
-            compared > 0,
-            "the corpus must have emitted functions to compare"
-        );
+        eprintln!("codegen corpus: {defined} catalog definitions checked");
+        assert!(defined > 0, "the corpus must define functions");
     }
 
     /// The legacy-free catalog census rejects an unplanned function, a
@@ -2366,12 +2067,12 @@ mod tests {
     }
 
     /// Stage 5.4 Step 1: every instance of an entry's `emits` templates is
-    /// fully emitted and body-compared. A template must exist in the module
+    /// defined with its planned catalog name. A template must exist in the module
     /// catalog and have at least one materialized instance.
     fn assert_focus_emissions(
-        program: &DifferentialProgram,
+        program: &CorpusProgram,
         lowered: &LoweredModule,
-        compared: &HashSet<String>,
+        defined: &HashSet<String>,
     ) {
         if program.emits.is_empty() {
             return;
@@ -2398,8 +2099,8 @@ mod tests {
                 .planned_name(id)
                 .expect("a materialized instance has a planned name");
             assert!(
-                compared.contains(name),
-                "`{}`: focus instance `{name}` ({}) was not body-compared against legacy",
+                defined.contains(name),
+                "`{}`: focus instance `{name}` ({}) was not defined",
                 program.name,
                 function.name
             );
@@ -2414,32 +2115,29 @@ mod tests {
     /// Stage 5.8 Step 8: one D5 fixture instantiates its pair or runner twice,
     /// with distinct owners, so the emitted module proves the second
     /// instantiation did not reuse the first artifact.
-    fn assert_distinct_d5_artifacts(program: &DifferentialProgram, lowered: &LoweredModule) {
+    fn assert_distinct_d5_artifacts(program: &CorpusProgram, lowered: &LoweredModule) {
         use crate::{LoweredArtifactPlan, ReactiveRunnerBody};
-        let family = program
-            .d5
-            .expect("a LoweredOnly fixture names its D5 family");
+        let family = program.d5.expect("a MustRun fixture names its D5 family");
         let mut owners = Vec::new();
         for (_, artifact) in lowered.program().artifacts() {
             match (family, artifact.plan.as_ref()) {
                 (
-                    super::DifferentialD5::CoroutinePairs,
+                    super::CorpusD5::CoroutinePairs,
                     Some(LoweredArtifactPlan::CoroutineCodes(plan)),
                 ) => owners.push(format!("{:?}", plan.body)),
                 (
-                    super::DifferentialD5::ReactionRunners,
+                    super::CorpusD5::ReactionRunners,
                     Some(LoweredArtifactPlan::ReactionRunner(plan)),
                 ) if matches!(plan.body, ReactiveRunnerBody::Reaction { .. }) => {
                     owners.push(format!("{:?}", plan.owner));
                 }
-                (
-                    super::DifferentialD5::UntilRunners,
-                    Some(LoweredArtifactPlan::UntilRunner(plan)),
-                ) if matches!(plan.body, ReactiveRunnerBody::Until { .. }) => {
+                (super::CorpusD5::UntilRunners, Some(LoweredArtifactPlan::UntilRunner(plan)))
+                    if matches!(plan.body, ReactiveRunnerBody::Until { .. }) =>
+                {
                     owners.push(format!("{:?}", plan.owner));
                 }
                 (
-                    super::DifferentialD5::DerivedRunners,
+                    super::CorpusD5::DerivedRunners,
                     Some(LoweredArtifactPlan::DerivedRunner(plan)),
                 ) if matches!(plan.body, ReactiveRunnerBody::Derived { .. }) => {
                     owners.push(format!("{:?}", plan.owner));
@@ -2458,218 +2156,5 @@ mod tests {
             "`{}`: the two D5 artifacts have distinct owners",
             program.name
         );
-    }
-}
-
-#[cfg(any(test, feature = "differential-shadow"))]
-/// Compare every mapped function the lowered emitter emitted with its
-/// legacy function. Returns the planned names compared.
-pub(crate) fn compare_fully_emitted_bodies(
-    label: &str,
-    lowered: &LoweredModule,
-    mapping: &CensusMapping,
-    legacy: &crate::codegen::LegacyEmissions,
-    emitted: &crate::codegen::LoweredEmissions,
-) -> HashSet<String> {
-    use crate::lower::census::planned_names_for;
-
-    let program = lowered.program();
-    // Legacy name -> canonical planned name, covering the specialization
-    // duplicates the census collapses.
-    let mut renames = HashMap::new();
-    for (legacy_name, entry) in &mapping.symbol_names {
-        let names = planned_names_for(program, entry);
-        if let [planned] = names.as_slice() {
-            renames.insert(legacy_name.clone(), planned.clone());
-        }
-    }
-    // Planned names can also be legacy names for a different catalog
-    // entry (sibling module initializers). Never apply the legacy map to
-    // lowered symbols; preserve all catalog spellings on that side.
-    let mut lowered_renames = HashMap::new();
-    for (_, instance) in program.instances() {
-        lowered_renames.insert(instance.name.clone(), instance.name.clone());
-    }
-    for (_, artifact) in program.artifacts() {
-        lowered_renames.insert(artifact.name.clone(), artifact.name.clone());
-        if let Some(crate::LoweredArtifactPlan::CoroutineCodes(_)) = artifact.plan {
-            let (resume, cleanup) = program
-                .planned_coroutine_pair_names(artifact.ordinal)
-                .expect("pair has names");
-            lowered_renames.insert(resume.clone(), resume);
-            lowered_renames.insert(cleanup.clone(), cleanup);
-        }
-    }
-    for (_, initializer) in program.initializers() {
-        lowered_renames.insert(initializer.name.clone(), initializer.name.clone());
-    }
-    let legacy_functions = module_functions(&legacy.module_ir);
-    let lowered_functions = module_functions(&emitted.module_ir);
-    let legacy_constants = module_constants(&legacy.module_ir);
-    let lowered_constants = module_constants(&emitted.module_ir);
-
-    let mut compared = HashSet::new();
-    for (legacy_name, entry) in &mapping.mapped {
-        for planned in planned_names_for(program, entry) {
-            let legacy_body = legacy_functions
-                .get(legacy_name)
-                .unwrap_or_else(|| panic!("legacy `{legacy_name}` has no body ({label})"));
-            let lowered_body = lowered_functions.get(&planned).unwrap_or_else(|| {
-                panic!("the lowered module has no body for `{planned}` ({label})")
-            });
-            // D5: a creation in a different concrete owner uses its own
-            // pair, while legacy's syntax cache keeps the first pair.
-            // Normalize only the census-proven CoroCreation references;
-            // compare every other instruction in this owner's body.
-            use crate::lower::census::LegacyCatalogEntry;
-            let owner = match entry {
-                LegacyCatalogEntry::Instance(id) => {
-                    Some(crate::lower::EmissionOwner::Instance(*id))
-                }
-                LegacyCatalogEntry::Artifact { ordinal, .. } => program
-                    .artifacts()
-                    .find(|(_, artifact)| artifact.ordinal == *ordinal)
-                    .and_then(|(_, artifact)| match &artifact.plan {
-                        Some(crate::LoweredArtifactPlan::CoroutineCodes(pair)) => {
-                            Some(crate::lower::EmissionOwner::Instance(pair.body))
-                        }
-                        _ => None,
-                    }),
-                LegacyCatalogEntry::Initializer(module) => program
-                    .initializers()
-                    .find(|(_, initializer)| initializer.module == *module)
-                    .map(|(id, _)| crate::lower::EmissionOwner::Initializer(id)),
-                _ => None,
-            };
-            let mut expected_renames = std::borrow::Cow::Borrowed(&renames);
-            if let Some(owner) = owner {
-                for use_ in program.artifact_uses(owner).unwrap_or(&[]) {
-                    if !matches!(use_.site, crate::ArtifactUseSite::CoroCreation(_))
-                        || !mapping.aliased_artifacts.contains(&use_.artifact)
-                    {
-                        continue;
-                    }
-                    let alias = program
-                        .artifacts()
-                        .find(|(_, artifact)| artifact.ordinal == use_.artifact)
-                        .and_then(|(_, artifact)| artifact.plan.as_ref());
-                    let Some(crate::LoweredArtifactPlan::CoroutineCodes(alias)) = alias else {
-                        continue;
-                    };
-                    let alias_template = program
-                        .instance(alias.body)
-                        .expect("aliased pair body")
-                        .template;
-                    let mut found = 0;
-                    for (name, target) in &mapping.symbol_names {
-                        let LegacyCatalogEntry::Artifact { ordinal, slot } = target else {
-                            continue;
-                        };
-                        let Some(crate::LoweredArtifactPlan::CoroutineCodes(pair)) = program
-                            .artifacts()
-                            .find(|(_, artifact)| artifact.ordinal == *ordinal)
-                            .and_then(|(_, artifact)| artifact.plan.as_ref())
-                        else {
-                            continue;
-                        };
-                        if program
-                            .instance(pair.body)
-                            .expect("mapped pair body")
-                            .template
-                            != alias_template
-                        {
-                            continue;
-                        }
-                        let names = planned_names_for(
-                            program,
-                            &LegacyCatalogEntry::Artifact {
-                                ordinal: use_.artifact,
-                                slot: *slot,
-                            },
-                        );
-                        let [target] = names.as_slice() else {
-                            panic!("aliased pair slot has exactly one planned name");
-                        };
-                        expected_renames
-                            .to_mut()
-                            .insert(name.clone(), target.clone());
-                        found += 1;
-                    }
-                    assert_eq!(
-                        found, 2,
-                        "census-confirmed alias has one legacy pair ({label})"
-                    );
-                }
-            }
-            let expected = normalize_function(legacy_body, &expected_renames, &legacy_constants);
-            let actual = normalize_function(lowered_body, &lowered_renames, &lowered_constants);
-            assert_eq!(
-                actual, expected,
-                "normalized body differs for legacy `{legacy_name}` -> `{planned}` ({label})"
-            );
-            compared.insert(planned);
-        }
-    }
-    compared
-}
-
-/// Number of successful shadow program/body comparisons in this process.
-#[doc(hidden)]
-#[cfg(feature = "differential-shadow")]
-pub fn shadow_counts() -> (usize, usize) {
-    use std::sync::atomic::Ordering;
-    (
-        SHADOW_PROGRAMS.load(Ordering::Relaxed),
-        SHADOW_BODIES.load(Ordering::Relaxed),
-    )
-}
-
-#[cfg(feature = "differential-shadow")]
-static SHADOW_PROGRAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-#[cfg(feature = "differential-shadow")]
-static SHADOW_BODIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Number of programs legacy rejected under D5 (unspecialized type parameter).
-#[doc(hidden)]
-#[cfg(feature = "differential-shadow")]
-pub fn shadow_rejections() -> usize {
-    SHADOW_REJECTIONS.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-#[cfg(feature = "differential-shadow")]
-static SHADOW_REJECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(feature = "differential-shadow")]
-pub(crate) fn record_shadow_rejection() {
-    use std::io::Write;
-    SHADOW_REJECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some(path) = std::env::var_os("STAPLE_DIFFERENTIAL_SHADOW_REPORT") {
-        let mut report = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .expect("open shadow comparison ledger");
-        report
-            .write_all(format!("{}\treject\n", std::process::id()).as_bytes())
-            .expect("append shadow comparison ledger");
-    }
-}
-
-/// Optional append-only run ledger aggregates isolated nextest and CLI processes.
-#[cfg(feature = "differential-shadow")]
-pub(crate) fn record_shadow(bodies: usize) {
-    use std::io::Write;
-    use std::sync::atomic::Ordering;
-    SHADOW_PROGRAMS.fetch_add(1, Ordering::Relaxed);
-    SHADOW_BODIES.fetch_add(bodies, Ordering::Relaxed);
-    if let Some(path) = std::env::var_os("STAPLE_DIFFERENTIAL_SHADOW_REPORT") {
-        let mut report = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .expect("open shadow comparison ledger");
-        report
-            .write_all(format!("{}\t{bodies}\n", std::process::id()).as_bytes())
-            .expect("append shadow comparison ledger");
     }
 }

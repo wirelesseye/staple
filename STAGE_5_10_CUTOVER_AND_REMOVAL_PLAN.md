@@ -26,6 +26,10 @@ The source inventory is broader than the initial 31-test list. Also audit `stage
 
 The default now always selects lowered emission. The converted runtime tests use actual LLVM use lists and catalog names for every emitted instance and initializer, with program-wide exact equality and owner-local coverage (owner derivation conservatively includes subsystem needs such as an inline `coro` creation). The exact predeclared-cell owner checks remain. This stronger coverage exposed missing GC requirements for `BufferGet` and `BufferFreeze` interior-pointer registration; lowering now records them. No emission instruction changes: R1 remains the gate. The converted tests pass and 16 legacy-only tests plus their dedicated helpers are retired. Default, lowered, and shadow suites each pass 1302 tests (one ignored dump helper skipped); all 86 R1 paths report `same (1 variant(s))`. Logs: `/private/tmp/staple-5-10-step2-{default,lowered,shadow,ir}.log`.
 
+### Step 3 — complete
+
+The shared 74-entry `codegen/corpus.rs` now exposes `Corpus*` types and `codegen_corpus`. Expectations are `MustRun`/`CompileOnly`; D5 metadata survives. The strict in-process harness retains catalog census, focus definitions, structural coverage and distinct D5 artifacts. The CLI harness retains object/link/run, pinned stdout and traps, and explicitly asserts successful exit codes. The body comparator, normalization test, shadow counters/ledger writers, shadow compilation and `differential-shadow` feature are removed. Default and remaining lowered-feature suites each pass 1301 tests (one ignored dump helper skipped). All 86 four-run R1 paths are `same (1 variant(s))`; formatting, workspace check and diff checks pass. Logs: `/private/tmp/staple-5-10-step3-{default,lowered,ir}.log`. Step 4 is next.
+
 ### Step 2 — test verdicts (R2)
 
 The audit covers the original 31 entries (including the shared compiler assertion helper) and five additional tests found in source: **36 entries**. Verdicts are recorded before deletions. `convert (Step 3)` means the retained corpus harness is renamed and converted together with its shared definitions in Step 3.
@@ -155,7 +159,7 @@ No test is deleted without a verdict and its reason.
 
 ## Steps
 
-Each step ends with `cargo nextest run --workspace` (default features), the R1 comparison, formatting, and a commit. Until Step 5 deletes them, the `lowered-emitter` and `differential-shadow,lowered-emitter` gates also run.
+Each step ends with `cargo nextest run --workspace` (default features), the R1 comparison, formatting, and a commit. The shadow gate runs until Step 3 removes its feature; the `lowered-emitter` gate runs until Step 5 removes that feature.
 
 ### Step 1: Freeze the reference
 

@@ -228,7 +228,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "differential-shadow"))]
+    #[cfg(test)]
     pub(super) fn declared_catalog_types(
         mut self,
         target_machine: &TargetMachine,
