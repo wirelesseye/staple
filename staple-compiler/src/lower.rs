@@ -28,6 +28,8 @@ use crate::{
 mod artifact_closure;
 mod artifact_plan;
 mod artifact_validation;
+#[cfg(any(test, feature = "differential-shadow"))]
+pub(crate) mod census;
 mod cleanup_artifacts;
 mod coroutine_artifacts;
 mod emission;
@@ -4497,15 +4499,12 @@ impl LoweredProgram {
             LoweredPlaceKind::Symbol { symbol } | LoweredPlaceKind::CapturedCell { symbol } => {
                 Some(*symbol)
             }
-            LoweredPlaceKind::ProductElement { base, slice, .. } => {
-                if *slice {
-                    None
-                } else {
-                    self.place_root_symbol(*base)
-                }
-            }
+            // Legacy `compile_place_pointer` returns no symbol for a field
+            // projection: writing a field neither initializes the base nor
+            // notifies its signal.
             LoweredPlaceKind::Representation { base } => self.place_root_symbol(*base),
-            LoweredPlaceKind::Temporary { .. }
+            LoweredPlaceKind::ProductElement { .. }
+            | LoweredPlaceKind::Temporary { .. }
             | LoweredPlaceKind::Resource { .. }
             | LoweredPlaceKind::Dereference { .. }
             | LoweredPlaceKind::Indexed { .. } => None,
@@ -21117,9 +21116,10 @@ mod tests {
         else {
             panic!("`pair.0` should lower to a product element place");
         };
-        assert_eq!(
-            assignment.initialization_symbol,
-            program.place_root_symbol(*base)
+        assert!(program.place_root_symbol(*base).is_some());
+        assert!(
+            assignment.initialization_symbol.is_none(),
+            "a field write does not initialize its base"
         );
 
         let LoweredItemKind::Assignment(assignment) = &items[2].kind else {

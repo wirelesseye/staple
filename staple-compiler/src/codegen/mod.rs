@@ -32,10 +32,11 @@ use staple_syntax::{
 };
 
 mod abi;
-mod differential;
+#[doc(hidden)]
+pub mod differential;
 mod ir;
 mod layout;
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 mod legacy_recorder;
 mod lowered;
 mod runtime;
@@ -55,7 +56,7 @@ use layout::{
     CORO_PARENT, CORO_RECORD, CORO_RESOURCES, CORO_RESULT_PTR, CORO_STATE, SumStorage,
     TASK_RECORD_FRAME, TASK_RECORD_RESULT, TASK_RECORD_SCHEDULER,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 pub(crate) use legacy_recorder::*;
 
 /// Stage 5.2: the backend-local layout/ABI/runtime/IR layer both emitters
@@ -229,31 +230,31 @@ struct ModuleEmitter<'module, 'context> {
         HashMap<TypeParameterId, CheckedType>,
     )>,
     /// Test-only: typed constructor-adapter records in creation order.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_constructor_adapters: Vec<LegacyConstructorAdapter>,
     /// Test-only: finished structural-method records in creation order.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_structural_methods: Vec<LegacyStructuralMethod>,
     /// Test-only: the structural bodies currently being emitted, innermost
     /// last. Events record onto the innermost entry so nested structural
     /// bodies attribute their own literals and delegates.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_structural_stack: Vec<LegacyStructuralMethod>,
     /// Test-only: open `compile_drop_value` frames, innermost last. A frame
     /// popped at the top level becomes a root of `legacy_drop_roots`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_drop_stack: Vec<LegacyDropCall>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_drop_roots: Vec<LegacyDropCall>,
     /// Test-only: every finalizer body created, in creation order.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_finalizers: Vec<LegacyFinalizer>,
     /// Test-only: every ownership registration per emitted function, in order.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_owned: Vec<LegacyOwned>,
     /// Test-only: the specialization currently being emitted, so ownership
     /// registrations map back to their instance.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_function_key: Option<(
         FunctionId,
         CheckedFunctionType,
@@ -263,39 +264,39 @@ struct ModuleEmitter<'module, 'context> {
     /// so registrations inside state 0 attribute to the thunk instead of the
     /// no-function-id resume environment. `environment.function_id` still wins
     /// for nested function emission.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_owned_function: Option<FunctionId>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_buffer_clones: Vec<LegacyBufferClone>,
     /// Test-only: every `ensure_coroutine_codes` pair creation, in creation
     /// order.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_coroutine_pairs: Vec<LegacyCoroutinePair>,
     /// Test-only: every `compile_coro_expression` request for a pair, in
     /// emission order.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_coroutine_requests: Vec<LegacyCoroutineRequest>,
     /// Test-only: every reactive runner creation, in creation order.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_runners: Vec<LegacyReactiveRunner>,
     /// Test-only: whether the most recent `set_gc_finalizer` call happened, so
     /// the constructor-adapter record observes the real call.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_finalizer_set: bool,
     /// Test-only: every eager extern closure adapter declaration, with whether
     /// the adapter was read as a first-class value.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_extern_adapters: Vec<LegacyExternAdapter>,
     /// Test-only: the functions the installed runtime modules and the UTF-8
     /// validator define. A runtime reference from inside one of them is the
     /// runtime's own business, not a surface emitted code needs.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_runtime_internal: HashSet<String>,
     /// Test-only: every function the emitter creates with a body, keyed by
     /// its final LLVM name, with the legacy record it belongs to. The Stage
     /// 4.7 census proves every function the module defines is here and maps
     /// to a catalog entry.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     legacy_defined_functions: Vec<(String, LegacyFunctionOrigin)>,
     active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
     expression_type_overrides: HashMap<staple_syntax::SyntaxId, CheckedType>,
@@ -429,7 +430,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     /// Test-only: registers one function the emitter created, under the name
     /// LLVM gave it (a clashing name is suffixed on the new function only, so
     /// the name is stable once added).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     fn legacy_register_function(
         &mut self,
         function: inkwell::values::FunctionValue<'context>,
@@ -442,7 +443,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     /// Test-only: marks the extern adapter for `symbol` as read as a
     /// first-class value.
     fn mark_extern_adapter_used(&mut self, symbol: SymbolId) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         if let Some(adapter) = self
             .legacy_extern_adapters
             .iter_mut()
@@ -450,7 +451,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         {
             adapter.used = true;
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "differential-shadow")))]
         let _ = symbol;
     }
 
@@ -481,39 +482,39 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             constructor_codes: HashMap::new(),
             structural_trait_codes: HashMap::new(),
             specialization_queue: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_constructor_adapters: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_structural_methods: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_structural_stack: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_drop_stack: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_drop_roots: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_finalizers: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_owned: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_function_key: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_owned_function: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_buffer_clones: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_coroutine_pairs: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_coroutine_requests: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_runners: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_finalizer_set: false,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_extern_adapters: Vec::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_runtime_internal: HashSet::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_defined_functions: Vec::new(),
             active_type_substitutions: HashMap::new(),
             expression_type_overrides: HashMap::new(),
@@ -613,6 +614,11 @@ impl<'context> CodeGenerator<'context> {
         module: &LoweredModule,
         target_machine: &TargetMachine,
     ) -> Result<LlvmModule<'context>, Vec<Diagnostic>> {
+        #[cfg(feature = "differential-shadow")]
+        {
+            return self.compile_shadow(module, target_machine);
+        }
+        #[cfg(not(feature = "differential-shadow"))]
         match self.emitter {
             Emitter::Legacy => ModuleEmitter::new(self.context, module, target_machine)
                 .compile(target_machine)
@@ -622,6 +628,81 @@ impl<'context> CodeGenerator<'context> {
                     .compile(target_machine)
             }
         }
+    }
+    #[cfg(feature = "differential-shadow")]
+    fn compile_shadow(
+        &self,
+        module: &LoweredModule,
+        target_machine: &TargetMachine,
+    ) -> Result<LlvmModule<'context>, Vec<Diagnostic>> {
+        // LLVM uniques named struct types per context, so the second module in
+        // a shared context would print `%CoroStatus.1`. The unselected emitter
+        // runs in a scratch context; only the selected module is returned.
+        let scratch = inkwell::context::Context::create();
+        match self.emitter {
+            Emitter::Legacy => {
+                let (llvm, emissions) =
+                    legacy_module_with_emissions(self.context, module, target_machine)?;
+                let lowered = lowered::LoweredEmitter::new(&scratch, module.program(), target_machine)
+                    .compile(target_machine)
+                    .unwrap_or_else(|diagnostics| {
+                        panic!("shadow lowered emission failed for a legacy-compiled program: {diagnostics:?}")
+                    });
+                let lowered_emissions =
+                    snapshot_lowered(&lowered, LoweredEmissionReport::default());
+                self.shadow_compare(module, &emissions, &lowered_emissions)?;
+                Ok(llvm)
+            }
+            Emitter::Lowered => {
+                let llvm =
+                    lowered::LoweredEmitter::new(self.context, module.program(), target_machine)
+                        .compile(target_machine)?;
+                let emissions = match legacy_module_with_emissions(&scratch, module, target_machine)
+                {
+                    Ok((_, emissions)) => emissions,
+                    Err(diagnostics) => {
+                        // D5: legacy rejects a generic artifact whose type
+                        // parameter reaches its emitter unspecialized. Any
+                        // other legacy rejection is an unexplained difference.
+                        assert!(
+                            diagnostics.iter().all(|diagnostic| diagnostic
+                                .message
+                                .contains("unspecialized type parameter")),
+                            "shadow legacy rejection needs a D5 explanation: {diagnostics:?}"
+                        );
+                        differential::record_shadow_rejection();
+                        return Ok(llvm);
+                    }
+                };
+                let lowered_emissions = snapshot_lowered(&llvm, LoweredEmissionReport::default());
+                self.shadow_compare(module, &emissions, &lowered_emissions)?;
+                Ok(llvm)
+            }
+        }
+    }
+
+    #[cfg(feature = "differential-shadow")]
+    fn shadow_compare(
+        &self,
+        module: &LoweredModule,
+        legacy: &LegacyEmissions,
+        lowered_emissions: &LoweredPartialEmissions,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let mapping = crate::lower::census::assert_declaration_parity(
+            "differential-shadow",
+            module,
+            legacy,
+            lowered_emissions,
+        );
+        let compared = differential::compare_fully_emitted_bodies(
+            "differential-shadow",
+            module,
+            &mapping,
+            legacy,
+            lowered_emissions,
+        );
+        differential::record_shadow(compared.len());
+        Ok(())
     }
 }
 
@@ -633,6 +714,15 @@ pub(crate) fn legacy_emissions(
     module: &LoweredModule,
 ) -> Result<LegacyEmissions, Vec<Diagnostic>> {
     let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
+    legacy_module_with_emissions(context, module, &target_machine).map(|(_, emissions)| emissions)
+}
+
+#[cfg(any(test, feature = "differential-shadow"))]
+fn legacy_module_with_emissions<'context>(
+    context: &'context inkwell::context::Context,
+    module: &LoweredModule,
+    target_machine: &TargetMachine,
+) -> Result<(LlvmModule<'context>, LegacyEmissions), Vec<Diagnostic>> {
     let mut emitter = ModuleEmitter::new(context, module, &target_machine);
     emitter
         .run(&target_machine)
@@ -643,7 +733,7 @@ pub(crate) fn legacy_emissions(
             format!("invalid legacy LLVM module: {message}"),
         )]
     })?;
-    Ok(LegacyEmissions {
+    let emissions = LegacyEmissions {
         specializations: emitter.specialization_queue.clone(),
         constructor_adapters: emitter.legacy_constructor_adapters.clone(),
         structural_methods: emitter.legacy_structural_methods.clone(),
@@ -698,7 +788,8 @@ pub(crate) fn legacy_emissions(
             .filter(|name| name != "main" && !emitter.legacy_runtime_internal.contains(name))
             .collect(),
         module_ir: emitter.llvm_module.print_to_string().to_string(),
-    })
+    };
+    Ok((emitter.backend.llvm_module, emissions))
 }
 
 /// Test-only Stage 5.3 declaration snapshot. This stops before body emission
@@ -719,7 +810,7 @@ pub(crate) fn lowered_catalog_types(
 /// Test-only Stage 5.3 Step 3 declaration census: the partial lowered
 /// module's function types, linkage, and defined-function set, plus the
 /// partial-emission report.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 pub(crate) struct LoweredPartialEmissions {
     pub(crate) report: LoweredEmissionReport,
     /// LLVM function types keyed by final planned name.
@@ -740,37 +831,45 @@ pub(crate) fn lowered_partial_emissions(
     let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
     lowered::LoweredEmitter::new(context, module.program(), &target_machine)
         .compile_partial(&target_machine)
-        .map(|(llvm_module, report)| LoweredPartialEmissions {
-            report,
-            function_types: llvm_module
-                .get_functions()
-                .filter_map(|function| {
-                    function.get_name().to_str().ok().map(|name| {
-                        (
-                            name.to_owned(),
-                            function.get_type().print_to_string().to_string(),
-                        )
-                    })
+        .map(|(llvm_module, report)| snapshot_lowered(&llvm_module, report))
+}
+
+#[cfg(any(test, feature = "differential-shadow"))]
+fn snapshot_lowered(
+    llvm_module: &LlvmModule<'_>,
+    report: LoweredEmissionReport,
+) -> LoweredPartialEmissions {
+    LoweredPartialEmissions {
+        report,
+        function_types: llvm_module
+            .get_functions()
+            .filter_map(|function| {
+                function.get_name().to_str().ok().map(|name| {
+                    (
+                        name.to_owned(),
+                        function.get_type().print_to_string().to_string(),
+                    )
                 })
-                .collect(),
-            function_linkages: llvm_module
-                .get_functions()
-                .filter_map(|function| {
-                    function.get_name().to_str().ok().map(|name| {
-                        (
-                            name.to_owned(),
-                            function.get_linkage() == inkwell::module::Linkage::Internal,
-                        )
-                    })
+            })
+            .collect(),
+        function_linkages: llvm_module
+            .get_functions()
+            .filter_map(|function| {
+                function.get_name().to_str().ok().map(|name| {
+                    (
+                        name.to_owned(),
+                        function.get_linkage() == inkwell::module::Linkage::Internal,
+                    )
                 })
-                .collect(),
-            defined_functions: llvm_module
-                .get_functions()
-                .filter(|function| function.count_basic_blocks() > 0)
-                .filter_map(|function| function.get_name().to_str().ok().map(str::to_owned))
-                .collect(),
-            module_ir: llvm_module.print_to_string().to_string(),
-        })
+            })
+            .collect(),
+        defined_functions: llvm_module
+            .get_functions()
+            .filter(|function| function.count_basic_blocks() > 0)
+            .filter_map(|function| function.get_name().to_str().ok().map(str::to_owned))
+            .collect(),
+        module_ir: llvm_module.print_to_string().to_string(),
+    }
 }
 
 /// Test-only ground truth for the runtime surfaces: every `(runtime symbol,
@@ -778,7 +877,7 @@ pub(crate) fn lowered_partial_emissions(
 /// and the `main` harness. A use that is not an instruction (a constant
 /// expression or global initializer) counts, conservatively, under an empty
 /// function name.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 fn referenced_runtime_symbols(emitter: &ModuleEmitter<'_, '_>) -> Vec<(String, String)> {
     use inkwell::values::{AnyValueEnum, InstructionValue};
 
@@ -830,6 +929,7 @@ fn referenced_runtime_symbols(emitter: &ModuleEmitter<'_, '_>) -> Vec<(String, S
 }
 
 impl<'module, 'context> ModuleEmitter<'module, 'context> {
+    #[cfg_attr(feature = "differential-shadow", allow(dead_code))]
     fn compile(
         mut self,
         target_machine: &TargetMachine,
@@ -848,7 +948,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.install_gc_runtime()?;
         self.install_reactive_runtime()?;
         self.install_coroutine_runtime()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             self.legacy_runtime_internal = self
                 .llvm_module
@@ -862,7 +962,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.declare_top_level_storage()?;
         self.declare_initializers();
         self.build_utf8_validator()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         self.legacy_runtime_internal
             .insert("__staple_is_valid_utf8".to_string());
         let typed_module = self.typed_module;
@@ -896,9 +996,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     /// legacy origin the transition tests expect.
     fn build_utf8_validator(&mut self) -> CodeGenerationResult<()> {
         let function = self.backend.build_utf8_validator()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         self.legacy_register_function(function, LegacyFunctionOrigin::Utf8Validator);
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "differential-shadow")))]
         let _ = function;
         Ok(())
     }
@@ -910,7 +1010,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pointer: inkwell::values::PointerValue<'context>,
         finalizer: inkwell::values::FunctionValue<'context>,
     ) -> CodeGenerationResult<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             self.legacy_finalizer_set = true;
         }
@@ -1019,7 +1119,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             .build_return(Some(&result))
                             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
                         self.closure_codes.insert(symbol, adapter);
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "differential-shadow"))]
                         {
                             self.legacy_extern_adapters.push(LegacyExternAdapter {
                                 symbol,
@@ -1191,7 +1291,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Some(inkwell::module::Linkage::Internal),
             );
             self.initializers.insert(source_module.id, function);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             self.legacy_register_function(
                 function,
                 LegacyFunctionOrigin::Initializer(source_module.id),
@@ -1232,7 +1332,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .llvm_module
                 .add_function(&function.name, llvm_type, None);
             self.functions.insert(function.id, llvm_function);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             self.legacy_register_function(
                 llvm_function,
                 LegacyFunctionOrigin::Declared {
@@ -1256,9 +1356,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<()> {
         // Test-only: remember which concrete function is being emitted, so
         // ownership registrations map back to their instance.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         let previous_key = self.legacy_function_key.take();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             let template = self
                 .typed_module
@@ -1303,7 +1403,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .build_return(Some(&return_value))
                 .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             self.legacy_function_key = previous_key;
         }
@@ -1312,7 +1412,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
     /// Test-only: records one ownership registration under the function
     /// currently being emitted.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     fn legacy_record_owned(
         &mut self,
         environment: &FunctionEnvironment<'context>,
@@ -1402,7 +1502,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         );
         self.specialized_functions
             .insert((function_id, key), llvm_function);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         self.legacy_register_function(
             llvm_function,
             LegacyFunctionOrigin::Specialization {
@@ -1447,7 +1547,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder.position_at_end(entry);
         let parameters = function.get_params();
         let value = self.build_product_value(&parameters[1..], Span::Compiler)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             // Observe the actual `set_gc_finalizer` call rather than
             // recomputing the predicate.
@@ -1462,7 +1562,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder
             .build_return(Some(&value))
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             let managed_ref = matches!(function_type.result.as_ref(), CheckedType::Ref(_));
             let finalizer_set = self.legacy_finalizer_set;
@@ -1912,7 +2012,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment.owned.insert(symbol, (value, value_type, live));
         if newly_owned {
             environment.owned_order.push(symbol);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             self.legacy_record_owned(environment, symbol, false);
         }
         Ok(())
@@ -1988,14 +2088,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         value_type: &CheckedType,
         span: Span,
     ) -> CodeGenerationResult<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         self.legacy_drop_stack.push(LegacyDropCall {
             value_type: value_type.clone(),
             branch: LegacyDropBranch::NoOp,
             nested: Vec::new(),
         });
         let result = self.compile_drop_value_inner(value, value_type, span);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             let call = self
                 .legacy_drop_stack
@@ -2010,7 +2110,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     }
 
     /// Test-only: sets the branch of the innermost open drop frame.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "differential-shadow"))]
     fn legacy_drop_set_branch(&mut self, branch: LegacyDropBranch) {
         if let Some(frame) = self.legacy_drop_stack.last_mut() {
             frame.branch = branch;
@@ -2024,7 +2124,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         span: Span,
     ) -> CodeGenerationResult<()> {
         if let Some(function_id) = self.typed_module.drop_method_for(value_type) {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             self.legacy_drop_set_branch(LegacyDropBranch::UserDrop(function_id));
             let function = self.functions.get(&function_id).copied().ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing compiled Drop implementation")
@@ -2051,7 +2151,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
 
         if self.typed_module.is_coroutine_type(value_type) {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             self.legacy_drop_set_branch(LegacyDropBranch::CoroutineCleanup);
             // Dropping a coroutine value runs its (idempotent) `cleanup`, which
             // destroys the captures of an unstarted coroutine and releases the
@@ -2065,7 +2165,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             return self.build_coroutine_frame_cleanup(frame, span);
         }
         if self.typed_module.is_scheduler_type(value_type) {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             self.legacy_drop_set_branch(LegacyDropBranch::RuntimeRelease("__staple_sched_destroy"));
             let BasicValueEnum::PointerValue(sched) = value else {
                 return Err(Diagnostic::new(span, "scheduler value is not a pointer"));
@@ -2089,7 +2189,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             } else {
                 RuntimeRelease::ResolverDrop
             };
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             self.legacy_drop_set_branch(LegacyDropBranch::RuntimeRelease(match release {
                 RuntimeRelease::WaitDrop => "__staple_completion_wait_drop",
                 RuntimeRelease::CompletionTokenRelease => "__staple_completion_token_release",
@@ -2101,7 +2201,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
         match value_type {
             CheckedType::CString => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "differential-shadow"))]
                 self.legacy_drop_set_branch(LegacyDropBranch::CStringFree);
                 let BasicValueEnum::PointerValue(pointer) = value else {
                     return Err(Diagnostic::new(
@@ -2112,7 +2212,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 return self.build_free_c_string(pointer, span);
             }
             CheckedType::Product(product) => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "differential-shadow"))]
                 self.legacy_drop_set_branch(LegacyDropBranch::Product);
                 let BasicValueEnum::StructValue(product_value) = value else {
                     return Err(Diagnostic::new(
@@ -2132,7 +2232,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
             }
             CheckedType::Sum(sum) => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "differential-shadow"))]
                 self.legacy_drop_set_branch(LegacyDropBranch::Sum);
                 let BasicValueEnum::StructValue(sum_value) = value else {
                     return Err(Diagnostic::new(span, "sum has an invalid representation"));
@@ -2174,7 +2274,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.builder.position_at_end(merge);
             }
             CheckedType::Distinct { representation, .. } => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "differential-shadow"))]
                 self.legacy_drop_set_branch(LegacyDropBranch::Distinct);
                 self.compile_drop_value(value, representation, span)?;
             }
@@ -2199,7 +2299,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let integer_type = self.context.i32_type();
         let function_type = integer_type.fn_type(&[], false);
         let function = self.llvm_module.add_function("main", function_type, None);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         self.legacy_register_function(function, LegacyFunctionOrigin::Main);
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
@@ -2699,7 +2799,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 environment.owned_cells.insert(symbol);
                 if newly_owned {
                     environment.owned_order.push(symbol);
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "differential-shadow"))]
                     self.legacy_record_owned(environment, symbol, true);
                 }
             }
@@ -4150,7 +4250,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .typed_module
             .trait_impl_method(trait_id, arguments, method)
         {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             if let Some(record) = self.legacy_structural_stack.last_mut() {
                 record.delegates.push(LegacyStructuralCallee::Instance(
                     function_id,
@@ -4166,7 +4266,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .typed_module
             .structural_trait_method(trait_id, arguments)
             .ok_or_else(|| Diagnostic::new(span.clone(), "no trait implementation is available"))?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         if let Some(record) = self.legacy_structural_stack.last_mut() {
             record.delegates.push(LegacyStructuralCallee::Structural(
                 structural,
@@ -4195,7 +4295,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         );
         let function = self.llvm_module.add_function(&name, llvm_type, None);
         self.structural_trait_codes.insert(key, function);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         self.legacy_structural_stack.push(LegacyStructuralMethod {
             structural,
             arguments: arguments.to_vec(),
@@ -4247,7 +4347,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     span.clone(),
                 )?,
             crate::StructuralTraitMethod::IntoIterator => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "differential-shadow"))]
                 if let Some(record) = self.legacy_structural_stack.last_mut() {
                     record.into_iterator_source = arguments.first().cloned();
                 }
@@ -4267,7 +4367,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if let Some(block) = previous {
             self.builder.position_at_end(block);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             self.legacy_structural_methods.push(
                 self.legacy_structural_stack
@@ -4385,7 +4485,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         literal: &str,
         span: Span,
     ) -> CodeGenerationResult<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         if let Some(record) = self.legacy_structural_stack.last_mut() {
             record.debug_literals.push(literal.to_string());
         }
@@ -4580,7 +4680,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if let CheckedType::Product(product) = target
             && product.homogeneous_element().is_none()
         {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             if let Some(record) = self.legacy_structural_stack.last_mut() {
                 record.index_homogeneous = Some(false);
                 record.index_length = Some(product.elements.len());
@@ -4634,7 +4734,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let CheckedType::Product(product) = target else {
             return Err(Diagnostic::new(span, "invalid structural Index target"));
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         if let Some(record) = self.legacy_structural_stack.last_mut() {
             record.index_homogeneous = Some(true);
             record.index_length = Some(product.elements.len());
@@ -4726,7 +4826,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             && let Some(element) = product.homogeneous_element()
             && self.typed_module.is_copy_in_function(element, None)
         {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             if let Some(record) = self.legacy_structural_stack.last_mut() {
                 record.deref_index_fast_path = Some(true);
             }
@@ -4738,7 +4838,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .const_int(product.elements.len() as u64, false);
             return self.compile_index_load(*pointer, *position, length, output.clone(), span);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         if let Some(record) = self.legacy_structural_stack.last_mut() {
             record.deref_index_fast_path = Some(false);
         }
@@ -4951,7 +5051,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing `IterStep.Yield` alternative"))?;
         let done_alternative = result_sum.alternatives[done_index].clone();
         let yield_alternative = result_sum.alternatives[yield_index].clone();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         if let Some(record) = self.legacy_structural_stack.last_mut() {
             record.next_alternatives = Some((done_index, yield_index));
         }
@@ -5050,7 +5150,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<()> {
         let llvm_type = self.compile_type(element)?;
         let slot = self.build_index_pointer(pointer, position, length, llvm_type, span.clone())?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         if let Some(record) = self.legacy_structural_stack.last_mut() {
             record.mutate_drop_previous = Some(self.typed_module.type_needs_drop(element));
         }
@@ -6013,7 +6113,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let name = format!("__staple_gc_finalize_{:016x}", hasher.finish());
         let function = self.add_finalizer_function(&name);
         self.gc_finalizers.insert(key, function);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             self.legacy_finalizers
                 .push(LegacyFinalizer::Payload(payload.clone()));
@@ -6045,7 +6145,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let name = format!("__staple_gc_finalize_cell_{:016x}", hasher.finish());
         let function = self.add_finalizer_function(&name);
         self.gc_finalizers.insert(key, function);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             self.legacy_finalizers
                 .push(LegacyFinalizer::Cell(value_type.clone()));
@@ -7330,7 +7430,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             })?;
 
         // Test-only: record the runner creation and its payload pass modes.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             let resource_slots = callback_type
                 .effects
@@ -7384,7 +7484,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             runner_type,
             Some(inkwell::module::Linkage::Internal),
         );
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             let index = self.legacy_runners.len() - 1;
             self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
@@ -7575,7 +7675,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let name = format!("__staple_until_runner_{}", call_id.0);
         // Test-only: record the creation and whether the syntax-keyed name was
         // reused across instantiations.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             let name_reused = self.llvm_module.get_function(&name).is_some();
             self.legacy_runners.push(LegacyReactiveRunner {
@@ -7600,7 +7700,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             self.context.void_type().fn_type(&[ptr_type.into()], false),
             Some(inkwell::module::Linkage::Internal),
         );
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             let index = self.legacy_runners.len() - 1;
             self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
@@ -7646,7 +7746,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
 
         // Test-only: record the runner creation keyed by the evaluator.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         self.legacy_runners.push(LegacyReactiveRunner {
             family: LegacyRunnerFamily::Derived,
             call_syntax: None,
@@ -7671,7 +7771,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             runner_type,
             Some(inkwell::module::Linkage::Internal),
         );
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             let index = self.legacy_runners.len() - 1;
             self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
@@ -8027,7 +8127,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
         // Test-only: record the pair's creation facts. The plan comparison
         // reads these; production emission ignores them.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             let substituted = |value_type: &CheckedType| {
                 substitute_type(value_type.clone(), &self.active_type_substitutions)
@@ -8226,11 +8326,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             // Test-only: state 0 is the body thunk's own code, so ownership
             // registrations attribute to the thunk. Production emission never
             // reads either key.
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             let previous_key = self.legacy_function_key.take();
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             let previous_owned_function = self.legacy_owned_function.replace(thunk.id);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             {
                 let template = self
                     .typed_module
@@ -8270,7 +8370,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     status_type,
                 )?;
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             {
                 self.legacy_function_key = previous_key;
                 self.legacy_owned_function = previous_owned_function;
@@ -8305,7 +8405,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let (resume_fn, cleanup_fn) = self.ensure_coroutine_codes(body_syntax)?;
         // Test-only: one request per creation site, so the comparison can show
         // where the syntax-keyed pair cache aliased two instantiations.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         self.legacy_coroutine_requests.push(LegacyCoroutineRequest {
             body_syntax,
             substitutions: self.active_type_substitutions.clone(),
@@ -9178,7 +9278,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_load(environment_type, pointer, "closure.finalizer.environment")
             .map_err(compiler_diagnostic)?
             .into_struct_value();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         let mut legacy_dropped = Vec::new();
         for (index, symbol) in closure.captures.iter().copied().enumerate().rev() {
             if self
@@ -9198,7 +9298,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             if !self.typed_module.type_needs_drop(&value_type) {
                 continue;
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "differential-shadow"))]
             legacy_dropped.push(index);
             let value = self
                 .builder
@@ -9206,7 +9306,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(compiler_diagnostic)?;
             self.compile_drop_value(value, &value_type, Span::Compiler)?;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             self.legacy_finalizers
                 .push(LegacyFinalizer::ClosureEnvironment {
@@ -10735,7 +10835,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             clone_method,
             call.syntax.span.clone(),
         )?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         if let Some(selected) = self.typed_module.trait_impl_method(
             clone_trait,
             std::slice::from_ref(element.as_ref()),
@@ -10871,7 +10971,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let name = format!("__staple_gc_finalize_buffer_{:016x}", hasher.finish());
         let function = self.add_finalizer_function(&name);
         self.gc_finalizers.insert(key, function);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "differential-shadow"))]
         {
             self.legacy_finalizers
                 .push(LegacyFinalizer::Buffer(element.clone()));

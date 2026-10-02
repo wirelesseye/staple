@@ -220,3 +220,19 @@ The newly runnable fixture exposed a harness defect: one rename map was applied 
 ### Step 4 — catalog name assertions (complete)
 
 `LoweredModule` exposes doc-hidden helpers for named-template instances and artifact families selected from catalog keys. Coroutine artifacts return both pair definition names. Fourteen spelling-only tests use these names under the lowered default and retain legacy spelling checks under the legacy default. Definition checks replace family substrings; generic tests require at least two catalog instances and their definitions. The block-tail coroutine check still requires a stored cleanup pointer, and the extern adapter retains its internal `i32` definition check. All fourteen focused cases pass. Default: **1317/1317 pass**; lowered: **1317/1317 pass, zero failures**. Both workspace checks, formatting, whitespace checks, and CLI corpus harnesses pass. Step 5 is next.
+
+### Step 5 — suite-wide shadow comparison (complete)
+
+The `differential-shadow` feature instruments selected emission, including object output. It emits both backends for the same target and reuses the corpus declaration census and normalized body comparison. The unselected emitter runs in a scratch LLVM context, because a shared context renames the second module's named types (`%CoroStatus.1`) and broke IR-text assertions. Census helpers live in a shared module; legacy recorder instrumentation is available under tests or this feature. A doc-hidden process counter and an optional append-only `STAPLE_DIFFERENTIAL_SHADOW_REPORT` ledger aggregate comparisons across isolated nextest and CLI processes.
+
+The first whole-suite run found **8 failures** in five groups; every fix is under P1:
+
+- **Stored-closure callee (emitter).** A recursive local `def` call read its closure from the binding cell without building legacy's unused `binding.state` slot when no check is required. `load_stored_closure` now builds it.
+- **Field-write base check (emitter).** Legacy checks a mutable base's initialization before projecting a field. The lowered emitter matched only `Symbol` bases, not `CapturedCell`.
+- **Field write initializes its base (lowering).** Legacy returns no symbol for a field projection, so a field write neither stores state `2` nor notifies a signal. Lowering's `place_root_symbol` followed `ProductElement` to its base, so `initialization_symbol` was wrong. `ProductElement` now yields none. The lowering unit test asserts the corrected rule.
+- **Effect-less legacy coroutine pair (census).** Legacy's body cache records no effect substitution for a body that reaches an effect parameter only through its enclosing signature. The lowered instance records the specialized effect. The pair census falls back to a match that omits effect parameters legacy never recorded. This is the only new explanation category (D5, legacy omission); types must still match exactly.
+- **D5 legacy rejection (explained).** Legacy's "unspecialized type parameter" rejection of generic coroutine pairs is accepted and counted (`record_shadow_rejection`). Any other legacy rejection panics.
+
+Three reduced corpus entries (`local_recursive_call_state_slot`, `captured_mut_field_write`, `await_task_effect_pair`) bring the corpus to 74 programs.
+
+**Result.** The whole suite passes under shadow with either default emitter: **1317/1317**. The shadow run compared **579 programs and 163710 bodies** across 369 isolated processes, with **8 D5-explained legacy rejections** and no other differences. Plain gates: default **1317/1317**; lowered **1317/1317**. Both workspace checks, formatting, and whitespace checks pass. Step 6 is next.

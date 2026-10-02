@@ -5,6 +5,8 @@ edition = "2024"
 
 [features]
 lowered-emitter = []
+# Test instrumentation: compare every emitted module with the other emitter.
+differential-shadow = []
 
 [dependencies]
 staple-project = { path = "../staple-project" }

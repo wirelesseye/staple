@@ -12,8 +12,12 @@
 //! and block labels in order of appearance, and sorts
 //! `__staple_gc_register_root` calls.
 
-#[cfg(test)]
-use std::collections::HashMap;
+#[cfg(any(test, feature = "differential-shadow"))]
+use crate::LoweredModule;
+#[cfg(any(test, feature = "differential-shadow"))]
+use crate::lower::census::CensusMapping;
+#[cfg(any(test, feature = "differential-shadow"))]
+use std::collections::{HashMap, HashSet};
 
 /// Where one corpus program's source comes from.
 #[doc(hidden)]
@@ -180,7 +184,7 @@ const fn emits(
 /// so the earlier substage's zero-stub gate is not blocked by the later
 /// construct: `coercion` is 5.5 (5.4 emits the move half),
 /// Signal and derived reads and bindings belong to 5.8.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 pub static FAMILY_OWNERS: &[(&str, &str)] = &[
     // 5.4: calls, call arguments, callable values, closures, resources, and
     // the numeric/string/slice intrinsics.
@@ -325,7 +329,7 @@ const COMPLETED_SUBSTAGES: &[&str] = &["5.3", "5.4", "5.5", "5.6", "5.7", "5.8"]
 /// The substage that owns one diagnostic family, or `None` for a diagnostic
 /// that is not a construct family at all (an internal invariant the emitter
 /// should never report on a corpus program).
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 pub fn family_owner(family: &str) -> Option<&'static str> {
     FAMILY_OWNERS
         .iter()
@@ -343,7 +347,7 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 71] = [
+static CORPUS: [DifferentialProgram; 74] = [
     must_run(inline("empty", "", "5.3")),
     must_run(inline(
         "integer_arithmetic",
@@ -1815,6 +1819,34 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "",
     )),
+    // Step 5 shadow findings: a stored-closure callee builds legacy's unused
+    // state slot, a captured `mut` field write checks its base without
+    // initializing it, and an await/until body's effect-less legacy pair maps
+    // to its effect-specialized instance.
+    must_run(expect_stdout(
+        inline(
+            "local_recursive_call_state_slot",
+            "def outer = value: I32 => {\n  def recurse: I32 -> I32 = n => {\n    let captured = value\n    recurse n\n  }\n  recurse 1\n}\n",
+            "5.9",
+        ),
+        "",
+    )),
+    must_run(expect_stdout(
+        inline(
+            "captured_mut_field_write",
+            "def make = () => {\n  let mut point = (x: 1, y: 2)\n  let update = () => { point.x = point.x + 1; point.x }\n  update ()\n}\n",
+            "5.9",
+        ),
+        "",
+    )),
+    must_run(expect_stdout(
+        inline(
+            "await_task_effect_pair",
+            "use std.coroutine.*\nuse std.io.(IO, println)\ndef leaf: () -> Coroutine{} I32 = () => coro { 9 }\ndef waiter: () -> Coroutine{Tasks, IO} I32 = () => coro {\n    let t = spawn (leaf ())\n    let r = await t\n    match r {\n        Completed v => v,\n        Cancelled() => 0,\n    }\n}\nlet sched = scheduler ()\nwith Tasks = task_scope (sched) {\n    let _ = spawn (waiter ())\n    let _ = pump (sched, 8)\n}\n",
+            "5.9",
+        ),
+        "",
+    )),
     must_run(expect_stdout(
         inline(
             "local_generic_cells",
@@ -1872,7 +1904,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
 
 /// Extract every `define`d function body from one module's IR text, keyed by
 /// the function's final symbol name.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 fn module_functions(ir: &str) -> HashMap<String, Vec<String>> {
     let lines = ir.lines().collect::<Vec<_>>();
     let mut functions = HashMap::new();
@@ -1908,7 +1940,7 @@ fn module_functions(ir: &str) -> HashMap<String, Vec<String>> {
 /// `@c_string.literal.3` in creation order, which differs between the two
 /// emitters, so a body comparison must compare what a referenced constant
 /// holds, never its name.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 fn module_constants(ir: &str) -> HashMap<String, String> {
     let mut constants = HashMap::new();
     for line in ir.lines() {
@@ -1925,7 +1957,7 @@ fn module_constants(ir: &str) -> HashMap<String, String> {
     constants
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 fn identifier_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '$' | '.' | '_' | '-')
 }
@@ -1935,7 +1967,7 @@ fn identifier_char(character: char) -> bool {
 /// definition from `constants` (the body's own module), canonicalize `%`
 /// locals and block labels in order of first appearance, and sort
 /// `__staple_gc_register_root` calls to the end.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 fn normalize_function(
     lines: &[String],
     renames: &HashMap<String, String>,
@@ -2004,14 +2036,14 @@ fn normalize_function(
     body
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 /// The comparison name of one `@` symbol: its planned name through the
 /// census map when it is a mapped function, otherwise its base name with the
 /// internal disambiguator removed. Decision D2 lets the legacy backend
 /// disambiguate a module global with LLVM's `.N` suffix while the lowered
 /// backend uses `unique_global_name`'s `.global.<symbol>`; both denote the
 /// same catalog symbol.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 fn canonical_symbol(
     token: &str,
     renames: &HashMap<String, String>,
@@ -2043,7 +2075,7 @@ fn canonical_symbol(
     token.to_owned()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 fn canonical_name(locals: &mut HashMap<String, String>, token: &str) -> String {
     if let Some(name) = locals.get(token) {
         return name.clone();
@@ -2060,12 +2092,12 @@ mod tests {
 
     use inkwell::context::Context;
 
-    use crate::lower::graph_validation::tests::{CensusMapping, assert_declaration_parity};
+    use crate::lower::census::assert_declaration_parity;
     use crate::{LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker};
 
     use super::{
-        DifferentialProgram, DifferentialSource, differential_corpus, module_constants,
-        module_functions, normalize_function,
+        DifferentialProgram, DifferentialSource, compare_fully_emitted_bodies, differential_corpus,
+        module_constants, normalize_function,
     };
 
     fn workspace_root() -> &'static Path {
@@ -2755,165 +2787,226 @@ mod tests {
             program.name
         );
     }
+}
 
-    /// Compare every function the lowered emitter fully emitted (not a stub)
-    /// with its mapped legacy function. Returns the planned names compared.
-    fn compare_fully_emitted_bodies(
-        label: &str,
-        lowered: &LoweredModule,
-        mapping: &CensusMapping,
-        legacy: &crate::codegen::LegacyEmissions,
-        partial: &crate::codegen::LoweredPartialEmissions,
-    ) -> HashSet<String> {
-        use crate::lower::graph_validation::tests::planned_names_for;
+#[cfg(any(test, feature = "differential-shadow"))]
+/// Compare every function the lowered emitter fully emitted (not a stub)
+/// with its mapped legacy function. Returns the planned names compared.
+pub(crate) fn compare_fully_emitted_bodies(
+    label: &str,
+    lowered: &LoweredModule,
+    mapping: &CensusMapping,
+    legacy: &crate::codegen::LegacyEmissions,
+    partial: &crate::codegen::LoweredPartialEmissions,
+) -> HashSet<String> {
+    use crate::lower::census::planned_names_for;
 
-        let program = lowered.program();
-        // Legacy name -> canonical planned name, covering the specialization
-        // duplicates the census collapses.
-        let mut renames = HashMap::new();
-        for (legacy_name, entry) in &mapping.symbol_names {
-            let names = planned_names_for(program, entry);
-            if let [planned] = names.as_slice() {
-                renames.insert(legacy_name.clone(), planned.clone());
+    let program = lowered.program();
+    // Legacy name -> canonical planned name, covering the specialization
+    // duplicates the census collapses.
+    let mut renames = HashMap::new();
+    for (legacy_name, entry) in &mapping.symbol_names {
+        let names = planned_names_for(program, entry);
+        if let [planned] = names.as_slice() {
+            renames.insert(legacy_name.clone(), planned.clone());
+        }
+    }
+    // Planned names can also be legacy names for a different catalog
+    // entry (sibling module initializers). Never apply the legacy map to
+    // lowered symbols; preserve all catalog spellings on that side.
+    let mut lowered_renames = HashMap::new();
+    for (_, instance) in program.instances() {
+        lowered_renames.insert(instance.name.clone(), instance.name.clone());
+    }
+    for (_, artifact) in program.artifacts() {
+        lowered_renames.insert(artifact.name.clone(), artifact.name.clone());
+        if let Some(crate::LoweredArtifactPlan::CoroutineCodes(_)) = artifact.plan {
+            let (resume, cleanup) = program
+                .planned_coroutine_pair_names(artifact.ordinal)
+                .expect("pair has names");
+            lowered_renames.insert(resume.clone(), resume);
+            lowered_renames.insert(cleanup.clone(), cleanup);
+        }
+    }
+    for (_, initializer) in program.initializers() {
+        lowered_renames.insert(initializer.name.clone(), initializer.name.clone());
+    }
+    let stubbed = partial
+        .report
+        .stubbed()
+        .iter()
+        .map(|stub| stub.name().to_owned())
+        .collect::<HashSet<_>>();
+    let legacy_functions = module_functions(&legacy.module_ir);
+    let lowered_functions = module_functions(&partial.module_ir);
+    let legacy_constants = module_constants(&legacy.module_ir);
+    let lowered_constants = module_constants(&partial.module_ir);
+
+    let mut compared = HashSet::new();
+    for (legacy_name, entry) in &mapping.mapped {
+        for planned in planned_names_for(program, entry) {
+            if stubbed.contains(&planned) {
+                continue;
             }
-        }
-        // Planned names can also be legacy names for a different catalog
-        // entry (sibling module initializers). Never apply the legacy map to
-        // lowered symbols; preserve all catalog spellings on that side.
-        let mut lowered_renames = HashMap::new();
-        for (_, instance) in program.instances() {
-            lowered_renames.insert(instance.name.clone(), instance.name.clone());
-        }
-        for (_, artifact) in program.artifacts() {
-            lowered_renames.insert(artifact.name.clone(), artifact.name.clone());
-            if let Some(crate::LoweredArtifactPlan::CoroutineCodes(_)) = artifact.plan {
-                let (resume, cleanup) = program
-                    .planned_coroutine_pair_names(artifact.ordinal)
-                    .expect("pair has names");
-                lowered_renames.insert(resume.clone(), resume);
-                lowered_renames.insert(cleanup.clone(), cleanup);
-            }
-        }
-        for (_, initializer) in program.initializers() {
-            lowered_renames.insert(initializer.name.clone(), initializer.name.clone());
-        }
-        let stubbed = partial
-            .report
-            .stubbed()
-            .iter()
-            .map(|stub| stub.name().to_owned())
-            .collect::<HashSet<_>>();
-        let legacy_functions = module_functions(&legacy.module_ir);
-        let lowered_functions = module_functions(&partial.module_ir);
-        let legacy_constants = module_constants(&legacy.module_ir);
-        let lowered_constants = module_constants(&partial.module_ir);
-
-        let mut compared = HashSet::new();
-        for (legacy_name, entry) in &mapping.mapped {
-            for planned in planned_names_for(program, entry) {
-                if stubbed.contains(&planned) {
-                    continue;
+            let legacy_body = legacy_functions
+                .get(legacy_name)
+                .unwrap_or_else(|| panic!("legacy `{legacy_name}` has no body ({label})"));
+            let lowered_body = lowered_functions.get(&planned).unwrap_or_else(|| {
+                panic!("the lowered module has no body for `{planned}` ({label})")
+            });
+            // D5: a creation in a different concrete owner uses its own
+            // pair, while legacy's syntax cache keeps the first pair.
+            // Normalize only the census-proven CoroCreation references;
+            // compare every other instruction in this owner's body.
+            use crate::lower::census::LegacyCatalogEntry;
+            let owner = match entry {
+                LegacyCatalogEntry::Instance(id) => {
+                    Some(crate::lower::EmissionOwner::Instance(*id))
                 }
-                let legacy_body = legacy_functions
-                    .get(legacy_name)
-                    .unwrap_or_else(|| panic!("legacy `{legacy_name}` has no body ({label})"));
-                let lowered_body = lowered_functions.get(&planned).unwrap_or_else(|| {
-                    panic!("the lowered module has no body for `{planned}` ({label})")
-                });
-                // D5: a creation in a different concrete owner uses its own
-                // pair, while legacy's syntax cache keeps the first pair.
-                // Normalize only the census-proven CoroCreation references;
-                // compare every other instruction in this owner's body.
-                use crate::lower::graph_validation::tests::LegacyCatalogEntry;
-                let owner = match entry {
-                    LegacyCatalogEntry::Instance(id) => {
-                        Some(crate::lower::EmissionOwner::Instance(*id))
+                LegacyCatalogEntry::Artifact { ordinal, .. } => program
+                    .artifacts()
+                    .find(|(_, artifact)| artifact.ordinal == *ordinal)
+                    .and_then(|(_, artifact)| match &artifact.plan {
+                        Some(crate::LoweredArtifactPlan::CoroutineCodes(pair)) => {
+                            Some(crate::lower::EmissionOwner::Instance(pair.body))
+                        }
+                        _ => None,
+                    }),
+                LegacyCatalogEntry::Initializer(module) => program
+                    .initializers()
+                    .find(|(_, initializer)| initializer.module == *module)
+                    .map(|(id, _)| crate::lower::EmissionOwner::Initializer(id)),
+                _ => None,
+            };
+            let mut expected_renames = std::borrow::Cow::Borrowed(&renames);
+            if let Some(owner) = owner {
+                for use_ in program.artifact_uses(owner).unwrap_or(&[]) {
+                    if !matches!(use_.site, crate::ArtifactUseSite::CoroCreation(_))
+                        || !mapping.aliased_artifacts.contains(&use_.artifact)
+                    {
+                        continue;
                     }
-                    LegacyCatalogEntry::Artifact { ordinal, .. } => program
+                    let alias = program
                         .artifacts()
-                        .find(|(_, artifact)| artifact.ordinal == *ordinal)
-                        .and_then(|(_, artifact)| match &artifact.plan {
-                            Some(crate::LoweredArtifactPlan::CoroutineCodes(pair)) => {
-                                Some(crate::lower::EmissionOwner::Instance(pair.body))
-                            }
-                            _ => None,
-                        }),
-                    LegacyCatalogEntry::Initializer(module) => program
-                        .initializers()
-                        .find(|(_, initializer)| initializer.module == *module)
-                        .map(|(id, _)| crate::lower::EmissionOwner::Initializer(id)),
-                    _ => None,
-                };
-                let mut expected_renames = std::borrow::Cow::Borrowed(&renames);
-                if let Some(owner) = owner {
-                    for use_ in program.artifact_uses(owner).unwrap_or(&[]) {
-                        if !matches!(use_.site, crate::ArtifactUseSite::CoroCreation(_))
-                            || !mapping.aliased_artifacts.contains(&use_.artifact)
+                        .find(|(_, artifact)| artifact.ordinal == use_.artifact)
+                        .and_then(|(_, artifact)| artifact.plan.as_ref());
+                    let Some(crate::LoweredArtifactPlan::CoroutineCodes(alias)) = alias else {
+                        continue;
+                    };
+                    let alias_template = program
+                        .instance(alias.body)
+                        .expect("aliased pair body")
+                        .template;
+                    let mut found = 0;
+                    for (name, target) in &mapping.symbol_names {
+                        let LegacyCatalogEntry::Artifact { ordinal, slot } = target else {
+                            continue;
+                        };
+                        let Some(crate::LoweredArtifactPlan::CoroutineCodes(pair)) = program
+                            .artifacts()
+                            .find(|(_, artifact)| artifact.ordinal == *ordinal)
+                            .and_then(|(_, artifact)| artifact.plan.as_ref())
+                        else {
+                            continue;
+                        };
+                        if program
+                            .instance(pair.body)
+                            .expect("mapped pair body")
+                            .template
+                            != alias_template
                         {
                             continue;
                         }
-                        let alias = program
-                            .artifacts()
-                            .find(|(_, artifact)| artifact.ordinal == use_.artifact)
-                            .and_then(|(_, artifact)| artifact.plan.as_ref());
-                        let Some(crate::LoweredArtifactPlan::CoroutineCodes(alias)) = alias else {
-                            continue;
-                        };
-                        let alias_template = program
-                            .instance(alias.body)
-                            .expect("aliased pair body")
-                            .template;
-                        let mut found = 0;
-                        for (name, target) in &mapping.symbol_names {
-                            let LegacyCatalogEntry::Artifact { ordinal, slot } = target else {
-                                continue;
-                            };
-                            let Some(crate::LoweredArtifactPlan::CoroutineCodes(pair)) = program
-                                .artifacts()
-                                .find(|(_, artifact)| artifact.ordinal == *ordinal)
-                                .and_then(|(_, artifact)| artifact.plan.as_ref())
-                            else {
-                                continue;
-                            };
-                            if program
-                                .instance(pair.body)
-                                .expect("mapped pair body")
-                                .template
-                                != alias_template
-                            {
-                                continue;
-                            }
-                            let names = planned_names_for(
-                                program,
-                                &LegacyCatalogEntry::Artifact {
-                                    ordinal: use_.artifact,
-                                    slot: *slot,
-                                },
-                            );
-                            let [target] = names.as_slice() else {
-                                panic!("aliased pair slot has exactly one planned name");
-                            };
-                            expected_renames
-                                .to_mut()
-                                .insert(name.clone(), target.clone());
-                            found += 1;
-                        }
-                        assert_eq!(
-                            found, 2,
-                            "census-confirmed alias has one legacy pair ({label})"
+                        let names = planned_names_for(
+                            program,
+                            &LegacyCatalogEntry::Artifact {
+                                ordinal: use_.artifact,
+                                slot: *slot,
+                            },
                         );
+                        let [target] = names.as_slice() else {
+                            panic!("aliased pair slot has exactly one planned name");
+                        };
+                        expected_renames
+                            .to_mut()
+                            .insert(name.clone(), target.clone());
+                        found += 1;
                     }
+                    assert_eq!(
+                        found, 2,
+                        "census-confirmed alias has one legacy pair ({label})"
+                    );
                 }
-                let expected =
-                    normalize_function(legacy_body, &expected_renames, &legacy_constants);
-                let actual = normalize_function(lowered_body, &lowered_renames, &lowered_constants);
-                assert_eq!(
-                    actual, expected,
-                    "normalized body differs for legacy `{legacy_name}` -> `{planned}` ({label})"
-                );
-                compared.insert(planned);
             }
+            let expected = normalize_function(legacy_body, &expected_renames, &legacy_constants);
+            let actual = normalize_function(lowered_body, &lowered_renames, &lowered_constants);
+            assert_eq!(
+                actual, expected,
+                "normalized body differs for legacy `{legacy_name}` -> `{planned}` ({label})"
+            );
+            compared.insert(planned);
         }
-        compared
+    }
+    compared
+}
+
+/// Number of successful shadow program/body comparisons in this process.
+#[doc(hidden)]
+#[cfg(feature = "differential-shadow")]
+pub fn shadow_counts() -> (usize, usize) {
+    use std::sync::atomic::Ordering;
+    (
+        SHADOW_PROGRAMS.load(Ordering::Relaxed),
+        SHADOW_BODIES.load(Ordering::Relaxed),
+    )
+}
+
+#[cfg(feature = "differential-shadow")]
+static SHADOW_PROGRAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "differential-shadow")]
+static SHADOW_BODIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Number of programs legacy rejected under D5 (unspecialized type parameter).
+#[doc(hidden)]
+#[cfg(feature = "differential-shadow")]
+pub fn shadow_rejections() -> usize {
+    SHADOW_REJECTIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(feature = "differential-shadow")]
+static SHADOW_REJECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "differential-shadow")]
+pub(crate) fn record_shadow_rejection() {
+    use std::io::Write;
+    SHADOW_REJECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some(path) = std::env::var_os("STAPLE_DIFFERENTIAL_SHADOW_REPORT") {
+        let mut report = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open shadow comparison ledger");
+        report
+            .write_all(format!("{}\treject\n", std::process::id()).as_bytes())
+            .expect("append shadow comparison ledger");
+    }
+}
+
+/// Optional append-only run ledger aggregates isolated nextest and CLI processes.
+#[cfg(feature = "differential-shadow")]
+pub(crate) fn record_shadow(bodies: usize) {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+    SHADOW_PROGRAMS.fetch_add(1, Ordering::Relaxed);
+    SHADOW_BODIES.fetch_add(bodies, Ordering::Relaxed);
+    if let Some(path) = std::env::var_os("STAPLE_DIFFERENTIAL_SHADOW_REPORT") {
+        let mut report = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open shadow comparison ledger");
+        report
+            .write_all(format!("{}\t{bodies}\n", std::process::id()).as_bytes())
+            .expect("append shadow comparison ledger");
     }
 }

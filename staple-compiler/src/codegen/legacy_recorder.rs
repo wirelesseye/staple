@@ -5,6 +5,9 @@
 //! just the record shapes, moved here unchanged so `codegen/mod.rs` keeps only
 //! the emitter. Production builds compile none of this.
 
+// Shadow comparison consumes census facts; transition tests inspect the rest.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::collections::HashMap;
 
 use crate::{CheckedFunctionType, CheckedType, FunctionId, ModuleId, SymbolId, TypeParameterId};
@@ -15,7 +18,7 @@ use crate::{CheckedFunctionType, CheckedType, FunctionId, ModuleId, SymbolId, Ty
 /// emission never reads this record.
 /// Test-only: one emitted constructor adapter and the decisions its body
 /// makes.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyConstructorAdapter {
     pub(crate) symbol: SymbolId,
@@ -29,7 +32,7 @@ pub(crate) struct LegacyConstructorAdapter {
 /// Test-only: one nested `trait_method_code` selection inside a structural
 /// body: the selected instance template with its concrete method type, or the
 /// nested structural kind with its completed arguments.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LegacyStructuralCallee {
     Instance(FunctionId, CheckedFunctionType),
@@ -37,7 +40,7 @@ pub(crate) enum LegacyStructuralCallee {
 }
 
 /// Test-only: one emitted structural-method body and the decisions it makes.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyStructuralMethod {
     pub(crate) structural: crate::StructuralTraitMethod,
@@ -63,7 +66,7 @@ pub(crate) struct LegacyStructuralMethod {
 }
 
 /// Test-only: the cleanup branch one `compile_drop_value` call took.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LegacyDropBranch {
     UserDrop(FunctionId),
@@ -77,7 +80,7 @@ pub(crate) enum LegacyDropBranch {
 }
 
 /// Test-only: one `compile_drop_value` call with its nested calls in order.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LegacyDropCall {
     pub(crate) value_type: CheckedType,
@@ -86,7 +89,7 @@ pub(crate) struct LegacyDropCall {
 }
 
 /// Test-only: one finalizer body the legacy backend created.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LegacyFinalizer {
     Payload(CheckedType),
@@ -100,7 +103,7 @@ pub(crate) enum LegacyFinalizer {
 }
 
 /// Test-only: one legacy ownership registration in `owned_order`.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LegacyOwned {
     pub(crate) function: FunctionId,
@@ -112,7 +115,7 @@ pub(crate) struct LegacyOwned {
 }
 
 /// Test-only: one `compile_buffer_clone` element `Clone` selection.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LegacyBufferClone {
     pub(crate) element: CheckedType,
@@ -122,7 +125,7 @@ pub(crate) struct LegacyBufferClone {
 /// Test-only: one `ensure_coroutine_codes` pair *creation*, with the facts the
 /// plan comparison records. Legacy's unwind drops follow `HashMap` order, so
 /// the test compares them as a set.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyCoroutinePair {
     /// The `coro` body syntax the legacy cache key uses.
@@ -147,7 +150,7 @@ pub(crate) struct LegacyCoroutinePair {
 
 /// Test-only: one `compile_coro_expression` *request* for a pair, so the test
 /// can show where the syntax-keyed cache aliased two instantiations.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyCoroutineRequest {
     pub(crate) body_syntax: staple_syntax::SyntaxId,
@@ -155,7 +158,7 @@ pub(crate) struct LegacyCoroutineRequest {
 }
 
 /// Test-only: the three reactive runner families.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LegacyRunnerFamily {
     Reaction,
@@ -164,7 +167,7 @@ pub(crate) enum LegacyRunnerFamily {
 }
 
 /// Test-only: one legacy runner creation with its legacy key and call facts.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyReactiveRunner {
     pub(crate) family: LegacyRunnerFamily,
@@ -189,7 +192,7 @@ pub(crate) struct LegacyReactiveRunner {
 /// Test-only: which legacy record one emitted function belongs to. Indexed
 /// variants point into the matching `LegacyEmissions` vector, whose per-family
 /// transition tests compare the record's contents with its plan.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone)]
 pub(crate) enum LegacyFunctionOrigin {
     /// A concrete template `declare_functions` emits eagerly.
@@ -221,7 +224,7 @@ pub(crate) enum LegacyFunctionOrigin {
 
 /// Test-only: one eager extern closure adapter and whether `compile_symbol_value`
 /// read it as a first-class value.
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyExternAdapter {
     pub(crate) symbol: SymbolId,
@@ -229,7 +232,7 @@ pub(crate) struct LegacyExternAdapter {
     pub(crate) used: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "differential-shadow"))]
 pub(crate) struct LegacyEmissions {
     pub(crate) specializations: Vec<(
         FunctionId,

@@ -4820,6 +4820,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
             let cell_type = self.binding_cell_type(owner, symbol)?;
+            if !callable.requires_initialization_check {
+                // Legacy's `compile_symbol_value` builds the state slot even
+                // when the read needs no check; the caller already emitted
+                // the check when one is required.
+                self.backend
+                    .builder
+                    .build_struct_gep(cell_type, cell, 1, "binding.state")
+                    .map_err(compiler_diagnostic)?;
+            }
             let slot = self
                 .backend
                 .builder
@@ -6008,7 +6017,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 // Legacy checks a mutable symbol base's initialization before
                 // projecting a field.
-                if let crate::LoweredPlaceKind::Symbol { symbol } = &base_place.kind
+                if let crate::LoweredPlaceKind::Symbol { symbol }
+                | crate::LoweredPlaceKind::CapturedCell { symbol } = &base_place.kind
                     && self
                         .view
                         .symbol(*symbol)
