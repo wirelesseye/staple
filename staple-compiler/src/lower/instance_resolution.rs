@@ -18,9 +18,9 @@ use crate::{
     CallSubstitutions, CheckedEffectSet, CheckedFunctionType, CheckedTraitBound,
     CheckedTraitImplementation, CheckedType, FunctionId, StructuralTraitMethod, TraitEvidence,
     TraitId, TraitMethodId, TypeParameterId, contains_inferred_type, contains_type_parameter,
-    effect_substitution_type, effect_substitution_value, infer_type_parameters, is_copy_type,
-    is_default_type, merge_types, structural_trait_arguments, substitute_effect_set,
-    substitute_type,
+    drop_implementation_applies, effect_substitution_type, effect_substitution_value,
+    infer_type_parameters, is_copy_type, is_default_type, merge_types, structural_trait_arguments,
+    substitute_effect_set, substitute_type,
 };
 
 use super::*;
@@ -1020,7 +1020,34 @@ impl<'a> TraitSelectionContext<'a> {
             self.program.semantic_ids.io_type,
             &self.implementations,
             &self.bounds,
+            &|bound| self.drop_bound_holds(bound),
         )
+    }
+
+    /// Stage 5.11 (F5): whether a `Drop` implementation applies to a concrete
+    /// type under the general matching rule.
+    fn drop_applies(&self, value_type: &CheckedType) -> bool {
+        drop_implementation_applies(
+            value_type,
+            self.program.semantic_ids.drop_trait,
+            &self.implementations,
+            &|bound| self.drop_bound_holds(bound),
+        )
+    }
+
+    /// The bound-discharge callback of the general drop-implementation
+    /// predicate: a `Copy` bound asks the structural `Copy` predicate, any
+    /// other bound asks the owned-catalog obligation resolver.
+    fn drop_bound_holds(&self, bound: &CheckedTraitBound) -> bool {
+        if Some(bound.trait_id) == self.program.semantic_ids.copy_trait {
+            bound
+                .arguments
+                .first()
+                .is_some_and(|argument| self.is_copy(argument))
+        } else {
+            self.resolve_obligation(bound.trait_id, &bound.arguments)
+                .is_some()
+        }
     }
 
     fn structural(
@@ -1731,14 +1758,11 @@ impl LoweredProgram {
         concrete_type_needs_drop(self, value_type)
     }
 
-    /// The user `Drop` implementation selected for a fully substituted type,
-    /// mirroring `TypedModule::drop_method_for`: the implementation whose sole
-    /// trait argument equals `value_type` exactly, and the first method from
-    /// its method map. A generic implementation never matches a concrete type.
-    pub(crate) fn drop_method_for_concrete(&self, value_type: &CheckedType) -> Option<FunctionId> {
-        drop_implementation_for(self, value_type)
-            .and_then(|implementation| implementation.methods.first())
-            .map(|(_, function)| *function)
+    /// Stage 5.11 (F5): whether a `Drop` implementation applies to a fully
+    /// substituted type under the general matching rule, using the owned
+    /// catalogs and the same bound-discharge callback the checker uses.
+    pub(crate) fn concrete_drop_implementation_applies(&self, value_type: &CheckedType) -> bool {
+        TraitSelectionContext::new(self, Vec::new()).drop_applies(value_type)
     }
 
     /// Completes one declared trait bound for a concrete instance: substitutes
@@ -1811,28 +1835,8 @@ impl LoweredProgram {
     }
 }
 
-/// The one-argument `Drop` implementation whose trait argument is exactly
-/// `value_type`, with the same predicate legacy `has_drop_implementation`
-/// uses. `concrete_type_needs_drop` and `drop_method_for_concrete` share this
-/// helper so gating and selection cannot drift.
-fn drop_implementation_for<'a>(
-    program: &'a LoweredProgram,
-    value_type: &CheckedType,
-) -> Option<&'a LoweredTraitImplementationMetadata> {
-    let drop_trait = program.semantic_ids.drop_trait?;
-    program
-        .trait_implementations
-        .iter()
-        .find_map(|(_, implementation)| {
-            (implementation.trait_id == drop_trait
-                && implementation.arguments.len() == 1
-                && implementation.arguments[0] == *value_type)
-                .then_some(implementation)
-        })
-}
-
 fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) -> bool {
-    if drop_implementation_for(program, value_type).is_some() {
+    if program.concrete_drop_implementation_applies(value_type) {
         return true;
     }
     match value_type {

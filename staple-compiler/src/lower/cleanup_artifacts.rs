@@ -20,14 +20,15 @@ use super::instance_resolution::{
     InstanceResolutionRequest, InstanceResolutionTarget, RuntimeOpaqueKind,
 };
 use super::{
-    ArenaId, BlockId, CallSubstitutions, DropGlueBody, DropGluePlan, DroppedAlternative,
-    DroppedCapture, DroppedElement, ExpressionId, GcFinalizerPlan, InitializerId, ItemId,
+    ArenaId, BlockId, DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture,
+    DroppedElement, ExpressionId, GcFinalizerPlan, InitializerId, ItemId,
     LoweredArtifactDependencyKind, LoweredArtifactPlan, LoweredArtifactRequestId,
     LoweredInstanceDependencyKind, LoweredItemKind, LoweredOwnedBinding, LoweredProgram, Origin,
-    OwnedStorage, PatternId, PlaceId, PlannedArtifact, PlannedInstance, RuntimeRelease, SymbolId,
+    OwnedStorage, PatternId, PlaceId, PlannedArtifact, PlannedCallee, PlannedInstance,
+    RuntimeRelease, SymbolId,
 };
 use crate::specialization::{ArtifactRequestKey, CanonicalType, GcFinalizerKey};
-use crate::{CheckedType, FunctionId, IntrinsicFunction};
+use crate::{CheckedType, IntrinsicFunction};
 
 /// Expands one drop-glue artifact: the selected cleanup body for the plan's
 /// concrete value type, mirroring the legacy decision order, plus the nested
@@ -1841,60 +1842,50 @@ fn drop_glue_body(
 /// Selects the user `Drop` method for a type and requests its instance, or
 /// returns `None` when legacy would fall through to the opaque/structural
 /// branches.
+/// The selected user `Drop` method for one concrete type, or `None` when no
+/// implementation applies. Stage 5.11 (F5) selects through the ordinary trait
+/// resolver with the `DropMethod` edge kind, so a generic implementation is
+/// resolved with its substitutions and becomes a specialized instance.
 fn user_drop_method(
     program: &LoweredProgram,
     value_type: &CheckedType,
     origin: &Origin,
     requests: &mut Vec<ClosureRequest>,
 ) -> Result<Option<PlannedInstance>, Vec<Diagnostic>> {
-    let Some(function) = program.drop_method_for_concrete(value_type) else {
+    let Some(drop_trait) = program.semantic_ids.drop_trait else {
         return Ok(None);
     };
-    // A matching implementation is non-generic by the exact-argument rule, so
-    // the template signature is already concrete and needs no substitutions.
-    let signature = function_signature(program, function, origin)?;
-    let resolved = program
-        .resolve_instance_request(&InstanceResolutionRequest {
-            function,
-            origin: origin.clone(),
-            function_type: signature,
-            substitutions: CallSubstitutions::default(),
-            evidence: None,
-            target: InstanceResolutionTarget::Root,
-        })
-        .map_err(|diagnostic| vec![diagnostic])?;
-    requests.push(ClosureRequest::Instance {
-        resolved: resolved.clone(),
-        kind: LoweredInstanceDependencyKind::DropMethod,
-        origin: origin.clone(),
-        use_site: None,
-    });
-    Ok(Some(PlannedInstance {
-        key: resolved.key,
-        instance: None,
-        kind: LoweredInstanceDependencyKind::DropMethod,
-    }))
-}
-
-/// The template signature of one selected method function.
-fn function_signature(
-    program: &LoweredProgram,
-    function: FunctionId,
-    origin: &Origin,
-) -> Result<crate::CheckedFunctionType, Vec<Diagnostic>> {
-    program
-        .functions
-        .get(function)
-        .map(|template| template.signature.clone())
-        .ok_or_else(|| {
-            vec![Diagnostic::new(
-                origin.span.clone(),
-                format!(
-                    "selected drop method function {} has no lowered template",
-                    function.0
-                ),
-            )]
-        })
+    if !program.concrete_drop_implementation_applies(value_type) {
+        return Ok(None);
+    }
+    let Some(method) = program
+        .traits
+        .get(drop_trait)
+        .and_then(|trait_| trait_.methods.first())
+        .copied()
+    else {
+        return Err(vec![Diagnostic::new(
+            origin.span.clone(),
+            "the `Drop` trait declares no method".to_string(),
+        )]);
+    };
+    let selected = super::structural_artifacts::select_concrete_trait_method_with_kind(
+        program,
+        origin,
+        drop_trait,
+        method,
+        std::slice::from_ref(value_type),
+        LoweredInstanceDependencyKind::DropMethod,
+    )
+    .map_err(|diagnostic| vec![diagnostic])?;
+    let PlannedCallee::Instance(instance) = selected.callee else {
+        return Err(vec![Diagnostic::new(
+            origin.span.clone(),
+            "a `Drop` selection resolved to a non-instance callee".to_string(),
+        )]);
+    };
+    requests.push(selected.request);
+    Ok(Some(instance))
 }
 
 /// Requests one nested `DropGlue` artifact and returns its planned callee.
@@ -2102,6 +2093,7 @@ mod tests {
         "def expose_wrapped: Wrapped -> I32 = value => 0\n",
         "def expose_box: (Box CString) -> I32 = value => 0\n",
         "def expose_box_handle: (Box Handle) -> I32 = value => 0\n",
+        "def expose_box_i32: (Box I32) -> I32 = value => 0\n",
         "def expose_product: (I32, CString) -> I32 = value => 0\n",
         "def expose_nested: ((I32, CString), I32) -> I32 = value => 0\n",
         "def expose_sum: (CString | I32) -> I32 = value => 0\n",
@@ -2130,6 +2122,7 @@ mod tests {
         let wrapped = parameter_type(&program, "expose_wrapped", 0);
         let box_c_string = parameter_type(&program, "expose_box", 0);
         let box_handle = parameter_type(&program, "expose_box_handle", 0);
+        let box_i32 = parameter_type(&program, "expose_box_i32", 0);
         let product = parameter_type(&program, "expose_product", 0);
         let nested = parameter_type(&program, "expose_nested", 0);
         let sum = parameter_type(&program, "expose_sum", 0);
@@ -2147,6 +2140,7 @@ mod tests {
             wrapped.clone(),
             box_c_string.clone(),
             box_handle.clone(),
+            box_i32.clone(),
             product.clone(),
             nested.clone(),
             sum.clone(),
@@ -2188,14 +2182,11 @@ mod tests {
             panic!("Resource selects a user drop: {:?}", plan.body);
         };
         assert!(representation.is_none(), "I32 does not need drop");
-        let selected = module
-            .drop_method_for(&resource)
-            .expect("the typed module selects the Resource drop method");
-        let bound = program
-            .instances
-            .get(method.instance.expect("bound after closure"))
-            .expect("method instance");
-        assert_eq!(bound.template, selected);
+        assert!(
+            program.concrete_drop_implementation_applies(&resource),
+            "the general predicate selects the Resource drop method"
+        );
+        assert!(method.instance.is_some(), "the Resource method is bound");
         assert_eq!(
             method.kind,
             LoweredInstanceDependencyKind::DropMethod,
@@ -2328,16 +2319,33 @@ mod tests {
             DropGlueBody::RuntimeRelease(RuntimeRelease::CompletionTokenRelease)
         );
 
-        // Two generic instantiations produce two keys, and a generic `Drop`
-        // implementation is never selected for a concrete type.
+        // Stage 5.11 (F5): the generic `impl<T where Copy T> Drop (Box T)`
+        // applies to `Box I32` (its bound discharges), so it selects a user
+        // drop; `Box CString` and `Box Handle` fail the `Copy` bound and keep
+        // the structural distinct branch. Two instantiations produce two keys.
         assert_ne!(
             CanonicalType::concrete(&box_c_string, &Origin::compiler()).expect("concrete"),
             CanonicalType::concrete(&box_handle, &Origin::compiler()).expect("concrete")
         );
+        let plan = drop_glue_plan(&program, &box_i32);
+        let DropGlueBody::UserDrop {
+            method,
+            representation,
+        } = &plan.body
+        else {
+            panic!("Box I32 selects the user drop: {:?}", plan.body);
+        };
+        assert!(representation.is_none(), "I32 does not need drop");
+        assert!(method.instance.is_some(), "the Box I32 method is bound");
+        assert_eq!(
+            method.kind,
+            LoweredInstanceDependencyKind::DropMethod,
+            "the Box I32 edge is a drop-method edge"
+        );
         for box_type in [&box_c_string, &box_handle] {
             assert!(
-                module.drop_method_for(box_type).is_none(),
-                "a generic `Drop` implementation never matches a concrete type"
+                !program.concrete_drop_implementation_applies(box_type),
+                "the `Copy` bound does not hold for `{box_type}`"
             );
             let plan = drop_glue_plan(&program, box_type);
             assert!(
@@ -2357,20 +2365,28 @@ mod tests {
                 module.type_needs_drop(&plan.value_type),
                 "a drop-glue key is only requested for a droppable type"
             );
-            let legacy = module.drop_method_for(&plan.value_type);
+            assert_eq!(
+                module.type_needs_drop(&plan.value_type),
+                program.concrete_needs_drop(&plan.value_type),
+                "needs-drop diverges for `{}`",
+                plan.value_type
+            );
+            assert_eq!(
+                module.is_copy_type(&plan.value_type),
+                program.concrete_is_copy(&plan.value_type),
+                "Copy diverges for `{}`",
+                plan.value_type
+            );
+            let applies = program.concrete_drop_implementation_applies(&plan.value_type);
             match &plan.body {
                 DropGlueBody::UserDrop { method, .. } => {
-                    let expected = legacy.expect("a planned user drop is the legacy selection");
-                    let bound = program
-                        .instances
-                        .get(method.instance.expect("bound after closure"))
-                        .expect("method instance");
-                    assert_eq!(bound.template, expected);
+                    assert!(applies, "a planned user drop has a matching implementation");
+                    assert!(method.instance.is_some(), "the method is bound");
                 }
                 DropGlueBody::Unexpanded => panic!("drop glue was never expanded"),
                 _ => {
                     assert!(
-                        legacy.is_none(),
+                        !applies,
                         "a non-user body is only planned when no user drop matches"
                     );
                 }

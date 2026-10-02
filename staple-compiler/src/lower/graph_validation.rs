@@ -2212,9 +2212,10 @@ pub(crate) mod tests {
     // ------------------------------------------------------------------
 
     /// Every naturally requested `DropGlue` plan agrees with the typed module:
-    /// the key's type needs drop, a user-drop body selects exactly
-    /// `drop_method_for`, and every non-user body is planned only when no user
-    /// implementation matches.
+    /// the key's type needs drop, a user-drop body is planned exactly when the
+    /// general drop-implementation predicate applies (Stage 5.11 F5), and the
+    /// checker and lowering `needs_drop`/`Copy` predicates agree on every
+    /// concrete type the fixture's catalog reaches.
     fn assert_drop_glue_plans_agree(source: &str) -> (usize, crate::ClosureStats) {
         let module = checked_program(source);
         let lowered = Lowerer::new()
@@ -2225,32 +2226,49 @@ pub(crate) mod tests {
             .closure_stats
             .expect("the production closure records its stats");
         let mut plans = 0;
+        let mut checked_types = Vec::new();
         for (_, artifact) in program.artifacts.iter() {
             let Some(crate::LoweredArtifactPlan::DropGlue(plan)) = &artifact.plan else {
                 continue;
             };
             plans += 1;
+            checked_types.push(plan.value_type.clone());
             assert!(
                 module.type_needs_drop(&plan.value_type),
                 "drop glue `{}` is only requested for a droppable type",
                 plan.value_type
             );
+            assert_eq!(
+                module.type_needs_drop(&plan.value_type),
+                program.concrete_needs_drop(&plan.value_type),
+                "needs-drop diverges for `{}`",
+                plan.value_type
+            );
+            assert_eq!(
+                module.is_copy_type(&plan.value_type),
+                program.concrete_is_copy(&plan.value_type),
+                "Copy diverges for `{}`",
+                plan.value_type
+            );
+            let applies = program.concrete_drop_implementation_applies(&plan.value_type);
             match &plan.body {
                 crate::DropGlueBody::Unexpanded => {
                     panic!("drop glue `{}` was never expanded", plan.value_type)
                 }
-                crate::DropGlueBody::UserDrop { method, .. } => {
-                    let expected = module.drop_method_for(&plan.value_type).unwrap_or_else(|| {
-                        panic!(
-                            "a planned user drop for `{}` has no legacy selection",
-                            plan.value_type
-                        )
-                    });
-                    let bound = program
-                        .instances
-                        .get(method.instance.expect("bound after closure"))
-                        .expect("method instance");
-                    assert_eq!(bound.template, expected);
+                crate::DropGlueBody::UserDrop {
+                    method,
+                    representation: _,
+                } => {
+                    assert!(
+                        applies,
+                        "a planned user drop for `{}` has no matching implementation",
+                        plan.value_type
+                    );
+                    assert!(
+                        method.instance.is_some(),
+                        "the user drop for `{}` is bound after closure",
+                        plan.value_type
+                    );
                     assert_eq!(
                         method.kind,
                         LoweredInstanceDependencyKind::DropMethod,
@@ -2258,11 +2276,23 @@ pub(crate) mod tests {
                     );
                 }
                 _ => assert!(
-                    module.drop_method_for(&plan.value_type).is_none(),
+                    !applies,
                     "a non-user body is planned for `{}` although a user implementation matches",
                     plan.value_type
                 ),
             }
+        }
+        for value_type in checked_types {
+            assert_eq!(
+                module.type_needs_drop(&value_type),
+                program.concrete_needs_drop(&value_type),
+                "needs-drop diverges for `{value_type}`"
+            );
+            assert_eq!(
+                module.is_copy_type(&value_type),
+                program.concrete_is_copy(&value_type),
+                "Copy diverges for `{value_type}`"
+            );
         }
         (plans, stats)
     }

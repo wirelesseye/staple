@@ -138,7 +138,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 81] = [
+static CORPUS: [CorpusProgram; 83] = [
     expect_stdout(must_run(inline("empty", "", "5.3")), ""),
     expect_stdout(
         must_run(inline(
@@ -2099,6 +2099,130 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ],
         ),
         "complete\nmoved\ncancel\nparent\nchild\ndone\n",
+    )),
+    // Stage 5.11 (F5): a generic `Drop` implementation applies by header
+    // unification plus bound discharge. The conditional `Copy T` bound holds
+    // for `Box I32`/`Box (I32, I32)` (user drop runs) and fails for
+    // `Box CString` (no user drop; the `CString` is still freed), including
+    // nested products and sums.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "generic_drop_selection",
+                concat!(
+                    "use std.cinterop.(CString, c_string)\n",
+                    "use std.io.(IO, println)\n",
+                    "extern \"c\" { puts: CString -> I32 }\n",
+                    "type Box T = ctor (T)\n",
+                    "impl<T where Copy T> Drop (Box T) { def drop = Box value => { puts (c_string \"copy box\"); () } }\n",
+                    "def run_i32: () -> () = () => { let b = Box 2; () }\n",
+                    "def run_product: () -> () = () => { let b = Box (1, 2); () }\n",
+                    "def run_cstring: () -> () = () => { let b = Box (c_string \"free me\"); () }\n",
+                    "def run_nested: () -> () = () => {\n",
+                    "    let b: (Box I32, Box CString) = (Box 3, Box (c_string \"x\"))\n",
+                    "    ()\n",
+                    "}\n",
+                    "def run_sum: Bool -> () = condition => {\n",
+                    "    let value: (Box I32 | Box CString) = when { condition => Box 4, else => Box (c_string \"y\") }\n",
+                    "    ()\n",
+                    "}\n",
+                    "run_i32 ()\n",
+                    "run_product ()\n",
+                    "run_cstring ()\n",
+                    "run_nested ()\n",
+                    "run_sum True\n",
+                    "run_sum False\n",
+                    "println \"done\"\n",
+                ),
+                "5.11",
+            ),
+            &[
+                "run_i32",
+                "run_product",
+                "run_cstring",
+                "run_nested",
+                "run_sum",
+            ],
+        ),
+        "copy box\ncopy box\ncopy box\ncopy box\ndone\n",
+    )),
+    // A generic `Drop` at two instantiations drops through its own instance:
+    // an owned local, a moved-out local (dropped once), a returned value, a
+    // closure capture, a coroutine frame binding (F4), and a drop body whose
+    // parameter is not owned by the method (no double drop of `Inner`).
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "generic_drop_ownership",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.cinterop.(CString, c_string)\n",
+                    "use std.io.(IO, println)\n",
+                    "extern \"c\" { puts: CString -> I32 }\n",
+                    "type Wrapper T = ctor (T)\n",
+                    "impl<T> Drop (Wrapper T) { def drop = Wrapper value => { puts (c_string \"wrapper\"); () } }\n",
+                    "def wrap: <T> move T -> Wrapper T = move value => Wrapper value\n",
+                    "def run_i32: () -> () = () => { let w = wrap 1; () }\n",
+                    "def run_cstring: () -> () = () => { let w = wrap (c_string \"x\"); () }\n",
+                    "def moved_out: () -> () = () => {\n",
+                    "    let first = wrap (c_string \"moved\")\n",
+                    "    let second = first\n",
+                    "    ()\n",
+                    "}\n",
+                    "def returns: () -> Wrapper (CString) = () => {\n",
+                    "    let held = wrap (c_string \"returned\")\n",
+                    "    held\n",
+                    "}\n",
+                    "def consumes: () -> () = () => {\n",
+                    "    let value = returns ()\n",
+                    "    ()\n",
+                    "}\n",
+                    "def keeper: move (Wrapper I32) -> (() -> I32) = move value => () => 1\n",
+                    "def closure: () -> () = () => {\n",
+                    "    let held = wrap 5\n",
+                    "    let peek = keeper held\n",
+                    "    peek ()\n",
+                    "    ()\n",
+                    "}\n",
+                    "def coroutine: () -> Coroutine{} () = () => coro {\n",
+                    "    let held = wrap 6\n",
+                    "    ()\n",
+                    "}\n",
+                    "type Inner = ctor CString\n",
+                    "impl Drop Inner { def drop = Inner text => { puts text; () } }\n",
+                    "type Outer T = ctor (T)\n",
+                    "impl<T> Drop (Outer T) { def drop = Outer value => { puts (c_string \"outer\"); () } }\n",
+                    "def outer: <T> move T -> Outer T = move value => Outer value\n",
+                    "def owned_parameter: () -> () = () => {\n",
+                    "    let value = outer (Inner (c_string \"inner\"))\n",
+                    "    ()\n",
+                    "}\n",
+                    "run_i32 ()\n",
+                    "run_cstring ()\n",
+                    "moved_out ()\n",
+                    "consumes ()\n",
+                    "closure ()\n",
+                    "let first = block_on (coroutine ())\n",
+                    "owned_parameter ()\n",
+                    "println \"done\"\n",
+                ),
+                "5.11",
+            ),
+            &[
+                "wrap",
+                "run_i32",
+                "run_cstring",
+                "moved_out",
+                "returns",
+                "consumes",
+                "keeper",
+                "closure",
+                "coroutine",
+                "outer",
+                "owned_parameter",
+            ],
+        ),
+        "wrapper\nwrapper\nwrapper\nwrapper\nwrapper\nwrapper\nouter\ninner\ndone\n",
     )),
 ];
 

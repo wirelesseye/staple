@@ -3211,6 +3211,27 @@ type Handle = ctor I32
 impl !Copy Handle {}
 ```
 
+A `Drop` implementation applies to a concrete type exactly when its header
+unifies with that type and its conditional bounds hold under the unification,
+the same rule every other trait uses. Coherence rejects overlapping
+implementations, bound-aware, so at most one implementation applies to any
+type and selection needs no precedence. A `Drop` implementation's bounds may
+constrain only its own type parameters (`impl<T where Copy T> Drop (Box T)`);
+a bound on the target type itself (for example `where Copy (Box T)`) is
+rejected. A type that still mentions type parameters and may have an
+applicable implementation is treated as not `Copy`, so a template that copies
+such a value is a move error even if some instantiation would qualify.
+
+```staple
+type Box T = ctor (T)
+impl<T where Copy T> Drop (Box T) {
+    def drop = Box value => ()
+}
+
+// `Box I32` has the custom destructor above; `Box CString` does not (its
+// `CString` field is still freed), because `CString` is not `Copy`.
+```
+
 `Clone` is a separate prelude trait for explicit duplication and, unlike Rust,
 is not a prerequisite of `Copy`: `Copy` remains fully compiler-inferred as
 described above, and a type needs no `Clone` implementation to be `Copy`.

@@ -1494,6 +1494,23 @@ impl TypedModule {
         self.string_representation.as_ref()
     }
 
+    /// The bound-discharge callback of the general drop-implementation
+    /// predicate (Stage 5.11 F5): a `Copy` bound asks the structural `Copy`
+    /// predicate, any other bound asks the obligation resolver. A concrete
+    /// substituted argument never carries a free function parameter, so the
+    /// empty bound list is correct here.
+    fn drop_bound_holds(&self, bound: &CheckedTraitBound) -> bool {
+        if Some(bound.trait_id) == self.copy_trait {
+            bound
+                .arguments
+                .first()
+                .is_some_and(|argument| self.is_copy_type(argument))
+        } else {
+            self.resolve_trait_obligation(bound.trait_id, &bound.arguments)
+                .is_some()
+        }
+    }
+
     pub fn is_copy_type(&self, value_type: &CheckedType) -> bool {
         is_copy_type(
             value_type,
@@ -1502,6 +1519,7 @@ impl TypedModule {
             self.io_type,
             &self.trait_implementations,
             &[],
+            &|bound| self.drop_bound_holds(bound),
         )
     }
 
@@ -1527,6 +1545,7 @@ impl TypedModule {
             self.io_type,
             &self.trait_implementations,
             &bounds,
+            &|bound| self.drop_bound_holds(bound),
         )
     }
 
@@ -1656,23 +1675,12 @@ impl TypedModule {
         {
             return true;
         }
-        type_needs_drop(value_type, self.drop_trait, &self.trait_implementations)
-    }
-
-    /// Only lowering tests still compare against this checker query; legacy
-    /// codegen was its last production caller. Stage 6 decides whether to
-    /// replace those tests and delete it.
-    #[cfg(test)]
-    pub(crate) fn drop_method_for(&self, value_type: &CheckedType) -> Option<FunctionId> {
-        let drop_trait = self.drop_trait?;
-        self.trait_implementations
-            .iter()
-            .find(|implementation| {
-                implementation.trait_id == drop_trait
-                    && implementation.arguments.len() == 1
-                    && &implementation.arguments[0] == value_type
-            })
-            .and_then(|implementation| implementation.methods.values().next().copied())
+        type_needs_drop(
+            value_type,
+            self.drop_trait,
+            &self.trait_implementations,
+            &|bound| self.drop_bound_holds(bound),
+        )
     }
 
     pub(crate) fn structural_trait_method(
@@ -2639,16 +2647,7 @@ impl TypeChecker {
                 self.into_iterator_trait,
                 self.iterator_trait,
                 self.debug_trait,
-                |value_type| {
-                    is_copy_type(
-                        value_type,
-                        self.copy_trait,
-                        self.drop_trait,
-                        self.io_type,
-                        &self.trait_implementations,
-                        &[],
-                    )
-                },
+                |value_type| self.is_copy_with(value_type, &[]),
                 |value_type| {
                     self.debug_trait.is_some_and(|trait_id| {
                         self.trait_obligation_available(trait_id, std::slice::from_ref(value_type))
@@ -2749,6 +2748,26 @@ impl TypeChecker {
                 .iter()
                 .filter_map(|bound| self.resolve_trait_bound(module, bound))
                 .collect::<Vec<_>>();
+            // Stage 5.11 (F5): a `Drop` implementation's bounds may constrain
+            // only its own type parameters. A bound on any other type would
+            // make discharging it ask about a type that may contain the header
+            // itself, so the recursive matching predicate could not terminate.
+            if Some(implementation.trait_id) == self.drop_trait
+                && bounds.iter().any(|bound| {
+                    !bound.arguments.iter().all(|argument| {
+                        matches!(
+                            argument,
+                            CheckedType::Parameter { id, .. } if declared_parameters.contains(id)
+                        )
+                    })
+                })
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    "a `Drop` implementation's bounds may constrain only its own type parameters",
+                ));
+                continue;
+            }
             if self.trait_implementations.iter().any(|existing| {
                 existing.trait_id == implementation.trait_id
                     && self.implementation_headers_overlap(
@@ -2895,27 +2914,13 @@ impl TypeChecker {
                 .first()
                 .is_some_and(|argument| !matches!(argument, CheckedType::Parameter { .. }))
         {
-            return is_copy_type(
-                &arguments[0],
-                self.copy_trait,
-                self.drop_trait,
-                self.io_type,
-                &self.trait_implementations,
-                &[],
-            );
+            return self.is_copy_with(&arguments[0], &[]);
         }
         if arguments.iter().any(contains_type_parameter) {
             return true;
         }
         if Some(trait_id) == self.copy_trait {
-            return is_copy_type(
-                &arguments[0],
-                self.copy_trait,
-                self.drop_trait,
-                self.io_type,
-                &self.trait_implementations,
-                &[],
-            );
+            return self.is_copy_with(&arguments[0], &[]);
         }
         self.trait_obligation_available(trait_id, arguments)
     }
@@ -5571,14 +5576,7 @@ impl TypeChecker {
             .flatten()
             .cloned()
             .collect::<Vec<_>>();
-        if !is_copy_type(
-            value_type,
-            self.copy_trait,
-            self.drop_trait,
-            self.io_type,
-            &self.trait_implementations,
-            &bounds,
-        ) {
+        if !self.is_copy_with(value_type, &bounds) {
             self.diagnostics.push(Diagnostic::new(
                 pattern.syntax.span.clone(),
                 format!("an `@` pattern requires a Copy value, found `{value_type}`"),
@@ -7194,14 +7192,7 @@ impl TypeChecker {
                             .collect::<Vec<_>>();
                         if count != 1
                             && value_type != CheckedType::Error
-                            && !is_copy_type(
-                                &value_type,
-                                self.copy_trait,
-                                self.drop_trait,
-                                self.io_type,
-                                &self.trait_implementations,
-                                &bounds,
-                            )
+                            && !self.is_copy_with(&value_type, &bounds)
                         {
                             self.diagnostics.push(Diagnostic::new(
                                 repeated.value.syntax().span.clone(),
@@ -7220,14 +7211,7 @@ impl TypeChecker {
                             .cloned()
                             .collect::<Vec<_>>();
                         if value_type != CheckedType::Error
-                            && !is_copy_type(
-                                &value_type,
-                                self.copy_trait,
-                                self.drop_trait,
-                                self.io_type,
-                                &self.trait_implementations,
-                                &bounds,
-                            )
+                            && !self.is_copy_with(&value_type, &bounds)
                         {
                             self.diagnostics.push(Diagnostic::new(
                                 repeated.value.syntax().span.clone(),
@@ -10279,16 +10263,7 @@ impl TypeChecker {
             self.into_iterator_trait,
             self.iterator_trait,
             self.debug_trait,
-            |value_type| {
-                is_copy_type(
-                    value_type,
-                    self.copy_trait,
-                    self.drop_trait,
-                    self.io_type,
-                    &self.trait_implementations,
-                    &bounds,
-                )
-            },
+            |value_type| self.is_copy_with(value_type, &bounds),
             |value_type| {
                 self.debug_trait.is_some_and(|trait_id| {
                     self.trait_obligation_available(trait_id, std::slice::from_ref(value_type))
@@ -10369,6 +10344,35 @@ impl TypeChecker {
             .then(|| arguments.to_vec())
     }
 
+    /// The bound-discharge callback of the general drop-implementation
+    /// predicate (Stage 5.11 F5) for declaration-time checks: a `Copy` bound
+    /// asks the structural `Copy` predicate under the active function bounds,
+    /// any other bound asks the exact obligation resolver.
+    fn drop_bound_holds(&self, bound: &CheckedTraitBound, bounds: &[CheckedTraitBound]) -> bool {
+        if Some(bound.trait_id) == self.copy_trait {
+            bound
+                .arguments
+                .first()
+                .is_some_and(|argument| self.is_copy_with(argument, bounds))
+        } else {
+            self.trait_obligation_available_exact(bound.trait_id, &bound.arguments)
+        }
+    }
+
+    /// `is_copy_type` with the general drop predicate and this checker's
+    /// discharge callback.
+    fn is_copy_with(&self, value_type: &CheckedType, bounds: &[CheckedTraitBound]) -> bool {
+        is_copy_type(
+            value_type,
+            self.copy_trait,
+            self.drop_trait,
+            self.io_type,
+            &self.trait_implementations,
+            bounds,
+            &|bound| self.drop_bound_holds(bound, bounds),
+        )
+    }
+
     fn trait_obligation_available_exact(
         &self,
         trait_id: TraitId,
@@ -10388,16 +10392,7 @@ impl TypeChecker {
             self.into_iterator_trait,
             self.iterator_trait,
             self.debug_trait,
-            |value_type| {
-                is_copy_type(
-                    value_type,
-                    self.copy_trait,
-                    self.drop_trait,
-                    self.io_type,
-                    &self.trait_implementations,
-                    &bounds,
-                )
-            },
+            |value_type| self.is_copy_with(value_type, &bounds),
             |value_type| {
                 self.debug_trait.is_some_and(|trait_id| {
                     self.trait_obligation_available(trait_id, std::slice::from_ref(value_type))
@@ -10437,14 +10432,7 @@ impl TypeChecker {
                 .flatten()
                 .cloned()
                 .collect::<Vec<_>>();
-            return is_copy_type(
-                target,
-                self.copy_trait,
-                self.drop_trait,
-                self.io_type,
-                &self.trait_implementations,
-                &bounds,
-            );
+            return self.is_copy_with(target, &bounds);
         }
         if Some(trait_id) == self.default_trait {
             let bounds = self
@@ -15017,16 +15005,49 @@ fn checked_type_contains_cstring(value_type: &CheckedType) -> bool {
     }
 }
 
-fn has_drop_implementation(
+/// Whether a `Drop` implementation applies to `value_type` under the general
+/// implementation-matching rule (Stage 5.11 F5): the implementation's header
+/// unifies with the type and, for a concrete type, every conditional bound
+/// holds under that unification. `discharge` answers one already-substituted
+/// bound.
+///
+/// A type that still contains type parameters treats any unifying
+/// implementation as applying, ignoring its bounds: ownership is checked on
+/// the template and must hold for every instantiation. The bound restriction
+/// (bounds constrain only the implementation's own type parameters) makes
+/// every recursive question about a strict subterm, so this terminates.
+pub(crate) fn drop_implementation_applies(
     value_type: &CheckedType,
     drop_trait: Option<TraitId>,
     implementations: &[CheckedTraitImplementation],
+    discharge: &dyn Fn(&CheckedTraitBound) -> bool,
 ) -> bool {
-    drop_trait.is_some_and(|drop_trait| {
-        implementations.iter().any(|implementation| {
-            implementation.trait_id == drop_trait
-                && implementation.arguments.len() == 1
-                && &implementation.arguments[0] == value_type
+    let Some(drop_trait) = drop_trait else {
+        return false;
+    };
+    let concrete = !contains_type_parameter(value_type);
+    implementations.iter().any(|implementation| {
+        if implementation.trait_id != drop_trait || implementation.arguments.len() != 1 {
+            return false;
+        }
+        let mut substitutions = HashMap::new();
+        if !infer_type_parameters(&implementation.arguments[0], value_type, &mut substitutions) {
+            return false;
+        }
+        if !concrete {
+            return true;
+        }
+        implementation.bounds.iter().all(|bound| {
+            let substituted = CheckedTraitBound {
+                trait_id: bound.trait_id,
+                arguments: bound
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| substitute_type(argument, &substitutions))
+                    .collect(),
+            };
+            discharge(&substituted)
         })
     })
 }
@@ -15187,8 +15208,9 @@ pub(crate) fn is_copy_type(
     io_type: Option<TypeId>,
     implementations: &[CheckedTraitImplementation],
     bounds: &[CheckedTraitBound],
+    discharge: &dyn Fn(&CheckedTraitBound) -> bool,
 ) -> bool {
-    if has_drop_implementation(value_type, drop_trait, implementations)
+    if drop_implementation_applies(value_type, drop_trait, implementations, discharge)
         || has_negative_copy_implementation(value_type, copy_trait, implementations)
     {
         return false;
@@ -15232,6 +15254,7 @@ pub(crate) fn is_copy_type(
                 io_type,
                 implementations,
                 bounds,
+                discharge,
             )
         }),
         CheckedType::Sum(sum) => sum.alternatives.iter().all(|alternative| {
@@ -15242,6 +15265,7 @@ pub(crate) fn is_copy_type(
                 io_type,
                 implementations,
                 bounds,
+                discharge,
             )
         }),
         CheckedType::Distinct { representation, .. } => is_copy_type(
@@ -15251,6 +15275,7 @@ pub(crate) fn is_copy_type(
             io_type,
             implementations,
             bounds,
+            discharge,
         ),
         CheckedType::Opaque { id, .. } => Some(*id) == io_type,
         CheckedType::TypeConstructor { .. } => false,
@@ -15261,23 +15286,22 @@ fn type_needs_drop(
     value_type: &CheckedType,
     drop_trait: Option<TraitId>,
     implementations: &[CheckedTraitImplementation],
+    discharge: &dyn Fn(&CheckedTraitBound) -> bool,
 ) -> bool {
-    if has_drop_implementation(value_type, drop_trait, implementations) {
+    if drop_implementation_applies(value_type, drop_trait, implementations, discharge) {
         return true;
     }
     match value_type {
         CheckedType::CString => true,
         CheckedType::Buffer(_) => false,
-        CheckedType::Product(product) => product
-            .elements
-            .iter()
-            .any(|element| type_needs_drop(&element.value_type, drop_trait, implementations)),
-        CheckedType::Sum(sum) => sum
-            .alternatives
-            .iter()
-            .any(|alternative| type_needs_drop(alternative, drop_trait, implementations)),
+        CheckedType::Product(product) => product.elements.iter().any(|element| {
+            type_needs_drop(&element.value_type, drop_trait, implementations, discharge)
+        }),
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(|alternative| {
+            type_needs_drop(alternative, drop_trait, implementations, discharge)
+        }),
         CheckedType::Distinct { representation, .. } => {
-            type_needs_drop(representation, drop_trait, implementations)
+            type_needs_drop(representation, drop_trait, implementations, discharge)
         }
         _ => false,
     }

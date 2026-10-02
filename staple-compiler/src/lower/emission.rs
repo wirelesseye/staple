@@ -327,6 +327,12 @@ impl<'a> EmissionView<'a> {
         self.program.concrete_is_copy(value_type)
     }
 
+    /// The catalog's concrete needs-drop decision: the shared predicate the
+    /// checker also uses (Stage 5.11 F5).
+    pub(crate) fn concrete_needs_drop(&self, value_type: &crate::CheckedType) -> bool {
+        self.program.concrete_needs_drop(value_type)
+    }
+
     /// The opaque runtime type identity of a fully substituted type, the same
     /// selection `LoweredProgram::runtime_opaque_kind` makes (Stage 5.2 layout
     /// context).

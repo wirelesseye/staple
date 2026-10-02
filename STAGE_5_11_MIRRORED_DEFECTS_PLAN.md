@@ -47,6 +47,17 @@ Line references are against `5194cf9` and will drift; re-locate code by name. Bu
 - `coroutine_drop_order` now expects `leaked` (the completed sibling's binding drops); the new `coroutine_completion_drops` entry pins a normal completion, a moved-out binding dropped once, a never-initialized branch binding skipped, a cancelled coroutine dropped once through the unwind, and a child-awaited coroutine dropping its own frame bindings.
 - M1: two new `DIFF`s, both exercising F4 — `await_task_effect_pair` (the moved-out `Task` frame cell is now cleared) and `coroutine_drop_order` (the completion drops). F1's two adapter `DIFF`s remain; 83 of 87 paths `same`. The full workspace suite passes 1302 tests.
 
+### Step 6 — complete (F5)
+
+- The shared `drop_implementation_applies` predicate unifies an implementation header and, for a concrete type, discharges its substituted bounds through a per-side callback; a type that still contains parameters applies a unifying header while ignoring bounds. The checker's `type_needs_drop`/`is_copy_type` and lowering's `concrete_needs_drop`/`concrete_is_copy` use it with their own discharge (the obligation resolvers plus the structural `Copy` predicate), so agreement is by construction.
+- Declaration checking rejects a `Drop` bound that constrains anything but the implementation's own type parameters, and coherence still rejects overlapping implementations; the new `generic_drop_selection_rules_are_enforced_at_declaration` test asserts both plus the template copy move error.
+- `user_drop_method` selects through `select_concrete_trait_method_with_kind(.., DropMethod)`: a generic implementation resolves to a specialized instance carrying its substitutions, with a `DropMethod` edge, catalog naming, and re-expansion validation. `drop_method_for` and its exact-match helpers are deleted, and the 4.4 `Box` fixture now asserts `Box I32` selects the user drop while `Box CString`/`Box Handle` fail the `Copy` bound and keep the structural branch.
+- The drop-method parameter stays unowned for specialized generic instances (the checker's `is_drop_method` recognizes the template), so a generic drop body does not double-drop its representation; the new fixture locks this.
+- Fixtures: `generic_drop_selection` (the conditional bound at `Box I32`/`Box (I32, I32)`/`Box CString`, nested products and sums) and `generic_drop_ownership` (two instantiations, a move out, a return, a closure capture, a coroutine frame binding, and the drop-method parameter).
+- The agreement test sweeps the fixtures: `layout_context_agrees_with_checker_predicates` checks `type_needs_drop`/`concrete_needs_drop` on every signature type, and `assert_drop_glue_plans_agree` checks needs-drop and `Copy` agreement plus the user-drop predicate on every drop-glue plan.
+- Language consequence: a type with an applicable generic `Drop` implementation is not `Copy`; only the 4.4 fixtures and the new 5.11 fixtures declare generic `Drop`, so no other program's diagnostics change. Staple.md's `Drop` section states the rule and the bound restriction.
+- M1: no baseline-corpus path changes for F5; the four `DIFF`s carried from F1/F4 remain; 83 of 87 paths `same`. The full workspace suite passes 1303 tests.
+
 ## Starting Point
 
 There is one emitter, and the suite passes 1302 tests. Stage 5.11 is the only part of Stage 5 that intentionally changes behavior. Five defects are queued:

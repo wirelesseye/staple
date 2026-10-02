@@ -569,6 +569,19 @@ mod tests {
                 "    CompletionToken.resolve t\n",
                 "}\n",
             ),
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "type Box T = ctor (T)\n",
+                "impl<T where Copy T> Drop (Box T) { def drop = Box value => () }\n",
+                "def take_i32: Box I32 -> I32 = value => 1\n",
+                "def take_cstring: Box CString -> I32 = value => 1\n",
+                "def take_nested: Box (Box I32) -> I32 = value => 1\n",
+                "def take_template: <T where Copy T> Box T -> I32 = value => 1\n",
+                "let first = take_i32 (Box 1)\n",
+                "let second = take_cstring (Box (c_string \"x\"))\n",
+                "let third = take_nested (Box (Box 2))\n",
+                "let fourth = take_template (Box 3)\n",
+            ),
         ] {
             let root = standard_library_root();
             let program = ProgramLoader::new()
@@ -590,6 +603,11 @@ mod tests {
                     context.is_copy(&value_type),
                     typed.is_copy_in_function(&value_type, None),
                     "Copy decision diverges for {value_type:?}",
+                );
+                assert_eq!(
+                    typed.type_needs_drop(&value_type),
+                    module.program().concrete_needs_drop(&value_type),
+                    "needs-drop decision diverges for {value_type:?}",
                 );
                 assert_eq!(
                     context.is_io(&value_type),

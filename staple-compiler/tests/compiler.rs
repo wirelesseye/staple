@@ -10443,6 +10443,52 @@ fn rejects_negative_copy_impl_for_non_nominal_types() {
 }
 
 #[test]
+fn generic_drop_selection_rules_are_enforced_at_declaration() {
+    // A generic `Drop` implementation beside an exact one is an overlap, so
+    // coherence rejects it and selection needs no precedence rule.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Box T = ctor (T)\n",
+            "impl<T> Drop (Box T) { def drop = Box value => () }\n",
+            "impl Drop (Box I32) { def drop = Box value => () }\n",
+        )))
+        .expect_err_diagnostics("overlapping Drop implementations are rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate trait implementation")
+    }));
+
+    // A `Drop` bound may constrain only the implementation's own parameters.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Box T = ctor (T)\n",
+            "impl<T where Copy (Box T)> Drop (Box T) { def drop = Box value => () }\n",
+        )))
+        .expect_err_diagnostics("a bound on the header type is rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("bounds may constrain only its own type parameters")
+    }));
+
+    // A template with a possibly-applicable `Drop` implementation is not
+    // `Copy`, so copying it is a move error.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Box T = ctor (T)\n",
+            "impl<T> Drop (Box T) { def drop = Box value => () }\n",
+            "def dup: <T> Box T -> (Box T, Box T) = value => (value, value)\n",
+        )))
+        .expect_err_diagnostics("a generically droppable type is move-only");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot move out of a borrowed value")
+    }));
+}
+
+#[test]
 fn lowers_custom_drop_and_gc_finalizer_glue() {
     let module = type_check(concat!(
         "type Resource = ctor I32\n",
