@@ -5458,14 +5458,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         cleanups: &mut Vec<(usize, PointerValue<'context>)>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
-        if record.writeback {
-            // Lowering does not record a writeback today; diagnose rather
-            // than silently dropping the write-back the record demands.
-            return Err(Diagnostic::new(
-                staple_syntax::Span::Compiler,
-                "lowered emitter: call argument writeback is not implemented yet",
-            ));
-        }
         let Some(expression) = expression else {
             // An implicit thunk argument: legacy `compile_adapted_call_argument`
             // builds the thunk's closure over the current environment.

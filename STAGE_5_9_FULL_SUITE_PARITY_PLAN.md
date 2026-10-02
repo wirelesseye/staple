@@ -171,3 +171,24 @@ Step 1 → Step 2 → Step 3 → Step 4 → Step 5 → Step 6 → Step 7 → Ste
 - Step 5 comes before Step 6 because the shadow run may expose new families of failure. Strict emission reports those as ordinary errors, so the family tables are not needed to find them, but keeping them until Step 6 avoids churn.
 - Step 7 can be written alongside Step 5; its gate runs after Step 6.
 - **Highest-risk item:** cause A (six tests in the slice/`Ref` coercion path, possibly a missing lowering fact) and whatever Step 5 finds. Keep each fix in its own commit with its corpus entry.
+
+## Implementation progress
+
+### Step 1 — baseline and triage (complete)
+
+Nine reduced `5.9` entries extend the differential corpus from 62 to 71 programs. They cover A–H, with separate recursive-local-def and recursive-local-generic fixtures for B. Only these new triage entries may be `MayBeBlocked`; existing entries keep the Stage 5.8 ratchet. The harness checks legacy compilation before accepting a blocked triage fixture.
+
+Root-cause audit:
+
+- A: lowered name loads use the expression's coerced target type to load storage; `SliceRef` then receives a slice struct instead of the stored `Ref` pointer. Fix belongs in emission.
+- B: `emit_block` lacks legacy's predeclaration of initialization-checked local def cells, so a recursive closure captures a cell before it is allocated. Fix belongs in emission.
+- C: instance cloning substitutes the symbolic repeated-product count but retains `collapsed`; emission consequently returns one element. Concrete count/collapse recomputation and validation belong in lowering.
+- D: `rebind_hidden_resources` rebuilds resource steps only for intrinsic calls. Effect substitution can add resources to an indirect closure call without adding its ABI argument steps. Fix and validation belong in lowering.
+- E: whole-product call arguments can occupy slot zero while the concrete parameter flattens to multiple slots; the emitter's unpack fallback only accepts an unplaced argument. Verify the concrete slot record and correct the owning lowering/emission rule.
+- F: the call argument path continues after evaluating a nested `return`; subsequent instructions can follow the terminator. Fix belongs in emission.
+- G: initializer declaration rejects repeated module prefixes instead of assigning a collision-free recorded name. Record and validate deterministic initializer names in lowering.
+- H: construction works (the lowered CLI block-tail-coroutine execution test passes); the compiler assertion hard-codes legacy's `store ptr @__staple_coro_` prefix. It joins Step 4's spelling-only tests: 13 real failures across seven causes, 17 spelling assertions.
+
+All twelve unfinished diagnostic sites were audited: eleven family diagnostic closures and one writeback branch. All four constructors of `LoweredCallArgument` set `writeback: false`, with no subsequent writes. The field and unreachable emission branch are removed; eleven diagnostic sites remain for Step 6.
+
+Baseline: default **1312/1312 pass**; lowered **1282 pass, 30 fail**. Post-step gates reproduce exactly those counts. The expanded in-process corpus compares **16642 fully emitted bodies with zero stubs**. Both workspace checks, formatting, and `git diff --check` pass. The CLI corpus harness passes under both defaults (LLVM compilation, object emission, linking, and execution with the worktree standard library). Step 2 is next.

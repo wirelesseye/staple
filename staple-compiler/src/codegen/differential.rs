@@ -343,7 +343,7 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 62] = [
+static CORPUS: [DifferentialProgram; 71] = [
     must_run(inline("empty", "", "5.3")),
     must_run(inline(
         "integer_arithmetic",
@@ -1799,6 +1799,51 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "tags ready\ncompleting\nfirst\nsecond\ncancelled True\nscope closed\n",
     )),
+    inline(
+        "slice_ref_coercion",
+        "use std.slice.Slice\nlet fixed: Ref (I32; 3) = Ref (1, 2, 3)\nlet values: Slice I32 = fixed\n",
+        "5.9",
+    ),
+    inline(
+        "local_recursive_cells",
+        "def outer: () -> I32 = () => {\n def f: () -> I32 = () => g ()\n def g: () -> I32 = () => f ()\n f ()\n}\n",
+        "5.9",
+    ),
+    inline(
+        "local_generic_cells",
+        "def outer: () -> I32 = () => {\n def recur: <T> T -> T = value => recur value\n recur 1\n}\n",
+        "5.9",
+    ),
+    inline(
+        "natural_repeated_return",
+        "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\nlet repeated: (I32; 3) = repeat 7 3\n",
+        "5.9",
+    ),
+    inline(
+        "effect_closure_resources",
+        "use std.io.(IO, println)\ndef twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\ndef output: () ->{IO} () = () => println \"hello\"\ntwice output\n",
+        "5.9",
+    ),
+    inline(
+        "product_trait_argument",
+        "trait Merge Left Right Output { merge: (Left, Right) -> Output }\nimpl Merge I32 I32 I32 { def merge = (left, right) => left + right }\ndef combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\nlet total: I32 = combine (20, 22)\n",
+        "5.9",
+    ),
+    inline(
+        "nested_expression_return",
+        "def identity = (value: I32) => value\ndef answer = () => { identity { return 42; }; 0; }\nanswer ()\n",
+        "5.9",
+    ),
+    inline(
+        "sibling_initializer_names",
+        "let a: I32 = { mod foo { pub let value: I32 = 1 }; foo.value }\nlet b: I32 = { mod foo { pub let value: I32 = 2 }; foo.value }\n",
+        "5.9",
+    ),
+    inline(
+        "block_tail_coroutine",
+        "use std.coroutine.*\ndef f: () -> Coroutine{} I32 = () => { coro { 42 } }\nlet held = f ()\n",
+        "5.9",
+    ),
 ];
 
 /// Extract every `define`d function body from one module's IR text, keyed by
@@ -2355,7 +2400,8 @@ mod tests {
         assert!(
             differential_corpus()
                 .iter()
-                .all(|program| program.expectation != super::DifferentialExpectation::MayBeBlocked),
+                .all(|program| program.substage == "5.9"
+                    || program.expectation != super::DifferentialExpectation::MayBeBlocked),
             "every corpus entry is MustRun, LoweredOnly, or CompileOnly"
         );
         for program in differential_corpus() {
@@ -2386,6 +2432,17 @@ mod tests {
             }
             let context = Context::create();
             let legacy = crate::codegen::legacy_emissions(&context, &lowered);
+            // Stage 5.9 triage fixtures may fail strict emission until their
+            // corresponding fix lands. Existing entries retain their ratchet.
+            if program.expectation == super::DifferentialExpectation::MayBeBlocked
+                && crate::CodeGenerator::with_emitter(&context, crate::Emitter::Lowered)
+                    .compile_module(&lowered)
+                    .is_err()
+            {
+                assert!(legacy.is_ok(), "triage fixture must compile with legacy");
+                continue;
+            }
+
             let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
                 .unwrap_or_else(|diagnostics| {
                     panic!(

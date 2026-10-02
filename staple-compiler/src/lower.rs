@@ -1007,7 +1007,7 @@ pub(crate) enum LoweredArgumentPassMode {
     MaterializedTemporary,
 }
 
-/// One visible call argument with its final ABI slot and temporary/writeback
+/// One visible call argument with its final ABI slot and temporary
 /// facts. Final slot mapping is stored here, separately from evaluation order.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredCallArgument {
@@ -1025,8 +1025,6 @@ pub(crate) struct LoweredCallArgument {
     pub place: Option<PlaceId>,
     /// The value is materialized into a temporary for the pass.
     pub temporary: bool,
-    /// The temporary's updated value is written back after the call.
-    pub writeback: bool,
     /// The temporary must be dropped after the call.
     pub drops_after_call: bool,
 }
@@ -7365,7 +7363,6 @@ impl LoweredProgram {
                         expected: expected.clone(),
                         place,
                         temporary: (mutation || indirect_slot) && place.is_none(),
-                        writeback: false,
                         drops_after_call: mutation
                             && place.is_none()
                             && module.type_needs_drop(&expected),
@@ -7398,7 +7395,6 @@ impl LoweredProgram {
                     expected: types[index].clone(),
                     place,
                     temporary: false,
-                    writeback: false,
                     drops_after_call: false,
                 });
             }
@@ -7457,7 +7453,6 @@ impl LoweredProgram {
                         .unwrap_or(CheckedType::Error),
                     place: placement.place,
                     temporary: false,
-                    writeback: false,
                     drops_after_call: false,
                 })
                 .collect();
@@ -7773,7 +7768,6 @@ impl LoweredProgram {
             expected: expected.clone(),
             place: placement.place,
             temporary,
-            writeback: false,
             drops_after_call,
         })
     }

@@ -12,6 +12,8 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 
 ## Current Status
 
+- **Stage 5.9 is in progress.** Step 1 is complete: reduced full-suite failures extend the corpus to 71 programs (16642 matching bodies, zero stubs), and the unreachable call-argument writeback field is retired. The default suite passes 1312 tests; the lowered gate retains exactly its 30 baseline failures. Step 2 (parameter names) is next. Detailed triage and gate results are recorded in [STAGE_5_9_FULL_SUITE_PARITY_PLAN.md](STAGE_5_9_FULL_SUITE_PARITY_PLAN.md).
+
 - **Stage 1 is complete.** The public lowering boundary exists, compilation modes invoke it, and code generation accepts only `LoweredModule`.
 - `LoweredModule` is currently an opaque owner of a cloned `TypedModule`. `CodeGenerator` crosses a private, explicitly transitional bridge to the existing backend implementation.
 - The initial validator rejects functions or implicit thunks that have no checked function type.
