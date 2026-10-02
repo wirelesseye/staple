@@ -33,10 +33,10 @@ use crate::{
 
 use super::abi::flattened_parameter_types;
 use super::{
-    Backend, CodeGenerationResult, Diagnostic, LayoutContext, LoweredCatalogEntry,
-    LoweredEmissionReport, compiler_diagnostic, ir::value_as_basic,
+    Backend, CodeGenerationResult, Diagnostic, LayoutContext, compiler_diagnostic,
+    ir::value_as_basic,
 };
-use crate::lower::{ArenaId, EmissionOwner};
+use crate::lower::EmissionOwner;
 
 #[derive(Default, Clone)]
 struct FunctionEnvironment<'context> {
@@ -194,32 +194,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .verify()
             .map_err(|message| vec![invalid_module_diagnostic(message)])?;
         Ok(self.backend.llvm_module)
-    }
-
-    /// Partial emission (Stage 5.3 Step 2): attempt every body, stub the ones
-    /// that fail, stub every artifact whose family has no body emitter yet,
-    /// and collect the report. `main` is never stubbed. The returned module
-    /// always passes LLVM verification.
-    pub(super) fn compile_partial(
-        mut self,
-        target_machine: &TargetMachine,
-    ) -> Result<(LlvmModule<'context>, LoweredEmissionReport), Vec<Diagnostic>> {
-        self.declare_program(target_machine)
-            .map_err(|diagnostic| vec![diagnostic])?;
-        let mut report = LoweredEmissionReport::default();
-        self.emit_instance_bodies_partial(&mut report);
-        self.emit_artifact_bodies_partial(&mut report);
-        self.emit_artifact_stubs(&mut report);
-        self.emit_initializers_partial(&mut report);
-        self.emit_main().map_err(|diagnostic| vec![diagnostic])?;
-        #[cfg(test)]
-        self.collect_stage58_blockers(&mut report);
-        report.finish();
-        self.backend
-            .llvm_module
-            .verify()
-            .map_err(|message| vec![invalid_module_diagnostic(message)])?;
-        Ok((self.backend.llvm_module, report))
     }
 
     fn declare_program(&mut self, target_machine: &TargetMachine) -> CodeGenerationResult<()> {
@@ -1002,24 +976,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             if let Err(diagnostic) = self.emit_instance_body(id) {
                 diagnostics.push(diagnostic);
             }
-        }
-    }
-
-    /// Partial: attempt every instance body and stub the failed ones.
-    fn emit_instance_bodies_partial(&mut self, report: &mut LoweredEmissionReport) {
-        for (id, _) in self.view.instances() {
-            let Err(diagnostic) = self.emit_instance_body(id) else {
-                continue;
-            };
-            let Some(function) = self.instances.get(&id).copied() else {
-                continue;
-            };
-            self.emit_stub_body(function);
-            report.push_stub(
-                function_name(function),
-                LoweredCatalogEntry::Instance(id.index()),
-                diagnostic,
-            );
         }
     }
 
@@ -1819,27 +1775,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Partial: attempt every initializer body and stub the failed ones.
-    fn emit_initializers_partial(&mut self, report: &mut LoweredEmissionReport) {
-        for (id, _) in self.view.initializers() {
-            let Err(diagnostic) = self.emit_initializer_body(id) else {
-                continue;
-            };
-            let function = self.initializers[&id];
-            self.emit_stub_body(function);
-            report.push_stub(
-                function_name(function),
-                LoweredCatalogEntry::Initializer(id.index()),
-                diagnostic,
-            );
-        }
-    }
-
     /// Stage 5.4 Step 8: one artifact family that is a call shim. A
     /// constructor adapter rebuilds its product (or GC-allocates the managed
     /// reference and sets the planned payload finalizer); an extern adapter
     /// forwards the closure parameters to the foreign symbol. Every other
-    /// family is left to `emit_artifact_stubs`.
+    /// family has no body to emit here.
     fn emit_artifact_body(&mut self, ordinal: ArtifactOrdinal) -> CodeGenerationResult<()> {
         let Some(artifact) = self.view.artifact(ordinal) else {
             return Ok(());
@@ -2078,43 +2018,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Partial: attempt every adapter body and stub the failed ones.
-    fn emit_artifact_bodies_partial(&mut self, report: &mut LoweredEmissionReport) {
-        for (_, artifact) in self.view.artifacts() {
-            let Some(plan) = artifact.plan.as_ref() else {
-                continue;
-            };
-            if !matches!(
-                plan,
-                LoweredArtifactPlan::ConstructorAdapter(_)
-                    | LoweredArtifactPlan::ExternAdapter(_)
-                    | LoweredArtifactPlan::GcFinalizer(_)
-                    | LoweredArtifactPlan::StructuralMethod(_)
-                    | LoweredArtifactPlan::CoroutineCodes(_)
-                    | LoweredArtifactPlan::ReactionRunner(_)
-                    | LoweredArtifactPlan::UntilRunner(_)
-                    | LoweredArtifactPlan::DerivedRunner(_)
-            ) {
-                continue;
-            }
-            let ordinal = artifact.ordinal;
-            let Err(diagnostic) = self.emit_artifact_body(ordinal) else {
-                continue;
-            };
-            let Some(functions) = self.artifacts.get(&ordinal) else {
-                continue;
-            };
-            for function in functions.clone() {
-                self.emit_stub_body(function);
-                report.push_stub(
-                    function_name(function),
-                    LoweredCatalogEntry::Artifact(ordinal.index()),
-                    diagnostic.clone(),
-                );
-            }
-        }
-    }
-
     /// Legacy `ensure_constructor_adapter`'s body: rebuild the product from
     /// the closure parameters (after the environment) and return it, or
     /// GC-allocate it as a `Ref` payload with the planned finalizer.
@@ -2222,138 +2125,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_return(Some(&result))
             .map_err(compiler_diagnostic)?;
         Ok(())
-    }
-
-    /// Partial: every artifact function still without a body belongs to a
-    /// family with no body emitter yet, so it gets a stub with a missing-family
-    /// diagnostic (which resolves F4 for the harness).
-    fn emit_artifact_stubs(&mut self, report: &mut LoweredEmissionReport) {
-        for (_, artifact) in self.view.artifacts() {
-            let Some(plan) = artifact.plan.as_ref() else {
-                continue;
-            };
-            let Some(functions) = self.artifacts.get(&artifact.ordinal) else {
-                continue;
-            };
-            let family = artifact_family(plan);
-            for function in functions.clone() {
-                if function.count_basic_blocks() > 0 {
-                    continue;
-                }
-                let diagnostic = Diagnostic::new(
-                    artifact.origin.span.clone(),
-                    format!("lowered emitter: {family} is not implemented yet"),
-                );
-                self.emit_stub_body(function);
-                report.push_stub(
-                    function_name(function),
-                    LoweredCatalogEntry::Artifact(artifact.ordinal.index()),
-                    diagnostic,
-                );
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn collect_stage58_blockers(&self, report: &mut LoweredEmissionReport) {
-        for stub in report.stubbed().to_vec() {
-            let owner = match stub.entry() {
-                LoweredCatalogEntry::Instance(index) => Some(EmissionOwner::Instance(
-                    crate::FunctionInstanceId::from_index(index),
-                )),
-                LoweredCatalogEntry::Initializer(index) => Some(EmissionOwner::Initializer(
-                    crate::InitializerId::from_index(index),
-                )),
-                LoweredCatalogEntry::Artifact(index) => {
-                    match self
-                        .view
-                        .artifacts()
-                        .find(|(_, artifact)| artifact.ordinal.index() == index)
-                        .map(|(_, artifact)| artifact)
-                        .and_then(|artifact| artifact.plan.as_ref())
-                    {
-                        Some(LoweredArtifactPlan::CoroutineCodes(plan)) => {
-                            Some(EmissionOwner::Instance(plan.body))
-                        }
-                        Some(LoweredArtifactPlan::ConstructorAdapter(_))
-                        | Some(LoweredArtifactPlan::StructuralMethod(_))
-                        | Some(LoweredArtifactPlan::DropGlue(_))
-                        | Some(LoweredArtifactPlan::GcFinalizer(_))
-                        | Some(LoweredArtifactPlan::ReactionRunner(_))
-                        | Some(LoweredArtifactPlan::UntilRunner(_))
-                        | Some(LoweredArtifactPlan::DerivedRunner(_))
-                        | Some(LoweredArtifactPlan::ExternAdapter(_))
-                        | None => None,
-                    }
-                }
-            };
-            let mut families = owner
-                .map(|owner| self.view.stage58_blockers(owner))
-                .unwrap_or_default();
-            families.push(super::diagnostic_family(stub.diagnostic()));
-            families.sort();
-            families.dedup();
-            for family in families {
-                *report.reached_families.entry(family).or_default() += 1;
-            }
-        }
-    }
-
-    /// A `llvm.trap` followed by `unreachable`: the stub body partial mode
-    /// gives a function whose real body is missing or failed. The function
-    /// keeps its declaration, name, type, and linkage, so the declaration
-    /// census still sees it.
-    fn emit_stub_body(&self, function: FunctionValue<'context>) {
-        // The failed body's blocks are removed so the stub is the only body.
-        // Uses are detached first (every result is replaced by poison, then
-        // every instruction is erased) so no deleted value is still used by an
-        // instruction in another block, whatever order the uses appear in.
-        // Deleting blocks with live cross-block uses trips LLVM's assertions.
-        let blocks = function.get_basic_blocks();
-        for block in &blocks {
-            let mut instruction = block.get_first_instruction();
-            while let Some(current) = instruction {
-                detach_uses(current);
-                instruction = current.get_next_instruction();
-            }
-        }
-        for block in &blocks {
-            while let Some(instruction) = block.get_first_instruction() {
-                debug_assert!(
-                    instruction.get_first_use().is_none(),
-                    "a failed-body instruction is still used while the stub replaces it"
-                );
-                instruction.erase_from_basic_block();
-            }
-        }
-        for block in blocks {
-            unsafe {
-                block
-                    .delete()
-                    .expect("a stub target block still belongs to its function");
-            }
-        }
-        let entry = self.backend.context.append_basic_block(function, "stub");
-        self.backend.builder.position_at_end(entry);
-        let trap = self
-            .backend
-            .llvm_module
-            .get_function("llvm.trap")
-            .unwrap_or_else(|| {
-                self.backend.llvm_module.add_function(
-                    "llvm.trap",
-                    self.backend.context.void_type().fn_type(&[], false),
-                    None,
-                )
-            });
-        self.backend
-            .builder
-            .build_direct_call(trap, &[], "stub.trap")
-            .expect("stub trap call");
-        self.backend
-            .builder
-            .build_unreachable()
-            .expect("stub unreachable");
     }
 
     fn emit_main(&mut self) -> CodeGenerationResult<()> {
@@ -2515,7 +2286,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let unimplemented = |family| {
             Diagnostic::new(
                 item.origin.span.clone(),
-                format!("lowered emitter: {family} is not implemented yet"),
+                format!(
+                    "lowered emitter: internal invariant violated: {family} is missing or malformed"
+                ),
             )
         };
         let item_span = item.origin.span.clone();
@@ -2828,7 +2601,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let unsupported = |family| {
             Diagnostic::new(
                 pattern.origin.span.clone(),
-                format!("lowered emitter: {family} is not implemented yet"),
+                format!(
+                    "lowered emitter: internal invariant violated: {family} is missing or malformed"
+                ),
             )
         };
         let span = pattern.origin.span.clone();
@@ -4605,7 +4380,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let unsupported = |family| {
             Diagnostic::new(
                 callable.origin.span.clone(),
-                format!("lowered emitter: {family} is not implemented yet"),
+                format!(
+                    "lowered emitter: internal invariant violated: {family} is missing or malformed"
+                ),
             )
         };
         // Legacy `compile_symbol_value` runs the symbol's initialization check
@@ -4783,7 +4560,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let Some(LoweredBoundTarget::Artifact(ordinal)) = binding else {
             return Err(Diagnostic::new(
                 span.clone(),
-                format!("lowered emitter: {family} is not implemented yet"),
+                format!(
+                    "lowered emitter: internal invariant violated: {family} is missing or malformed"
+                ),
             ));
         };
         self.artifacts
@@ -4805,7 +4584,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let unsupported = |family| {
             Diagnostic::new(
                 callable.origin.span.clone(),
-                format!("lowered emitter: {family} is not implemented yet"),
+                format!(
+                    "lowered emitter: internal invariant violated: {family} is missing or malformed"
+                ),
             )
         };
         let LoweredCallableTarget::DirectFunction { function, .. } = &callable.target else {
@@ -4985,7 +4766,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let unsupported = |family| {
             Diagnostic::new(
                 call.origin.span.clone(),
-                format!("lowered emitter: {family} is not implemented yet"),
+                format!(
+                    "lowered emitter: internal invariant violated: {family} is missing or malformed"
+                ),
             )
         };
         let native_extern = matches!(call.target, LoweredCallableTarget::ExternalFunction { .. });
@@ -5585,12 +5368,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 // Legacy `compile_indirect_argument_pointer` silently falls
                 // back to a materialized copy when a possibly-place-rooted
                 // borrow is not actually addressable; the mutation path has no
-                // fallback. A place kind this substage has not ported yet
-                // stays a diagnostic: silently materializing would emit a
-                // different body than legacy instead of stubbing.
+                // fallback. An indexed place stays a diagnostic.
                 Err(error) => {
                     if record.pass_mode != LoweredArgumentPassMode::BorrowedPointer
-                        || is_unimplemented_place(&error)
+                        || is_indexed_place_error(&error)
                     {
                         return Err(error);
                     }
@@ -5848,7 +5629,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let unsupported = |family| {
             Diagnostic::new(
                 place.origin.span.clone(),
-                format!("lowered emitter: {family} is not implemented yet"),
+                format!(
+                    "lowered emitter: internal invariant violated: {family} is missing or malformed"
+                ),
             )
         };
         match &place.kind {
@@ -6258,7 +6041,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let unsupported = |family| {
             Diagnostic::new(
                 span.clone(),
-                format!("lowered emitter: {family} is not implemented yet"),
+                format!(
+                    "lowered emitter: internal invariant violated: {family} is missing or malformed"
+                ),
             )
         };
         let binding = self
@@ -6883,7 +6668,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let unsupported = |family| {
             Diagnostic::new(
                 span.clone(),
-                format!("lowered emitter: {family} is not implemented yet"),
+                format!(
+                    "lowered emitter: internal invariant violated: {family} is missing or malformed"
+                ),
             )
         };
         match intrinsic {
@@ -7931,20 +7718,12 @@ fn intrinsic_buffer_element(
 /// Stage 5.4 Step 4: store one assembled argument in its final slot, failing
 /// when the slot is out of range or already filled (an internal inconsistency
 /// in the lowered record).
-/// Whether a place-pointer failure is an unported place kind (a construct
-/// family) rather than a genuinely unavailable address. The former must stay
-/// a stub so the differential body comparison never sees a materialized
-/// substitute for legacy's direct pointer.
-fn is_unimplemented_place(diagnostic: &Diagnostic) -> bool {
-    [
-        "temporary place",
-        "dereference place",
-        "product element place",
-        "representation place",
-        "indexed place",
-    ]
-    .iter()
-    .any(|family| diagnostic.message == format!("lowered emitter: {family} is not implemented yet"))
+/// Whether a place-pointer failure is the invariant error for an indexed
+/// place: indexed targets dispatch through `MutateIndex` and never have an
+/// address, so a borrowed argument must not silently materialize a copy.
+fn is_indexed_place_error(diagnostic: &Diagnostic) -> bool {
+    diagnostic.message
+        == "lowered emitter: internal invariant violated: indexed place is missing or malformed"
 }
 
 /// A record- or expression-derived value that must be a pointer; a malformed
@@ -7999,60 +7778,6 @@ fn place_argument_slot<'context>(
     }
     *destination = Some(value);
     Ok(())
-}
-
-/// Replaces every use of one instruction's result with a poison value of the
-/// same type, so the instruction can be erased while other instructions of
-/// the failed body still refer to it. inkwell classifies an instruction by its
-/// result type (a phi is an `IntValue`, `PointerValue`, …), so these arms
-/// cover every value-producing instruction; void instructions have no uses.
-fn detach_uses(instruction: inkwell::values::InstructionValue<'_>) {
-    use inkwell::values::AnyValueEnum as Value;
-    if instruction.get_first_use().is_none() {
-        return;
-    }
-    match instruction.as_any_value_enum() {
-        Value::IntValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
-        Value::FloatValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
-        Value::PointerValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
-        Value::StructValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
-        Value::ArrayValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
-        Value::VectorValue(value) => value.replace_all_uses_with(value.get_type().get_poison()),
-        Value::ScalableVectorValue(value) => {
-            value.replace_all_uses_with(value.get_type().get_poison())
-        }
-        _ => {}
-    }
-}
-
-/// The final LLVM name of a declared function, used by the partial-mode stub
-/// records.
-fn function_name(function: FunctionValue<'_>) -> String {
-    function.get_name().to_string_lossy().into_owned()
-}
-
-/// The construct family of one artifact plan, the `<family>` in a partial-mode
-/// missing-body diagnostic (`lowered emitter: <family> is not implemented
-/// yet`).
-fn artifact_family(plan: &LoweredArtifactPlan) -> &'static str {
-    match plan {
-        LoweredArtifactPlan::ConstructorAdapter(_) => "constructor adapter artifact",
-        LoweredArtifactPlan::StructuralMethod(_) => "structural method artifact",
-        LoweredArtifactPlan::DropGlue(_) => "drop glue artifact",
-        // Stage 5.6 Step 1: the four finalizer subkinds are separate families
-        // so progress is tracked per body shape.
-        LoweredArtifactPlan::GcFinalizer(finalizer) => match finalizer {
-            GcFinalizerPlan::Payload { .. } => "payload finalizer",
-            GcFinalizerPlan::Cell { .. } => "cell finalizer",
-            GcFinalizerPlan::ClosureEnvironment { .. } => "closure environment finalizer",
-            GcFinalizerPlan::Buffer { .. } => "buffer finalizer",
-        },
-        LoweredArtifactPlan::CoroutineCodes(_) => "coroutine pair artifact",
-        LoweredArtifactPlan::ReactionRunner(_) => "reaction runner artifact",
-        LoweredArtifactPlan::UntilRunner(_) => "until runner artifact",
-        LoweredArtifactPlan::DerivedRunner(_) => "derived runner artifact",
-        LoweredArtifactPlan::ExternAdapter(_) => "extern adapter artifact",
-    }
 }
 
 fn invalid_module_diagnostic(message: impl std::fmt::Display) -> Diagnostic {

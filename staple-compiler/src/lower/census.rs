@@ -816,7 +816,7 @@ pub(crate) fn assert_declaration_parity(
     label: &str,
     lowered: &crate::LoweredModule,
     legacy: &crate::codegen::LegacyEmissions,
-    partial: &crate::codegen::LoweredPartialEmissions,
+    partial: &crate::codegen::LoweredEmissions,
 ) -> CensusMapping {
     let mapping = census_mapping(lowered, legacy);
     assert!(
@@ -913,7 +913,7 @@ pub(crate) fn assert_declaration_parity(
 
     assert_eq!(
         lowered_defined, expected_defined,
-        "the partial lowered defined set differs from the census mapping\n{label}"
+        "the lowered defined set differs from the census mapping\n{label}"
     );
     mapping
 }

@@ -5195,7 +5195,7 @@ pub(crate) mod tests {
     }
 
     /// Stage 5.3 Step 3 (F2, F10): over the Stage 4.7 census corpus plus a
-    /// fixture using every artifact family, the partial lowered module defines
+    /// fixture using every artifact family, the lowered module defines
     /// exactly the functions the census maps -- plus `main`, the UTF-8
     /// validator, and the entries reachable only through a syntax-aliased
     /// coroutine -- with identical LLVM types and linkage for every mapped
@@ -5325,13 +5325,12 @@ pub(crate) mod tests {
                     panic!("the legacy backend should compile: {diagnostics:?}\n{source}")
                 },
             );
-            let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
-                .unwrap_or_else(|diagnostics| {
-                    panic!("partial lowered emission should verify: {diagnostics:?}\n{source}")
-                });
+            let partial = crate::codegen::lowered_emissions(&context, &lowered).unwrap_or_else(
+                |diagnostics| {
+                    panic!("strict lowered emission should succeed: {diagnostics:?}\n{source}")
+                },
+            );
             let mapping = assert_declaration_parity(source, &lowered, &legacy, &partial);
-            // Stage 5.6: a fully ported program may have no stubbed body at
-            // all, so the report is informational here, never required.
             if !mapping.aliased_instances.is_empty() || !mapping.aliased_artifacts.is_empty() {
                 saw_aliased_entries = true;
             }
@@ -5416,10 +5415,11 @@ pub(crate) mod tests {
                     panic!("the legacy backend should compile: {diagnostics:?}\n{source}")
                 },
             );
-            let partial = crate::codegen::lowered_partial_emissions(&context, &lowered)
-                .unwrap_or_else(|diagnostics| {
-                    panic!("partial lowered emission should verify: {diagnostics:?}\n{source}")
-                });
+            let partial = crate::codegen::lowered_emissions(&context, &lowered).unwrap_or_else(
+                |diagnostics| {
+                    panic!("strict lowered emission should succeed: {diagnostics:?}\n{source}")
+                },
+            );
             assert_eq!(
                 normalized_function_body(&partial.module_ir, "define i32 @main()"),
                 normalized_function_body(&legacy.module_ir, "define i32 @main()"),

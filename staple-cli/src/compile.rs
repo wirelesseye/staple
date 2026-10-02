@@ -4547,19 +4547,15 @@ mod tests {
     /// program with both emitters and compare stdout and exit status. Each
     /// program's `DifferentialExpectation` decides what is required:
     /// - `CompileOnly` programs cannot link under either emitter, so only
-    ///   compilation is checked (legacy must compile; lowered may be blocked);
-    /// - `MayBeBlocked` programs are reported blocked with the family
-    ///   histogram while strict lowered emission fails, and must behave
-    ///   identically once it succeeds;
-    /// - `MustRun` programs must compile strictly and behave identically, so a
-    ///   program that once ran can never regress to blocked;
+    ///   compilation is checked (both emitters must compile them);
+    /// - `MustRun` programs must compile strictly and behave identically, and
+    ///   print their pinned stdout where one is recorded;
     /// - `LoweredOnly` D5 fixtures run only under the lowered emitter and must
     ///   print their pinned stdout; legacy must fail to compile or behave
     ///   differently, and the run records which.
     #[cfg(unix)]
     #[test]
-    fn stage_5_3_cli_differential_harness_compares_or_reports_blocked() {
-        use std::collections::HashMap;
+    fn stage_5_3_cli_differential_harness_compares_emitters() {
         use std::path::Path;
 
         use inkwell::context::Context;
@@ -4573,13 +4569,11 @@ mod tests {
         let options = parse_options([std::ffi::OsString::from("corpus.sta")])
             .expect("corpus link options should parse");
 
-        let mut blocked = 0usize;
         let mut identical = 0usize;
         let mut compile_only = 0usize;
         let mut lowered_only = 0usize;
         let mut legacy_rejected = 0usize;
         let mut legacy_different = 0usize;
-        let mut families: HashMap<String, usize> = HashMap::new();
         for program in staple_compiler::differential_corpus() {
             let (source, root) = match program.source {
                 DifferentialSource::Inline(source) => {
@@ -4623,8 +4617,13 @@ mod tests {
             let strict =
                 CodeGenerator::with_emitter(&context, Emitter::Lowered).compile_module(&lowered);
             if program.expectation == DifferentialExpectation::CompileOnly {
-                // Unlinkable under either emitter: legacy must compile it, and
-                // the lowered emitter either compiles it or reports it blocked.
+                // Unlinkable under either emitter: both must compile it.
+                assert!(
+                    strict.is_ok(),
+                    "`{}` must emit strictly under the lowered emitter: {:?}",
+                    program.name,
+                    strict.err()
+                );
                 CodeGenerator::with_emitter(&context, Emitter::Legacy)
                     .compile_module(&lowered)
                     .unwrap_or_else(|diagnostics| {
@@ -4672,73 +4671,49 @@ mod tests {
                 lowered_only += 1;
                 continue;
             }
-            // A program whose lowered strict compile fails is blocked: it has
-            // no lowered behavior to run or compare, so the legacy baseline is
-            // not needed.
-            let Err(diagnostics) = strict else {
-                let legacy =
-                    compile_link_run(&lowered, Emitter::Legacy, &options).unwrap_or_else(|error| {
-                        panic!("`{}` should link with legacy: {error}", program.name)
-                    });
-                let lowered_behavior = compile_link_run(&lowered, Emitter::Lowered, &options)
-                    .unwrap_or_else(|error| {
-                        panic!("`{}` should run with lowered: {error}", program.name)
-                    });
-                assert_eq!(
-                    lowered_behavior, legacy,
-                    "`{}` behaves differently under the lowered emitter",
+            if let Err(diagnostics) = strict {
+                panic!(
+                    "`{}` must emit strictly under the lowered emitter: {diagnostics:?}",
                     program.name
                 );
-                if program.traps {
-                    assert_eq!(
-                        legacy.0, None,
-                        "`{}` must end in a trap under both emitters",
-                        program.name
-                    );
-                }
-                if let Some(expected) = program.expected_stdout {
-                    assert_eq!(
-                        legacy.1, expected,
-                        "`{}` prints unexpected output under both emitters",
-                        program.name
-                    );
-                }
-                identical += 1;
-                continue;
-            };
-            assert_ne!(
-                program.expectation,
-                DifferentialExpectation::MustRun,
-                "`{}` must run under the lowered emitter but is blocked: {diagnostics:?}",
+            }
+            let legacy =
+                compile_link_run(&lowered, Emitter::Legacy, &options).unwrap_or_else(|error| {
+                    panic!("`{}` should link with legacy: {error}", program.name)
+                });
+            let lowered_behavior = compile_link_run(&lowered, Emitter::Lowered, &options)
+                .unwrap_or_else(|error| {
+                    panic!("`{}` should run with lowered: {error}", program.name)
+                });
+            assert_eq!(
+                lowered_behavior, legacy,
+                "`{}` behaves differently under the lowered emitter",
                 program.name
             );
-            blocked += 1;
-            for diagnostic in &diagnostics {
-                let family = diagnostic
-                    .message
-                    .strip_prefix("lowered emitter: ")
-                    .and_then(|family| family.strip_suffix(" is not implemented yet"))
-                    .unwrap_or(&diagnostic.message);
-                *families.entry(family.to_owned()).or_insert(0) += 1;
+            if program.traps {
+                assert_eq!(
+                    legacy.0, None,
+                    "`{}` must end in a trap under both emitters",
+                    program.name
+                );
             }
+            if let Some(expected) = program.expected_stdout {
+                assert_eq!(
+                    legacy.1, expected,
+                    "`{}` prints unexpected output under both emitters",
+                    program.name
+                );
+            }
+            identical += 1;
         }
-        let mut families = families.into_iter().collect::<Vec<_>>();
-        families.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        let top = families
-            .iter()
-            .take(6)
-            .map(|(family, count)| format!("{count} {family}"))
-            .collect::<Vec<_>>()
-            .join(", ");
         eprintln!(
-            "stage 5.3 CLI harness: {blocked} blocked, {identical} identical, {compile_only} compile-only, \
-{lowered_only} lowered-only ({legacy_rejected} legacy-rejected, {legacy_different} legacy-different) \
-(top families: {top})"
+            "stage 5.3 CLI harness: {identical} identical, {compile_only} compile-only, \
+{lowered_only} lowered-only ({legacy_rejected} legacy-rejected, {legacy_different} legacy-different)"
         );
         assert_eq!(
-            blocked + identical + compile_only + lowered_only,
+            identical + compile_only + lowered_only,
             staple_compiler::differential_corpus().len(),
-            "every corpus program is blocked, identical, compile-only, or lowered-only"
+            "every corpus program is identical, compile-only, or lowered-only"
         );
     }
 

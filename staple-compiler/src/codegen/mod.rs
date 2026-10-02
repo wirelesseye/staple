@@ -100,119 +100,6 @@ pub enum Emitter {
     Lowered,
 }
 
-/// Stage 5.3 Step 2: which lowered catalog entry a stubbed function belongs to.
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LoweredCatalogEntry {
-    /// A source-function instance, by catalog ordinal.
-    Instance(usize),
-    /// A generated artifact, by catalog ordinal.
-    Artifact(usize),
-    /// A module initializer, by lowered ID.
-    Initializer(usize),
-}
-
-impl LoweredCatalogEntry {
-    /// A stable description for reports and diagnostics.
-    pub fn description(self) -> String {
-        match self {
-            LoweredCatalogEntry::Instance(ordinal) => format!("instance {ordinal}"),
-            LoweredCatalogEntry::Artifact(ordinal) => format!("artifact {ordinal}"),
-            LoweredCatalogEntry::Initializer(id) => format!("initializer {id}"),
-        }
-    }
-}
-
-/// Stage 5.3 Step 2: one function the partial lowered emitter stubbed.
-#[doc(hidden)]
-#[derive(Clone, Debug)]
-pub struct LoweredStubRecord {
-    name: String,
-    entry: LoweredCatalogEntry,
-    diagnostic: Diagnostic,
-}
-
-impl LoweredStubRecord {
-    /// The stubbed function's planned LLVM name.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// The catalog entry the stubbed function belongs to.
-    pub fn entry(&self) -> LoweredCatalogEntry {
-        self.entry
-    }
-
-    /// The diagnostic the body failed with, or the missing-family diagnostic
-    /// for an artifact whose family has no body emitter yet.
-    pub fn diagnostic(&self) -> &Diagnostic {
-        &self.diagnostic
-    }
-}
-
-/// Stage 5.3 Step 2: the partial-emission report, the progress measure for
-/// Stage 5.4–5.8. It lists every stubbed function with its catalog entry and
-/// diagnostic, and a histogram of the diagnostics by construct family.
-#[doc(hidden)]
-#[derive(Clone, Debug, Default)]
-pub struct LoweredEmissionReport {
-    stubbed: Vec<LoweredStubRecord>,
-    families: Vec<(String, usize)>,
-    #[cfg(test)]
-    pub(crate) reached_families: std::collections::BTreeMap<String, usize>,
-}
-
-impl LoweredEmissionReport {
-    /// Every stubbed function in emission order (instances, then artifacts,
-    /// then initializers).
-    pub fn stubbed(&self) -> &[LoweredStubRecord] {
-        &self.stubbed
-    }
-
-    /// The construct-family histogram, ordered by stub count (descending) then
-    /// family name. A family is the `<family>` of a
-    /// `lowered emitter: <family> is not implemented yet` diagnostic; any
-    /// other diagnostic contributes its whole message.
-    pub fn family_histogram(&self) -> &[(String, usize)] {
-        &self.families
-    }
-
-    pub(crate) fn push_stub(
-        &mut self,
-        name: String,
-        entry: LoweredCatalogEntry,
-        diagnostic: Diagnostic,
-    ) {
-        let family = diagnostic_family(&diagnostic);
-        match self.families.iter_mut().find(|(key, _)| key == &family) {
-            Some((_, count)) => *count += 1,
-            None => self.families.push((family, 1)),
-        }
-        self.stubbed.push(LoweredStubRecord {
-            name,
-            entry,
-            diagnostic,
-        });
-    }
-
-    /// Orders the histogram by count (descending) then family name.
-    pub(crate) fn finish(&mut self) {
-        self.families
-            .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    }
-}
-
-/// The construct family of one lowered diagnostic: the `<family>` in
-/// `lowered emitter: <family> is not implemented yet`, or the whole message.
-fn diagnostic_family(diagnostic: &Diagnostic) -> String {
-    diagnostic
-        .message
-        .strip_prefix("lowered emitter: ")
-        .and_then(|family| family.strip_suffix(" is not implemented yet"))
-        .unwrap_or(&diagnostic.message)
-        .to_owned()
-}
-
 struct ModuleEmitter<'module, 'context> {
     typed_module: &'module TypedModule,
     /// The Stage 5.2 shared layout/ABI/runtime/IR layer. Field and method
@@ -566,24 +453,6 @@ impl<'context> CodeGenerator<'context> {
             .map(|module| module.print_to_string().to_string())
     }
 
-    /// Stage 5.3 Step 2: emit a lower-derived module in partial mode for the
-    /// differential harness. Functions whose bodies fail, and artifact
-    /// families that still have no body emitter, get an `llvm.trap` followed
-    /// by `unreachable` instead of failing the compile, and the returned
-    /// report lists every stub with a construct-family histogram. The module
-    /// always passes LLVM verification on success. The CLI and the
-    /// `lowered-emitter` default never call this entry point.
-    #[doc(hidden)]
-    pub fn compile_lowered_partial(
-        &self,
-        module: &LoweredModule,
-    ) -> Result<(String, LoweredEmissionReport), Vec<Diagnostic>> {
-        let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
-        lowered::LoweredEmitter::new(self.context, module.program(), &target_machine)
-            .compile_partial(&target_machine)
-            .map(|(module, report)| (module.print_to_string().to_string(), report))
-    }
-
     pub fn emit_object(
         &self,
         module: &LoweredModule,
@@ -648,8 +517,7 @@ impl<'context> CodeGenerator<'context> {
                     .unwrap_or_else(|diagnostics| {
                         panic!("shadow lowered emission failed for a legacy-compiled program: {diagnostics:?}")
                     });
-                let lowered_emissions =
-                    snapshot_lowered(&lowered, LoweredEmissionReport::default());
+                let lowered_emissions = snapshot_lowered(&lowered);
                 self.shadow_compare(module, &emissions, &lowered_emissions)?;
                 Ok(llvm)
             }
@@ -674,7 +542,7 @@ impl<'context> CodeGenerator<'context> {
                         return Ok(llvm);
                     }
                 };
-                let lowered_emissions = snapshot_lowered(&llvm, LoweredEmissionReport::default());
+                let lowered_emissions = snapshot_lowered(&llvm);
                 self.shadow_compare(module, &emissions, &lowered_emissions)?;
                 Ok(llvm)
             }
@@ -686,7 +554,7 @@ impl<'context> CodeGenerator<'context> {
         &self,
         module: &LoweredModule,
         legacy: &LegacyEmissions,
-        lowered_emissions: &LoweredPartialEmissions,
+        lowered_emissions: &LoweredEmissions,
     ) -> Result<(), Vec<Diagnostic>> {
         let mapping = crate::lower::census::assert_declaration_parity(
             "differential-shadow",
@@ -807,40 +675,34 @@ pub(crate) fn lowered_catalog_types(
         .map_err(|diagnostic| vec![diagnostic])
 }
 
-/// Test-only Stage 5.3 Step 3 declaration census: the partial lowered
-/// module's function types, linkage, and defined-function set, plus the
-/// partial-emission report.
+/// Declaration census input: the lowered module's function types, linkage,
+/// and defined-function set.
 #[cfg(any(test, feature = "differential-shadow"))]
-pub(crate) struct LoweredPartialEmissions {
-    pub(crate) report: LoweredEmissionReport,
+pub(crate) struct LoweredEmissions {
     /// LLVM function types keyed by final planned name.
     pub(crate) function_types: HashMap<String, String>,
     /// LLVM linkage keyed by final planned name (`true` for `Internal`).
     pub(crate) function_linkages: HashMap<String, bool>,
-    /// Every function the partial module defines (real body or stub).
+    /// Every function the module defines.
     pub(crate) defined_functions: HashSet<String>,
-    /// The whole partial module's IR text, for body-level comparison.
+    /// The whole module's IR text, for body-level comparison.
     pub(crate) module_ir: String,
 }
 
 #[cfg(test)]
-pub(crate) fn lowered_partial_emissions(
+pub(crate) fn lowered_emissions(
     context: &inkwell::context::Context,
     module: &LoweredModule,
-) -> Result<LoweredPartialEmissions, Vec<Diagnostic>> {
+) -> Result<LoweredEmissions, Vec<Diagnostic>> {
     let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
     lowered::LoweredEmitter::new(context, module.program(), &target_machine)
-        .compile_partial(&target_machine)
-        .map(|(llvm_module, report)| snapshot_lowered(&llvm_module, report))
+        .compile(&target_machine)
+        .map(|llvm_module| snapshot_lowered(&llvm_module))
 }
 
 #[cfg(any(test, feature = "differential-shadow"))]
-fn snapshot_lowered(
-    llvm_module: &LlvmModule<'_>,
-    report: LoweredEmissionReport,
-) -> LoweredPartialEmissions {
-    LoweredPartialEmissions {
-        report,
+fn snapshot_lowered(llvm_module: &LlvmModule<'_>) -> LoweredEmissions {
+    LoweredEmissions {
         function_types: llvm_module
             .get_functions()
             .filter_map(|function| {
