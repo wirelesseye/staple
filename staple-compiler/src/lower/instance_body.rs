@@ -1144,14 +1144,13 @@ impl<'a> BodyCloner<'a> {
             }
             LoweredExpressionKind::RepeatedProduct(mut product) => {
                 product.expression = self.clone_expression(product.expression);
-                product.count = match product.count {
-                    super::LoweredRepeatCount::Fixed(count) => {
-                        super::LoweredRepeatCount::Fixed(count)
-                    }
-                    super::LoweredRepeatCount::Symbolic(value_type) => {
-                        super::LoweredRepeatCount::Symbolic(self.ty(&value_type))
-                    }
-                };
+                let source_type = expression
+                    .coercion
+                    .as_ref()
+                    .map(|coercion| &coercion.source)
+                    .unwrap_or(&expression.value_type);
+                product.count = super::LoweredRepeatCount::for_type(&self.ty(source_type));
+                product.collapsed = product.count == super::LoweredRepeatCount::Fixed(1);
                 LoweredExpressionKind::RepeatedProduct(product)
             }
             LoweredExpressionKind::Satisfies(mut satisfies) => {
@@ -3627,6 +3626,12 @@ impl<'a> BodyValidator<'a> {
                 if let super::LoweredRepeatCount::Symbolic(value_type) = &product.count {
                     self.check_concrete_type(&origin, value_type, "repeat count");
                 }
+                let source_type = expression
+                    .coercion
+                    .as_ref()
+                    .map(|coercion| &coercion.source)
+                    .unwrap_or(&expression.value_type);
+                product.validate_shape(source_type, &origin, &mut self.diagnostics);
             }
             LoweredExpressionKind::Satisfies(satisfies) => {
                 self.visit_expression(satisfies.value);
@@ -4787,6 +4792,56 @@ mod tests {
             assert!(!contains_type_parameter(&place.value_type));
         }
         let _ = program;
+    }
+
+    #[test]
+    fn concrete_repetition_shape_corruption_is_rejected() {
+        let module = checked_program(concat!(
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+            "let repeated: (I32; 3) = repeat 7 3\n",
+        ));
+        let baseline = crate::Lowerer::new()
+            .lower(&module)
+            .expect("repetition lowers")
+            .program;
+        for corrupt_count in [true, false] {
+            let mut program = baseline.clone();
+            let repeated = program
+                .instances
+                .iter_mut()
+                .filter_map(|(_, instance)| instance.body.as_mut())
+                .flat_map(|body| {
+                    body.expressions
+                        .iter_mut()
+                        .map(|(_, expression)| expression)
+                })
+                .find_map(|expression| match &mut expression.kind {
+                    LoweredExpressionKind::RepeatedProduct(repeated)
+                        if repeated.count == super::super::LoweredRepeatCount::Fixed(3) =>
+                    {
+                        Some(repeated)
+                    }
+                    _ => None,
+                })
+                .expect("concrete three-element repetition");
+            assert!(!repeated.collapsed);
+            if corrupt_count {
+                repeated.count = super::super::LoweredRepeatCount::Fixed(2);
+            } else {
+                repeated.collapsed = true;
+            }
+            let diagnostics = program.validate_instance_bodies();
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(if corrupt_count {
+                        "repeated product count disagrees"
+                    } else {
+                        "repeated product collapse marker disagrees"
+                    })),
+                "{diagnostics:?}"
+            );
+        }
     }
 
     #[test]

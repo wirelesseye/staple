@@ -1814,11 +1814,14 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         "def outer: () -> I32 = () => {\n def recur: <T> T -> T = value => recur value\n recur 1\n}\n",
         "5.9",
     ),
-    inline(
-        "natural_repeated_return",
-        "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\nlet repeated: (I32; 3) = repeat 7 3\n",
-        "5.9",
-    ),
+    must_run(expect_stdout(
+        inline(
+            "natural_repeated_return",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\nlet repeated: (I32; 3) = repeat 7 3\n",
+            "5.9",
+        ),
+        "",
+    )),
     must_run(expect_stdout(
         inline(
             "effect_closure_resources",
