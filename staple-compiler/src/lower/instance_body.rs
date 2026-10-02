@@ -52,6 +52,7 @@ use super::{
 /// checked type, so no body consumer has to ask the global symbol catalog.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredInstanceParameter {
+    pub initialization_state_only: bool,
     pub symbol: SymbolId,
     pub value_type: CheckedType,
 }
@@ -60,6 +61,7 @@ pub(crate) struct LoweredInstanceParameter {
 /// concrete checked type and the cleanup facts the closure finalizer mirrors.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredInstanceCapture {
+    pub initialization_state_only: bool,
     pub capture: LoweredCapture,
     pub value_type: CheckedType,
     /// The captured symbol requires initialization state.
@@ -649,6 +651,7 @@ impl<'a> BodyCloner<'a> {
             .parameters
             .iter()
             .map(|symbol| LoweredInstanceParameter {
+                initialization_state_only: self.symbol_initialization_state_only(*symbol),
                 symbol: *symbol,
                 value_type: self.symbol_type(*symbol),
             })
@@ -659,6 +662,8 @@ impl<'a> BodyCloner<'a> {
             .map(|capture| {
                 let symbol = self.program.symbols.get(capture.symbol);
                 LoweredInstanceCapture {
+                    initialization_state_only: self
+                        .symbol_initialization_state_only(capture.symbol),
                     capture: capture.clone(),
                     value_type: self.symbol_type(capture.symbol),
                     requires_initialization_state: symbol
@@ -849,6 +854,12 @@ impl<'a> BodyCloner<'a> {
         }
     }
 
+    fn symbol_initialization_state_only(&self, symbol: SymbolId) -> bool {
+        self.program.symbols.get(symbol).is_some_and(|record| {
+            contains_type_parameter(&self.ty(&record.initialization_state_type))
+        })
+    }
+
     /// The concrete type of one global symbol, substituted for this instance.
     fn symbol_type(&self, symbol: SymbolId) -> CheckedType {
         self.program
@@ -899,6 +910,9 @@ impl<'a> BodyCloner<'a> {
         let mut assignment_site = None;
         let new_kind = match item.kind {
             LoweredItemKind::Binding(mut binding) => {
+                binding.initialization_state_only = binding
+                    .symbol
+                    .is_some_and(|symbol| self.symbol_initialization_state_only(symbol));
                 if binding.generic {
                     // A generic local binding is a compile-time template
                     // declaration: its generic value is never emitted.
@@ -1453,12 +1467,15 @@ impl<'a> BodyCloner<'a> {
         let kind = match pattern.kind {
             LoweredPatternKind::Wildcard => LoweredPatternKind::Wildcard,
             LoweredPatternKind::Binding {
+                initialization_state_only: _,
                 name,
                 symbol,
                 singleton,
                 mutable,
                 moved,
             } => LoweredPatternKind::Binding {
+                initialization_state_only: symbol
+                    .is_some_and(|symbol| self.symbol_initialization_state_only(symbol)),
                 name,
                 symbol,
                 singleton,
@@ -3271,6 +3288,22 @@ impl<'a> BodyValidator<'a> {
         }
     }
 
+    fn check_state_layout(&mut self, symbol: SymbolId, state_only: bool, origin: &Origin) {
+        let substitutions = self.instance.environment.substitution_map();
+        let expected = self.program.symbols.get(symbol).is_some_and(|record| {
+            contains_type_parameter(&substitute_type(
+                record.initialization_state_type.clone(),
+                &substitutions,
+            ))
+        });
+        if state_only != expected {
+            self.report(
+                origin.span.clone(),
+                "instance initialization-state layout disagrees with its checked symbol type",
+            );
+        }
+    }
+
     fn run(&mut self) {
         if self.body.template != self.instance.template {
             self.report(
@@ -3360,9 +3393,19 @@ impl<'a> BodyValidator<'a> {
         }
         for parameter in &self.body.parameters {
             self.check_concrete_type(&self.body.origin, &parameter.value_type, "parameter type");
+            self.check_state_layout(
+                parameter.symbol,
+                parameter.initialization_state_only,
+                &self.body.origin,
+            );
         }
         for capture in &self.body.captures {
             self.check_concrete_type(&self.body.origin, &capture.value_type, "capture type");
+            self.check_state_layout(
+                capture.capture.symbol,
+                capture.initialization_state_only,
+                &self.body.origin,
+            );
         }
         if self
             .body
@@ -3475,6 +3518,33 @@ impl<'a> BodyValidator<'a> {
         };
         match &item.kind {
             LoweredItemKind::Binding(binding) => {
+                if let Some(symbol) = binding.symbol {
+                    self.check_state_layout(
+                        symbol,
+                        binding.initialization_state_only,
+                        &item.origin,
+                    );
+                    let expected = self.program.items.iter().find_map(|(_, template)| {
+                        if template.origin.syntax != item.origin.syntax {
+                            return None;
+                        }
+                        match &template.kind {
+                            LoweredItemKind::Binding(original)
+                                if original.symbol == Some(symbol) =>
+                            {
+                                Some(original.predeclare_state_only)
+                            }
+                            _ => None,
+                        }
+                    });
+                    if expected != Some(binding.predeclare_state_only) {
+                        self.report(
+                            item.origin.span.clone(),
+                            "instance binding predeclaration layout disagrees with its template",
+                        );
+                    }
+                }
+
                 if let Some(value) = binding.value {
                     self.visit_expression(value);
                 }
@@ -3786,6 +3856,14 @@ impl<'a> BodyValidator<'a> {
                 }
                 Err(message) => self.report(pattern.origin.span.clone(), message),
             }
+        }
+        if let LoweredPatternKind::Binding {
+            symbol: Some(symbol),
+            initialization_state_only,
+            ..
+        } = &pattern.kind
+        {
+            self.check_state_layout(*symbol, *initialization_state_only, &pattern.origin);
         }
         match &pattern.kind {
             LoweredPatternKind::Wildcard
@@ -4792,6 +4870,52 @@ mod tests {
             assert!(!contains_type_parameter(&place.value_type));
         }
         let _ = program;
+    }
+
+    #[test]
+    fn recursive_local_storage_layout_corruption_is_rejected() {
+        let module = checked_program(
+            "def outer: () -> I32 = () => {\n def recur: <T> T -> T = value => recur value\n recur 1\n}\n",
+        );
+        let baseline = crate::Lowerer::new()
+            .lower(&module)
+            .expect("recursive locals lower")
+            .program;
+        assert!(baseline.validate_instance_bodies().is_empty());
+        for corrupt_predeclaration in [true, false] {
+            let mut program = baseline.clone();
+            let binding = program
+                .instances
+                .iter_mut()
+                .filter_map(|(_, instance)| instance.body.as_mut())
+                .flat_map(|body| body.items.iter_mut().map(|(_, item)| item))
+                .find_map(|item| match &mut item.kind {
+                    LoweredItemKind::Binding(binding)
+                        if binding.predeclare_state_only == Some(true) =>
+                    {
+                        Some(binding)
+                    }
+                    _ => None,
+                })
+                .expect("generic local state cell");
+            if corrupt_predeclaration {
+                binding.predeclare_state_only = None;
+            } else {
+                binding.initialization_state_only = false;
+            }
+            let diagnostics = program.validate_instance_bodies();
+            let message = if corrupt_predeclaration {
+                "predeclaration layout disagrees"
+            } else {
+                "initialization-state layout disagrees"
+            };
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(message)),
+                "{diagnostics:?}"
+            );
+        }
     }
 
     #[test]

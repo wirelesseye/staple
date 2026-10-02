@@ -418,6 +418,48 @@ impl<'a> EmissionView<'a> {
             .map(LoweredInstanceBody::captures)
     }
 
+    /// Recorded state-access layout under this owner's substitutions.
+    pub(crate) fn initialization_state_only(&self, owner: EmissionOwner, symbol: SymbolId) -> bool {
+        if let EmissionOwner::Instance(id) = owner {
+            if let Some(body) = self.instance_body(id) {
+                for (_, item) in body.items.iter() {
+                    if let super::LoweredItemKind::Binding(binding) = &item.kind
+                        && binding.symbol == Some(symbol)
+                    {
+                        return binding.initialization_state_only;
+                    }
+                }
+                for (_, pattern) in body.patterns.iter() {
+                    if let super::LoweredPatternKind::Binding {
+                        symbol: Some(bound),
+                        initialization_state_only,
+                        ..
+                    } = &pattern.kind
+                        && *bound == symbol
+                    {
+                        return *initialization_state_only;
+                    }
+                }
+                if let Some(parameter) = body
+                    .parameters
+                    .iter()
+                    .find(|parameter| parameter.symbol == symbol)
+                {
+                    return parameter.initialization_state_only;
+                }
+                if let Some(capture) = body
+                    .captures
+                    .iter()
+                    .find(|capture| capture.capture.symbol == symbol)
+                {
+                    return capture.initialization_state_only;
+                }
+            }
+        }
+        self.symbol(symbol)
+            .is_some_and(|symbol| symbol.initialization_state_only)
+    }
+
     /// The concrete type of one owner-local symbol under the owner's
     /// substitutions: a binding item or binding pattern, a parameter, or a
     /// capture of the owner's body. An initializer's symbols take the program

@@ -1804,16 +1804,22 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         "use std.slice.Slice\nlet fixed: Ref (I32; 3) = Ref (1, 2, 3)\nlet values: Slice I32 = fixed\n",
         "5.9",
     ),
-    inline(
-        "local_recursive_cells",
-        "def outer: () -> I32 = () => {\n def f: () -> I32 = () => g ()\n def g: () -> I32 = () => f ()\n f ()\n}\n",
-        "5.9",
-    ),
-    inline(
-        "local_generic_cells",
-        "def outer: () -> I32 = () => {\n def recur: <T> T -> T = value => recur value\n recur 1\n}\n",
-        "5.9",
-    ),
+    must_run(expect_stdout(
+        inline(
+            "local_recursive_cells",
+            "def outer: () -> I32 = () => {\n def f: () -> I32 = () => g ()\n def g: () -> I32 = () => f ()\n f ()\n}\n",
+            "5.9",
+        ),
+        "",
+    )),
+    must_run(expect_stdout(
+        inline(
+            "local_generic_cells",
+            "def outer: () -> I32 = () => {\n def recur: <T> T -> T = value => recur value\n recur 1\n}\n",
+            "5.9",
+        ),
+        "",
+    )),
     must_run(expect_stdout(
         inline(
             "natural_repeated_return",

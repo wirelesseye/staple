@@ -2237,6 +2237,7 @@ fn pattern_plan_shape(
 pub(crate) enum LoweredPatternKind {
     Wildcard,
     Binding {
+        initialization_state_only: bool,
         /// Source spelling retained for LLVM value names (Stage 5.9 P2).
         name: String,
         /// The symbol this pattern binds. Absent for singleton patterns such
@@ -2342,6 +2343,10 @@ pub(crate) enum LoweredItemKind {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredBindingItem {
+    /// Checked def storage allocated before the block items: true is a state-only cell.
+    pub predeclare_state_only: Option<bool>,
+    /// State access uses the cell directly rather than its value/state struct.
+    pub initialization_state_only: bool,
     /// The bound runtime symbol. Absent for compile-time-only `const`
     /// bindings, which stay outside the runtime symbol catalog.
     pub symbol: Option<SymbolId>,
@@ -2559,6 +2564,9 @@ pub(crate) enum SymbolStorage {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredSymbol {
+    /// Checked symbol type used for initialization-state layout specialization.
+    pub initialization_state_type: CheckedType,
+    pub initialization_state_only: bool,
     pub origin: Origin,
     pub semantic_id: SymbolId,
     pub module: ModuleId,
@@ -3181,6 +3189,13 @@ impl LoweredProgram {
         let has_global = facts.globals.contains(&symbol);
         let global_root = has_global && checked_type_contains_ref(&value_type);
         let value = LoweredSymbol {
+            initialization_state_type: module
+                .type_of_symbol(symbol)
+                .cloned()
+                .unwrap_or_else(|| value_type.clone()),
+            initialization_state_only: module
+                .type_of_symbol(symbol)
+                .is_some_and(contains_type_parameter),
             origin: origin.clone(),
             semantic_id: symbol,
             module: module_id,
@@ -3729,6 +3744,16 @@ impl LoweredProgram {
         };
         let reactive = self.lower_binding_reactive_operation(module, binding, symbol)?;
         Ok(LoweredBindingItem {
+            predeclare_state_only: (binding.kind == staple_syntax::BindingKind::Def
+                && resolved.requires_initialization_state(symbol))
+            .then(|| {
+                module
+                    .type_of_symbol(symbol)
+                    .is_some_and(contains_type_parameter)
+            }),
+            initialization_state_only: module
+                .type_of_symbol(symbol)
+                .is_some_and(contains_type_parameter),
             symbol: Some(symbol),
             value,
             compile_time_only: compile_time_only_symbol(module, symbol),
@@ -4768,6 +4793,10 @@ impl LoweredProgram {
         let kind = match pattern {
             Pattern::Wildcard(_) => LoweredPatternKind::Wildcard,
             Pattern::Binding(binding) => LoweredPatternKind::Binding {
+                initialization_state_only: resolved
+                    .symbol_for(binding.syntax.id)
+                    .and_then(|symbol| module.type_of_symbol(symbol))
+                    .is_some_and(contains_type_parameter),
                 name: binding.name.clone(),
                 symbol: resolved.symbol_for(binding.syntax.id),
                 singleton: resolved.type_for_pattern(binding.syntax.id),

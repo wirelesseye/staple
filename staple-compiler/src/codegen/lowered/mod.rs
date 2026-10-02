@@ -1530,12 +1530,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let Some(cell) = environment.binding_cells.get(&symbol).copied() else {
             return Ok(());
         };
-        let cell_type = self.binding_cell_type(owner, symbol)?;
-        let state_slot = self
-            .backend
-            .builder
-            .build_struct_gep(cell_type, cell, 1, "binding.state")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let state_slot = if self.view.initialization_state_only(owner, symbol) {
+            cell
+        } else {
+            let cell_type = self.binding_cell_type(owner, symbol)?;
+            self.backend
+                .builder
+                .build_struct_gep(cell_type, cell, 1, "binding.state")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+        };
         self.backend
             .builder
             .build_store(
@@ -2402,6 +2405,66 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
+    fn predeclare_checked_bindings(
+        &mut self,
+        owner: EmissionOwner,
+        items: &[crate::ItemId],
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        for &id in items {
+            let Some(item) = self.view.item(owner, id) else {
+                continue;
+            };
+            let LoweredItemKind::Binding(binding) = &item.kind else {
+                continue;
+            };
+            let Some(state_only) = binding.predeclare_state_only else {
+                continue;
+            };
+            let Some(symbol) = binding.symbol else {
+                continue;
+            };
+            if environment.binding_cells.contains_key(&symbol) {
+                continue;
+            }
+            let span = item.origin.span.clone();
+            let (cell, state) = if state_only {
+                let state = self
+                    .backend
+                    .builder
+                    .build_malloc(self.backend.context.i8_type(), "binding.state.cell")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                self.backend
+                    .register_gc_root_region(state, 1, span.clone())?;
+                (state, state)
+            } else {
+                let cell_type = self.binding_cell_type(owner, symbol)?;
+                let cell = self
+                    .backend
+                    .builder
+                    .build_malloc(cell_type, "binding.cell")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                self.backend.register_gc_root_region(
+                    cell,
+                    self.backend.target_data.get_store_size(&cell_type),
+                    span.clone(),
+                )?;
+                let state = self
+                    .backend
+                    .builder
+                    .build_struct_gep(cell_type, cell, 1, "binding.state")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                (cell, state)
+            };
+            self.backend
+                .builder
+                .build_store(state, self.backend.context.i8_type().const_zero())
+                .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+            environment.binding_cells.insert(symbol, cell);
+        }
+        Ok(())
+    }
+
     fn emit_block(
         &mut self,
         owner: EmissionOwner,
@@ -2417,6 +2480,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let span = block.origin.span.clone();
         let items = block.items.clone();
         let result = block.result;
+        let initializer_root = matches!(owner, EmissionOwner::Initializer(initializer_id)
+            if self.view.initializer(initializer_id).is_some_and(|initializer| initializer.body == id));
+        if !initializer_root {
+            self.predeclare_checked_bindings(owner, &items, environment)?;
+        }
         for item in items {
             self.emit_item(owner, item, environment)?;
             if environment.returned {
@@ -5442,12 +5510,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
-            let cell_type = self.binding_cell_type(owner, symbol)?;
-            let state = self
-                .backend
-                .builder
-                .build_struct_gep(cell_type, cell, 1, "binding.state")
-                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+            let state = if self.view.initialization_state_only(owner, symbol) {
+                cell
+            } else {
+                let cell_type = self.binding_cell_type(owner, symbol)?;
+                self.backend
+                    .builder
+                    .build_struct_gep(cell_type, cell, 1, "binding.state")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            };
             return self.backend.build_initialization_check(state, span.clone());
         }
         if let Some(state) = self.initialization_states.get(&symbol) {
