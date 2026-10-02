@@ -16,15 +16,9 @@ LLVM generation consumes lowered IR and no longer infers types, selects trait im
 - **Stage 5.1–5.9 are complete.** The backend helper layers and complete lowered emitter passed the migration gates. Historical results remain in the [Stage 5 breakdown](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md) and substage plans.
 - **Stage 5.10 is complete.** The lowered emitter is the only emitter. Lowering's output owns the concrete program and carries no checked-module copy. The selector, features, legacy emission/recorder/census and body comparator are gone. The 74-entry corpus retains strict/catalog/D5 and pinned-output/trap checks. The default suite passes 1301 tests; all 86 four-run LLVM comparisons matched the pre-cutover lowered reference, which is now removed. All 36 example LLVM/object/run paths pass; the fresh corpus export is verified.
 - The [36-entry test verdict table](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#step-2--test-verdicts-r2) records retained coverage for every legacy test. No new emission differences were introduced; D2 planned names and D5 per-instance artifacts are the existing intended differences from legacy.
-- **Stage 5.11 is complete, and Stage 5 is complete.** All five mirrored/queued defects are fixed: F1 (extern-adapter ABI), F2 (signal field writes), F3 (task scopes on early exits), F4 (completed-coroutine frame bindings), and F5 (generic `Drop` selection). Each has a pinned `MustRun` fixture and an M1 comparison; the 87-path comparison reports 83 `same` and the four `DIFF`s F1/F4 explain. The checker/lowering drop and `Copy` agreement sweep passes, Staple.md states the generic `Drop` rule and bound restriction, and the full workspace suite passes 1303 tests. `drop_method_for` is deleted, so the deferred checker warning is gone. **Stage 6 is next**; its [77-method handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) is unchanged apart from the deleted `drop_method_for`.
+- **Stage 5.11 is complete, and Stage 5 is complete.** All five mirrored/queued defects are fixed: F1 (extern-adapter ABI), F2 (signal field writes), F3 (task scopes on early exits), F4 (completed-coroutine frame bindings), and F5 (generic `Drop` selection). Each has a pinned `MustRun` fixture and an M1 comparison; the 87-path comparison reports 83 `same` and the four `DIFF`s F1/F4 explain. The checker/lowering drop and `Copy` agreement sweep passes, Staple.md states the generic `Drop` rule and bound restriction, and the full workspace suite passes 1303 tests. `drop_method_for` is deleted, so the deferred checker warning is gone. **Stage 6 is complete**; the historical [77-method handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) is unchanged apart from the deleted `drop_method_for`.
+- **Stage 6 and the typed-lowering refactor are complete.** Unused schema and APIs are removed; surviving comments and names describe current rules. Explicit lowering/codegen panic sites are classified and Result-returning sites report internal diagnostics. Crate/module docs describe the pipeline, validated boundary, planned names, inline cleanup, and concrete ABIs. The language reference covers task-scope early exits and signal field notification. The final gate passes 1301 tests, a warning-free workspace/test build, rustdoc with warnings denied, all 96 reference IR comparisons, and all 36 example CLI paths. The known CString callback temporary leak is documented in code and has an ignored executable reproduction. All plan files are safe to delete and are left for the user to remove.
 - Current suite command: `CARGO_INCREMENTAL=0 cargo nextest run --workspace`. No emitter feature or selector exists.
-
-### Known defects
-
-- **A temporary `CString` passed through an unknown callable leaks (Stage 5.11 F1 residual).**
-  - **Symptom:** a temporary `CString` argument is released after the call only when the callee is a statically known extern binding. Through an arbitrary closure, such as a callback parameter, the temporary is never freed.
-  - **Why it is narrow:** `CString.to_string` releases its own argument, so a blanket caller free would double-free `apply CString.to_string`.
-  - **Fix direction:** record whether the callee's parameter consumes its `CString` (a move or a releasing conversion), and free only when it borrows.
 
 ### Fixed defects
 
@@ -190,7 +184,7 @@ Progress:
 
 Stage 5.10 completed all eight steps. The final gate passes 1301 tests, all 86 four-run LLVM comparisons, the fresh-corpus supplemental check, and all 36 example LLVM/object/run paths. The temporary reference build is removed and all eight steps are committed. The [cutover plan](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md) contains per-step results, the test verdicts, and the Stage 6 method inventory. Implementation and historical gates for Stages 5.1–5.9 remain in the [migration breakdown](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md) and its linked plans.
 
-Stage 5.11 then fixed the five mirrored/queued defects in one commit each, with pinned `MustRun` fixtures and a baseline IR comparison per fix: F1 (extern-adapter ABI), F2 (signal field writes), F3 (task scopes on early exits), F4 (completed-coroutine frame bindings), and F5 (generic `Drop` selection). Its Step 7 gate passes: 1303 workspace tests, a warning-free build, formatting and whitespace checks, the CLI `--emit llvm`/`--emit object`/`run` paths on the examples, the checker/lowering drop and `Copy` agreement sweep, and an 87-path comparison that reports 83 `same` with only F1/F4's four explained `DIFF`s. **Stage 5 is complete; Stage 6 is next.**
+Stage 5.11 then fixed the five mirrored/queued defects in one commit each, with pinned `MustRun` fixtures and a baseline IR comparison per fix: F1 (extern-adapter ABI), F2 (signal field writes), F3 (task scopes on early exits), F4 (completed-coroutine frame bindings), and F5 (generic `Drop` selection). Its Step 7 gate passes: 1303 workspace tests, a warning-free build, formatting and whitespace checks, the CLI `--emit llvm`/`--emit object`/`run` paths on the examples, the checker/lowering drop and `Copy` agreement sweep, and an 87-path comparison that reports 83 `same` with only F1/F4's four explained `DIFF`s. **Stages 5 and 6 are complete.**
 
 - Functions, adapters and helpers are predeclared from the lowered catalog; emission follows deterministic catalog order and reads recorded bindings/plans.
 - The checked-module output bridge, LLVM-time specialization queue, active substitutions, expression overrides, generic reconstruction, trait selection and debug-string specialization keys are removed.
@@ -198,14 +192,15 @@ Stage 5.11 then fixed the five mirrored/queued defects in one commit each, with 
 - The corpus and catalog census remain as permanent behavior and structure checks. Whole-module identity against the pre-cutover lowered binary guards the cutover only.
 - Stage 5.11's five fixes are the only intended behavior changes: extern adapters receive their arguments by value, signal field writes notify, early exits close task scopes, completed coroutines drop their frame bindings, and generic `Drop` implementations run.
 
-### Stage 6 - Remove Transitional Code and Document the Boundary (Next)
+### Stage 6 - Remove Transitional Code and Document the Boundary (Completed)
 
-> **Plan:** [STAGE_6_CLEANUP_AND_BOUNDARY_PLAN.md](STAGE_6_CLEANUP_AND_BOUNDARY_PLAN.md). Because the plan files are deleted after the refactor, Stage 6 also makes code, tests, rustdoc, and `Staple.md` self-contained: no stage numbers, decision IDs, plan names, or legacy-function citations remain in code.
+> **Results:** [STAGE_6_CLEANUP_AND_BOUNDARY_PLAN.md](STAGE_6_CLEANUP_AND_BOUNDARY_PLAN.md).
 
-- Follow the [77-method checked-program inventory](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory). Remove or test-gate unused accessors, including `state_accesses_of_expression` (already unused), while retaining lowering, diagnostics and LSP/tooling APIs. Audit the existing broad dead-code allowance on the lowering schema. (`drop_method_for` was deleted by Stage 5.11 Step 6.)
-- Add module-level documentation describing phase responsibilities and invariants.
-- Confirm that lowering failures produce source-based diagnostics rather than backend panics.
-- Verify that concrete closure, resource, coroutine, FFI, and ownership ABIs are unchanged.
+The unused-code audit, self-contained comments and names, panic classification,
+ignored leak reproduction, module docs, language-reference updates, warning-free
+builds, complete suite, CLI paths, and reference IR gate are complete. Code,
+tests, rustdoc, README, and `Staple.md` stand alone. Nothing outside the plans
+references a plan file; all plan files remain for the user to delete.
 
 ## Test Plan
 

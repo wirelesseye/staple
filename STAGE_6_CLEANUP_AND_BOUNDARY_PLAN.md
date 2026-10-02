@@ -401,3 +401,56 @@ of removed-backend failures that could otherwise read as current behavior.
 Workspace and test builds are warning-free, and rustdoc including private modules
 builds with warnings denied. All 36 example CLI paths pass. Formatting and
 whitespace checks pass. The final reference IR results are recorded in Step 6.
+
+### Step 6: Final gate (complete)
+
+- The current source passes `cargo nextest run --workspace`: 1301 passed; the
+  corpus-dump hook and known-leak reproduction are ignored by the default suite.
+- `CARGO_INCREMENTAL=0 cargo build --workspace` and
+  `CARGO_INCREMENTAL=0 cargo test --workspace --no-run` are warning-free.
+- Crate and private-module rustdoc builds with warnings denied.
+- All 96 paths are `same` against the release reference from `9428582`.
+- All four prescribed mechanical scans are empty. Additional compact stage-name,
+  substage, and numbered-step comment scans are empty as well.
+- No blanket dead-code allowance remains. All 11 narrow allowances have their
+  concrete reason at the item (nine runtime layout constants, the test arena
+  constructor macro, and the LSP legend slot).
+- All 36 example LLVM/object/run paths pass with the worktree standard library.
+- Formatting and `git diff --check` pass.
+
+### Step 7: Plans are safe to delete (complete)
+
+A fixed-string scan for every filename below across the repository, excluding
+only the plan files, returns no matches. The primary plan marks Stage 6 and the
+refactor complete. The duplicate known-defect description was removed from its
+summary: `lower_call`, `LoweredCall::c_string_temporary`, and the ignored CLI
+reproduction preserve it. No plan files were deleted.
+
+Files left for the user to delete:
+
+- `STAGE_2_2_METADATA_CATALOG_PLAN.md`
+- `STAGE_2_4_EXPRESSION_CONTROL_FLOW_PLAN.md`
+- `STAGE_2_5_CALLS_TRAITS_CLOSURES_PLAN.md`
+- `STAGE_2_6_RESOURCES_REACTIVE_COROUTINES_PLAN.md`
+- `STAGE_2_LOWERING_BREAKDOWN.md`
+- `STAGE_3_1_SPECIALIZATION_KEYS_PLAN.md`
+- `STAGE_3_2_SUBSTITUTIONS_EVIDENCE_PLAN.md`
+- `STAGE_3_4_CONCRETE_INSTANCE_BODIES_PLAN.md`
+- `STAGE_3_5_GRAPH_VALIDATION_PLAN.md`
+- `STAGE_3_SPECIALIZATION_BREAKDOWN.md`
+- `STAGE_4_2_ARTIFACT_CLOSURE_PLAN.md`
+- `STAGE_4_3_STRUCTURAL_AND_FORMATTING_PLAN.md`
+- `STAGE_4_4_CLEANUP_ARTIFACTS_PLAN.md`
+- `STAGE_4_5_COROUTINE_AND_REACTIVE_ARTIFACTS_PLAN.md`
+- `STAGE_4_GENERATED_ARTIFACTS_BREAKDOWN.md`
+- `STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md`
+- `STAGE_5_11_MIRRORED_DEFECTS_PLAN.md`
+- `STAGE_5_3_EMITTER_SKELETON_PLAN.md`
+- `STAGE_5_4_CALLS_CLOSURES_RESOURCES_PLAN.md`
+- `STAGE_5_5_EXPRESSIONS_CONTROL_FLOW_PLAN.md`
+- `STAGE_5_6_OWNERSHIP_CLEANUP_EMISSION_PLAN.md`
+- `STAGE_5_8_COROUTINES_AND_REACTIVE_EMISSION_PLAN.md`
+- `STAGE_5_9_FULL_SUITE_PARITY_PLAN.md`
+- `STAGE_5_LLVM_MIGRATION_BREAKDOWN.md`
+- `STAGE_6_CLEANUP_AND_BOUNDARY_PLAN.md`
+- `TYPED_LOWERING_PLAN.md`
