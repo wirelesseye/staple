@@ -9,6 +9,21 @@ This plan's gate (Step 8) supersedes the **Gate** paragraph in the breakdown's 5
 
 Line references are against `1501270` and will drift; re-locate code by name. Build with `CARGO_INCREMENTAL=0`: each feature combination gets its own build tree, and Stage 5.9 filled the disk.
 
+## Execution Notes
+
+### Step 1 — complete
+
+- Pre-cutover production reference: `ee50922`, built with `CARGO_INCREMENTAL=0 cargo build --features staple/lowered-emitter --target-dir /private/tmp/staple-stage-5-10-reference`. Binary: `/private/tmp/staple-stage-5-10-reference/debug/staple`. The only source addition during this build is the test-only dump below.
+- Added ignored `codegen::differential::tests::dump_corpus_sources`; invoke with `STAPLE_CORPUS_DUMP=/private/tmp/staple-stage-5-10-corpus cargo test -p staple-compiler dump_corpus_sources -- --ignored --nocapture`. It dumped all 74 entries and copies `.sta` companion modules for file entries.
+- The final default, lowered, and shadow gates each pass all 1318 tests (one ignored dump helper skipped). Logs: `/private/tmp/staple-5-10-{default,lowered,shadow}.log`. Final legacy ledger: `/private/tmp/staple-5-10-shadow.ledger`, **589 programs, 166552 bodies, 8 D5-explained rejections**.
+- Frozen reference for all later R1 gates: `/private/tmp/staple-stage-5-10-reference/release/staple`, built with `CARGO_INCREMENTAL=0 cargo build --release --features staple/lowered-emitter --target-dir /private/tmp/staple-stage-5-10-reference` from the same `ee50922` production source. The supplemental debug sweep also finished with 85 single-variant successes and the original macro-example rejection; the optimized reference makes repeated full-scope gates practical.
+- Optimized reference self-comparison passes for **all 86 paths**, four runs per side, one variant each. The initial log `/private/tmp/staple-5-10-reference-release-self.log` contains 85 successes plus the pre-existing rejection of `examples/macros.sta`. That example used parenthesized effectful macro arguments which lowering rejected as positional products. Replacing the two invocations with block arguments makes the unchanged reference compile and run the complete intended tour. `/private/tmp/staple-5-10-reference-macros-self.log` proves its single stable variant; no path remains unverified. Compiler behavior is untouched. The underlying parenthesized-macro lowering rejection remains for a later front-end fix.
+- The final test-only split into doc-hidden `dump_corpus` plus ignored `dump_corpus_sources` passes its focused ignored test; the 225 dumped `.sta` files are byte-identical to the original export. The macro example prints all eight intended lines, including `generated values are correct`. Its dependent LSP hover check passes; formatting and diff checks pass. Step 2 is next.
+
+### Step 2 — preliminary audit findings (implementation not started)
+
+The source inventory is broader than the initial 31-test list. Also audit `stage_4_5_coroutine_and_runner_transition_matches_legacy_emission`, `legacy_constructor_and_structural_bodies_match_artifact_plans`, `legacy_specializations_not_in_the_catalog_are_detected`, and `stage_4_7_census_accounts_for_every_emitted_function`. Their transition helpers and `instance_for_legacy_specialization` must be retired once their verdicts are recorded. `coroutine_and_reactive_thunks_bind_demand_driven` and `stage_4_6_unused_subsystems_record_no_requirement` already assert lowering facts without calling legacy; preserve their assertions.
+
 ## Starting Point
 
 The lowered emitter is complete and proven against legacy:

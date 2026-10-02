@@ -2057,6 +2057,49 @@ mod tests {
             .expect("compiler crate should have a workspace parent")
     }
 
+    /// Freeze CLI inputs for the Stage 5.10 IR identity gate.
+    #[doc(hidden)]
+    fn dump_corpus(destination: &Path) {
+        fn copy_sources(source: &Path, destination: &Path) {
+            std::fs::create_dir_all(destination).unwrap();
+            for entry in std::fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let target = destination.join(entry.file_name());
+                if path.is_dir() {
+                    copy_sources(&path, &target);
+                } else if path.extension().is_some_and(|extension| extension == "sta") {
+                    std::fs::copy(path, target).unwrap();
+                }
+            }
+        }
+
+        for program in differential_corpus() {
+            let directory = destination.join(program.name);
+            std::fs::create_dir_all(&directory).unwrap();
+            match program.source {
+                DifferentialSource::Inline(source) => {
+                    std::fs::write(directory.join("main.sta"), source).unwrap();
+                }
+                DifferentialSource::File(path) => {
+                    let source = workspace_root().join(path);
+                    copy_sources(source.parent().unwrap(), &directory);
+                    std::fs::copy(source, directory.join("main.sta")).unwrap();
+                }
+            }
+        }
+        eprintln!("dumped {} corpus programs", differential_corpus().len());
+    }
+
+    #[test]
+    #[ignore = "set STAPLE_CORPUS_DUMP to the destination directory"]
+    fn dump_corpus_sources() {
+        let destination = std::path::PathBuf::from(
+            std::env::var_os("STAPLE_CORPUS_DUMP").expect("set STAPLE_CORPUS_DUMP"),
+        );
+        dump_corpus(&destination);
+    }
+
     /// The program source and the directory its `use` paths resolve against:
     /// a file entry resolves relative to its own directory (so a directory of
     /// side modules works), an inline entry against the workspace root.
