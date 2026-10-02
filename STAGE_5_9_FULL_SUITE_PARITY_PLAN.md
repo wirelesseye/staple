@@ -260,3 +260,31 @@ The build directory had grown to 26 GB across feature combinations and filled th
 ### Step 8 — freeze the oracle (complete)
 
 Legacy's stdout and exit status were captured for the 41 runnable entries that lacked `expected_stdout`, each run twice under legacy to confirm determinism (all 41 were stable, so none needed to be demoted or reduced to deterministic lines). Each entry now pins its output; the CLI harness asserts it under both emitters. Twenty-eight print nothing (three of them trap), and thirteen pin real output (the eleven `example_*` programs, `extern_values`, and `drop_glue_shapes`). Exit status is pinned as: normal exit (0) is asserted by the harness's behavior equality plus the pinned stdout; `buffers` (its `trapped` function traps by design) joins `structural_switch_trap` and `structural_deref_trap` under `expect_trap`. The in-process harness asserts that every `MustRun` and `LoweredOnly` entry pins its output, so Stage 5.10 can drop the legacy comparison and keep the behavior check. Default and lowered gates both pass **1318/1318**; formatting and whitespace checks pass. Step 9 is next.
+
+### Step 9 — gate and handoff (complete)
+
+**Gate results** (final tree, `CARGO_INCREMENTAL=0`):
+
+- Default emitter: **1318/1318**. `--features staple-compiler/lowered-emitter`: **1318/1318**.
+- `--features staple-compiler/differential-shadow,staple-compiler/lowered-emitter`: **1318/1318**. The shadow run compared **589 programs and 166552 bodies** across isolated test and CLI processes, with **8 D5-explained legacy rejections** ("unspecialized type parameter" on generic coroutine pairs). The only legacy-omission explanation added during 5.9 is the effect-less legacy coroutine pair match. The legacy-default shadow run matched the same program counts at Step 5.
+- The catalog census passes beside the legacy declaration census over the corpus, the census programs, and the shadow run; the legacy census still requires identical LLVM function types and linkage for every mapped function. The in-process corpus compares **19726 bodies** over **74 programs** (the 5.9 triage entries, plus three found by the shadow run).
+- `rg "not implemented yet" staple-compiler/src/codegen/lowered` is empty. Partial mode, the family tables, and `MayBeBlocked` are gone. Every `MustRun` and `LoweredOnly` corpus entry pins its output, asserted by the in-process harness and by the CLI harness under both emitters.
+- CLI paths, built from the worktree with the worktree standard library, for `examples/hello_world.sta`: `compile --emit llvm`, `compile --emit object`, and `run` all succeed under the legacy-default binary and the `lowered-emitter` binary, and print `Hello, world!` under both (the lowered module defines 318 functions to legacy's 348 for that program; the CLI corpus harness compares full behavior).
+
+**Handoff to Stage 5.10**
+
+Replaced already (5.10 may delete without loss):
+
+- `assert_declaration_parity`'s type/linkage guarantee, now also enforced without legacy by `assert_catalog_census`.
+- Output and exit-status comparison against legacy in the CLI harness: pinned `expected_stdout` and `traps` carry the behavior check. The harness's `compile_link_run(.., Emitter::Legacy, ..)` calls can be dropped, except that `LoweredOnly` entries record how legacy fails.
+- Partial-mode machinery: already deleted.
+
+Depend on legacy and need an explicit decision in 5.10:
+
+- Body-for-body comparison: `compare_fully_emitted_bodies`, `normalize_function`, the `stage_5_8_*` fixture tests and corpus harness in `codegen/differential.rs`, and the `differential-shadow` feature with its ledger. Nothing else re-checks that a lowered body is instruction-equivalent to the legacy body; deleting it ends parity evidence for 5.10's own refactors. Consider freezing normalized body digests per corpus function first.
+- The legacy census: `lower/census.rs` (`census_mapping`, `assert_declaration_parity`, the legacy-origin coverage kinds, aliased D5 detection), `codegen/legacy_recorder.rs`, and the test-only fields they need in the legacy `ModuleEmitter`. The D5 alias detection asserts plan-content facts (two artifacts for one legacy pair) that `assert_distinct_d5_artifacts` covers only for the `LoweredOnly` fixtures.
+- `lower/graph_validation.rs` tests that call `legacy_emissions` (about 19 references): the declaration and artifact-family census tests. The catalog census replaces their definition and type checks; their legacy-origin coverage assertions do not carry over.
+- `tests/compiler.rs`: `assert_artifact_definition` and the other `cfg!(feature = "lowered-emitter")` branches keep a legacy-spelling `else` arm that disappears with the legacy default. `tests/lowered_emitter.rs::selector_preserves_legacy_and_emits_reactive_body` compares both emitters directly.
+- `Emitter`, `CodeGenerator::with_emitter`, and the `lowered-emitter` feature, which exist only to choose between the two.
+
+Mirrored behavior left for 5.11: unchanged (the 5.9 fixes changed lowering, never legacy behavior).
