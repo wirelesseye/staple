@@ -58,6 +58,15 @@ Line references are against `5194cf9` and will drift; re-locate code by name. Bu
 - Language consequence: a type with an applicable generic `Drop` implementation is not `Copy`; only the 4.4 fixtures and the new 5.11 fixtures declare generic `Drop`, so no other program's diagnostics change. Staple.md's `Drop` section states the rule and the bound restriction.
 - M1: no baseline-corpus path changes for F5; the four `DIFF`s carried from F1/F4 remain; 83 of 87 paths `same`. The full workspace suite passes 1303 tests.
 
+### Step 7 — complete (gate met, Stage 5 closed)
+
+- **Fixtures.** Every Step 2–6 fixture prints its corrected output and is a pinned `MustRun` corpus entry: `extern_adapter_abi`, `signal_field_writes`, `task_scope_break_exit`, `task_scope_continue_exit`, `task_scope_return_exit`, `coroutine_completion_drops`, `generic_drop_selection`, and `generic_drop_ownership`; `thunk_arguments` and `coroutine_drop_order` were deliberately updated with pinned output.
+- **Containment.** The 87-path four-run comparison against the `5194cf9` reference reports 83 `same`. The only `DIFF`s are `census_coroutines_and_runners` and `extern_values` (F1: the adapter load) and `await_task_effect_pair` and `coroutine_drop_order` (F4: the moved-out frame cell and the completion drops), each exercising its fix.
+- **Agreement.** `layout_context_agrees_with_checker_predicates` checks `type_needs_drop`/`concrete_needs_drop` and `Copy` on every signature type, and `assert_drop_glue_plans_agree` checks them plus the user-drop predicate on every drop-glue plan, over the extended fixture sweep.
+- **Suite.** `CARGO_INCREMENTAL=0 cargo nextest run --workspace` passes 1303 tests; `cargo build --workspace` is warning-free; `cargo fmt --all -- --check` and `git diff --check` pass.
+- **CLI.** The `--emit llvm`, `--emit object`, and `run` paths pass on the examples with the worktree standard library.
+- **Close-out.** TYPED_LOWERING_PLAN.md (status, the Stage 5/6 sections, and the fixed-defect list), the breakdown (status line, D5, the 5.11 section, ordering, and the definition of done), the 4.4/4.5 plans' latent-defect notes, and Staple.md's `Drop` section record the fixes. Stage 5 is marked complete with Stage 6 named as next; the Stage 6 handoff is unchanged apart from the deleted `drop_method_for`.
+
 ## Starting Point
 
 There is one emitter, and the suite passes 1302 tests. Stage 5.11 is the only part of Stage 5 that intentionally changes behavior. Five defects are queued:

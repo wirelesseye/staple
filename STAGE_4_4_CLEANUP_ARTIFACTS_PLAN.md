@@ -45,7 +45,7 @@ The decision order matters and must be preserved exactly.
    - **`Distinct`:** drop the representation.
    - **Anything else:** no-op.
 
-Generic `Drop` implementations such as `impl<T> Drop (Box T)` are accepted by the checker. However, both `drop_method_for` and `type_needs_drop` match only an implementation whose argument is exactly the concrete type, so a generic implementation never matches a concrete type. This is a latent language gap. Stage 4.4 **mirrors it**, records it in the handoff, and does not fix it.
+Generic `Drop` implementations such as `impl<T> Drop (Box T)` are accepted by the checker. However, both `drop_method_for` and `type_needs_drop` match only an implementation whose argument is exactly the concrete type, so a generic implementation never matches a concrete type. This is a latent language gap. Stage 4.4 **mirrors it**, records it in the handoff, and does not fix it. **Fixed in Stage 5.11 Step 6:** one shared header/bound predicate backs the checker and lowering, and lowering selects the method through trait resolution with a `DropMethod` edge.
 
 ### Finalizers
 
@@ -222,13 +222,13 @@ Stage 4.4 is the first substage with a real scanner. Following the 4.2 recipe, a
   - each runtime opaque type (`Coroutine`, `Scheduler`, `Wait`, `Resolver`, `CompletionToken`);
   - a recursive nominal type through a sum;
   - drop glue requested from two generic instantiations (two keys);
-  - a generic `Drop` implementation, asserting that it is **not** selected, which mirrors legacy.
+  - a generic `Drop` implementation, asserting that it is **not** selected, which mirrors legacy. (Stage 5.11 Step 6 replaced this with the corrected selection: `Box I32` selects the user drop, while `Box CString`/`Box Handle` fail the `Copy` bound and keep the structural branch.)
 - **Gate:** every 4.3-requested `DropGlue` is now expanded. Every plan's user-drop selection agrees with `TypedModule::drop_method_for`, and its needs-drop gating agrees with `type_needs_drop`, both checked in a transition test. Closure converges; record the round and growth maxima.
 
 **Step 2 notes (complete):**
 
 - **Module.** New private `lower/cleanup_artifacts.rs` owns `expand_drop_glue`; `ProductionHooks::expand` dispatches the `DropGlue` arm to it and `expands_body` reports the family, so validation rejects any drop-glue plan left `Unexpanded`.
-- **Selection.** `LoweredProgram::drop_method_for_concrete` and `concrete_type_needs_drop` now share `drop_implementation_for`: the one-argument `Drop` implementation whose trait argument equals the concrete type exactly (mirroring legacy `has_drop_implementation`), with the method taken from the implementation's method map. The selected method becomes a `Root` instance request with the template signature and no substitutions, kind `LoweredInstanceDependencyKind::DropMethod` (new). A generic `Drop` implementation never matches a concrete type, exactly as legacy `drop_method_for` does; the `Box T` fixture asserts it is not selected.
+- **Selection.** `LoweredProgram::drop_method_for_concrete` and `concrete_type_needs_drop` now share `drop_implementation_for`: the one-argument `Drop` implementation whose trait argument equals the concrete type exactly (mirroring legacy `has_drop_implementation`), with the method taken from the implementation's method map. The selected method becomes a `Root` instance request with the template signature and no substitutions, kind `LoweredInstanceDependencyKind::DropMethod` (new). A generic `Drop` implementation never matches a concrete type, exactly as legacy `drop_method_for` does; the `Box T` fixture asserts it is not selected. (Stage 5.11 Step 6 replaced both the predicate and the selection: `drop_method_for_concrete`/`drop_implementation_for` are deleted, and `user_drop_method` selects through `select_concrete_trait_method_with_kind(.., DropMethod)`.)
 - **Decision order.** `drop_glue_body` checks user `Drop` first, then the coroutine cleanup, then `Scheduler`/`Wait`/`Resolver`/`CompletionToken` runtime releases (via the new `LoweredProgram::runtime_opaque_kind`, shared with `concrete_needs_drop`), then `CString` (`free`), then the structural product (reverse element order, droppable fields only), sum (tag order, droppable alternatives only), and `Distinct` representation. Each nested cleanup is a `DropGlue` request in that same order, so a recursive nominal type terminates through 4.2 key deduplication. `CStringFree` is the `free` release; Stage 4.6 turns `RuntimeRelease` and `CStringFree` into runtime requirements.
 - **Needs-drop gating.** A `DropGlue` key whose type `concrete_needs_drop` rejects is an expander diagnostic; every requester already gates on `concrete_needs_drop`. The representation drop after a user `Drop` is requested only when `concrete_needs_drop(representation)` holds: legacy calls `compile_drop_value(representation)` unconditionally, but that call is the `_ => {}` no-op for a type that does not need drop, so the recorded plans are behaviorally identical.
 - **Canonicalizing coroutine types (new).** `Coroutine{E} T` encodes its concrete effect row as a function type with `Error` parameter and result (`effect_substitution_type`), which `CanonicalType::convert` previously rejected. `CheckedType::Function` values in that exact shape now canonicalize as a never-parameter marker that keeps the canonical effect row, so coroutine/task type arguments stay part of artifact and instance keys. Existing key encodings are unchanged (no previously-passing key contained an error-charged function), so `SPECIALIZATION_KEY_ENCODING_VERSION` stays 2.
@@ -352,7 +352,7 @@ While extending the recorder, also close 4.3 review finding 2: compare `IndexSwi
 
 ##### Language gap
 
-- A generic `Drop` implementation (`impl<T> Drop (Box T)`) is accepted by the checker but never selected: both legacy `drop_method_for` and the owned `drop_implementation_for` require the implementation's single trait argument to equal the concrete type exactly. Stage 4.4 mirrors the gap (the `Box` fixture asserts a generic implementation is not selected) and does not fix it.
+- A generic `Drop` implementation (`impl<T> Drop (Box T)`) is accepted by the checker but never selected: both legacy `drop_method_for` and the owned `drop_implementation_for` require the implementation's single trait argument to equal the concrete type exactly. Stage 4.4 mirrors the gap (the `Box` fixture asserts a generic implementation is not selected) and does not fix it. **Fixed in Stage 5.11 Step 6:** one shared header/bound predicate backs the checker and lowering, lowering selects the method through trait resolution, and the bound restriction is enforced at declaration.
 
 ##### Observed maxima
 

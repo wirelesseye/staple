@@ -16,7 +16,7 @@ LLVM generation consumes lowered IR and no longer infers types, selects trait im
 - **Stage 5.1–5.9 are complete.** The backend helper layers and complete lowered emitter passed the migration gates. Historical results remain in the [Stage 5 breakdown](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md) and substage plans.
 - **Stage 5.10 is complete.** The lowered emitter is the only emitter. Lowering's output owns the concrete program and carries no checked-module copy. The selector, features, legacy emission/recorder/census and body comparator are gone. The 74-entry corpus retains strict/catalog/D5 and pinned-output/trap checks. The default suite passes 1301 tests; all 86 four-run LLVM comparisons matched the pre-cutover lowered reference, which is now removed. All 36 example LLVM/object/run paths pass; the fresh corpus export is verified.
 - The [36-entry test verdict table](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#step-2--test-verdicts-r2) records retained coverage for every legacy test. No new emission differences were introduced; D2 planned names and D5 per-instance artifacts are the existing intended differences from legacy.
-- **Stage 5.11 is in progress after the cutover.** F1 (the extern-value adapter ABI) is fixed: the adapter takes the closure ABI's parameter shapes and loads each borrowed argument, and a closure call to a known extern binding releases a `CString` temporary. F2 (signal field writes) is fixed: a field write notifies its base signal and never writes initialization state. F3 (task scopes on early exits) is fixed: `return`, `break`, and `continue` close every task scope opened since their target. F4 (completed-coroutine frame bindings) is fixed: a coroutine that completes normally drops its live frame bindings before publishing the result. F5 (generic `Drop` selection) is fixed: one shared header/bound predicate backs both sides, lowering selects through trait resolution, and the bound restriction is enforced. Step 7's gate and close-out remain; Stage 5 is still in progress. The [77-method Stage 6 handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) identifies surviving lowering/frontend/LSP/test uses and unused queries. `drop_method_for` is deleted, so codegen is warning-free.
+- **Stage 5.11 is complete, and Stage 5 is complete.** All five mirrored/queued defects are fixed: F1 (extern-adapter ABI), F2 (signal field writes), F3 (task scopes on early exits), F4 (completed-coroutine frame bindings), and F5 (generic `Drop` selection). Each has a pinned `MustRun` fixture and an M1 comparison; the 87-path comparison reports 83 `same` and the four `DIFF`s F1/F4 explain. The checker/lowering drop and `Copy` agreement sweep passes, Staple.md states the generic `Drop` rule and bound restriction, and the full workspace suite passes 1303 tests. `drop_method_for` is deleted, so the deferred checker warning is gone. **Stage 6 is next**; its [77-method handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) is unchanged apart from the deleted `drop_method_for`.
 - Current suite command: `CARGO_INCREMENTAL=0 cargo nextest run --workspace`. No emitter feature or selector exists.
 
 ### Fixed defects
@@ -169,19 +169,21 @@ Progress:
 
 > **Complex stage:** Some dependencies are currently discovered deep inside LLVM emission, especially formatting, structural traits, cleanup, and coroutines. This stage may need subsystem-specific breakdown plans to identify and relocate every hidden discovery path.
 
-### Stage 5 - Migrate LLVM Generation to Lowered IR (In Progress)
+### Stage 5 - Migrate LLVM Generation to Lowered IR (Done)
 
 Stage 5.10 completed all eight steps. The final gate passes 1301 tests, all 86 four-run LLVM comparisons, the fresh-corpus supplemental check, and all 36 example LLVM/object/run paths. The temporary reference build is removed and all eight steps are committed. The [cutover plan](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md) contains per-step results, the test verdicts, and the Stage 6 method inventory. Implementation and historical gates for Stages 5.1–5.9 remain in the [migration breakdown](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md) and its linked plans.
+
+Stage 5.11 then fixed the five mirrored/queued defects in one commit each, with pinned `MustRun` fixtures and a baseline IR comparison per fix: F1 (extern-adapter ABI), F2 (signal field writes), F3 (task scopes on early exits), F4 (completed-coroutine frame bindings), and F5 (generic `Drop` selection). Its Step 7 gate passes: 1303 workspace tests, a warning-free build, formatting and whitespace checks, the CLI `--emit llvm`/`--emit object`/`run` paths on the examples, the checker/lowering drop and `Copy` agreement sweep, and an 87-path comparison that reports 83 `same` with only F1/F4's four explained `DIFF`s. **Stage 5 is complete; Stage 6 is next.**
 
 - Functions, adapters and helpers are predeclared from the lowered catalog; emission follows deterministic catalog order and reads recorded bindings/plans.
 - The checked-module output bridge, LLVM-time specialization queue, active substitutions, expression overrides, generic reconstruction, trait selection and debug-string specialization keys are removed.
 - Target-specific layout, calling conventions and instruction construction remain backend-local.
-- The corpus and catalog census remain as permanent behavior and structure checks. Whole-module identity against the pre-cutover lowered binary guards this cutover only.
-- Stage 5.11 owns the mirrored defects and candidates listed in the breakdown; this cutover changes no emitted instructions.
+- The corpus and catalog census remain as permanent behavior and structure checks. Whole-module identity against the pre-cutover lowered binary guards the cutover only.
+- Stage 5.11's five fixes are the only intended behavior changes: extern adapters receive their arguments by value, signal field writes notify, early exits close task scopes, completed coroutines drop their frame bindings, and generic `Drop` implementations run.
 
-### Stage 6 - Remove Transitional Code and Document the Boundary (Remaining)
+### Stage 6 - Remove Transitional Code and Document the Boundary (Next)
 
-- Follow the [77-method checked-program inventory](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory). Remove or test-gate unused accessors, including `drop_method_for` (tests only after cutover) and `state_accesses_of_expression` (already unused), while retaining lowering, diagnostics and LSP/tooling APIs. Audit the existing broad dead-code allowance on the lowering schema.
+- Follow the [77-method checked-program inventory](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory). Remove or test-gate unused accessors, including `state_accesses_of_expression` (already unused), while retaining lowering, diagnostics and LSP/tooling APIs. Audit the existing broad dead-code allowance on the lowering schema. (`drop_method_for` was deleted by Stage 5.11 Step 6.)
 - Add module-level documentation describing phase responsibilities and invariants.
 - Confirm that lowering failures produce source-based diagnostics rather than backend panics.
 - Verify that concrete closure, resource, coroutine, FFI, and ownership ABIs are unchanged.
@@ -255,4 +257,4 @@ Stage 5.10 completed all eight steps. The final gate passes 1301 tests, all 86 f
 - `LoweredModule` is compiler-facing and has no stable serialization or binary-compatibility promise.
 - Emitted function instances are fully concrete; generic templates exist only inside lowering.
 - Scheme abstraction, stored polymorphic values, erased calls, dictionaries, descriptors, runtime-sized layouts, and related tooling remain for the later feature update.
-- Existing language behavior and concrete ABI are unchanged by this preparatory update. The one exception is Stage 5.11's two fixes for mirrored drop defects.
+- Existing language behavior and concrete ABI are unchanged by this preparatory update. The exception is Stage 5.11's five fixes for the mirrored/queued defects (F1–F5).
