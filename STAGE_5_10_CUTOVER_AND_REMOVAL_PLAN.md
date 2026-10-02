@@ -30,6 +30,10 @@ The default now always selects lowered emission. The converted runtime tests use
 
 The shared 74-entry `codegen/corpus.rs` now exposes `Corpus*` types and `codegen_corpus`. Expectations are `MustRun`/`CompileOnly`; D5 metadata survives. The strict in-process harness retains catalog census, focus definitions, structural coverage and distinct D5 artifacts. The CLI harness retains object/link/run, pinned stdout and traps, and explicitly asserts successful exit codes. The body comparator, normalization test, shadow counters/ledger writers, shadow compilation and `differential-shadow` feature are removed. Default and remaining lowered-feature suites each pass 1301 tests (one ignored dump helper skipped). All 86 four-run R1 paths are `same (1 variant(s))`; formatting, workspace check and diff checks pass. Logs: `/private/tmp/staple-5-10-step3-{default,lowered,ir}.log`. Step 4 is next.
 
+### Step 4 — complete
+
+The legacy declaration census, alias/fallback mapping and specialization matcher are gone. `assert_catalog_census` and the concrete-type helper used by lowering assertions remain. The recorder module, legacy snapshot functions and every test instrumentation block in `ModuleEmitter` are removed; actual LLVM runtime use-list checks remain on lowered emission. The workspace check is warning-free; both remaining suites pass 1301 tests (one ignored helper skipped), all 86 four-run R1 paths match, and formatting/diff checks pass. Logs: `/private/tmp/staple-5-10-step4-{default,lowered,ir}.log`. The IR sweep invokes the unchanged comparison script on four disjoint chunks and verifies exactly 86 matching rows. Step 5 is next.
+
 ### Step 2 — test verdicts (R2)
 
 The audit covers the original 31 entries (including the shared compiler assertion helper) and five additional tests found in source: **36 entries**. Verdicts are recorded before deletions. `convert (Step 3)` means the retained corpus harness is renamed and converted together with its shared definitions in Step 3.

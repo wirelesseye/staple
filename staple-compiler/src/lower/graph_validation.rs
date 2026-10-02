@@ -7,10 +7,6 @@
 //! values. It runs inside `Lowerer::lower` after the Stage 3.4 body validator
 //! and never interns keys, materializes bodies, or touches the legacy backend.
 //!
-//! The test-only `instance_for_legacy_specialization` matcher backs the
-//! transition comparison in this module: the legacy LLVM specialization queue
-//! records a function plus concrete substitutions only, so evidence is not
-//! part of the match.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -474,51 +470,6 @@ fn body_evidence_origin(
         LoweredBindingSite::AwaitChildPlan(id) => {
             body.awaits.get(id).map(|await_| await_.origin.clone())
         }
-    }
-}
-
-#[cfg(test)]
-impl LoweredProgram {
-    /// Test-only: the interned instance whose template, concrete callable
-    /// type, and substitutions reproduce one legacy specialization. The
-    /// legacy queue does not record evidence, so it is excluded here.
-    pub(crate) fn instance_for_legacy_specialization(
-        &self,
-        function: crate::FunctionId,
-        function_type: &crate::CheckedFunctionType,
-        substitutions: &std::collections::HashMap<crate::TypeParameterId, crate::CheckedType>,
-    ) -> Option<FunctionInstanceId> {
-        self.instances.iter().find_map(|(id, instance)| {
-            if instance.template != function
-                || !instance
-                    .body
-                    .as_ref()
-                    .is_some_and(|body| &body.signature == function_type)
-            {
-                return None;
-            }
-            let types_match = instance.relevant.type_parameters().all(|parameter| {
-                matches!(
-                    (
-                        instance.environment.type_value(parameter),
-                        substitutions.get(&parameter),
-                    ),
-                    (Some(instance_value), Some(legacy)) if instance_value == legacy
-                )
-            });
-            let effects_match = instance.relevant.effect_parameters().all(|parameter| {
-                match (
-                    instance.environment.effect_value(parameter),
-                    substitutions
-                        .get(&parameter)
-                        .and_then(crate::effect_substitution_value),
-                ) {
-                    (Some(instance_value), Some(legacy)) => instance_value == legacy,
-                    _ => false,
-                }
-            });
-            (types_match && effects_match).then_some(id)
-        })
     }
 }
 

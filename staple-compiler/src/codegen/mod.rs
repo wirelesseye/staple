@@ -36,8 +36,6 @@ mod abi;
 pub mod corpus;
 mod ir;
 mod layout;
-#[cfg(test)]
-mod legacy_recorder;
 mod lowered;
 mod runtime;
 
@@ -54,8 +52,6 @@ use layout::{
     CORO_PARENT, CORO_RECORD, CORO_RESOURCES, CORO_RESULT_PTR, CORO_STATE, SumStorage,
     TASK_RECORD_FRAME, TASK_RECORD_RESULT, TASK_RECORD_SCHEDULER,
 };
-#[cfg(test)]
-pub(crate) use legacy_recorder::*;
 
 /// Stage 5.2: the backend-local layout/ABI/runtime/IR layer both emitters
 /// share. It owns the LLVM module, builder, target data, pointer-sized integer
@@ -114,75 +110,6 @@ struct ModuleEmitter<'module, 'context> {
         CheckedFunctionType,
         HashMap<TypeParameterId, CheckedType>,
     )>,
-    /// Test-only: typed constructor-adapter records in creation order.
-    #[cfg(test)]
-    legacy_constructor_adapters: Vec<LegacyConstructorAdapter>,
-    /// Test-only: finished structural-method records in creation order.
-    #[cfg(test)]
-    legacy_structural_methods: Vec<LegacyStructuralMethod>,
-    /// Test-only: the structural bodies currently being emitted, innermost
-    /// last. Events record onto the innermost entry so nested structural
-    /// bodies attribute their own literals and delegates.
-    #[cfg(test)]
-    legacy_structural_stack: Vec<LegacyStructuralMethod>,
-    /// Test-only: open `compile_drop_value` frames, innermost last. A frame
-    /// popped at the top level becomes a root of `legacy_drop_roots`.
-    #[cfg(test)]
-    legacy_drop_stack: Vec<LegacyDropCall>,
-    #[cfg(test)]
-    legacy_drop_roots: Vec<LegacyDropCall>,
-    /// Test-only: every finalizer body created, in creation order.
-    #[cfg(test)]
-    legacy_finalizers: Vec<LegacyFinalizer>,
-    /// Test-only: every ownership registration per emitted function, in order.
-    #[cfg(test)]
-    legacy_owned: Vec<LegacyOwned>,
-    /// Test-only: the specialization currently being emitted, so ownership
-    /// registrations map back to their instance.
-    #[cfg(test)]
-    legacy_function_key: Option<(
-        FunctionId,
-        CheckedFunctionType,
-        HashMap<TypeParameterId, CheckedType>,
-    )>,
-    /// Test-only: the body thunk a coroutine `resume` is currently compiling,
-    /// so registrations inside state 0 attribute to the thunk instead of the
-    /// no-function-id resume environment. `environment.function_id` still wins
-    /// for nested function emission.
-    #[cfg(test)]
-    legacy_owned_function: Option<FunctionId>,
-    #[cfg(test)]
-    legacy_buffer_clones: Vec<LegacyBufferClone>,
-    /// Test-only: every `ensure_coroutine_codes` pair creation, in creation
-    /// order.
-    #[cfg(test)]
-    legacy_coroutine_pairs: Vec<LegacyCoroutinePair>,
-    /// Test-only: every `compile_coro_expression` request for a pair, in
-    /// emission order.
-    #[cfg(test)]
-    legacy_coroutine_requests: Vec<LegacyCoroutineRequest>,
-    /// Test-only: every reactive runner creation, in creation order.
-    #[cfg(test)]
-    legacy_runners: Vec<LegacyReactiveRunner>,
-    /// Test-only: whether the most recent `set_gc_finalizer` call happened, so
-    /// the constructor-adapter record observes the real call.
-    #[cfg(test)]
-    legacy_finalizer_set: bool,
-    /// Test-only: every eager extern closure adapter declaration, with whether
-    /// the adapter was read as a first-class value.
-    #[cfg(test)]
-    legacy_extern_adapters: Vec<LegacyExternAdapter>,
-    /// Test-only: the functions the installed runtime modules and the UTF-8
-    /// validator define. A runtime reference from inside one of them is the
-    /// runtime's own business, not a surface emitted code needs.
-    #[cfg(test)]
-    legacy_runtime_internal: HashSet<String>,
-    /// Test-only: every function the emitter creates with a body, keyed by
-    /// its final LLVM name, with the legacy record it belongs to. The Stage
-    /// 4.7 census proves every function the module defines is here and maps
-    /// to a catalog entry.
-    #[cfg(test)]
-    legacy_defined_functions: Vec<(String, LegacyFunctionOrigin)>,
     active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
     expression_type_overrides: HashMap<staple_syntax::SyntaxId, CheckedType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
@@ -312,34 +239,6 @@ struct LoopCodegenContext<'context> {
 type CodeGenerationResult<T> = Result<T, Diagnostic>;
 
 impl<'module, 'context> ModuleEmitter<'module, 'context> {
-    /// Test-only: registers one function the emitter created, under the name
-    /// LLVM gave it (a clashing name is suffixed on the new function only, so
-    /// the name is stable once added).
-    #[cfg(test)]
-    fn legacy_register_function(
-        &mut self,
-        function: inkwell::values::FunctionValue<'context>,
-        origin: LegacyFunctionOrigin,
-    ) {
-        let name = function.get_name().to_string_lossy().into_owned();
-        self.legacy_defined_functions.push((name, origin));
-    }
-
-    /// Test-only: marks the extern adapter for `symbol` as read as a
-    /// first-class value.
-    fn mark_extern_adapter_used(&mut self, symbol: SymbolId) {
-        #[cfg(test)]
-        if let Some(adapter) = self
-            .legacy_extern_adapters
-            .iter_mut()
-            .find(|adapter| adapter.symbol == symbol)
-        {
-            adapter.used = true;
-        }
-        #[cfg(not(test))]
-        let _ = symbol;
-    }
-
     fn new(
         context: &'context inkwell::context::Context,
         module: &'module LoweredModule,
@@ -367,40 +266,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             constructor_codes: HashMap::new(),
             structural_trait_codes: HashMap::new(),
             specialization_queue: Vec::new(),
-            #[cfg(test)]
-            legacy_constructor_adapters: Vec::new(),
-            #[cfg(test)]
-            legacy_structural_methods: Vec::new(),
-            #[cfg(test)]
-            legacy_structural_stack: Vec::new(),
-            #[cfg(test)]
-            legacy_drop_stack: Vec::new(),
-            #[cfg(test)]
-            legacy_drop_roots: Vec::new(),
-            #[cfg(test)]
-            legacy_finalizers: Vec::new(),
-            #[cfg(test)]
-            legacy_owned: Vec::new(),
-            #[cfg(test)]
-            legacy_function_key: None,
-            #[cfg(test)]
-            legacy_owned_function: None,
-            #[cfg(test)]
-            legacy_buffer_clones: Vec::new(),
-            #[cfg(test)]
-            legacy_coroutine_pairs: Vec::new(),
-            #[cfg(test)]
-            legacy_coroutine_requests: Vec::new(),
-            #[cfg(test)]
-            legacy_runners: Vec::new(),
-            #[cfg(test)]
-            legacy_finalizer_set: false,
-            #[cfg(test)]
-            legacy_extern_adapters: Vec::new(),
-            #[cfg(test)]
-            legacy_runtime_internal: HashSet::new(),
-            #[cfg(test)]
-            legacy_defined_functions: Vec::new(),
             active_type_substitutions: HashMap::new(),
             expression_type_overrides: HashMap::new(),
             function_symbols: HashMap::new(),
@@ -484,97 +349,6 @@ impl<'context> CodeGenerator<'context> {
             }
         }
     }
-}
-
-/// Compiles one lowered module with the legacy backend and returns its typed
-/// discoveries for the Stage 3.5 transition comparison.
-#[cfg(test)]
-pub(crate) fn legacy_emissions(
-    context: &inkwell::context::Context,
-    module: &LoweredModule,
-) -> Result<LegacyEmissions, Vec<Diagnostic>> {
-    let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
-    legacy_module_with_emissions(context, module, &target_machine).map(|(_, emissions)| emissions)
-}
-
-#[cfg(test)]
-fn legacy_module_with_emissions<'context>(
-    context: &'context inkwell::context::Context,
-    module: &LoweredModule,
-    target_machine: &TargetMachine,
-) -> Result<(LlvmModule<'context>, LegacyEmissions), Vec<Diagnostic>> {
-    let mut emitter = ModuleEmitter::new(context, module, &target_machine);
-    emitter
-        .run(&target_machine)
-        .map_err(|diagnostic| vec![diagnostic])?;
-    emitter.llvm_module.verify().map_err(|message| {
-        vec![Diagnostic::new(
-            Span::Compiler,
-            format!("invalid legacy LLVM module: {message}"),
-        )]
-    })?;
-    let emissions = LegacyEmissions {
-        specializations: emitter.specialization_queue.clone(),
-        constructor_adapters: emitter.legacy_constructor_adapters.clone(),
-        structural_methods: emitter.legacy_structural_methods.clone(),
-        drop_calls: emitter.legacy_drop_roots.clone(),
-        finalizers: emitter.legacy_finalizers.clone(),
-        owned: emitter.legacy_owned.clone(),
-        buffer_clones: emitter.legacy_buffer_clones.clone(),
-        coroutine_pairs: emitter.legacy_coroutine_pairs.clone(),
-        coroutine_requests: emitter.legacy_coroutine_requests.clone(),
-        runners: emitter.legacy_runners.clone(),
-        extern_adapters: emitter.legacy_extern_adapters.clone(),
-        defined_functions: emitter.legacy_defined_functions.clone(),
-        function_types: emitter
-            .llvm_module
-            .get_functions()
-            .filter_map(|function| {
-                function.get_name().to_str().ok().map(|name| {
-                    (
-                        name.to_owned(),
-                        function.get_type().print_to_string().to_string(),
-                    )
-                })
-            })
-            .collect(),
-        function_linkages: emitter
-            .llvm_module
-            .get_functions()
-            .filter_map(|function| {
-                function.get_name().to_str().ok().map(|name| {
-                    (
-                        name.to_owned(),
-                        function.get_linkage() == inkwell::module::Linkage::Internal,
-                    )
-                })
-            })
-            .collect(),
-        runtime_surfaces: {
-            let mut surfaces: Vec<String> = Vec::new();
-            for (symbol, _) in
-                referenced_runtime_symbols(&emitter.llvm_module, &emitter.legacy_runtime_internal)
-            {
-                if !surfaces.contains(&symbol) {
-                    surfaces.push(symbol);
-                }
-            }
-            surfaces
-        },
-        runtime_references: referenced_runtime_symbols(
-            &emitter.llvm_module,
-            &emitter.legacy_runtime_internal,
-        ),
-        emitted_functions: emitter
-            .llvm_module
-            .get_functions()
-            .filter(|function| function.count_basic_blocks() > 0)
-            .filter_map(|function| function.get_name().to_str().ok().map(str::to_string))
-            .filter(|name| name != "main" && !emitter.legacy_runtime_internal.contains(name))
-            .collect(),
-        module_ir: emitter.llvm_module.print_to_string().to_string(),
-    };
-    Ok((emitter.backend.llvm_module, emissions))
 }
 
 /// Declaration snapshot: the LLVM type and linkage the catalog signatures
@@ -756,23 +530,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.install_gc_runtime()?;
         self.install_reactive_runtime()?;
         self.install_coroutine_runtime()?;
-        #[cfg(test)]
-        {
-            self.legacy_runtime_internal = self
-                .llvm_module
-                .get_functions()
-                .filter(|function| function.count_basic_blocks() > 0)
-                .filter_map(|function| function.get_name().to_str().ok().map(str::to_string))
-                .collect();
-        }
         self.declare_external_functions()?;
         self.declare_functions()?;
         self.declare_top_level_storage()?;
         self.declare_initializers();
         self.build_utf8_validator()?;
-        #[cfg(test)]
-        self.legacy_runtime_internal
-            .insert("__staple_is_valid_utf8".to_string());
         let typed_module = self.typed_module;
         let functions = typed_module
             .functions()
@@ -804,9 +566,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     /// legacy origin the transition tests expect.
     fn build_utf8_validator(&mut self) -> CodeGenerationResult<()> {
         let function = self.backend.build_utf8_validator()?;
-        #[cfg(test)]
-        self.legacy_register_function(function, LegacyFunctionOrigin::Utf8Validator);
-        #[cfg(not(test))]
         let _ = function;
         Ok(())
     }
@@ -818,10 +577,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pointer: inkwell::values::PointerValue<'context>,
         finalizer: inkwell::values::FunctionValue<'context>,
     ) -> CodeGenerationResult<()> {
-        #[cfg(test)]
-        {
-            self.legacy_finalizer_set = true;
-        }
         self.backend.set_gc_finalizer(pointer, finalizer)
     }
 
@@ -927,19 +682,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             .build_return(Some(&result))
                             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
                         self.closure_codes.insert(symbol, adapter);
-                        #[cfg(test)]
-                        {
-                            self.legacy_extern_adapters.push(LegacyExternAdapter {
-                                symbol,
-                                callable_type: function_type.clone(),
-                                used: false,
-                            });
-                            let index = self.legacy_extern_adapters.len() - 1;
-                            self.legacy_register_function(
-                                adapter,
-                                LegacyFunctionOrigin::ExternAdapter(index),
-                            );
-                        }
                     }
                 }
             }
@@ -1099,11 +841,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Some(inkwell::module::Linkage::Internal),
             );
             self.initializers.insert(source_module.id, function);
-            #[cfg(test)]
-            self.legacy_register_function(
-                function,
-                LegacyFunctionOrigin::Initializer(source_module.id),
-            );
         }
     }
 
@@ -1140,14 +877,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .llvm_module
                 .add_function(&function.name, llvm_type, None);
             self.functions.insert(function.id, llvm_function);
-            #[cfg(test)]
-            self.legacy_register_function(
-                llvm_function,
-                LegacyFunctionOrigin::Declared {
-                    function: function.id,
-                    function_type: function_type.clone(),
-                },
-            );
         }
         Ok(())
     }
@@ -1164,28 +893,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<()> {
         // Test-only: remember which concrete function is being emitted, so
         // ownership registrations map back to their instance.
-        #[cfg(test)]
-        let previous_key = self.legacy_function_key.take();
-        #[cfg(test)]
-        {
-            let template = self
-                .typed_module
-                .type_of_function(function.id)
-                .cloned()
-                .expect("emitted functions are freshly checked");
-            let function_type = match substitute_type(
-                CheckedType::Function(template),
-                &self.active_type_substitutions,
-            ) {
-                CheckedType::Function(function_type) => function_type,
-                other => panic!("substituted function signature is not a function: {other:?}"),
-            };
-            self.legacy_function_key = Some((
-                function.id,
-                function_type,
-                self.active_type_substitutions.clone(),
-            ));
-        }
         let entry = self.context.append_basic_block(llvm_function, "entry");
         self.builder.position_at_end(entry);
 
@@ -1211,42 +918,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .build_return(Some(&return_value))
                 .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
         }
-        #[cfg(test)]
-        {
-            self.legacy_function_key = previous_key;
-        }
         Ok(())
-    }
-
-    /// Test-only: records one ownership registration under the function
-    /// currently being emitted.
-    #[cfg(test)]
-    fn legacy_record_owned(
-        &mut self,
-        environment: &FunctionEnvironment<'context>,
-        symbol: SymbolId,
-        cell: bool,
-    ) {
-        // A coroutine `resume` compiles state 0 with no function id in its
-        // environment, but its registrations belong to the body thunk. A
-        // nested emission inside state 0 supplies its own function id and
-        // therefore wins.
-        let Some(function_id) = environment.function_id.or(self.legacy_owned_function) else {
-            return;
-        };
-        let Some((function, function_type, substitutions)) = &self.legacy_function_key else {
-            return;
-        };
-        if *function != function_id {
-            return;
-        }
-        self.legacy_owned.push(LegacyOwned {
-            function: *function,
-            function_type: function_type.clone(),
-            substitutions: substitutions.clone(),
-            symbol,
-            cell,
-        });
     }
 
     fn specialization_key(function_type: &CheckedFunctionType) -> String {
@@ -1310,15 +982,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         );
         self.specialized_functions
             .insert((function_id, key), llvm_function);
-        #[cfg(test)]
-        self.legacy_register_function(
-            llvm_function,
-            LegacyFunctionOrigin::Specialization {
-                function: function_id,
-                function_type: function_type.clone(),
-                substitutions: substitutions.clone(),
-            },
-        );
         self.specialization_queue
             .push((function_id, function_type.clone(), substitutions));
         Ok(llvm_function)
@@ -1355,12 +1018,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder.position_at_end(entry);
         let parameters = function.get_params();
         let value = self.build_product_value(&parameters[1..], Span::Compiler)?;
-        #[cfg(test)]
-        {
-            // Observe the actual `set_gc_finalizer` call rather than
-            // recomputing the predicate.
-            self.legacy_finalizer_set = false;
-        }
         let value = if let CheckedType::Ref(payload) = function_type.result.as_ref() {
             self.build_ref_value(value, payload, Span::Compiler)?
                 .as_basic_value_enum()
@@ -1370,23 +1027,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder
             .build_return(Some(&value))
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
-        #[cfg(test)]
-        {
-            let managed_ref = matches!(function_type.result.as_ref(), CheckedType::Ref(_));
-            let finalizer_set = self.legacy_finalizer_set;
-            self.legacy_constructor_adapters
-                .push(LegacyConstructorAdapter {
-                    symbol,
-                    callable_type: function_type.clone(),
-                    managed_ref,
-                    finalizer_set,
-                });
-            let index = self.legacy_constructor_adapters.len() - 1;
-            self.legacy_register_function(
-                function,
-                LegacyFunctionOrigin::ConstructorAdapter(index),
-            );
-        }
         if let Some(block) = previous_block {
             self.builder.position_at_end(block);
         }
@@ -1820,8 +1460,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment.owned.insert(symbol, (value, value_type, live));
         if newly_owned {
             environment.owned_order.push(symbol);
-            #[cfg(test)]
-            self.legacy_record_owned(environment, symbol, false);
         }
         Ok(())
     }
@@ -1896,33 +1534,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         value_type: &CheckedType,
         span: Span,
     ) -> CodeGenerationResult<()> {
-        #[cfg(test)]
-        self.legacy_drop_stack.push(LegacyDropCall {
-            value_type: value_type.clone(),
-            branch: LegacyDropBranch::NoOp,
-            nested: Vec::new(),
-        });
         let result = self.compile_drop_value_inner(value, value_type, span);
-        #[cfg(test)]
-        {
-            let call = self
-                .legacy_drop_stack
-                .pop()
-                .expect("a drop frame was pushed above");
-            match self.legacy_drop_stack.last_mut() {
-                Some(parent) => parent.nested.push(call),
-                None => self.legacy_drop_roots.push(call),
-            }
-        }
         result
-    }
-
-    /// Test-only: sets the branch of the innermost open drop frame.
-    #[cfg(test)]
-    fn legacy_drop_set_branch(&mut self, branch: LegacyDropBranch) {
-        if let Some(frame) = self.legacy_drop_stack.last_mut() {
-            frame.branch = branch;
-        }
     }
 
     fn compile_drop_value_inner(
@@ -1932,8 +1545,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         span: Span,
     ) -> CodeGenerationResult<()> {
         if let Some(function_id) = self.typed_module.drop_method_for(value_type) {
-            #[cfg(test)]
-            self.legacy_drop_set_branch(LegacyDropBranch::UserDrop(function_id));
             let function = self.functions.get(&function_id).copied().ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing compiled Drop implementation")
             })?;
@@ -1959,8 +1570,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
 
         if self.typed_module.is_coroutine_type(value_type) {
-            #[cfg(test)]
-            self.legacy_drop_set_branch(LegacyDropBranch::CoroutineCleanup);
             // Dropping a coroutine value runs its (idempotent) `cleanup`, which
             // destroys the captures of an unstarted coroutine and releases the
             // frame's GC root.
@@ -1973,8 +1582,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             return self.build_coroutine_frame_cleanup(frame, span);
         }
         if self.typed_module.is_scheduler_type(value_type) {
-            #[cfg(test)]
-            self.legacy_drop_set_branch(LegacyDropBranch::RuntimeRelease("__staple_sched_destroy"));
             let BasicValueEnum::PointerValue(sched) = value else {
                 return Err(Diagnostic::new(span, "scheduler value is not a pointer"));
             };
@@ -1997,20 +1604,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             } else {
                 RuntimeRelease::ResolverDrop
             };
-            #[cfg(test)]
-            self.legacy_drop_set_branch(LegacyDropBranch::RuntimeRelease(match release {
-                RuntimeRelease::WaitDrop => "__staple_completion_wait_drop",
-                RuntimeRelease::CompletionTokenRelease => "__staple_completion_token_release",
-                RuntimeRelease::SchedulerDestroy => "__staple_sched_destroy",
-                RuntimeRelease::ResolverDrop => "__staple_completion_resolver_drop",
-            }));
             return self.build_runtime_release(release, record, span);
         }
 
         match value_type {
             CheckedType::CString => {
-                #[cfg(test)]
-                self.legacy_drop_set_branch(LegacyDropBranch::CStringFree);
                 let BasicValueEnum::PointerValue(pointer) = value else {
                     return Err(Diagnostic::new(
                         span,
@@ -2020,8 +1618,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 return self.build_free_c_string(pointer, span);
             }
             CheckedType::Product(product) => {
-                #[cfg(test)]
-                self.legacy_drop_set_branch(LegacyDropBranch::Product);
                 let BasicValueEnum::StructValue(product_value) = value else {
                     return Err(Diagnostic::new(
                         span,
@@ -2040,8 +1636,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
             }
             CheckedType::Sum(sum) => {
-                #[cfg(test)]
-                self.legacy_drop_set_branch(LegacyDropBranch::Sum);
                 let BasicValueEnum::StructValue(sum_value) = value else {
                     return Err(Diagnostic::new(span, "sum has an invalid representation"));
                 };
@@ -2082,8 +1676,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.builder.position_at_end(merge);
             }
             CheckedType::Distinct { representation, .. } => {
-                #[cfg(test)]
-                self.legacy_drop_set_branch(LegacyDropBranch::Distinct);
                 self.compile_drop_value(value, representation, span)?;
             }
             _ => {}
@@ -2107,8 +1699,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let integer_type = self.context.i32_type();
         let function_type = integer_type.fn_type(&[], false);
         let function = self.llvm_module.add_function("main", function_type, None);
-        #[cfg(test)]
-        self.legacy_register_function(function, LegacyFunctionOrigin::Main);
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
@@ -2607,8 +2197,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 environment.owned_cells.insert(symbol);
                 if newly_owned {
                     environment.owned_order.push(symbol);
-                    #[cfg(test)]
-                    self.legacy_record_owned(environment, symbol, true);
                 }
             }
         }
@@ -4058,13 +3646,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .typed_module
             .trait_impl_method(trait_id, arguments, method)
         {
-            #[cfg(test)]
-            if let Some(record) = self.legacy_structural_stack.last_mut() {
-                record.delegates.push(LegacyStructuralCallee::Instance(
-                    function_id,
-                    function_type.clone(),
-                ));
-            }
             if let Some(function) = self.functions.get(&function_id).copied() {
                 return Ok(function);
             }
@@ -4074,13 +3655,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .typed_module
             .structural_trait_method(trait_id, arguments)
             .ok_or_else(|| Diagnostic::new(span.clone(), "no trait implementation is available"))?;
-        #[cfg(test)]
-        if let Some(record) = self.legacy_structural_stack.last_mut() {
-            record.delegates.push(LegacyStructuralCallee::Structural(
-                structural,
-                arguments.to_vec(),
-            ));
-        }
         self.structural_trait_method_code(structural, arguments, &function_type, span)
     }
 
@@ -4103,20 +3677,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         );
         let function = self.llvm_module.add_function(&name, llvm_type, None);
         self.structural_trait_codes.insert(key, function);
-        #[cfg(test)]
-        self.legacy_structural_stack.push(LegacyStructuralMethod {
-            structural,
-            arguments: arguments.to_vec(),
-            function_type: function_type.clone(),
-            debug_literals: Vec::new(),
-            delegates: Vec::new(),
-            deref_index_fast_path: None,
-            next_alternatives: None,
-            index_homogeneous: None,
-            index_length: None,
-            mutate_drop_previous: None,
-            into_iterator_source: None,
-        });
         let previous = self.builder.get_insert_block();
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
@@ -4155,10 +3715,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     span.clone(),
                 )?,
             crate::StructuralTraitMethod::IntoIterator => {
-                #[cfg(test)]
-                if let Some(record) = self.legacy_structural_stack.last_mut() {
-                    record.into_iterator_source = arguments.first().cloned();
-                }
                 self.compile_structural_into_iterator_body(&values, span.clone())?
             }
             crate::StructuralTraitMethod::Iterator => self.compile_structural_next_body(
@@ -4174,16 +3730,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         if let Some(block) = previous {
             self.builder.position_at_end(block);
-        }
-        #[cfg(test)]
-        {
-            self.legacy_structural_methods.push(
-                self.legacy_structural_stack
-                    .pop()
-                    .expect("every emitted structural body has a record"),
-            );
-            let index = self.legacy_structural_methods.len() - 1;
-            self.legacy_register_function(function, LegacyFunctionOrigin::StructuralMethod(index));
         }
         Ok(function)
     }
@@ -4293,10 +3839,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         literal: &str,
         span: Span,
     ) -> CodeGenerationResult<()> {
-        #[cfg(test)]
-        if let Some(record) = self.legacy_structural_stack.last_mut() {
-            record.debug_literals.push(literal.to_string());
-        }
         let function_id = self
             .typed_module
             .resolved()
@@ -4488,11 +4030,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if let CheckedType::Product(product) = target
             && product.homogeneous_element().is_none()
         {
-            #[cfg(test)]
-            if let Some(record) = self.legacy_structural_stack.last_mut() {
-                record.index_homogeneous = Some(false);
-                record.index_length = Some(product.elements.len());
-            }
             let BasicValueEnum::StructValue(product_value) = value else {
                 return Err(Diagnostic::new(
                     span,
@@ -4542,11 +4079,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let CheckedType::Product(product) = target else {
             return Err(Diagnostic::new(span, "invalid structural Index target"));
         };
-        #[cfg(test)]
-        if let Some(record) = self.legacy_structural_stack.last_mut() {
-            record.index_homogeneous = Some(true);
-            record.index_length = Some(product.elements.len());
-        }
         let llvm_type = self.compile_type(target)?;
         let pointer = self
             .builder
@@ -4634,10 +4166,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             && let Some(element) = product.homogeneous_element()
             && self.typed_module.is_copy_in_function(element, None)
         {
-            #[cfg(test)]
-            if let Some(record) = self.legacy_structural_stack.last_mut() {
-                record.deref_index_fast_path = Some(true);
-            }
             let BasicValueEnum::IntValue(position) = position_value else {
                 return Err(Diagnostic::new(span, "invalid structural Index position"));
             };
@@ -4645,10 +4173,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .size_type
                 .const_int(product.elements.len() as u64, false);
             return self.compile_index_load(*pointer, *position, length, output.clone(), span);
-        }
-        #[cfg(test)]
-        if let Some(record) = self.legacy_structural_stack.last_mut() {
-            record.deref_index_fast_path = Some(false);
         }
         let payload_value = self
             .builder
@@ -4859,10 +4383,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing `IterStep.Yield` alternative"))?;
         let done_alternative = result_sum.alternatives[done_index].clone();
         let yield_alternative = result_sum.alternatives[yield_index].clone();
-        #[cfg(test)]
-        if let Some(record) = self.legacy_structural_stack.last_mut() {
-            record.next_alternatives = Some((done_index, yield_index));
-        }
 
         let product_value = *product_value;
         let cursor = *cursor;
@@ -4958,10 +4478,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<()> {
         let llvm_type = self.compile_type(element)?;
         let slot = self.build_index_pointer(pointer, position, length, llvm_type, span.clone())?;
-        #[cfg(test)]
-        if let Some(record) = self.legacy_structural_stack.last_mut() {
-            record.mutate_drop_previous = Some(self.typed_module.type_needs_drop(element));
-        }
         if self.typed_module.type_needs_drop(element) {
             let old = self
                 .builder
@@ -5921,13 +5437,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let name = format!("__staple_gc_finalize_{:016x}", hasher.finish());
         let function = self.add_finalizer_function(&name);
         self.gc_finalizers.insert(key, function);
-        #[cfg(test)]
-        {
-            self.legacy_finalizers
-                .push(LegacyFinalizer::Payload(payload.clone()));
-            let index = self.legacy_finalizers.len() - 1;
-            self.legacy_register_function(function, LegacyFunctionOrigin::Finalizer(index));
-        }
 
         let body = self.enter_finalizer_function(function, Span::Compiler)?;
         let payload_type = self.compile_type(payload)?;
@@ -5953,13 +5462,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let name = format!("__staple_gc_finalize_cell_{:016x}", hasher.finish());
         let function = self.add_finalizer_function(&name);
         self.gc_finalizers.insert(key, function);
-        #[cfg(test)]
-        {
-            self.legacy_finalizers
-                .push(LegacyFinalizer::Cell(value_type.clone()));
-            let index = self.legacy_finalizers.len() - 1;
-            self.legacy_register_function(function, LegacyFunctionOrigin::Finalizer(index));
-        }
         let body = self.enter_finalizer_function(function, Span::Compiler)?;
         self.compile_conditional_cell_drop(body.payload, value_type, Span::Compiler)?;
         self.finish_finalizer_function(&body)?;
@@ -6153,7 +5655,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(|error| Diagnostic::new(span, error.to_string()));
         }
         if let Some(code) = self.closure_codes.get(&symbol).copied() {
-            self.mark_extern_adapter_used(symbol);
             let closure_environment =
                 if self.function_symbols.get(&symbol).copied() == environment.function_id {
                     environment.closure_environment.unwrap_or_else(|| {
@@ -7238,29 +6739,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             })?;
 
         // Test-only: record the runner creation and its payload pass modes.
-        #[cfg(test)]
-        {
-            let resource_slots = callback_type
-                .effects
-                .resources
-                .iter()
-                .map(|resource| {
-                    resource.mutable
-                        || !self
-                            .typed_module
-                            .is_copy_in_function(&resource.value_type, environment.function_id)
-                })
-                .collect();
-            self.legacy_runners.push(LegacyReactiveRunner {
-                family: LegacyRunnerFamily::Reaction,
-                call_syntax: Some(call.syntax.id),
-                evaluator: None,
-                owner: self.legacy_function_key.clone(),
-                callback_type: callback_type.clone(),
-                resource_slots,
-                name_reused: false,
-            });
-        }
 
         let mut payload_fields = vec![callback.get_type().into()];
         for resource in &callback_type.effects.resources {
@@ -7292,11 +6770,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             runner_type,
             Some(inkwell::module::Linkage::Internal),
         );
-        #[cfg(test)]
-        {
-            let index = self.legacy_runners.len() - 1;
-            self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
-        }
         self.build_reaction_runner(
             runner,
             payload_type,
@@ -7483,19 +6956,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let name = format!("__staple_until_runner_{}", call_id.0);
         // Test-only: record the creation and whether the syntax-keyed name was
         // reused across instantiations.
-        #[cfg(test)]
-        {
-            let name_reused = self.llvm_module.get_function(&name).is_some();
-            self.legacy_runners.push(LegacyReactiveRunner {
-                family: LegacyRunnerFamily::Until,
-                call_syntax: Some(call_id),
-                evaluator: None,
-                owner: self.legacy_function_key.clone(),
-                callback_type: predicate_type.clone(),
-                resource_slots: Vec::new(),
-                name_reused,
-            });
-        }
         if let Some(existing) = self.llvm_module.get_function(&name) {
             return Ok(existing);
         }
@@ -7508,11 +6968,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             self.context.void_type().fn_type(&[ptr_type.into()], false),
             Some(inkwell::module::Linkage::Internal),
         );
-        #[cfg(test)]
-        {
-            let index = self.legacy_runners.len() - 1;
-            self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
-        }
         self.build_until_runner(runner, bool_fn_type)?;
         if let Some(block) = previous {
             self.builder.position_at_end(block);
@@ -7554,16 +7009,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
 
         // Test-only: record the runner creation keyed by the evaluator.
-        #[cfg(test)]
-        self.legacy_runners.push(LegacyReactiveRunner {
-            family: LegacyRunnerFamily::Derived,
-            call_syntax: None,
-            evaluator: Some(evaluator.id),
-            owner: self.legacy_function_key.clone(),
-            callback_type: callback_type.clone(),
-            resource_slots: Vec::new(),
-            name_reused: false,
-        });
 
         let pointer_type = self.context.ptr_type(AddressSpace::default());
         let payload_type = self.derived_payload_type(callback.get_type());
@@ -7579,11 +7024,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             runner_type,
             Some(inkwell::module::Linkage::Internal),
         );
-        #[cfg(test)]
-        {
-            let index = self.legacy_runners.len() - 1;
-            self.legacy_register_function(runner, LegacyFunctionOrigin::Runner(index));
-        }
         self.build_derived_runner(
             runner,
             payload_type,
@@ -7935,70 +7375,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
         // Test-only: record the pair's creation facts. The plan comparison
         // reads these; production emission ignores them.
-        #[cfg(test)]
-        {
-            let substituted = |value_type: &CheckedType| {
-                substitute_type(value_type.clone(), &self.active_type_substitutions)
-            };
-            let frame_binding_types = plan
-                .frame_bindings
-                .iter()
-                .map(|symbol| {
-                    self.typed_module
-                        .type_of_symbol(*symbol)
-                        .cloned()
-                        .map(|ty| substituted(&ty))
-                        .unwrap_or(CheckedType::Error)
-                })
-                .collect();
-            let mut unwind_drops = Vec::new();
-            for (symbol, _) in &layout.cell_fields {
-                let value_type = self
-                    .typed_module
-                    .type_of_symbol(*symbol)
-                    .cloned()
-                    .map(|ty| substituted(&ty));
-                if let Some(value_type) = value_type
-                    && self.typed_module.type_needs_drop(&value_type)
-                {
-                    unwind_drops.push((*symbol, value_type));
-                }
-            }
-            let resource_slots = plan
-                .deferred_effects
-                .resources
-                .iter()
-                .map(|resource| {
-                    resource.mutable
-                        || !self
-                            .typed_module
-                            .is_copy_in_function(&resource.value_type, None)
-                })
-                .collect();
-            self.legacy_coroutine_pairs.push(LegacyCoroutinePair {
-                body_syntax,
-                substitutions: self.active_type_substitutions.clone(),
-                frame_binding_types,
-                result_type: substituted(&plan.result_type),
-                await_result_types: plan
-                    .await_result_types
-                    .iter()
-                    .map(|ty| substituted(&ty))
-                    .collect(),
-                resume_points: plan.resume_points,
-                wait_await_states: plan.wait_await_states.clone(),
-                until_await_states: plan.until_await_states.clone(),
-                resource_slots,
-                capture_finalizer: !thunk.captures.is_empty(),
-                unwind_drops,
-            });
-            let index = self.legacy_coroutine_pairs.len() - 1;
-            self.legacy_register_function(resume_fn, LegacyFunctionOrigin::CoroutineResume(index));
-            self.legacy_register_function(
-                cleanup_fn,
-                LegacyFunctionOrigin::CoroutineCleanup(index),
-            );
-        }
 
         let previous_block = self.builder.get_insert_block();
 
@@ -8134,33 +7510,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             // Test-only: state 0 is the body thunk's own code, so ownership
             // registrations attribute to the thunk. Production emission never
             // reads either key.
-            #[cfg(test)]
-            let previous_key = self.legacy_function_key.take();
-            #[cfg(test)]
-            let previous_owned_function = self.legacy_owned_function.replace(thunk.id);
-            #[cfg(test)]
-            {
-                let template = self
-                    .typed_module
-                    .type_of_function(thunk.id)
-                    .cloned()
-                    .expect("coroutine body thunks are freshly checked");
-                let mut function_type = match substitute_type(
-                    CheckedType::Function(template),
-                    &self.active_type_substitutions,
-                ) {
-                    CheckedType::Function(function_type) => function_type,
-                    other => {
-                        panic!("substituted coroutine thunk type is not a function: {other:?}")
-                    }
-                };
-                function_type.effects = plan.deferred_effects.clone();
-                self.legacy_function_key = Some((
-                    thunk.id,
-                    function_type,
-                    self.active_type_substitutions.clone(),
-                ));
-            }
             self.builder.position_at_end(dispatch[0]);
             let value = self.compile_expression(&mut environment, &thunk.body)?;
             if !environment.did_return {
@@ -8177,11 +7526,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     state_slot,
                     status_type,
                 )?;
-            }
-            #[cfg(test)]
-            {
-                self.legacy_function_key = previous_key;
-                self.legacy_owned_function = previous_owned_function;
             }
         }
 
@@ -8213,11 +7557,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let (resume_fn, cleanup_fn) = self.ensure_coroutine_codes(body_syntax)?;
         // Test-only: one request per creation site, so the comparison can show
         // where the syntax-keyed pair cache aliased two instantiations.
-        #[cfg(test)]
-        self.legacy_coroutine_requests.push(LegacyCoroutineRequest {
-            body_syntax,
-            substitutions: self.active_type_substitutions.clone(),
-        });
         let thunk = self
             .typed_module
             .implicit_thunk_for(body_syntax)
@@ -9086,8 +8425,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_load(environment_type, pointer, "closure.finalizer.environment")
             .map_err(compiler_diagnostic)?
             .into_struct_value();
-        #[cfg(test)]
-        let mut legacy_dropped = Vec::new();
         for (index, symbol) in closure.captures.iter().copied().enumerate().rev() {
             if self
                 .typed_module
@@ -9106,24 +8443,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             if !self.typed_module.type_needs_drop(&value_type) {
                 continue;
             }
-            #[cfg(test)]
-            legacy_dropped.push(index);
             let value = self
                 .builder
                 .build_extract_value(environment, index as u32, "closure.finalizer.capture")
                 .map_err(compiler_diagnostic)?;
             self.compile_drop_value(value, &value_type, Span::Compiler)?;
-        }
-        #[cfg(test)]
-        {
-            self.legacy_finalizers
-                .push(LegacyFinalizer::ClosureEnvironment {
-                    function: closure.id,
-                    capture_types,
-                    dropped: legacy_dropped,
-                });
-            let index = self.legacy_finalizers.len() - 1;
-            self.legacy_register_function(function, LegacyFunctionOrigin::Finalizer(index));
         }
         self.builder
             .build_return(None)
@@ -10643,17 +9967,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             clone_method,
             call.syntax.span.clone(),
         )?;
-        #[cfg(test)]
-        if let Some(selected) = self.typed_module.trait_impl_method(
-            clone_trait,
-            std::slice::from_ref(element.as_ref()),
-            clone_method,
-        ) {
-            self.legacy_buffer_clones.push(LegacyBufferClone {
-                element: element.as_ref().clone(),
-                function: selected,
-            });
-        }
         let source_data = self.buffer_data_pointer(source, llvm_element)?;
         let destination_data = self.buffer_data_pointer(destination, llvm_element)?;
         let destination_length_slot = self
@@ -10779,13 +10092,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let name = format!("__staple_gc_finalize_buffer_{:016x}", hasher.finish());
         let function = self.add_finalizer_function(&name);
         self.gc_finalizers.insert(key, function);
-        #[cfg(test)]
-        {
-            self.legacy_finalizers
-                .push(LegacyFinalizer::Buffer(element.clone()));
-            let index = self.legacy_finalizers.len() - 1;
-            self.legacy_register_function(function, LegacyFunctionOrigin::Finalizer(index));
-        }
         let finalizer_body = self.enter_finalizer_function(function, Span::Compiler)?;
         let check = self
             .context
