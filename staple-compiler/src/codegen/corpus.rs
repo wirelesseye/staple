@@ -138,7 +138,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 76] = [
+static CORPUS: [CorpusProgram; 77] = [
     expect_stdout(must_run(inline("empty", "", "5.3")), ""),
     expect_stdout(
         must_run(inline(
@@ -1883,6 +1883,41 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ],
         ),
         "callback\nvalue\nclosure\nthunk\ntemporary\n",
+    )),
+    // Stage 5.11 (F2): a field write resolves to its base's signal for
+    // notification, so a reaction over a signal product field re-runs. A field
+    // projection never writes initialization state; the base is already
+    // initialized when the projection executes.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "signal_field_writes",
+                concat!(
+                    "use std.io.(IO, println)\n",
+                    "let signal point = (x: 0, y: 0)\n",
+                    "reaction {\n",
+                    "    println \"seen ${point.x}\"\n",
+                    "}\n",
+                    "point.x = 5\n",
+                    "point.x = 7\n",
+                    "let signal outer = (left: (x: 0, y: 0), right: 0)\n",
+                    "reaction {\n",
+                    "    println \"nested ${outer.left.x}\"\n",
+                    "}\n",
+                    "outer.left.x = 4\n",
+                    "def captured = () => {\n",
+                    "    let mut local = (x: 1, y: 2)\n",
+                    "    let update = () => { local.x = 9 }\n",
+                    "    update ()\n",
+                    "    local.x\n",
+                    "}\n",
+                    "println \"captured ${captured ()}\"\n",
+                ),
+                "5.11",
+            ),
+            &["captured"],
+        ),
+        "seen 0\nseen 5\nseen 7\nnested 0\nnested 4\ncaptured 9\n",
     )),
 ];
 

@@ -16,7 +16,7 @@ LLVM generation consumes lowered IR and no longer infers types, selects trait im
 - **Stage 5.1–5.9 are complete.** The backend helper layers and complete lowered emitter passed the migration gates. Historical results remain in the [Stage 5 breakdown](STAGE_5_LLVM_MIGRATION_BREAKDOWN.md) and substage plans.
 - **Stage 5.10 is complete.** The lowered emitter is the only emitter. Lowering's output owns the concrete program and carries no checked-module copy. The selector, features, legacy emission/recorder/census and body comparator are gone. The 74-entry corpus retains strict/catalog/D5 and pinned-output/trap checks. The default suite passes 1301 tests; all 86 four-run LLVM comparisons matched the pre-cutover lowered reference, which is now removed. All 36 example LLVM/object/run paths pass; the fresh corpus export is verified.
 - The [36-entry test verdict table](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#step-2--test-verdicts-r2) records retained coverage for every legacy test. No new emission differences were introduced; D2 planned names and D5 per-instance artifacts are the existing intended differences from legacy.
-- **Stage 5.11 is in progress after the cutover.** F1 (the extern-value adapter ABI) is fixed: the adapter takes the closure ABI's parameter shapes and loads each borrowed argument, and a closure call to a known extern binding releases a `CString` temporary. F2–F5 remain; Stage 5 is still in progress. The [77-method Stage 6 handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) identifies surviving lowering/frontend/LSP/test uses and unused queries. `drop_method_for` now has only test callers and produces the one deferred checker warning; codegen is warning-free.
+- **Stage 5.11 is in progress after the cutover.** F1 (the extern-value adapter ABI) is fixed: the adapter takes the closure ABI's parameter shapes and loads each borrowed argument, and a closure call to a known extern binding releases a `CString` temporary. F2 (signal field writes) is fixed: a field write notifies its base signal and never writes initialization state. F3–F5 remain; Stage 5 is still in progress. The [77-method Stage 6 handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) identifies surviving lowering/frontend/LSP/test uses and unused queries. `drop_method_for` now has only test callers and produces the one deferred checker warning; codegen is warning-free.
 - Current suite command: `CARGO_INCREMENTAL=0 cargo nextest run --workspace`. No emitter feature or selector exists.
 
 ### Fixed defects
@@ -32,6 +32,11 @@ LLVM generation consumes lowered IR and no longer infers types, selects trait im
   - **Fix:** `ExternAdapterPlan` records each flattened value parameter's closure pass mode, the adapter loads every by-pointer argument before the unchanged native call, and a closure call to a statically known extern binding releases its `CString` temporary after the call. `CString.to_string` consumes its argument, so the release stays restricted to known extern callees and avoids a double free.
   - **Containment:** the 87-path four-run comparison reports 85 `same`; only `census_coroutines_and_runners` and `extern_values` differ, and only in the adapter load.
   - **Coverage:** `extern_adapter_abi` (5.11) and the restored `thunk_arguments` pin the corrected text.
+
+- **A signal product field write did not notify (found in the Stage 5.9 review; fixed in Stage 5.11 Step 3).**
+  - **Symptom:** `point.x = 5` on a signal product resolved to no root symbol, so the signal was not notified and a reaction over `point.x` did not re-run.
+  - **Fix:** the assignment root follows `ProductElement` to its base for notification; a field projection never writes the base's initialization state because its own runtime check requires an initialized base.
+  - **Coverage:** `signal_field_writes` (5.11) pins `seen 0`, `seen 5`, `seen 7`, a nested field write, and a captured-`mut`-cell field write.
 
 ## Public Interfaces
 

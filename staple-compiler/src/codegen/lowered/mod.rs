@@ -5951,7 +5951,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_store(pointer, value)
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        if let Some(symbol) = assignment.initialization_symbol {
+        // Stage 5.11 (F2): a field projection never initializes its base; the
+        // base is already initialized (or the projection's own check traps).
+        // Its root symbol exists here for notification only.
+        if let Some(symbol) = assignment.initialization_symbol
+            && !matches!(place.kind, crate::LoweredPlaceKind::ProductElement { .. })
+        {
             self.store_local_initialization_state(owner, environment, symbol, 2, &span)?;
             self.store_initialization_state(symbol, 2)?;
         }

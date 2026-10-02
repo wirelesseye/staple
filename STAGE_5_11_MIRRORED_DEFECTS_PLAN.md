@@ -26,6 +26,13 @@ Line references are against `5194cf9` and will drift; re-locate code by name. Bu
 - Fixtures: the new `extern_adapter_abi` 5.11 entry (extern callback, captured adapter in a closure, stored adapter, implicit thunk with a moved capture, and an implicit thunk with a literal temporary) and the restored `thunk_arguments` (`puts value`, pinned `thunk\n\n`).
 - M1: 85 of 87 paths are `same` over four runs. The two `DIFF`s are `census_coroutines_and_runners` and `extern_values`, each differing only in the adapter body (`%extern.argument = load ptr, ptr %1`). The full workspace suite passes 1302 tests.
 
+### Step 3 — complete (F2)
+
+- `place_root_symbol` now follows `ProductElement` to its base, so a field write's `initialization_symbol` and `signal_notify` name the base signal. The emitter still suppresses the initialization-state writeback for a `ProductElement` target: the projection's own runtime check requires an initialized base, so a field write cannot initialize it.
+- The checker accepts a field write to a possibly-uninitialized base only through a captured binding's runtime check, and the projection check traps before the store; a `mut` binding and a signal both require an initializer, so the base is always initialized when the projection executes. A field write therefore never changes initialization state.
+- Fixture: `signal_field_writes` (5.11) pins `seen 0`, `seen 5`, `seen 7` over a signal product field, a nested field write, and a field write through a captured `mut` cell.
+- M1: no baseline-corpus path changes for F2 (the baseline corpus has no signal field write); F1's two `DIFF`s remain. The full workspace suite passes 1302 tests.
+
 ## Starting Point
 
 There is one emitter, and the suite passes 1302 tests. Stage 5.11 is the only part of Stage 5 that intentionally changes behavior. Five defects are queued:

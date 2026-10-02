@@ -4493,17 +4493,21 @@ impl LoweredProgram {
     /// The symbol whose initialization state an assignment writes back. Mirrors
     /// code generation's place-pointer result: direct storage keeps its symbol,
     /// slice and dereference places do not.
+    /// The root symbol of an assignment target's place: a direct symbol or
+    /// captured cell, or a representation/product projection of one. Stage
+    /// 5.11 (F2): a field write resolves to its base's root symbol for
+    /// notification, so a reaction over a signal product field re-runs. The
+    /// emitter never writes the base's initialization state for a field
+    /// projection; a projection only executes on an already-initialized base
+    /// (its own check traps otherwise).
     fn place_root_symbol(&self, place: PlaceId) -> Option<SymbolId> {
         match &self.places.get(place)?.kind {
             LoweredPlaceKind::Symbol { symbol } | LoweredPlaceKind::CapturedCell { symbol } => {
                 Some(*symbol)
             }
-            // Legacy `compile_place_pointer` returns no symbol for a field
-            // projection: writing a field neither initializes the base nor
-            // notifies its signal.
-            LoweredPlaceKind::Representation { base } => self.place_root_symbol(*base),
-            LoweredPlaceKind::ProductElement { .. }
-            | LoweredPlaceKind::Temporary { .. }
+            LoweredPlaceKind::Representation { base }
+            | LoweredPlaceKind::ProductElement { base, .. } => self.place_root_symbol(*base),
+            LoweredPlaceKind::Temporary { .. }
             | LoweredPlaceKind::Resource { .. }
             | LoweredPlaceKind::Dereference { .. }
             | LoweredPlaceKind::Indexed { .. } => None,
@@ -21159,9 +21163,14 @@ mod tests {
             panic!("`pair.0` should lower to a product element place");
         };
         assert!(program.place_root_symbol(*base).is_some());
+        assert_eq!(
+            assignment.initialization_symbol,
+            program.place_root_symbol(*base),
+            "a field write resolves to its base's root symbol (Stage 5.11 F2)"
+        );
         assert!(
-            assignment.initialization_symbol.is_none(),
-            "a field write does not initialize its base"
+            assignment.signal_notify.is_none(),
+            "the base is not a signal, so the field write does not notify"
         );
 
         let LoweredItemKind::Assignment(assignment) = &items[2].kind else {

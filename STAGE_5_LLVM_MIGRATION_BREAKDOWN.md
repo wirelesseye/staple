@@ -420,6 +420,8 @@ This runs after the cutover, so each fix lands in one backend (D5). It is the on
 
 **Progress (Step 2, F1 complete).** The extern-adapter plan records each flattened value parameter's closure pass mode, the adapter loads every by-pointer argument before the native extern call, and the closure route releases a `CString` temporary when the callee is a statically known extern binding. The 5.4 `thunk_arguments` entry is restored to call the `puts` extern value and pins `thunk\n\n`; the new `extern_adapter_abi` entry covers the callback, captured-closure, stored-adapter, and implicit-thunk routes. M1: 85 of 87 paths `same`; the two `DIFF`s (`census_coroutines_and_runners`, `extern_values`) differ only in the adapter load. Suite: 1302 tests.
 
+**Progress (Step 3, F2 complete).** A field write's assignment root follows `ProductElement` to its base, so it records `SignalNotify` on the base signal and a reaction over the field re-runs; the field projection never writes the base's initialization state. The `signal_field_writes` 5.11 entry pins `seen 0`/`seen 5`/`seen 7`, a nested field write, and a captured-`mut`-cell field write. M1: no baseline-corpus path changes; F1's two `DIFF`s remain. Suite: 1302 tests.
+
 **Gate (superseded by the plan's Step 7; kept for history):** The new fixtures print the corrected drop output. The full gate set (Contract 6) passes. The checker/lowering drop-agreement test passes. **Only now may Stage 5 be marked complete.**
 
 ## Ordering and Parallelism
