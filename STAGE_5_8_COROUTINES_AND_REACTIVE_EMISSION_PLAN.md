@@ -371,3 +371,20 @@ Step 1 → Step 2 → Step 3 → Step 4 → Step 5 → Step 6 ─┐
 - Step 7 can run in parallel with Steps 4–6 after Step 3. The `until`-inside-a-coroutine fixture needs Steps 5 and 7.
 - **Riskiest steps.** These are Step 4 (the state machine, the unwind, and the body emitted in another owner's arenas) and Step 5 (suspension and resume across awaits). Land them in small commits, and keep the in-process body comparison green after each.
 - **Sub-plans.** None of the steps needs its own plan file, but Steps 4 and 5 should each open with a short design note in this file recording the `FunctionEnvironment` coroutine-context shape.
+
+## Post-gate review fixes
+
+The review confirmed the gate. The suite passed 1311 tests. Legacy IR was unchanged against the Step 1 binary over every example and the review probes. The lowered emitter is deterministic on the coroutine, signals, and `game_loop` examples. Legacy's remaining variation on the latter two is function order only, with every body identical across runs, so the body comparison is unaffected. It found four follow-ups, now fixed:
+
+- **The D5 case where legacy runs but is wrong had no fixture.** All four Step 8 fixtures are programs legacy rejects. The aliasing case, where legacy compiles but silently reuses the first instantiation's pair, never ran. So the CLI harness's legacy-different branch and the in-process requirement that the census explain an alias were never exercised.
+  - The new `generic_coro_alias` fixture (`LoweredOnly`) runs a generic `coro` with an `I32` result and a `T` capture at `I32` and `(U8, U8)`.
+  - Legacy prints `7` then `513`, the bytes `01 02` read as an `I32`. The lowered emitter prints the pinned `7` then `(1, 2)`.
+  - The CLI harness now records 5 lowered-only programs: 4 legacy-rejected and 1 legacy-different. The in-process harness checks that the census explains the reused pair.
+- **External `await` built its own outcome injections.** The emitter constructed `SumInject` plans for `Completed`/`Cancelled` and indexed `alternatives[0]`/`[1]` directly.
+  - `LoweredAwait::outcome` (`LoweredAwaitOutcome { completed, cancelled }`) now records both plans at legacy's fixed positions.
+  - Template lowering computes it when the result type is concrete, and each instance recomputes it after substitution.
+  - The instance validator rejects a missing or disagreeing record, with a corruption test (`external_await_outcomes_are_recorded_and_revalidated`). The emitter reads the record and checks the alternatives without panicking.
+- **The parked-cancellation unwind branches never ran.** The new `coroutine_parked_cancellation` fixture (`MustRun`, with pinned stdout) cancels one task parked on an unresolved `Wait` (the unwind abandons the record) and one parked on an `until` child (the unwind runs the child's cleanup). Neither body resumes, and both tasks report finished.
+- **Malformed records panicked.** The new `pointer_operand`/`struct_operand` helpers check every conversion of a record- or expression-derived value in `lowered/coroutines.rs` and `lowered/reactive.rs`: await operands, the `Tasks` and `Reactive` resources, the cancel callback, and the resolver record. Destructuring with a diagnostic replaces the `pop().expect(..)` calls, and the `block_on` activation `expect` now reports a diagnostic. Conversions of loads with a fixed pointer type, runtime results, and insert/extract values are left as they are.
+
+Results: 62 corpus programs, **16350 fully emitted bodies compared, zero stubs**. The CLI harness reports **0 blocked, 54 identical, 3 compile-only, and 5 lowered-only (4 legacy-rejected, 1 legacy-different)**. The full suite passes 1312 tests, and the legacy IR sweep against the pre-fix binary is `same` everywhere.

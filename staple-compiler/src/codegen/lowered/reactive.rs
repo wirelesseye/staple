@@ -162,15 +162,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ok_or_else(|| Diagnostic::new(span.clone(), "resource `Reactive` is not available"))?;
         let value = value_as_basic(bound.value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "reactive resource is not first-class"))?;
+        let pointer = pointer_operand(value, "`Reactive` resource", span)?;
         if bound.indirect {
             let llvm_type = self.backend.compile_type(&bound.resource.value_type)?;
-            self.backend
+            let scope = self
+                .backend
                 .builder
-                .build_load(llvm_type, value.into_pointer_value(), load_name)
-                .map_err(compiler_diagnostic)
-                .map(|value| value.into_pointer_value())
+                .build_load(llvm_type, pointer, load_name)
+                .map_err(compiler_diagnostic)?;
+            pointer_operand(scope, "`Reactive` scope", span)
         } else {
-            Ok(value.into_pointer_value())
+            Ok(pointer)
         }
     }
 

@@ -343,7 +343,7 @@ pub fn differential_corpus() -> &'static [DifferentialProgram] {
     &CORPUS
 }
 
-static CORPUS: [DifferentialProgram; 60] = [
+static CORPUS: [DifferentialProgram; 62] = [
     must_run(inline("empty", "", "5.3")),
     must_run(inline(
         "integer_arithmetic",
@@ -1449,6 +1449,33 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         DifferentialD5::CoroutinePairs,
     ),
+    // Stage 5.8 review: the D5 case legacy compiles but gets wrong. The
+    // result type is concrete while the capture is `T`, so legacy's
+    // syntax-keyed cache reuses the `I32` pair for the `(U8, U8)` creation
+    // and prints `513` (the bytes `01 02` read as an `I32`). The lowered
+    // emitter runs each instantiation's own pair.
+    lowered_only(
+        expect_stdout(
+            inline(
+                "generic_coro_alias",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "def generic: <T where Copy T, Debug T> T -> Coroutine{IO} I32 = value => coro {\n",
+                    "    println \"${value:?}\"\n",
+                    "    0\n",
+                    "}\n",
+                    "let a = generic (7 satisfies I32)\n",
+                    "let b = generic ((1 satisfies U8), (2 satisfies U8))\n",
+                    "let x = block_on a\n",
+                    "let y = block_on b\n",
+                ),
+                "5.8",
+            ),
+            "7\n(1, 2)\n",
+        ),
+        DifferentialD5::CoroutinePairs,
+    ),
     lowered_only(
         expect_stdout(
             inline(
@@ -1572,6 +1599,53 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             &["worker"],
         ),
         "worker start\nfinished True\n",
+    )),
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "coroutine_parked_cancellation",
+                concat!(
+                    // Stage 5.8 review: cancel coroutines parked on an
+                    // unresolved `Wait` (the unwind abandons the record) and
+                    // on an `until` child (the unwind runs the child's
+                    // cleanup); neither body resumes.
+                    "use std.coroutine.*\n",
+                    "use std.io.(IO, println)\n",
+                    "let signal flag = 0\n",
+                    "def waiter: move Wait I32 ->{IO} Coroutine{IO} () = move pending => coro {\n",
+                    "  let outcome = await pending\n",
+                    "  match outcome {\n",
+                    "    Completed value => println \"wait ${value:?}\",\n",
+                    "    Cancelled() => println \"wait cancelled\",\n",
+                    "  }\n",
+                    "}\n",
+                    "def waiting: () -> Coroutine{Reactive, IO} () = () => coro {\n",
+                    "  let _ = await (until { flag >= 1 })\n",
+                    "  println \"until done\"\n",
+                    "}\n",
+                    "def make_completion: Scheduler -> (wait: Wait I32, resolver: Resolver I32) = s => completion s\n",
+                    "let sched = scheduler ()\n",
+                    "with Reactive = reactive_scope () {\n",
+                    "  with Tasks = task_scope (sched) {\n",
+                    "    let (wait, resolver) = make_completion sched\n",
+                    "    let parked_wait = spawn (waiter wait)\n",
+                    "    let parked_until = spawn (waiting ())\n",
+                    "    let _ = pump (sched, 8)\n",
+                    "    Task.cancel parked_wait\n",
+                    "    Task.cancel parked_until\n",
+                    "    let _ = pump (sched, 8)\n",
+                    "    flag = 1\n",
+                    "    let _ = pump (sched, 8)\n",
+                    "    println \"wait finished ${Task.is_finished parked_wait:?}\"\n",
+                    "    println \"until finished ${Task.is_finished parked_until:?}\"\n",
+                    "  }\n",
+                    "}\n",
+                ),
+                "5.8",
+            ),
+            &["waiter", "waiting", "make_completion"],
+        ),
+        "wait finished True\nuntil finished True\n",
     )),
     must_run(expect_stdout(
         emits(

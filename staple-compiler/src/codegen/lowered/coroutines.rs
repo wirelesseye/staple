@@ -8,8 +8,7 @@ use crate::codegen::layout::{
     CORO_STATE, TASK_RECORD_FRAME, TASK_RECORD_RESULT, TASK_RECORD_SCHEDULER,
 };
 use crate::{
-    CoroutineCodesPlan, CoroutineFramePlan, LoweredAwaitId, LoweredAwaitKind, LoweredCoercionPlan,
-    LoweredCoroId,
+    CoroutineCodesPlan, CoroutineFramePlan, LoweredAwaitId, LoweredAwaitKind, LoweredCoroId,
 };
 use inkwell::types::StructType;
 
@@ -415,11 +414,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ..
             } => {
                 let child = self.emit_expression(owner, await_.operand, environment)?;
-                let child = value_as_basic(child)
-                    .ok_or_else(|| {
-                        Diagnostic::new(span.clone(), "`await` operand is not a coroutine")
-                    })?
-                    .into_pointer_value();
+                let child = value_as_basic(child).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "`await` operand is not a coroutine")
+                })?;
+                let child = pointer_operand(child, "`await` coroutine operand", span)?;
                 self.store_coroutine_resources(
                     owner,
                     deferred_resources,
@@ -474,8 +472,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "`await` result is not a `Completed | Cancelled` sum",
             ));
         };
-        let completed_type = outcome_sum.alternatives[0].clone();
-        let cancelled_type = outcome_sum.alternatives[1].clone();
+        let [completed_type, cancelled_type, ..] = outcome_sum.alternatives.as_slice() else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "`await` outcome sum has fewer than two alternatives",
+            ));
+        };
+        let outcome_plans = await_.outcome.as_ref().ok_or_else(|| {
+            Diagnostic::new(span.clone(), "external await has no recorded outcome plans")
+        })?;
         let payload_llvm = self.backend.compile_type(result)?;
         let (record_type, result_field, kind) = match &await_.kind {
             LoweredAwaitKind::Task { .. } => (
@@ -509,8 +514,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ok_or_else(|| Diagnostic::new(span.clone(), "await dispatch has no function"))?;
         let record = self.emit_expression(owner, await_.operand, environment)?;
         let record = value_as_basic(record)
-            .ok_or_else(|| Diagnostic::new(span.clone(), "`await` operand is not a wait handle"))?
-            .into_pointer_value();
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`await` operand is not a wait handle"))?;
+        let record = pointer_operand(record, "`await` handle operand", span)?;
         self.backend.build_external_await_suspend(
             function,
             frame,
@@ -567,14 +572,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
         let outcome_type = &await_.result_type;
         let outcome_llvm = self.backend.compile_type(outcome_type)?;
-        let completed_plan = LoweredCoercionPlan::SumInject {
-            alternative: 0,
-            payload: Box::new(LoweredCoercionPlan::Identity),
-        };
-        let cancelled_plan = LoweredCoercionPlan::SumInject {
-            alternative: 1,
-            payload: Box::new(LoweredCoercionPlan::Identity),
-        };
+        // Lowering records both injections (`LoweredAwait::outcome`).
+        let completed_plan = &outcome_plans.completed;
+        let cancelled_plan = &outcome_plans.cancelled;
 
         self.backend.builder.position_at_end(completed_block);
         let result_slot = self
@@ -589,9 +589,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)?;
         let completed_value = self.emit_coercion(
             payload.as_any_value_enum(),
-            &completed_type,
+            completed_type,
             outcome_type,
-            &completed_plan,
+            completed_plan,
             span,
         )?;
         let completed_value = value_as_basic(completed_value)
@@ -609,9 +609,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.builder.position_at_end(cancelled_block);
         let cancelled_value = self.emit_coercion(
             self.backend.unit_value(),
-            &cancelled_type,
+            cancelled_type,
             outcome_type,
-            &cancelled_plan,
+            cancelled_plan,
             span,
         )?;
         let cancelled_value = value_as_basic(cancelled_value)
@@ -694,14 +694,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let uses = self.activation_resource_uses(call, span)?;
         self.store_coroutine_resources(owner, &uses, frame, environment, span)?;
-        let result_llvm = self.backend.compile_type(
-            &call
-                .runtime
-                .coroutine
-                .as_ref()
-                .expect("activation")
-                .result_type,
-        )?;
+        let activation = call.runtime.coroutine.as_ref().ok_or_else(|| {
+            Diagnostic::new(
+                span.clone(),
+                "`block_on` has no recorded coroutine activation",
+            )
+        })?;
+        let result_llvm = self.backend.compile_type(&activation.result_type)?;
         self.backend
             .build_coroutine_drive(frame, result_llvm, span.clone())
             .map(|value| value.as_any_value_enum())
@@ -764,8 +763,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .get(&provider)
             .ok_or_else(|| Diagnostic::new(span.clone(), "resource `Tasks` is not available"))?;
         let pointer = value_as_basic(bound.value)
-            .map(|value| value.into_pointer_value())
             .ok_or_else(|| Diagnostic::new(span.clone(), "`Tasks` resource is not first-class"))?;
+        let pointer = pointer_operand(pointer, "`Tasks` resource", span)?;
         if bound.indirect {
             let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
             self.backend
@@ -966,9 +965,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(record.as_any_value_enum())
             }
             IntrinsicFunction::Pump => {
-                let mut values = self.intrinsic_product(call, arguments, 2, &span)?;
-                let limit = values.pop().expect("pump limit");
-                let scheduler = values.pop().expect("pump scheduler");
+                let values = self.intrinsic_product(call, arguments, 2, &span)?;
+                let [scheduler, limit] = values.as_slice() else {
+                    return Err(Diagnostic::new(span.clone(), "`pump` takes two arguments"));
+                };
+                let (scheduler, limit) = (*scheduler, *limit);
                 let counts_type = self.backend.context.struct_type(
                     &[self.backend.size_type.into(), self.backend.size_type.into()],
                     false,
@@ -1052,12 +1053,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 })?;
                 let (scheduler, cancel_closure) =
                     if intrinsic == IntrinsicFunction::CompletionWithCancel {
-                        let mut fields = self.intrinsic_product(call, arguments, 2, &span)?;
-                        let closure = fields
-                            .pop()
-                            .expect("completion callback")
-                            .into_struct_value();
-                        let scheduler = fields.pop().expect("completion scheduler");
+                        let fields = self.intrinsic_product(call, arguments, 2, &span)?;
+                        let [scheduler, closure] = fields.as_slice() else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "`completion_with_cancel` takes two arguments",
+                            ));
+                        };
+                        let closure = struct_operand(*closure, "cancel callback", &span)?;
+                        let scheduler = *scheduler;
                         (scheduler, Some(closure))
                     } else {
                         let [scheduler] = arguments else {
@@ -1175,9 +1179,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value_type = call.runtime.completion_value_type.clone().ok_or_else(|| {
                     Diagnostic::new(span.clone(), "`complete` value has no concrete type")
                 })?;
-                let mut fields = self.intrinsic_product(call, arguments, 2, &span)?;
-                let value = fields.pop().expect("resolver value");
-                let record = fields.pop().expect("resolver record").into_pointer_value();
+                let fields = self.intrinsic_product(call, arguments, 2, &span)?;
+                let [record, value] = fields.as_slice() else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "`Resolver.complete` takes two arguments",
+                    ));
+                };
+                let value = *value;
+                let record = pointer_operand(*record, "resolver record", &span)?;
                 let value_llvm = self.backend.compile_type(&value_type)?;
                 let slot = self
                     .backend

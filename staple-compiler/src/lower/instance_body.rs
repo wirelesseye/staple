@@ -2496,13 +2496,23 @@ impl<'a> BodyCloner<'a> {
             },
         };
         let owning_plan = self.local_plan(original.owning_plan, &original.origin);
+        let result_type = self.ty(&original.result_type);
+        let outcome = match super::LoweredAwaitOutcome::for_await(&kind, &result_type) {
+            Ok(outcome) => outcome,
+            Err(message) => {
+                self.diagnostics
+                    .push(Diagnostic::new(original.origin.span.clone(), message));
+                None
+            }
+        };
         let new = self.body.awaits.push(LoweredAwait {
             origin: original.origin.clone(),
             operand,
-            result_type: self.ty(&original.result_type),
+            result_type,
             owning_plan,
             resume_state: original.resume_state,
             kind,
+            outcome,
         });
         self.awaits.insert(id, new);
         if let Some(plan) = child_plan {
@@ -3127,6 +3137,7 @@ impl<'a> BodyCloner<'a> {
             kind: LoweredAwaitKind::Wait {
                 result: CheckedType::Error,
             },
+            outcome: None,
         })
     }
 }
@@ -4139,6 +4150,16 @@ impl<'a> BodyValidator<'a> {
             return;
         };
         self.check_concrete_type(&await_.origin, &await_.result_type, "await result type");
+        let expected = super::LoweredAwaitOutcome::for_await(&await_.kind, &await_.result_type);
+        let external = !matches!(await_.kind, LoweredAwaitKind::ChildCoroutine { .. });
+        if !matches!(&expected, Ok(outcome) if *outcome == await_.outcome)
+            || (external && await_.outcome.is_none())
+        {
+            self.report(
+                await_.origin.span.clone(),
+                "instance body external await outcome plans disagree with the concrete result type",
+            );
+        }
         if self.body.plans.get(await_.owning_plan).is_none() {
             self.report(
                 await_.origin.span.clone(),
@@ -5822,5 +5843,54 @@ mod tests {
         assert!(deferred_resources.is_empty());
         assert_eq!(await_.result_type, CheckedType::I32);
         assert_eq!(await_.resume_state, 1);
+    }
+
+    /// Stage 5.8 review: an external await records its `Completed`/`Cancelled`
+    /// injections per concrete instance, and the instance validator rejects a
+    /// corrupted record, so the emitter never plans them.
+    #[test]
+    fn external_await_outcomes_are_recorded_and_revalidated() {
+        let (_, mut program) = lower_with_worklist(concat!(
+            "use std.coroutine.*\n",
+            "def waiter: <T> move Wait T -> Coroutine{} () = move pending => coro {\n",
+            "  let _ = await pending\n",
+            "  ()\n",
+            "}\n",
+            "def make_completion: Scheduler -> (wait: Wait I32, resolver: Resolver I32) = s => completion s\n",
+            "def start: Scheduler -> Coroutine{} () = s => {\n",
+            "  let (wait, resolver) = make_completion s\n",
+            "  waiter wait\n",
+            "}\n",
+            "let pending = start (scheduler ())\n",
+        ));
+        materialize(&mut program);
+        let mut recorded = 0;
+        for (_, instance) in program.instances.iter_mut() {
+            let Some(body) = instance.body.as_mut() else {
+                continue;
+            };
+            for (_, await_) in body.awaits.iter_mut() {
+                if let Some(outcome) = await_.outcome.as_mut() {
+                    assert!(matches!(
+                        outcome.completed,
+                        super::super::LoweredCoercionPlan::SumInject { alternative: 0, .. }
+                    ));
+                    assert!(matches!(
+                        outcome.cancelled,
+                        super::super::LoweredCoercionPlan::SumInject { alternative: 1, .. }
+                    ));
+                    std::mem::swap(&mut outcome.completed, &mut outcome.cancelled);
+                    recorded += 1;
+                }
+            }
+        }
+        assert!(recorded > 0, "the concrete waiter body awaits a `Wait`");
+        let diagnostics = program.validate_instance_bodies();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("external await outcome plans disagree")),
+            "{diagnostics:?}"
+        );
     }
 }

@@ -7844,6 +7844,38 @@ fn is_unimplemented_place(diagnostic: &Diagnostic) -> bool {
     .any(|family| diagnostic.message == format!("lowered emitter: {family} is not implemented yet"))
 }
 
+/// A record- or expression-derived value that must be a pointer; a malformed
+/// plan reports a diagnostic instead of panicking.
+fn pointer_operand<'context>(
+    value: BasicValueEnum<'context>,
+    what: &str,
+    span: &staple_syntax::Span,
+) -> CodeGenerationResult<PointerValue<'context>> {
+    match value {
+        BasicValueEnum::PointerValue(pointer) => Ok(pointer),
+        _ => Err(Diagnostic::new(
+            span.clone(),
+            format!("{what} is not a pointer"),
+        )),
+    }
+}
+
+/// A record- or expression-derived value that must be a struct (a closure,
+/// product, or sum); a malformed plan reports a diagnostic.
+fn struct_operand<'context>(
+    value: BasicValueEnum<'context>,
+    what: &str,
+    span: &staple_syntax::Span,
+) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+    match value {
+        BasicValueEnum::StructValue(value) => Ok(value),
+        _ => Err(Diagnostic::new(
+            span.clone(),
+            format!("{what} is not a struct value"),
+        )),
+    }
+}
+
 fn place_argument_slot<'context>(
     slots: &mut [Option<BasicMetadataValueEnum<'context>>],
     slot: usize,

@@ -1424,6 +1424,43 @@ pub(crate) struct LoweredAwait {
     /// One-based resume state.
     pub resume_state: usize,
     pub kind: LoweredAwaitKind,
+    /// An external (`Task`/`Wait`) await's injections into its outcome sum.
+    /// Recomputed per instance from the concrete result type and validated,
+    /// so the emitter never plans them.
+    pub outcome: Option<LoweredAwaitOutcome>,
+}
+
+/// The `Completed payload | Cancelled` injections of one external await,
+/// at legacy `compile_external_await`'s fixed positions (0 and 1).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoweredAwaitOutcome {
+    pub completed: LoweredCoercionPlan,
+    pub cancelled: LoweredCoercionPlan,
+}
+
+impl LoweredAwaitOutcome {
+    /// The outcome plans of an external await, `None` for a child-coroutine
+    /// await or a template result type that still names a type parameter.
+    pub(crate) fn for_await(
+        kind: &LoweredAwaitKind,
+        result_type: &CheckedType,
+    ) -> Result<Option<Self>, String> {
+        if matches!(kind, LoweredAwaitKind::ChildCoroutine { .. })
+            || contains_type_parameter(result_type)
+        {
+            return Ok(None);
+        }
+        let CheckedType::Sum(outcome) = result_type else {
+            return Err("`await` result is not a `Completed | Cancelled` sum".to_string());
+        };
+        let [completed, cancelled, ..] = outcome.alternatives.as_slice() else {
+            return Err("`await` outcome sum has fewer than two alternatives".to_string());
+        };
+        Ok(Some(Self {
+            completed: LoweredCoercionPlan::plan(completed, result_type)?,
+            cancelled: LoweredCoercionPlan::plan(cancelled, result_type)?,
+        }))
+    }
 }
 
 /// The runtime call route a checked call follows, mirroring the backend's
@@ -5108,6 +5145,8 @@ impl LoweredProgram {
             .type_of_expression(await_.syntax.id)
             .cloned()
             .unwrap_or(CheckedType::Never);
+        let outcome = LoweredAwaitOutcome::for_await(&kind, &result_type)
+            .map_err(|message| Diagnostic::new(span.clone(), message))?;
         let await_id = self.awaits.push(LoweredAwait {
             origin: Origin {
                 syntax: await_.syntax.id,
@@ -5118,6 +5157,7 @@ impl LoweredProgram {
             owning_plan: plan_id,
             resume_state: state,
             kind,
+            outcome,
         });
         if let Some(plan) = self.coroutine_plans.get_mut(plan_id) {
             plan.awaits.push(await_id);
