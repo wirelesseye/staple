@@ -1,3 +1,16 @@
+//! Type, effect, trait, and ownership checking.
+//!
+//! [`TypeChecker`] consumes a resolved module. It checks declarations and runtime
+//! expressions, infers concrete types and effect rows, records coercions and
+//! contextual defaults, and selects trait evidence. Ownership analysis records
+//! moves, borrows, mutations, captures, and initialization checks.
+//!
+//! A successful [`TypedModule`] carries the checked facts needed by lowering.
+//! Generic obligations remain explicit recipes for concrete substitution;
+//! checking rejects invalid source programs with source-located diagnostics.
+//! Lowering owns specialization and cleanup planning. Codegen never receives
+//! this checker interface.
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;

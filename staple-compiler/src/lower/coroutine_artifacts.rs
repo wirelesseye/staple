@@ -16,7 +16,7 @@
 //! evaluator's signature and output type.
 //!
 //! The scanner walks one owner in lowered evaluation order through the shared
-//! artifact planning owner walker. It requests one pair per `coro` creation
+//! owner walker. It requests one pair per `coro` creation
 //! (`CoroCreation`), the environment finalizer a thunk callback installs
 //! (`ReactiveCallbackEnvironment`/`DerivedEvaluatorEnvironment`, gap 1), and
 //! one runner per reaction, `until`, and derived operation (`ReactiveRunner`).
@@ -451,7 +451,7 @@ pub(super) fn expand_reactive_runner(
                 )]);
             };
             let evaluator_type = evaluator_body.signature().clone();
-            // The emitter proof rejects an evaluator that captures resources:
+            // A derived evaluator cannot capture ambient resources:
             // the runner passes only the environment to the indirect call.
             if !evaluator_type.effects.resources.is_empty() {
                 return Err(vec![Diagnostic::new(
@@ -606,7 +606,7 @@ fn resolve_thunk_instance(
     Ok(FunctionInstanceId::from_index(ordinal.index()))
 }
 
-/// Validates the artifact planning plans and creation uses:
+/// Validates the coroutine and reactive plans and creation uses:
 ///
 /// - every expanded pair re-expands to itself from its body instance, so a
 ///   plan whose body is not a coroutine body thunk or whose frame facts
@@ -1790,7 +1790,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // artifact planning reactive runners.
+    // Reactive runners.
     // ------------------------------------------------------------------
 
     /// The human-readable owner of one runner plan: the initializer or the

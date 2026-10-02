@@ -131,7 +131,7 @@ const fn emits(mut program: CorpusProgram, templates: &'static [&'static str]) -
 
 /// The shared code-generation corpus: the empty program, a non-generic
 /// integer-arithmetic program, a two-module program with module globals and
-/// initialization state, the artifact planning census programs plus an
+/// initialization state, the artifact census programs plus an
 /// every-artifact-family fixture, `staple-compiler/examples/*.sta` (excluding
 /// `macros.sta`, covered by the standalone example gate), and `game_loop`
 /// example.

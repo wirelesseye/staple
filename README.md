@@ -10,12 +10,16 @@ workspace:
 | crate | contents |
 | --- | --- |
 | [`staple-cli`](staple-cli) | the `staple` executable (this is the only binary) |
-| [`staple-compiler`](staple-compiler) | the compiler library: lexer, parser, macro expansion, name resolution, type checking, and LLVM code generation |
+| [`staple-compiler`](staple-compiler) | the compiler library: macro expansion, name resolution, checking, typed lowering, and LLVM emission |
 | [`staple-project`](staple-project) | the package-manifest and dependency-graph loader |
+| [`staple-syntax`](staple-syntax) | syntax trees, lexer, and parser |
 
 ```sh
 cargo build            # produces target/debug/staple
 ```
+
+The compiler crate documentation describes phase responsibilities and the
+validated lowering boundary. Open it with `cargo doc -p staple-compiler --open`.
 
 ## Commands
 

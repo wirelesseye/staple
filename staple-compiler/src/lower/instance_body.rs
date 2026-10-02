@@ -1,4 +1,4 @@
-//! materialize concrete instance bodies.
+//! Materialization of concrete instance bodies.
 //!
 //! Every reachable `LoweredFunctionInstance` gets one immutable, instance-owned
 //! body. Bodies are cloned from the lowering template arenas through a
@@ -74,7 +74,7 @@ pub(crate) struct LoweredInstanceCapture {
 
 /// A dispatch or construction site inside one instance body. Sites are keys
 /// into the per-body binding tables; IDs are instance-local. Module
-/// initializers use the same variant keys over program-arena IDs .
+/// initializers use the same variant keys over program-arena IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum LoweredBindingSite {
     /// A direct, trait-dispatched, external, intrinsic, constructor, or helper
@@ -191,11 +191,11 @@ pub(crate) struct LoweredInstanceBody {
     pub bindings: BTreeMap<LoweredBindingSite, LoweredBoundTarget>,
     /// Resolved evidence for every trait-dependent site.
     pub evidence: BTreeMap<LoweredBindingSite, TraitEvidence>,
-    /// Generated-artifact uses recorded by artifact planning scanners, in scan order.
+    /// Generated-artifact uses recorded by artifact scanners, in scan order.
     /// The validator proves these agree one-to-one with the instance's
     /// closure-phase artifact edges.
     pub artifact_uses: Vec<LoweredArtifactUse>,
-    /// Source-function instance uses recorded by artifact planning scanners, in scan
+    /// Source-function instance uses recorded by artifact scanners, in scan
     /// order. The validator proves these agree one-to-one with the instance's
     /// closure-phase instance edges.
     pub instance_uses: Vec<LoweredInstanceUse>,
@@ -344,9 +344,8 @@ impl LoweredInstanceBody {
     }
 
     /// The concrete type of one body-local binding symbol, from its binding
-    /// item or binding pattern, mirroring type of symbol lookup
-    /// under the instance's own substitutions. The artifact planning coroutine
-    /// expander uses this for the plan's frame bindings.
+    /// item or binding pattern under the instance's substitutions. Coroutine
+    /// expansion uses this type for the planned frame binding.
     pub(crate) fn binding_symbol_type(&self, symbol: SymbolId) -> Option<&CheckedType> {
         for (_, item) in self.items.iter() {
             if let LoweredItemKind::Binding(binding) = &item.kind
@@ -392,7 +391,7 @@ impl LoweredProgram {
     }
 
     /// Materializes one concrete body per instance that has none yet, in
-    /// ordinal order. The specialization entry point calls this once; the artifact planning
+    /// ordinal order. The specialization entry point calls this once; the artifact
     /// closure loop calls it after each resumed worklist pass, so an instance
     /// requested by a generated artifact gets a body without re-cloning the
     /// bodies already installed. Installation is all-or-nothing per call:
@@ -1241,7 +1240,7 @@ impl<'a> BodyCloner<'a> {
             .map(|coercion| self.coercion(coercion));
         // recompute the coercion plan from the substituted types,
         // like the other concrete-sensitive derived facts. A concrete pair
-        // the emitter rejects is a diagnostic, never a silently missing plan.
+        // unsupported by lowering produces a diagnostic rather than a missing plan.
         let coercion_plan = match &coercion {
             Some(coercion) => {
                 match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {

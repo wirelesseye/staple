@@ -1,8 +1,22 @@
-//! Typed lowering boundary and owned lowered representation.
+//! The owned boundary between checking and LLVM emission.
 //!
-//! Lowering owns the transition from a successfully checked program to the
-//! owned representation consumed by code generation. The output carries the
-//! closed specialization catalog and concrete emission plans.
+//! [`Lowerer`] reads a successfully checked [`TypedModule`] and snapshots its
+//! semantic catalogs and runtime constructs into typed arenas. Arena handles
+//! are owner-relative: initializers use program arenas, while concrete function
+//! instances own separate arenas. Source origins remain available for diagnostics.
+//!
+//! Canonical substitutions and resolved evidence identify concrete instances.
+//! The worklist reserves stable ordinals before visiting bodies, and generated
+//! artifact closure repeatedly scans owners, expands plans, and materializes new
+//! instances until no requests remain. The catalog is closed before emission.
+//!
+//! Validators check source coverage, arena references, concrete instance bodies,
+//! dependency/use agreement, bound callees, planned names, and complete artifact
+//! plans. Cleanup, coroutine, reactive, and runtime requirements are recorded here.
+//! The resulting [`LoweredProgram`] owns all semantic facts its consumer needs;
+//! codegen selects neither trait implementations nor ownership behavior and
+//! never queries the checker. The read-only emission view exposes owner-local
+//! records without permitting mutations across this boundary.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
@@ -534,7 +548,7 @@ pub(crate) struct LoweredExpression {
     pub value_type: CheckedType,
     pub effects: CheckedEffectSet,
     pub coercion: Option<CheckedCoercion>,
-    /// The recursive plan coerce value executes for
+    /// The recursive plan emitted for
     /// `coercion`. `None` exactly when `coercion` is `None`; a template whose
     /// types still contain declared parameters leaves the plan absent, and
     /// materialization recomputes it from the substituted types.
@@ -1228,7 +1242,7 @@ pub(crate) struct LoweredWith {
     /// The provider value expression, evaluated before the body.
     pub value: ExpressionId,
     /// The source place the provider storage reuses
-    /// (`LoweredProviderStorage::Place`). emission records it so the
+    /// (`LoweredProviderStorage::Place`), recorded so the
     /// emitter does not re-derive the place decision.
     pub place: Option<PlaceId>,
     pub body: BlockId,
@@ -2600,7 +2614,7 @@ pub(crate) struct LoweredSemanticIds {
     pub natural_trait: Option<TraitId>,
     pub sized_trait: Option<TraitId>,
     pub copy_trait: Option<TraitId>,
-    /// The checker-selected `Clone` trait, used by artifact planning's buffer-clone
+    /// The checker-selected `Clone` trait, used by buffer-clone
     /// artifact and evidence recording.
     pub clone_trait: Option<TraitId>,
     pub drop_trait: Option<TraitId>,
@@ -2717,7 +2731,7 @@ pub(crate) struct LoweredProgram {
     consumed_calls: HashSet<SyntaxId>,
     /// Transient lowering state: the active lexical provider stack while one
     /// function body or module initializer lowers. The last matching provider
-    /// by checked value type is the one the emitter backend would select.
+    /// by checked value type agrees with the recorded cleanup selection.
     active_resource_providers: Vec<LoweredResourceProviderId>,
     /// Test-only: the rounds and total growth the last closed artifact catalog
     /// observed, so the closure statistics can record the observed maxima rather
@@ -15835,7 +15849,7 @@ mod tests {
             expanded_adapters > 0,
             "the fixture reserves a constructor adapter"
         );
-        // The artifact planning scanner records cleanup uses and edges, so the fixture
+        // The cleanup scanner records cleanup uses and edges, so the fixture
         // must show at least one of each; the validator already proved the
         // one-to-one agreement inside `Lowerer::lower`.
         let mut artifact_uses = 0;
@@ -16765,9 +16779,8 @@ mod tests {
         // `CurriedDefault` is unreachable from accepted source (curried
         // defaults are rejected during resolution), `PrimitiveMacro` calls are
         // normalized to `Expression::CString` by macro expansion and remain a
-        // defensive route, and `CompilerHelper` is selected by checked
-        // operations rather than source calls. The route/category table test
-        // covers all three; every source-reachable route is asserted here.
+        // defensive route. The route/category table test covers both; every
+        // source-reachable route is asserted here.
         for route in [
             CallRoute::Juxtaposed,
             CallRoute::JuxtaposedIntrinsic,

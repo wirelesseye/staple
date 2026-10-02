@@ -1716,7 +1716,8 @@ the reactive executor. Outside a batch, the executor drains synchronously to
 quiescence before ordinary execution continues, so a reaction still runs
 immediately when created and has completed before a signal assignment returns.
 Dependencies are recollected on every run. Assigning the same value still
-notifies dependents.
+notifies dependents. Writing a product field of a signal also notifies
+that signal's dependents, including reactions that read the field.
 
 Reaction work is FIFO. Reactions made runnable by one propagation are appended
 in creation order, and work made runnable while a reaction runs is appended to
@@ -2740,6 +2741,10 @@ with Tasks = task_scope (sched) {
 - `with Tasks = task_scope (sched) { ... }` opens an affine task scope that
   provides the implicit `Tasks` capability, exactly as `with Reactive = ...`
   provides `Reactive`. `spawn` requires it.
+  Normal exit closes the task scope. `return`, `break`, and `continue` close
+  every task scope opened since their target, in reverse order, just as they
+  dispose reactive scopes. A `return` targets the function exit; `break` and
+  `continue` target their loop. Closing a scope cancels its unfinished tasks.
 - `spawn coroutine` consumes the coroutine, schedules it, and returns a
   `Task T` handle. It also requires the coroutine's own effects `E` at the
   spawn site so its resources are captured then.

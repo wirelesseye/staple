@@ -1,11 +1,11 @@
-//! Canonical structural keys for specialization specialization.
+//! Canonical structural identities for concrete specialization.
 //!
-//! specialization defines the owned, typed identity of source-function instances
-//! and of the constructor-adapter and structural-method artifacts artifact planning
-//! materializes. Keys are built from semantic IDs and structural checked data
-//! only: display names, source spans, contextual defaults, and expanded
-//! nominal representations never participate in equality. The worklist that
-//! consumes these keys belongs to specialization.
+//! Instance and artifact keys contain semantic IDs and concrete structural types
+//! and evidence. Display names, spans, contextual defaults, and expanded nominal
+//! representations do not participate in equality. The append-only catalog interns
+//! keys before body traversal, reserves deterministic ordinals, and plans emitted
+//! names with collision checks. Runtime surfaces with fixed names are recorded
+//! separately from generated artifacts.
 
 use std::collections::{HashMap, HashSet};
 
@@ -464,9 +464,9 @@ impl InstanceKey {
     }
 }
 
-/// Canonical trait evidence. Only resolved selections appear here; declared
-/// bounds and negative obligations stay in `InstanceRequest` until specialization
-/// replaces them with a concrete selection.
+/// Canonical trait evidence contains only resolved selections. Declared bounds
+/// remain evidence recipes until concrete resolution; rejected obligations
+/// never enter an instance key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum CanonicalEvidence {
     /// A selected explicit implementation method. The selected method
@@ -593,7 +593,7 @@ impl ConstructorAdapterKey {
 /// cached `(StructuralTraitMethod, Debug arguments)`: for the seven current
 /// methods the trait, method, and callable type are derivable from the
 /// structural kind plus completed arguments, but this key keeps them explicit
-/// so artifact planning never depends on that derivability.
+/// so planning never depends on that derivability.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct StructuralMethodKey {
     pub structural: StructuralTraitMethod,
@@ -698,7 +698,7 @@ pub(crate) struct ExternAdapterKey {
 /// Generated-artifact request keys. The variant is the namespace: keys from
 /// different families can never compare or hash equal, even when their numeric
 /// IDs coincide. `RuntimeHelper` is deliberately absent: runtime symbols have
-/// fixed names and no lowered bodies, so artifact planning records them as a separate
+/// fixed names and no lowered bodies, so Lowering records them as a separate
 /// ordered requirement set rather than an artifact family.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ArtifactRequestKey {
@@ -2055,15 +2055,15 @@ mod tests {
     }
 
     #[test]
-    fn artifact_families_are_namespaced_and_encoded() {
+    fn artifact_families_have_unique_names_and_keys() {
         let families = artifact_families();
         assert_eq!(
             families.len(),
             12,
-            "every artifact planning artifact family has a representative key"
+            "every artifact family has a representative key"
         );
         let mut names = HashSet::new();
-        let mut encodings = HashSet::new();
+        let mut keys = HashSet::new();
         for key in &families {
             assert!(
                 names.insert(key.family_name()),
@@ -2071,7 +2071,7 @@ mod tests {
                 key.family_name()
             );
             assert!(
-                encodings.insert(key.clone()),
+                keys.insert(key.clone()),
                 "family `{}` has a distinct key",
                 key.family_name()
             );
@@ -2123,13 +2123,10 @@ mod tests {
             ArtifactSiteOwner::Initializer(InitializerId::for_test(0)),
             ArtifactSiteOwner::Instance(InstanceOrdinal(0)),
         ];
-        let mut encodings = HashSet::new();
+        let mut keys = HashSet::new();
         for owner in owners {
             let key = ArtifactRequestKey::UntilRunner(ReactiveRunnerKey { owner, site });
-            assert!(
-                encodings.insert(key.clone()),
-                "each owner namespace separates"
-            );
+            assert!(keys.insert(key.clone()), "each owner namespace separates");
         }
         assert_ne!(
             ArtifactRequestKey::UntilRunner(first),
@@ -2159,16 +2156,16 @@ mod tests {
             }),
             "closure finalizers separate by closure instance for identical captures"
         );
-        let mut coroutine_encodings = HashSet::new();
+        let mut coroutine_keys = HashSet::new();
         for body in 0..2 {
-            coroutine_encodings.insert(
+            coroutine_keys.insert(
                 ArtifactRequestKey::CoroutineCodes(CoroutineCodesKey {
                     body: InstanceOrdinal(body),
                 })
                 .clone(),
             );
         }
-        assert_eq!(coroutine_encodings.len(), 2);
+        assert_eq!(coroutine_keys.len(), 2);
     }
 
     #[test]

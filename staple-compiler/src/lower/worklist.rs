@@ -1,4 +1,4 @@
-//! the deterministic specialization worklist.
+//! The deterministic specialization worklist.
 //!
 //! The worklist is the reachable function-instance graph for one lowered
 //! program. Roots are module initializer bodies in program initialization
@@ -102,14 +102,14 @@ pub(crate) enum LoweredInstanceRequest {
         kind: LoweredInstanceDependencyKind,
         origin: Origin,
     },
-    /// First requested by a generated artifact's plan (artifact planning closure).
+    /// First requested by a generated artifact's plan (artifact closure).
     Artifact {
         artifact: LoweredArtifactRequestId,
         kind: LoweredInstanceDependencyKind,
         origin: Origin,
     },
     /// First requested by a closure-phase scanner reading an owner body
-    /// (artifact planning). The owner is the materialized instance or module
+    /// . The owner is the materialized instance or module
     /// initializer whose scan requested the instance.
     Scan {
         owner: LoweredScanOwner,
@@ -193,7 +193,7 @@ pub(crate) struct LoweredInstanceDependency {
     pub instance: FunctionInstanceId,
     pub origin: Origin,
     pub kind: LoweredInstanceDependencyKind,
-    /// Whether the artifact planning closure phase recorded this edge. Closure edges
+    /// Whether the artifact closure phase recorded this edge. Closure edges
     /// have no instance-body binding; they are checked against scanner use
     /// records instead of the specialization binding table.
     pub closure_phase: bool,
@@ -211,14 +211,14 @@ pub(crate) struct LoweredArtifactRequest {
     /// The requesting site.
     pub origin: Origin,
     pub request: LoweredArtifactRequestRoot,
-    /// The owned plan filling this artifact's generated body. artifact planning fills
+    /// The owned plan filling this artifact's generated body. Expansion fills
     /// the variant that matches the artifact's key family.
     pub plan: Option<LoweredArtifactPlan>,
     /// Artifact-to-artifact edges in the order the plan requested them.
     pub artifacts: Vec<LoweredArtifactDependency>,
     /// Artifact-to-instance edges in the order the plan requested them.
     pub instances: Vec<LoweredInstanceDependency>,
-    /// Whether the artifact planning closure engine expanded this artifact. Transient
+    /// Whether the artifact closure engine expanded this artifact. Transient
     /// closure state like `LoweredFunctionInstance::traversed`.
     pub expanded: bool,
 }
@@ -234,7 +234,7 @@ pub(crate) enum LoweredArtifactRequestRoot {
         kind: LoweredArtifactDependencyKind,
         origin: Origin,
     },
-    /// Another artifact's plan requested this one (artifact planning closure).
+    /// Another artifact's plan requested this one (artifact closure).
     Artifact {
         artifact: LoweredArtifactRequestId,
         kind: LoweredArtifactDependencyKind,
@@ -340,7 +340,7 @@ pub(super) struct SpecializationParts {
 }
 
 /// The append-only interning and edge-recording state shared by the specialization
-/// worklist traversal and the artifact planning closure loop. Exactly one recorder
+/// worklist traversal and the artifact closure loop. Exactly one recorder
 /// owns the graph at a time; between recording phases the graph persists on
 /// the program as `SpecializationParts`. Only this type reserves ordinals,
 /// creates instance/artifact records, and writes edges.
@@ -638,7 +638,7 @@ pub(super) fn build(program: &LoweredProgram) -> Result<SpecializationParts, Vec
 }
 
 /// The record that requested an instance or artifact. Artifacts own requests
-/// once the artifact planning closure loop expands their plans.
+/// once the artifact closure loop expands their plans.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum TraversalOwner {
     Initializer(InitializerId),
@@ -3058,7 +3058,7 @@ mod tests {
             );
             assert!(
                 artifact.artifacts.is_empty() && artifact.instances.is_empty(),
-                "artifact planning artifacts carry no outgoing edges yet"
+                "request-time artifact plans carry no outgoing edges"
             );
             families.insert(key.family_name());
         }
@@ -3323,7 +3323,7 @@ mod tests {
         let existing = program.instances.len();
 
         // Append a second concrete instance of the same template through the
-        // recorder and traverse it with `resume`, exactly as the artifact planning
+        // recorder and traverse it with `resume`, exactly as the artifact
         // closure loop will after an artifact requests a new instance.
         let function = function_id(&program, "identity");
         let template = program.functions.get(function).expect("identity").clone();

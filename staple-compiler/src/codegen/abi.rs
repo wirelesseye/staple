@@ -1,7 +1,7 @@
-//! the backend-local calling-convention layer.
+//! Backend-local calling conventions.
 //!
 //! These functions build the LLVM function types and argument classifications
-//! the emitter uses. They are parameterized by [`LayoutContext`] for the
+//! the emitter uses. They are parameterized by [`super::layout::LayoutContext`] for the
 //! `Copy` decisions that decide indirect parameter slots; they never consult
 //! checked-program queries.
 

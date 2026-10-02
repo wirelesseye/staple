@@ -1,4 +1,4 @@
-//! the backend-local pure-IR layer.
+//! Backend-local LLVM instruction primitives.
 //!
 //! Small IR constructs the emitter uses: GC allocation, finalizer and root
 //! registration, traps, unit values, and the byte helpers the UTF-8 validator

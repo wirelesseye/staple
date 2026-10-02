@@ -10,8 +10,7 @@ use super::{ArenaId, LoweredProgram, PlanType};
 use crate::specialization::{CanonicalFunctionType, CanonicalType};
 
 impl LoweredProgram {
-    /// The closed-catalog checks artifact planning adds on top of the artifact planning
-    /// validators. Runs after `validate_artifact_closure`.
+    /// Checks complete concrete plans and initializer names after artifact closure.
     pub(super) fn validate_closed_catalog(&self) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         self.check_plan_types(&mut diagnostics);
@@ -241,7 +240,7 @@ mod tests {
         // Point the first discard's use at an item that is not a discard: the
         // item exists (so the arena check passes) and the edge is unchanged
         // (so edge agreement passes), but the site emission would emit the
-        // drop from is wrong. Only the artifact planning exact-site check sees it.
+        // drop from is wrong. The exact-site check detects that mismatch.
         let discards = body
             .artifact_uses
             .iter()

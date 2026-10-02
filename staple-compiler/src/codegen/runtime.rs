@@ -1,7 +1,8 @@
-//! the backend-local runtime layer.
+//! Runtime linkage and fixed LLVM helper declarations.
 //!
-//! Installs the hand-written `.ll` runtime modules, declares the lazily
-//! referenced libc/runtime helpers, and emits the fixed UTF-8 validator. These helpers depend only on LLVM and recorded layouts.
+//! Installs recorded runtime modules, declares libc and runtime entry points, and
+//! builds the UTF-8 validator. These helpers use LLVM types and recorded layouts;
+//! they do not query source syntax or checker state.
 
 use inkwell::{AddressSpace, memory_buffer::MemoryBuffer};
 

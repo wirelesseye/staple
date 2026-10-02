@@ -1,4 +1,4 @@
-//! the fixed-point generated-artifact closure engine.
+//! The fixed-point generated-artifact closure engine.
 //!
 //! specialization builds the reachable source-function instance graph and materializes
 //! concrete bodies once. Generated artifacts (constructor adapters, structural
@@ -43,8 +43,8 @@ use crate::specialization::{ArtifactOrdinal, ArtifactRequestKey};
 const MAX_CLOSURE_ROUNDS: usize = 64;
 
 /// Defensive total-growth allowance, proportional to the number of function
-/// templates. Chosen far above the observed standard-library maxima; see the
-/// artifact planning step notes for the recorded values.
+/// templates. Chosen far above the standard-library growth observed by
+/// closure-statistics tests.
 const GROWTH_PER_TEMPLATE: usize = 64;
 const MIN_GROWTH_BUDGET: usize = 1_024;
 
@@ -80,12 +80,9 @@ pub(super) enum ClosureRequest {
     },
 }
 
-/// Sites in one owner body that use a generated artifact. artifact planning defines no
-/// family variants; artifact planning adds the ownership-cleanup sites (drops,
-/// finalizers, and buffer clones); artifact planning adds `coro` creations, reactive
-/// callback/evaluator environments, and reactive runners; artifact planning adds the
-/// extern callable-value site. Every match on this enum must stay exhaustive,
-/// and every variant's ID must be interpreted in the owning body's own arenas.
+/// A generated-artifact use site within one owner body: cleanup, finalizers,
+/// buffer clones, coroutine creation, callbacks/runners, or extern values.
+/// Matches stay exhaustive and IDs resolve in the owning body's arenas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ArtifactUseSite {
     /// A scripted test site identified by its position in the hook table.
@@ -208,7 +205,7 @@ pub(super) trait ArtifactFamilyHooks {
     /// Whether this hook set fills the owned body for `key`'s family.
     /// Validation only rejects a plan that still carries the request-time
     /// marker in a family whose expander is registered; a hook set or a
-    /// family that keeps the artifact planning placeholder plan is exempt.
+    /// test hook that declares no body expansion is exempt.
     fn expands_body(&self, _key: &ArtifactRequestKey) -> bool {
         false
     }

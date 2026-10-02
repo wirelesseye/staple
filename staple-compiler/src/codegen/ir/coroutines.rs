@@ -1,6 +1,9 @@
-//! emission shared coroutine state-machine and reactive runner IR.
-//! Inputs are compiled LLVM types/values; source and checked-type selection
-//! remain with the caller.
+//! LLVM and runtime primitives for coroutine frames and reactive runners.
+//!
+//! Builds resume and cleanup entry points, frame projections, suspension dispatch,
+//! and scheduler/completion calls. Concrete plans are interpreted by the lowered
+//! emitter; these helpers implement fixed runtime field and function conventions.
+
 use super::super::layout::*;
 use super::super::{Backend, CodeGenerationResult, Diagnostic, Span, compiler_diagnostic};
 use super::value_as_basic;

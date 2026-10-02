@@ -22,28 +22,28 @@ use crate::{
 /// The owned plan of one generated artifact, one variant per artifact family.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoweredArtifactPlan {
-    /// A constructor value's callable adapter. artifact planning adds the recursive
+    /// A constructor value's callable adapter. Expansion records the recursive
     /// construction class and the parameter-to-representation mapping.
     ConstructorAdapter(ConstructorAdapterPlan),
-    /// A compiler-generated structural method. artifact planning adds the ordered
+    /// A compiler-generated structural method. Expansion records the ordered
     /// labels, element types, selected callees, and formatting edges.
     StructuralMethod(StructuralMethodPlan),
-    /// Drop glue for one concrete value type. artifact planning adds the selected
+    /// Drop glue for one concrete value type. Expansion records the selected
     /// `Drop` method and the ordered representation cleanup steps.
     DropGlue(DropGluePlan),
-    /// A garbage-collector finalizer. artifact planning adds the referenced drop glue.
+    /// A garbage-collector finalizer. Expansion records the referenced drop glue.
     GcFinalizer(GcFinalizerPlan),
-    /// A coroutine `resume`/`cleanup` pair. artifact planning adds the frame layout
+    /// A coroutine `resume`/`cleanup` pair. Expansion records the frame layout
     /// inputs, cleanup drop glue, and thunk-environment finalizer.
     CoroutineCodes(CoroutineCodesPlan),
-    /// A reaction subscription runner. artifact planning adds the callback route,
+    /// A reaction subscription runner. Expansion records the callback route,
     /// closure type, ordered resources, and payload slot order.
     ReactionRunner(ReactiveRunnerPlan),
-    /// An `until` predicate runner. artifact planning adds the predicate closure type.
+    /// An `until` predicate runner. Expansion records the predicate closure type.
     UntilRunner(ReactiveRunnerPlan),
-    /// A derived binding runner. artifact planning adds the evaluator call shape.
+    /// A derived binding runner. Expansion records the evaluator call shape.
     DerivedRunner(ReactiveRunnerPlan),
-    /// An extern closure adapter. artifact planning records the eager
+    /// An extern closure adapter. Lowering records the eager
     /// foreign-symbol declaration parity facts; the callable sites that use
     /// the adapter live on their owners' use records.
     ExternAdapter(ExternAdapterPlan),
@@ -253,7 +253,7 @@ impl LoweredArtifactPlan {
     /// the closure validator can match them one-to-one with artifact-owned
     /// edges. The runner and extern-adapter families call indirectly or
     /// directly through fixed symbols, so their schemas have no callee slots
-    /// and keep their artifact planning request-based representation.
+    /// and use recorded artifact requests instead.
     pub(crate) fn supports_planned_callees(&self) -> bool {
         matches!(
             self,
@@ -266,8 +266,7 @@ impl LoweredArtifactPlan {
     }
 
     /// Whether expansion replaced the request-time marker for this family.
-    /// Families without a marker (the remaining artifact planning placeholder) are
-    /// always expanded.
+    /// Families without a request-time marker are complete on construction.
     pub(crate) fn is_expanded(&self) -> bool {
         match self {
             LoweredArtifactPlan::ConstructorAdapter(plan) => {
@@ -1001,7 +1000,7 @@ pub(crate) enum DropGlueBody {
     Distinct { representation: PlannedArtifact },
 }
 
-/// The runtime release one opaque-type drop performs. artifact planning turns these
+/// The runtime release one opaque-type drop performs. Expansion turns these
 /// into `LoweredRuntimeRequirements`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuntimeRelease {

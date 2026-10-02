@@ -1,4 +1,9 @@
-//! Structural artifact bodies read only the closed, validated plans.
+//! Emission of validated structural method and formatting plans.
+//!
+//! Body variants prescribe projections, coercions, nested callees, and cleanup.
+//! This module converts those decisions into LLVM instructions without selecting
+//! trait implementations or reconstructing checked structural rules.
+
 use super::*;
 use crate::{DebugDelegate, DebugStep, PlannedCallee, StructuralBody, StructuralMethodPlan};
 

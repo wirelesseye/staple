@@ -1113,7 +1113,7 @@ pub(crate) mod tests {
                 // Structural artifact arguments are canonical keys, which can
                 // only be built from concrete types.
                 Some(ArtifactRequestKey::StructuralMethod(_)) => saw_structural = true,
-                // artifact planning adds cleanup artifacts over the same catalog.
+                // Expansion records cleanup artifacts over the same catalog.
                 Some(ArtifactRequestKey::DropGlue(_))
                 | Some(ArtifactRequestKey::GcFinalizer(_)) => {}
                 Some(other) => panic!("unexpected artifact family `{}`", other.family_name()),
@@ -1471,7 +1471,7 @@ pub(crate) mod tests {
     }
 
     // ------------------------------------------------------------------
-    // artifact planning carried-over gap fixtures.
+    // Callback and coroutine cleanup regressions.
     // ------------------------------------------------------------------
 
     /// A reaction whose callback thunk captures a
@@ -1632,7 +1632,7 @@ pub(crate) mod tests {
     }
 
     // ------------------------------------------------------------------
-    // artifact planning extern adapters and runtime requirements.
+    // Extern adapters and runtime requirements.
     // ------------------------------------------------------------------
 
     const EXTERN_ADAPTER_FIXTURE: &str = concat!(
@@ -2193,7 +2193,7 @@ pub(crate) mod tests {
     }
 
     // ------------------------------------------------------------------
-    // artifact planning drop-glue agreement tests.
+    // Drop-glue agreement tests.
     // ------------------------------------------------------------------
 
     /// Every naturally requested `DropGlue` plan agrees with the typed module:
@@ -2375,7 +2375,7 @@ pub(crate) mod tests {
     }
 
     // ------------------------------------------------------------------
-    // artifact planning formatting closure and the runtime requirement tests.
+    // Formatting closure and runtime requirement tests.
     // ------------------------------------------------------------------
 
     /// Every string template in a materialized body binds its formatting

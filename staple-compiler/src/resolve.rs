@@ -1,3 +1,14 @@
+//! Name resolution and stable semantic identities.
+//!
+//! [`NameResolver`] consumes a loaded program and expands its macros before resolution.
+//! It resolves imports, lexical scopes, declarations, patterns, and references,
+//! assigning module, symbol, function, type, trait, and parameter identities.
+//! Missing or ambiguous names produce source diagnostics.
+//!
+//! The resulting [`ResolvedModule`] owns the program and resolution tables.
+//! The checker uses these identities rather than source spellings to associate
+//! types, effects, and ownership facts with declarations and occurrences.
+
 use std::collections::{HashMap, HashSet};
 
 use crate::{ModuleId, Program};

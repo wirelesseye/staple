@@ -216,7 +216,7 @@ fn closure_environment_drops(
 }
 
 // ---------------------------------------------------------------------------
-// artifact planning scanner and owned-binding collector.
+// cleanup scanner and owned-binding collector.
 // ---------------------------------------------------------------------------
 
 /// One owned-binding draft produced by the shared walk, before its glue is
@@ -230,7 +230,7 @@ pub(super) struct OwnedBindingDraft {
 }
 
 /// The sites one owner walk reports. The walker itself is family-neutral: the
-/// artifact planning cleanup scanner and the artifact planning coroutine/reactive scanners each
+/// cleanup scanner and the coroutine/reactive scanners each
 /// override only the hooks they own (every hook defaults to ignoring the
 /// site), so the traversal exists once.
 pub(super) trait LoweredOwnerVisitor {
@@ -348,7 +348,7 @@ pub(super) trait LoweredOwnerVisitor {
         false
     }
 
-    /// One first-class callable value. artifact planning requests extern adapters and
+    /// One first-class callable value. Extern adapters and
     /// records closure-environment requirements here.
     fn callable_value_site(
         &mut self,
@@ -359,7 +359,7 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
-    /// One binding item. artifact planning records captured binding cells here.
+    /// One binding item. Lowering records captured binding cells here.
     fn binding_site(
         &mut self,
         _binding: &super::LoweredBindingItem,
@@ -368,7 +368,7 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
-    /// One pattern. artifact planning records string-literal comparison here.
+    /// One pattern. Lowering records string-literal comparison here.
     fn pattern_site(
         &mut self,
         _pattern: &super::LoweredPattern,
@@ -377,14 +377,14 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
-    /// One string literal expression. artifact planning records its GC-allocated data
+    /// One string literal expression. Lowering records its GC-allocated data
     /// here; a `c_string` literal lowers to `CString` instead and never reaches
     /// this hook.
     fn string_literal_site(&mut self, _origin: &Origin) -> Result<(), Vec<Diagnostic>> {
         Ok(())
     }
 
-    /// One string template. artifact planning records literal-data allocation here.
+    /// One string template. Lowering records literal-data allocation here.
     fn string_template_site(
         &mut self,
         _template: &super::LoweredStringTemplate,
@@ -393,7 +393,7 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
-    /// One `await` record. artifact planning records the completion surfaces the
+    /// One `await` record. Lowering records the completion surfaces the
     /// suspension implies.
     fn await_site(
         &mut self,
@@ -517,7 +517,7 @@ impl LoweredOwnerVisitor for ScanVisitor<'_> {
         _id: super::LoweredCoroId,
         _origin: &Origin,
     ) -> Result<(), Vec<Diagnostic>> {
-        // The artifact planning coroutine scanner owns `CoroCreation` requests.
+        // The coroutine scanner owns `CoroCreation` requests.
         Ok(())
     }
 }
@@ -583,8 +583,8 @@ impl LoweredOwnerVisitor for CollectVisitor {
 /// Walks one owner in lowered evaluation order, reporting every site through
 /// its visitor. The traversal mirrors the specialization first-visit order:
 /// parameters first, then block items in order, then the block result, with
-/// each expression's operands in evaluation order. artifact planning first used it for
-/// cleanup decisions; artifact planning reuses it for coroutine and reactive sites.
+/// each expression's operands in evaluation order. Cleanup, coroutine, and
+/// reactive scanners share this traversal.
 struct LoweredWalker<'a> {
     program: &'a LoweredProgram,
     owner: OwnerArenas<'a>,
@@ -1031,7 +1031,7 @@ impl<'a> LoweredWalker<'a> {
                         self.walk_expression(expression)?;
                     }
                     // A reactive intrinsic's callback thunk is the
-                    // `ReactiveCallbackEnvironment` site (artifact planning); every
+                    // `ReactiveCallbackEnvironment` site ; every
                     // other implicit thunk argument builds its closure here.
                     if let Some(thunk) =
                         arguments.get(*argument).and_then(|argument| argument.thunk)
@@ -2435,7 +2435,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // artifact planning gc-finalizer fixtures.
+    // GC finalizer fixtures.
     // ------------------------------------------------------------------
 
     use crate::GcFinalizerPlan;

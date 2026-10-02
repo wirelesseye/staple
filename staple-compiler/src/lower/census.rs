@@ -1,4 +1,9 @@
-//! Catalog definition, signature, linkage, and uniqueness checks.
+//! Test-only census of planned definitions, concrete ABIs, and runtime calls.
+//!
+//! Compares catalog names, linkage, and function types with emitted definitions
+//! and checks per-owner runtime requirements. Production code never reads this
+//! module; its assertions exercise the lowering/emission boundary.
+
 use crate::specialization::CanonicalType;
 use crate::{LoweredArtifactPlan, Origin};
 use std::collections::HashSet;

@@ -1,21 +1,10 @@
-//! module-initializer dispatch bindings.
+//! Concrete dispatch bindings for module initializers.
 //!
-//! Module initializers own program-arena bodies, not instance-local bodies, so
-//! they never went through the specialization site binder: their dispatch sites were
-//! recorded as request roots and closure edges, and the artifact planning scanners
-//! re-resolved each one with the specialization recipe. The emitter must
-//! instead read a binding table exactly as it does for instance bodies, because
-//! it must never resolve a dispatch site at LLVM time.
-//!
-//! This module builds that table at the closure fixed point: each initializer
-//! is walked with the shared family-neutral `LoweredWalker`, and every
-//! call/callable/thunk/trait/constructor/formatting/coroutine/reactive site is
-//! resolved with the same recipe the scanners use (root target, empty enclosing
-//! environment). The validator then applies the instance-table rules: every
-//! dispatch site is bound with the expected shape, every binding names a live
-//! site and a catalog entry, trait evidence exists exactly for trait-dependent
-//! sites, each closure-phase use names the target the binding does, and every
-//! instance first requested by this initializer is bound at some site.
+//! Initializers use program arenas rather than instance-local arenas. At catalog
+//! closure, the shared owner walker binds each callable, constructor, trait,
+//! formatting, coroutine, and reactive site to a concrete catalog target. Validators
+//! check binding shape, live sites, evidence, and dependency/use agreement.
+//! Codegen reads these tables without resolving dispatch again.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -1539,7 +1528,7 @@ mod tests {
             .find(|id| *id != bound)
             .expect("another instance");
         // A closure-phase use at the bound site that names a different
-        // instance is a corruption, not a artifact planning failure: this table's
+        // instance is a corruption, not an expansion failure: this table's
         // contract is that the binding and the use agree.
         program.initializer_instance_uses[index].push(crate::LoweredInstanceUse {
             site: ArtifactUseSite::CoroCreation(coro),

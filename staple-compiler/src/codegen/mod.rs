@@ -1,3 +1,29 @@
+//! LLVM emission from a validated, closed [`crate::LoweredProgram`].
+//!
+//! Codegen consumes only lowered records through their read-only emission view.
+//! It declares catalog functions using planned names and linkage, emits concrete
+//! instance and initializer bodies, expands recorded drop glue inline, and emits
+//! validated adapters, finalizers, coroutine pairs, and reactive runners. Recorded
+//! runtime requirements select the runtime modules to link. No source AST or
+//! checker query participates in emission; trait selection, coercion choices,
+//! and cleanup decisions are already recorded. LLVM type layout and instructions
+//! are target-specific work performed here.
+//!
+//! The concrete ABI represents a callable as a code pointer and an environment
+//! pointer. Closure entry points receive the environment first, then effect-row
+//! resources in recorded order, then flattened value parameters. Mutable and
+//! borrowed non-`Copy` slots pass by pointer; moved slots pass by value unless
+//! mutated. Whole-product mutation uses one pointer. Native extern signatures
+//! omit the environment and effect prefix and retain C variadic parameters.
+//! A native CString argument is its NUL-terminated data pointer.
+//! Sum values carry an `i32` tag and an ABI-aligned payload; binding cells retain
+//! value and initialization state, with reactive metadata when required.
+//! Coroutine resume/cleanup and runtime layouts share fixed field conventions
+//! with the linked runtime modules.
+//!
+//! Emission failures return diagnostics. A module with failed bodies is never
+//! returned; successful emission verifies the completed LLVM module.
+
 use crate::LoweredModule;
 #[cfg(test)]
 use inkwell::values::BasicValue;

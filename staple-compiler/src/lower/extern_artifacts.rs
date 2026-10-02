@@ -1,18 +1,11 @@
-//! the extern-adapter artifact expander and scanner.
+//! Planning and discovery of first-class extern callable adapters.
 //!
-//! `expand_extern_adapter` fills one `ExternAdapter` plan from the lowered
-//! foreign binding: the adapter's declared arity and the eager-declaration
-//! parity facts emission needs. The adapter body itself is a direct call to the
-//! foreign symbol, so the plan names no lowered callee.
-//!
-//! The scanner walks one owner through the shared artifact planning owner walker and
-//! requests one adapter per non-variadic extern binding used as a first-class
-//! callable value (`ExternAdapterValue`). The emitter creates an adapter eagerly for
-//! every non-variadic extern binding; the artifact records which adapters a
-//! callable-value site actually reaches, and the plan's declaration facts keep
-//! the eager foreign-symbol parity for emission. A variadic extern used as a
-//! first-class value is rejected here with the emitter diagnostic, because the
-//! adapter's direct call cannot forward a variadic argument list.
+//! Each reached non-variadic extern value requests an adapter recording its
+//! concrete callable signature and foreign declaration facts. The adapter calls
+//! the native symbol directly; it has no lowered callee. Foreign declarations
+//! remain available independently of whether an adapter is reached. A variadic
+//! extern cannot be used as a first-class callable because an adapter cannot
+//! forward an unknown variadic tail; lowering reports a source diagnostic.
 
 use staple_syntax::{Diagnostic, Span};
 
@@ -229,7 +222,7 @@ impl LoweredOwnerVisitor for ExternScanVisitor<'_> {
     }
 }
 
-/// Validates the artifact planning extern-adapter plans and uses:
+/// Validates the extern-adapter plans and uses:
 ///
 /// - every expanded adapter re-expands to itself from the lowered symbol, so a
 ///   plan whose symbol is not a matching external binding is rejected;

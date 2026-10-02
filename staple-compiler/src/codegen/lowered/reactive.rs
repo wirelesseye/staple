@@ -1,4 +1,9 @@
-//! signal, derived, and reactive-call emission.
+//! Reactive emission from recorded operations, callbacks, and runner plans.
+//!
+//! Signal and derived storage, provider identity, notification targets, and
+//! callback bindings are lowering facts. This module emits their runtime calls
+//! and disposes reactive scopes at recorded control-flow exits.
+
 use super::*;
 use crate::{
     LoweredReactiveCallbackId, LoweredReactiveOperationId, LoweredReactiveOperationKind,

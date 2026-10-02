@@ -1,4 +1,9 @@
-//! Coroutine pair emission from the concrete artifact and body records.
+//! Coroutine emission from concrete frame and await plans.
+//!
+//! Uses recorded frame order, resume states, resource slots, cancellation cleanup,
+//! and bound coroutine pair names. The emitter translates these facts to LLVM
+//! control flow and runtime calls without reclassifying source awaits.
+
 use super::*;
 use crate::codegen::ir::{CoroutineResumeEntry, ExternalAwaitKind};
 use crate::codegen::layout::{

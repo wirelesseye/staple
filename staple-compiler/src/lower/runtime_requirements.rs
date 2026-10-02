@@ -1,20 +1,10 @@
-//! the per-program lowered runtime requirements.
+//! Ordered runtime requirements of a closed lowered program.
 //!
-//! Fixed-named runtime symbols have no lowered bodies to plan, so they are not
-//! an artifact family. Instead every program carries an ordered, deduplicated
-//! set of the runtime surfaces its lowered operations need. The set is derived
-//! from the closed catalog: materialized instance bodies (including the
-//! eagerly materialized standard-library templates the backend always emits),
-//! module initializers, and expanded artifact plans. emission may keep
-//! installing the surfaces by name, but only when the requirement is present
-//! and with the same eager-root behavior.
-//!
-//! The set records surfaces, not individual symbols, because a subsystem's
-//! symbols are installed together: the garbage-collector module, the
-//! coroutine/scheduler/completion module, and the reactive module, plus the
-//! UTF-8 validator and the lazily declared libc symbols. `llvm.trap` stays
-//! backend-local: it is a pure LLVM intrinsic with no runtime installation and
-//! no lowered body, as the artifact planning negative matrix records.
+//! Fixed-name runtime surfaces are separate from generated artifacts. Materialized
+//! instances, initializers, and expanded plans contribute to a deduplicated set.
+//! Codegen links only recorded surfaces: GC, coroutine/scheduler/completion,
+//! reactive execution, UTF-8 validation, and lazily declared libc functions.
+//! LLVM intrinsics such as llvm.trap need no runtime module or lowered body.
 
 use staple_syntax::Diagnostic;
 

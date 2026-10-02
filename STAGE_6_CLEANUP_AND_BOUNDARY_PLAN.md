@@ -93,7 +93,7 @@ Each step ends with `cargo nextest run --workspace`, the C4 comparison, a warnin
 - Add the ignored reproduction test for the `CString` leak, so the remaining known defect is executable. Without allocator instrumentation it can at least compile and run the leaking program, and the comment explains what a fixed version must assert.
 - In the step notes, record each classification and every site converted.
 
-### Step 5: Module documentation and language reference
+### Step 5: Module documentation and language reference (complete)
 
 - **Crate overview** (`lib.rs` `//!`): the pipeline order (parse → expand → resolve → check → lower → emit), what each phase consumes and produces, and the rule that each phase reads only its predecessor's output. In particular, codegen reads only `LoweredProgram`, never the checker.
 - **Phase docs** for `resolve.rs`, `typecheck.rs`, `lower.rs` (expanded), and `codegen/mod.rs`, covering responsibilities, invariants, and what each guarantees its consumer:
@@ -370,3 +370,34 @@ asserted `strlen` results from both invocations. The workspace and test builds
 are warning-free. All 96 reference comparisons are `same`. Formatting and
 whitespace checks pass. Corpus prose was reviewed again to remove descriptions
 of removed-backend failures that could otherwise read as current behavior.
+
+### Step 5: Module documentation and language reference (complete)
+
+- Crate rustdoc explains parse → expand → resolve → check → lower → emit,
+  each output and its consumer, and the distinction between compiler object
+  emission and CLI executable linking. Codegen reads only the owned lowered
+  program and its emission view.
+- Resolver, checker, lowering, and codegen docs describe responsibilities and
+  guarantees. Lowering docs cover owner-relative arenas, canonical instances,
+  fixed-point catalog closure, validators, recorded runtime requirements, and
+  the immutable emission boundary. Codegen docs cover planned names/linkage,
+  inline cleanup, recorded semantic choices, target layout, and concrete closure,
+  resource, mutation, coroutine, sum/cell, and native extern ABI conventions.
+- Main lowering and codegen submodules have standalone overviews, including the
+  test-only census. Remaining placeholder/future-tense prose was rewritten as
+  current construction, expansion, and validation rules. Comments referring to
+  removed `InstanceRequest`/`CompilerHelper` designs are gone. The key-family
+  test now describes unique names and structural keys rather than deleted byte
+  encodings.
+- `Staple.md` states normal and early task-scope closure, and product-field signal
+  notification. Its generic `Drop` selection/bound restriction and declared
+  coroutine-row upper-bound rules were checked and retained.
+- README identifies the syntax crate and typed lowering and points to crate docs.
+- Rustdoc, including private modules, builds with warnings denied. A public link
+  to the private `LoweredProgram` type was changed to code text so ordinary public
+  documentation remains valid too.
+
+**Results:** All 1301 workspace tests pass (two intentionally ignored tests).
+Workspace and test builds are warning-free, and rustdoc including private modules
+builds with warnings denied. All 36 example CLI paths pass. Formatting and
+whitespace checks pass. The final reference IR results are recorded in Step 6.

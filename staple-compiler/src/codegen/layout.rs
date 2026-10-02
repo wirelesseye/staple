@@ -91,8 +91,7 @@ pub(crate) const TASK_RECORD_RESULT: u32 = 6;
 pub(crate) const TASK_STATE_CANCELLED: u64 = 2;
 
 /// The storage of a lowered sum value: one `i32` tag plus a payload buffer
-/// aligned for the widest alternative. compile sum value builds
-/// it; moving it here keeps the layout decision with `compile_sum_type`.
+/// aligned for the widest alternative. Target layout determines the alignment.
 #[derive(Clone)]
 pub(crate) struct SumStorage<'context> {
     pub(crate) tag: inkwell::values::PointerValue<'context>,
