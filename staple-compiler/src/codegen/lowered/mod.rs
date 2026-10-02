@@ -2963,11 +2963,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             // Legacy clears the binding cell's state only for a symbol with
             // mutable storage (`has_mutable_storage`); a coroutine frame cell
-            // for an ordinary `let` is not cleared.
-            if self
-                .view
-                .symbol(*symbol)
-                .is_some_and(|symbol| symbol.mutable_storage)
+            // for an ordinary `let` was not cleared because legacy never
+            // dropped it. Stage 5.11 (F4) drops live frame cells at
+            // completion, so a moved-out frame binding's state is cleared too;
+            // otherwise the completion or cancel drop would double-drop it.
+            let frame_binding = environment
+                .coroutine
+                .as_ref()
+                .is_some_and(|coroutine| coroutine.frame_bindings.contains(symbol));
+            if frame_binding
+                || self
+                    .view
+                    .symbol(*symbol)
+                    .is_some_and(|symbol| symbol.mutable_storage)
             {
                 self.store_local_initialization_state(
                     owner,

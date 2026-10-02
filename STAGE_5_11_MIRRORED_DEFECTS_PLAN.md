@@ -40,6 +40,13 @@ Line references are against `5194cf9` and will drift; re-locate code by name. Bu
 - The checker's effect inference leaves `spawn`'s effect variable unresolved outside a coroutine or top-level statement, so the return fixture carries an empty scope; the break/continue fixtures prove child cancellation. The emitted `__staple_task_scope_close` on the return path is verified in the IR.
 - M1: no baseline-corpus path changes for F3. The full workspace suite passes 1302 tests.
 
+### Step 5 — complete (F4)
+
+- The completion path reuses each frame binding's recorded `unwind_drop` glue; no separate `CoroutineFramePlan` field was needed, so `expand_coroutine_codes`, `check_stage_4_5`'s re-expansion, `visit_types`/`visit_callees`, and the catalog snapshot already cover it. `emit_coroutine_pair` now runs one conditional cell drop per droppable frame binding, in plan order, after `drop_all_owned` and before `build_coroutine_complete`.
+- A moved-out frame binding must not be dropped again: `release_moved_ownership` now clears an ordinary frame cell's state too (legacy cleared only mutable cells because it never dropped frame cells at completion). The coroutine context records the frame-binding symbols so a nested-thunk binding moved inside its thunk is cleared as well.
+- `coroutine_drop_order` now expects `leaked` (the completed sibling's binding drops); the new `coroutine_completion_drops` entry pins a normal completion, a moved-out binding dropped once, a never-initialized branch binding skipped, a cancelled coroutine dropped once through the unwind, and a child-awaited coroutine dropping its own frame bindings.
+- M1: two new `DIFF`s, both exercising F4 — `await_task_effect_pair` (the moved-out `Task` frame cell is now cleared) and `coroutine_drop_order` (the completion drops). F1's two adapter `DIFF`s remain; 83 of 87 paths `same`. The full workspace suite passes 1302 tests.
+
 ## Starting Point
 
 There is one emitter, and the suite passes 1302 tests. Stage 5.11 is the only part of Stage 5 that intentionally changes behavior. Five defects are queued:

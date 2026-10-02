@@ -19,6 +19,10 @@ pub(super) struct CoroutineContext<'context> {
     pub status_type: StructType<'context>,
     pub dispatch: Vec<BasicBlock<'context>>,
     pub pending_field: u32,
+    /// Stage 5.11 (F4): every frame binding symbol, including bindings inside
+    /// nested thunks. A move out of one clears its frame cell state so the
+    /// completion and cancel drops skip it.
+    pub frame_bindings: Vec<SymbolId>,
 }
 
 impl<'program, 'context> LoweredEmitter<'program, 'context> {
@@ -234,6 +238,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             status_type: status,
             dispatch: dispatch.clone(),
             pending_field: layout.pending_field,
+            frame_bindings: frame_plan
+                .frame_bindings
+                .iter()
+                .map(|binding| binding.symbol)
+                .collect(),
         });
         let state = self.backend.build_coroutine_resume_dispatch(
             resume,
@@ -286,12 +295,59 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Diagnostic::new(span.clone(), "coroutine result is not first-class")
             })?;
             self.drop_all_owned(&environment, span)?;
+            // Stage 5.11 (F4): a coroutine that completes normally drops its
+            // live frame bindings, in plan order, before the result is
+            // published. The recorded `unwind_drop` glue is the same type drop
+            // the cancel unwind uses; the cell state skips a moved-out or
+            // never-initialized binding, and the unwind and completion paths
+            // are mutually exclusive.
+            self.emit_frame_binding_drops(frame, layout.ty, frame_plan, span)?;
             self.backend
                 .build_coroutine_complete(result, result_slot, state_slot, status)?;
         }
         self.backend.build_coroutine_cleanup(cleanup, finalizer)?;
         if let Some(previous) = previous {
             self.backend.builder.position_at_end(previous);
+        }
+        Ok(())
+    }
+
+    /// One conditional cell drop per droppable frame binding, in plan order.
+    /// The cancel unwind and the normal completion path share the recorded
+    /// `unwind_drop` glue (the drop is type-based, so a separate completion
+    /// plan field would be redundant); the cell state makes the drop
+    /// conditional, so a moved-out or never-initialized binding is skipped.
+    fn emit_frame_binding_drops(
+        &mut self,
+        frame: PointerValue<'context>,
+        frame_type: StructType<'context>,
+        frame_plan: &CoroutineFramePlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        for (index, binding) in frame_plan.frame_bindings.iter().enumerate() {
+            let Some(glue) = &binding.unwind_drop else {
+                continue;
+            };
+            let ordinal = glue
+                .artifact
+                .ok_or_else(|| Diagnostic::new(span.clone(), "unbound coroutine frame drop"))?;
+            let plan = self.drop_glue_plan(ordinal, span)?;
+            let cell = self
+                .backend
+                .builder
+                .build_struct_gep(
+                    frame_type,
+                    frame,
+                    CORO_HEADER_FIELDS + index as u32,
+                    "coro.complete.cell",
+                )
+                .map_err(compiler_diagnostic)?;
+            let llvm_type = self.backend.compile_type(&binding.value_type)?;
+            let blocks = self
+                .backend
+                .begin_conditional_cell_drop(cell, llvm_type, span.clone())?;
+            self.emit_drop_glue(blocks.value, plan, span)?;
+            self.backend.end_conditional_cell_drop(&blocks)?;
         }
         Ok(())
     }

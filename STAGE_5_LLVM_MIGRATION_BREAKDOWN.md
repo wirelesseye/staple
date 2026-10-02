@@ -424,6 +424,8 @@ This runs after the cutover, so each fix lands in one backend (D5). It is the on
 
 **Progress (Step 4, F3 complete).** `return`, `break`, and `continue` close every task scope opened since their target (`LoopContext::tasks_before`), immediately after reactive disposal and before the owned drops; the `with Tasks` normal exit is unchanged. The `task_scope_break_exit` and `task_scope_continue_exit` entries prove a cancelled child never reaches its trailing output, and `task_scope_return_exit` covers the return path. M1: no baseline-corpus path changes. Suite: 1302 tests.
 
+**Progress (Step 5, F4 complete).** A coroutine that completes normally drops its live frame bindings in plan order after `drop_all_owned` and before the result is published, reusing each binding's `unwind_drop` glue; the cell state skips a moved-out or never-initialized binding, and a moved-out ordinary frame cell is now cleared on the move. `coroutine_drop_order` expects the completed sibling's `leaked` drop, and `coroutine_completion_drops` covers normal completion, a moved-out binding, a never-run branch, cancellation, and a child await. M1: `await_task_effect_pair` and `coroutine_drop_order` join F1's two adapter `DIFF`s; 83 of 87 paths `same`. Suite: 1302 tests.
+
 **Gate (superseded by the plan's Step 7; kept for history):** The new fixtures print the corrected drop output. The full gate set (Contract 6) passes. The checker/lowering drop-agreement test passes. **Only now may Stage 5 be marked complete.**
 
 ## Ordering and Parallelism

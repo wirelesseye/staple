@@ -138,7 +138,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 80] = [
+static CORPUS: [CorpusProgram; 81] = [
     expect_stdout(must_run(inline("empty", "", "5.3")), ""),
     expect_stdout(
         must_run(inline(
@@ -1668,8 +1668,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         "derived len\nvalue len\n",
     )),
     // K2/D5: the cancel unwind drops the frame bindings in plan order
-    // (`first` then `second`); the completed sibling's `kept` frame binding is
-    // never dropped — the mirrored completed-coroutine leak (D5).
+    // (`first` then `second`); Stage 5.11 (F4) fixed the completed-coroutine
+    // leak, so the completed sibling's `leaked` frame binding is dropped when
+    // that coroutine completes.
     must_run(expect_stdout(
         emits(
             inline(
@@ -1708,7 +1709,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ),
             &["tag", "with_tags", "completing"],
         ),
-        "tags ready\ncompleting\nfirst\nsecond\ncancelled True\nscope closed\n",
+        "tags ready\ncompleting\nleaked\nfirst\nsecond\ncancelled True\nscope closed\n",
     )),
     must_run(expect_stdout(
         inline(
@@ -2024,6 +2025,80 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             "5.11",
         ),
         "returned 1\n",
+    )),
+    // Stage 5.11 (F4): a coroutine that completes normally drops its live
+    // frame bindings in plan order, before the result is published. The cell
+    // state skips a moved-out or never-initialized binding, a cancelled
+    // coroutine still drops exactly once through the unwind, and a
+    // child-awaited coroutine drops its own frame bindings on completion.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "coroutine_completion_drops",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "use std.cinterop.(CString, c_string)\n",
+                    "use std.io.(IO, println)\n",
+                    "extern \"c\" { puts: CString -> I32 }\n",
+                    "type Tag = ctor CString\n",
+                    "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
+                    "def tag: move CString -> Tag = move text => Tag text\n",
+                    "def completes: () -> Coroutine{} () = () => coro {\n",
+                    "    let kept = tag (c_string \"complete\")\n",
+                    "    ()\n",
+                    "}\n",
+                    "def moved_out: () -> Coroutine{} () = () => coro {\n",
+                    "    let first = tag (c_string \"moved\")\n",
+                    "    let second = first\n",
+                    "    ()\n",
+                    "}\n",
+                    "def never_ran: Bool -> Coroutine{} () = condition => coro {\n",
+                    "    if (condition) {\n",
+                    "        let never = tag (c_string \"never\")\n",
+                    "        ()\n",
+                    "    }\n",
+                    "}\n",
+                    "def cancelled: () -> Coroutine{Tasks} () = () => coro {\n",
+                    "    let doomed = tag (c_string \"cancel\")\n",
+                    "    let _ = await (yield_now ())\n",
+                    "    ()\n",
+                    "}\n",
+                    "def child: () -> Coroutine{} Tag = () => coro {\n",
+                    "    let held = tag (c_string \"child\")\n",
+                    "    held\n",
+                    "}\n",
+                    "def parent: () -> Coroutine{} () = () => coro {\n",
+                    "    let outer = tag (c_string \"parent\")\n",
+                    "    let result = await (child ())\n",
+                    "    ()\n",
+                    "}\n",
+                    "let first = block_on (completes ())\n",
+                    "let second = block_on (moved_out ())\n",
+                    "let third = block_on (never_ran False)\n",
+                    "let sched = scheduler ()\n",
+                    "with Tasks = task_scope (sched) {\n",
+                    "    let doomed = spawn (cancelled ())\n",
+                    "    let _ = pump (sched, 1)\n",
+                    "    Task.cancel doomed\n",
+                    "    let _ = pump (sched, 1)\n",
+                    "    let _ = spawn (parent ())\n",
+                    "    let _ = pump (sched, 8)\n",
+                    "}\n",
+                    "println \"done\"\n",
+                ),
+                "5.11",
+            ),
+            &[
+                "tag",
+                "completes",
+                "moved_out",
+                "never_ran",
+                "cancelled",
+                "child",
+                "parent",
+            ],
+        ),
+        "complete\nmoved\ncancel\nparent\nchild\ndone\n",
     )),
 ];
 
