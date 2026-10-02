@@ -22,7 +22,7 @@ Line references are against `5194cf9` and will drift; re-locate code by name. Bu
 
 - `ExternAdapterPlan` records `indirect_parameters`, one flag per flattened value slot, computed by `adapter_indirect_parameters` from the shared `concrete_is_copy` decision. The callable-value scanner and the family expander compute the same vector, so `check_stage_4_6`'s re-expansion rejects a disagreement.
 - `emit_extern_adapter_body` loads every recorded by-pointer argument (`extern.argument`) before the unchanged native call. A whole-mutation callable is rejected; no extern binding can produce one.
-- The closure route records `c_string_temporary` for an indirect call only when the callee is a statically known extern binding and its first slot is not moved, and the emitter loads the borrowed `CString` slot before releasing it. This is narrower than the plan's "caller always frees": `CString.to_string` consumes its argument (Staple.md, "C interop"), so a blanket caller free would double-free the conversion's own release (an owned `CString` passed to `CString.to_string` already aborts on the baseline). The adapter leak is fixed; an unknown callable that borrows a temporary can still leak, exactly as today.
+- The closure route records `c_string_temporary` for an indirect call only when the callee is a statically known extern binding and its first slot is not moved, and the emitter loads the borrowed `CString` slot before releasing it. This is narrower than the plan's "caller always frees": `CString.to_string` consumes its argument (Staple.md, "C interop"), so a blanket caller free would double-free the conversion's own release. The adapter leak is fixed; an unknown callable that borrows a temporary can still leak, exactly as today.
 - Fixtures: the new `extern_adapter_abi` 5.11 entry (extern callback, captured adapter in a closure, stored adapter, implicit thunk with a moved capture, and an implicit thunk with a literal temporary) and the restored `thunk_arguments` (`puts value`, pinned `thunk\n\n`).
 - M1: 85 of 87 paths are `same` over four runs. The two `DIFF`s are `census_coroutines_and_runners` and `extern_values`, each differing only in the adapter body (`%extern.argument = load ptr, ptr %1`). The full workspace suite passes 1302 tests.
 
@@ -236,3 +236,17 @@ Step 1 → Step 2 (F1) → Step 3 (F2) → Step 4 (F3) → Step 5 (F4) → Step 
 - **F4 comes before F5.** F5 changes which types need drop, and F4's completion drops should be validated against today's drop set first.
 - **F5 is last.** It is the only fix that changes language semantics: `Copy` reclassification and new move errors. Its design note is fixed before code lands (M4).
 - **Highest risk.** This is F5's template-versus-concrete `Copy` rule. A mistake there is a soundness bug, a double drop, rather than a missing feature. That is why the design note specifies the conservative template rule and an agreement sweep that runs before the switch.
+
+## Post-gate review fixes
+
+The review re-verified the gate:
+
+- the suite passes 1303 tests;
+- an independent rebuild of the `5194cf9` reference reproduced the 87-path containment result exactly: 83 `same`, and the same four justified `DIFF`s. The two F1 `DIFF`s are only the adapter's new `extern.argument` load;
+- direct probes of the F5 rule behaved soundly: a `Copy`-bounded call and a template copy of a generically droppable `Box` are rejected, a double use is a move error, each instantiation and a generic move-through drop exactly once, and a failed bound runs no user drop.
+
+Three follow-ups, all fixed:
+
+- **The F3 `return` path had no test.** `task_scope_return_exit` spawns no child, and the return-path close was verified only by reading IR. The new `a_return_inside_a_task_scope_closes_it` asserts that the function closes the scope exactly once, before its `ret`. The scope's normal exit is unreachable there, so the close comes from the return path.
+- **`spawn` does not type-check in an ordinary function, and this was unrecorded.** It is why the return fixture could not spawn a child. Inside a plain `def`, `spawn`'s effect variable `E` is never resolved, even with an annotated coroutine type, so the body "requires effects {E}"; the same call checks at top level and inside a coroutine. It is recorded under "Known defects" in TYPED_LOWERING_PLAN.md, with the ignored reproduction `spawn_type_checks_inside_an_ordinary_function`.
+- **F1's narrowed C-string release.** Step 2's note claimed that an owned `CString` passed to `CString.to_string` "already aborts on the baseline". The review could not reproduce that (a moved parameter, a scoped local, and a callback all run correctly), so the claim is removed. The narrowing's real reason stands: `CString.to_string` releases its argument, so a blanket caller free would double-free a temporary passed through a callback such as `apply CString.to_string`. The leak that remains for an unknown callable borrowing a temporary `CString` is now a recorded known defect.

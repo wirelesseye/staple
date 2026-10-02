@@ -680,6 +680,67 @@ fn until_rejects_a_predicate_that_is_not_pure_signal_reads() {
     );
 }
 
+/// Stage 5.11 F3: a `return` from inside `with Tasks` closes the scope on the
+/// return path. The scope's normal exit is unreachable here, so any close in
+/// `early` comes from the return; it must precede the function's `ret`.
+#[test]
+fn a_return_inside_a_task_scope_closes_it() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "def early: () -> I32 = () => {\n",
+        "    let sched = scheduler ()\n",
+        "    with Tasks = task_scope (sched) {\n",
+        "        return 1\n",
+        "    }\n",
+        "    0\n",
+        "}\n",
+        "let value = early ()\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("an early return from a task scope should lower");
+    let body = function_definition(&llvm, "early");
+    assert_eq!(
+        body.matches("call void @__staple_task_scope_close").count(),
+        1,
+        "the return path closes the scope exactly once:\n{body}"
+    );
+    let close = body
+        .find("@__staple_task_scope_close")
+        .expect("scope close");
+    let ret = body.find("ret i32").expect("return");
+    assert!(close < ret, "the close precedes the return:\n{body}");
+}
+
+/// Known checker defect (TYPED_LOWERING_PLAN.md, "Known defects"): inside an
+/// ordinary function, `spawn`'s effect variable `E` is never resolved, even
+/// when the coroutine's type is annotated, so the body "requires effects {E}".
+/// The same call checks at top level and inside a coroutine. Remove
+/// `#[ignore]` with the fix, and give `task_scope_return_exit` a spawned child.
+#[test]
+#[ignore = "known checker defect: spawn's effect variable in a function body"]
+fn spawn_type_checks_inside_an_ordinary_function() {
+    type_check(concat!(
+        "use std.coroutine.*\n",
+        "use std.io.(IO, println)\n",
+        "def worker: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+        "    let _ = await (yield_now ())\n",
+        "    println \"task end\"\n",
+        "}\n",
+        "def early: Scheduler ->{IO} I32 = sched => {\n",
+        "    with Tasks = task_scope (sched) {\n",
+        "        let w: Coroutine{Tasks, IO} () = worker ()\n",
+        "        let child = spawn w\n",
+        "        let _ = pump (sched, 1)\n",
+        "        return 1\n",
+        "    }\n",
+        "    0\n",
+        "}\n",
+        "let value = early (scheduler ())\n",
+    ));
+}
+
 #[test]
 fn spawned_coroutines_lower_a_cancellation_unwind_path() {
     let module = type_check(concat!(

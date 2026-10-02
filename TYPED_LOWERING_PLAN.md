@@ -19,6 +19,17 @@ LLVM generation consumes lowered IR and no longer infers types, selects trait im
 - **Stage 5.11 is complete, and Stage 5 is complete.** All five mirrored/queued defects are fixed: F1 (extern-adapter ABI), F2 (signal field writes), F3 (task scopes on early exits), F4 (completed-coroutine frame bindings), and F5 (generic `Drop` selection). Each has a pinned `MustRun` fixture and an M1 comparison; the 87-path comparison reports 83 `same` and the four `DIFF`s F1/F4 explain. The checker/lowering drop and `Copy` agreement sweep passes, Staple.md states the generic `Drop` rule and bound restriction, and the full workspace suite passes 1303 tests. `drop_method_for` is deleted, so the deferred checker warning is gone. **Stage 6 is next**; its [77-method handoff](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory) is unchanged apart from the deleted `drop_method_for`.
 - Current suite command: `CARGO_INCREMENTAL=0 cargo nextest run --workspace`. No emitter feature or selector exists.
 
+### Known defects
+
+- **`spawn` does not type-check inside an ordinary function (found in the Stage 5.11 review).**
+  - **Symptom:** in a plain `def` that declares its effects, `spawn` (`<T, effect E> Coroutine{E} T ->{Tasks, E} Task T`) leaves `E` unresolved, so the body "requires effects {E}". This happens even when the coroutine argument is annotated `Coroutine{Tasks, IO} ()`. The same call type-checks at top level and inside a coroutine body.
+  - **Effect:** a function cannot spawn from inside `with Tasks`, so `task_scope_return_exit` cannot prove that an early `return` cancels a live child. The IR test `a_return_inside_a_task_scope_closes_it` covers the return-path close.
+  - **Reproduction:** `tests/compiler.rs::spawn_type_checks_inside_an_ordinary_function` is `#[ignore]`d. Remove the attribute with the fix, and give the return fixture a spawned child.
+- **A temporary `CString` passed through an unknown callable leaks (Stage 5.11 F1 residual).**
+  - **Symptom:** a temporary `CString` argument is released after the call only when the callee is a statically known extern binding. Through an arbitrary closure, such as a callback parameter, the temporary is never freed.
+  - **Why it is narrow:** `CString.to_string` releases its own argument, so a blanket caller free would double-free `apply CString.to_string`.
+  - **Fix direction:** record whether the callee's parameter consumes its `CString` (a move or a releasing conversion), and free only when it borrows.
+
 ### Fixed defects
 
 - **A parenthesized expression whose own type is a product did not lower (found in the Stage 5.10 review; predated Stage 5; fixed after 5.10).**
