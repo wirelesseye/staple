@@ -5,6 +5,8 @@ This is the plan for the Stage 5.10 section of [STAGE_5_LLVM_MIGRATION_BREAKDOWN
 - the breakdown's Migration Contract and Decisions D1–D6;
 - the Stage 5.9 plan's handoff ([STAGE_5_9_FULL_SUITE_PARITY_PLAN.md](STAGE_5_9_FULL_SUITE_PARITY_PLAN.md), "Handoff to Stage 5.10" and "Post-gate review fixes").
 
+**Status:** All eight steps are complete. The single-emitter final gate passes; Stage 5.11 is next.
+
 This plan's gate (Step 8) supersedes the **Gate** paragraph in the breakdown's 5.10 section.
 
 Line references are against `1501270` and will drift; re-locate code by name. Build with `CARGO_INCREMENTAL=0` to bound disk use. Migration-era feature builds are historical; only the default emitter exists now.
@@ -24,7 +26,7 @@ Line references are against `1501270` and will drift; re-locate code by name. Bu
 
 The source inventory is broader than the initial 31-test list. Also audit `stage_4_5_coroutine_and_runner_transition_matches_legacy_emission`, `legacy_constructor_and_structural_bodies_match_artifact_plans`, `legacy_specializations_not_in_the_catalog_are_detected`, and `stage_4_7_census_accounts_for_every_emitted_function`. The verdicts below are recorded before deletion. Their transition helpers and `instance_for_legacy_specialization` will be retired in dependency order. `coroutine_and_reactive_thunks_bind_demand_driven` and `stage_4_6_unused_subsystems_record_no_requirement` already assert lowering facts without calling legacy; preserve their assertions.
 
-The default now always selects lowered emission. The converted runtime tests use actual LLVM use lists and catalog names for every emitted instance and initializer, with program-wide exact equality and owner-local coverage (owner derivation conservatively includes subsystem needs such as an inline `coro` creation). The exact predeclared-cell owner checks remain. This stronger coverage exposed missing GC requirements for `BufferGet` and `BufferFreeze` interior-pointer registration; lowering now records them. No emission instruction changes: R1 remains the gate. The converted tests pass and 16 legacy-only tests plus their dedicated helpers are retired. Default, lowered, and shadow suites each pass 1302 tests (one ignored dump helper skipped); all 86 R1 paths report `same (1 variant(s))`. Logs: `/private/tmp/staple-5-10-step2-{default,lowered,shadow,ir}.log`.
+The default now always selects lowered emission. The converted runtime tests use actual LLVM use lists and catalog names for every emitted instance and initializer, with program-wide exact equality and owner-local coverage (owner derivation conservatively includes subsystem needs such as an inline `coro` creation). The exact predeclared-cell owner checks remain. This stronger coverage exposed missing GC requirements for `BufferGet` and `BufferFreeze` interior-pointer registration; lowering now records them. No emission instruction changes: R1 remains the gate. The converted tests pass and 16 legacy-only tests plus their dedicated helpers are retired. Default, lowered, and shadow suites each pass 1302 tests (one ignored dump helper skipped); all 86 R1 paths report `same (1 variant(s))`. Logs: `/private/tmp/staple-5-10-step2-{default,lowered,shadow,ir}.log`. The last shadow ledger (`/private/tmp/staple-5-10-step2-shadow.ledger`) records 587 successful programs, 165983 bodies and 8 D5-explained rejections before its retirement in Step 3.
 
 ### Step 3 — complete
 
@@ -45,6 +47,18 @@ Lowering's output no longer carries or clones `TypedModule`; its private bridge 
 ### Step 7 — complete
 
 The main plan now reports general current progress; the breakdown and substage plans separate historical migration results from the single-emitter commands and retired APIs. Current notes link to the 36-entry R2 verdicts and 77-method Stage 6 handoff, preserve the D2/D5 differences, and leave Stage 5.11 pending. The default suite passes 1301 tests (one ignored helper skipped), all 86 four-run R1 paths match, and formatting, plan-link and diff checks pass. Logs: `/private/tmp/staple-5-10-step7-{default,ir}.log`. Step 8 is next.
+
+### Step 8 — complete
+
+- `CARGO_INCREMENTAL=0 cargo nextest run --workspace`: **1301 passed**, one ignored corpus-export helper skipped. Both permanent corpus harnesses pass: 74 entries, **71 runnable / 3 compile-only**, all pinned stdout/exit/trap assertions, structural coverage, focus definitions, catalog signature/linkage/uniqueness checks and five tagged D5 fixtures with distinct artifacts. The ignored export helper separately passes.
+- **R1:** all **86 paths** (11 standalone examples, actual `game_loop`, 74 corpus entries), four runs per binary, report `same (1 variant(s))` against the frozen `ee50922` lowered reference. No emitted instruction, function-type or instance duplication difference is introduced.
+- The fresh corpus export has the same 74 entry sources and 225 file paths. **215 files are byte-identical** to Step 1's original dump; ten copied `macros.sta` companions contain only the authorized Step 1 example repair. Supplemental four-run R1 checks over all ten affected fresh entry folders also report `same`; every current corpus input is covered. The old dump had included those files before the repair, and they were not the corpus entry source.
+- **CLI:** all 12 example entry points pass LLVM output, object output and native `run` with the absolute worktree `stdlib` root (**36 successful paths**). Artifacts and exit results are in `/private/tmp/staple-stage-5-10-cli-gate/results.json`; the macro example prints its eight intended lines.
+- The mechanical checked-module/AST/syntax-ID/hash/substitution/queue audit is clean in codegen. Selector/features, recorder, legacy census and body comparator are absent. Debug formatting is confined to test-side D5 owner diagnostics, not symbol names. `cargo build --workspace` passes with **no codegen dead-code warnings**; the sole checker production warning, `drop_method_for`, is explicitly retained for Stage 6 because five tests still call it. No warning allowance was added.
+- Formatting, plan links and `git diff --check` pass. The final step changes only the three progress plans. All eight steps have their own conventional commits, and the worktree is clean after the final commit.
+- The temporary reference target (debug and release builds, about 1.8 GiB) is removed after the last comparisons. Reference provenance remains: source `ee50922`, release build with the pre-cutover lowered feature; binary SHA-256 `779313feaa81912089fe0d982c213456212485f3554519c1d7735db372dbb34b`. Logs and exported corpus inputs remain in task scratch space; no permanent IR oracle is retained.
+
+Final logs: `/private/tmp/staple-5-10-step8-{default,ir,build,cli,dump,current-corpus}.log`, supplemental comparisons `/private/tmp/staple-5-10-step8-current-corpus-ir.log`. **Stage 5.10 is complete. Stage 5.11 is next; Stage 5 as a whole remains in progress.**
 
 ### Step 2 — test verdicts (R2)
 
