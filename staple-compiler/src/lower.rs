@@ -1098,8 +1098,12 @@ pub(crate) struct LoweredCall {
     pub substitutions: CallSubstitutions,
     /// Trait evidence for trait-dispatched calls.
     pub evidence: Option<TraitEvidence>,
-    /// The call owns a C-string temporary that must outlive the call (an
-    /// extern call whose argument is an unsymbolized `CString` value).
+    /// The call owns a `CString` temporary (an argument that is not a named
+    /// binding) and must release it after the call. Set for a direct extern
+    /// call, and for a closure call whose callee is a statically known extern
+    /// binding that borrows the argument. Any other callable leaves the
+    /// temporary unreleased; see the known leak documented at the indirect
+    /// call site in `lower_call`.
     pub c_string_temporary: bool,
     /// The reactive operation this intrinsic call performs (`reactive_scope`,
     /// `reaction`, `batch`, `until`, `snapshot`).
@@ -7051,13 +7055,25 @@ impl LoweredProgram {
                             )
                         })?,
                 };
-                // Stage 5.11 (F1): a closure call to a statically-known extern
-                // binding that borrows a CString temporary releases it after
-                // the call, exactly like the direct extern route. An unknown
-                // callable may be a consuming one (`CString.to_string` takes
-                // ownership of its argument), so only the known adapter frees
-                // here; a `move` parameter takes ownership instead and the
-                // callee's own drop releases it.
+                // A closure call to a statically known extern binding that
+                // borrows a `CString` temporary releases it after the call,
+                // exactly like the direct extern route; a `move` parameter
+                // takes ownership instead, and the callee's own drop releases
+                // it.
+                //
+                // KNOWN LEAK: through any other callable (a callback
+                // parameter, a stored closure) the temporary is never freed.
+                // Freeing it unconditionally would be wrong, because some
+                // callables consume their `CString` argument even though the
+                // parameter is not marked `move`: `CString.to_string` releases
+                // it, so `apply CString.to_string` with a caller-side free
+                // would double-free. The fix is to record, per callable type,
+                // whether its `CString` parameter consumes or borrows the
+                // value (a `move` marker, or a releasing conversion such as
+                // `to_string`), and release the temporary here only when it
+                // borrows. Reproduce with
+                // `def apply: (CString -> I32) -> I32 = f => f (c_string "x")`
+                // called with a non-extern closure: the C string is never freed.
                 c_string_temporary = module
                     .symbol_for(callee_syntax)
                     .is_some_and(|symbol| resolved.is_external_symbol(symbol))

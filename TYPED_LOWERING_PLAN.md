@@ -200,6 +200,8 @@ Stage 5.11 then fixed the five mirrored/queued defects in one commit each, with 
 
 ### Stage 6 - Remove Transitional Code and Document the Boundary (Next)
 
+> **Plan:** [STAGE_6_CLEANUP_AND_BOUNDARY_PLAN.md](STAGE_6_CLEANUP_AND_BOUNDARY_PLAN.md). Because the plan files are deleted after the refactor, Stage 6 also makes code, tests, rustdoc, and `Staple.md` self-contained: no stage numbers, decision IDs, plan names, or legacy-function citations remain in code.
+
 - Follow the [77-method checked-program inventory](STAGE_5_10_CUTOVER_AND_REMOVAL_PLAN.md#stage-6-handoff-checked-program-method-inventory). Remove or test-gate unused accessors, including `state_accesses_of_expression` (already unused), while retaining lowering, diagnostics and LSP/tooling APIs. Audit the existing broad dead-code allowance on the lowering schema. (`drop_method_for` was deleted by Stage 5.11 Step 6.)
 - Add module-level documentation describing phase responsibilities and invariants.
 - Confirm that lowering failures produce source-based diagnostics rather than backend panics.
