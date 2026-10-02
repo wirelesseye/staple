@@ -295,15 +295,6 @@ impl<'a> InitializerBinder<'a> {
                     call.substitutions.clone(),
                 );
             }
-            LoweredCallableTarget::CompilerHelper { function } => {
-                self.report(
-                    &call.origin,
-                    format!(
-                        "compiler-helper target function {} has no generated artifact",
-                        function.0
-                    ),
-                );
-            }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
             | LoweredCallableTarget::Intrinsic { .. }
@@ -369,15 +360,6 @@ impl<'a> InitializerBinder<'a> {
                     value.adapter,
                     &value.function_type,
                     &value.origin,
-                );
-            }
-            LoweredCallableTarget::CompilerHelper { function } => {
-                self.report(
-                    &value.origin,
-                    format!(
-                        "compiler-helper target function {} has no generated artifact",
-                        function.0
-                    ),
                 );
             }
             LoweredCallableTarget::IndirectClosure { .. }
@@ -527,7 +509,7 @@ impl<'a> InitializerBinder<'a> {
                     Err(diagnostic) => self.diagnostics.push(diagnostic),
                 }
             }
-            TraitEvidence::DeclaredBound { .. } | TraitEvidence::RejectedImplementation { .. } => {
+            TraitEvidence::DeclaredBound { .. } => {
                 self.report(
                     origin,
                     "trait evidence did not resolve to a concrete selection",
@@ -834,8 +816,7 @@ fn evidence_trait_id(evidence: &TraitEvidence) -> TraitId {
     match evidence {
         TraitEvidence::ExplicitImplementation { trait_id, .. }
         | TraitEvidence::Structural { trait_id, .. }
-        | TraitEvidence::DeclaredBound { trait_id, .. }
-        | TraitEvidence::RejectedImplementation { trait_id, .. } => *trait_id,
+        | TraitEvidence::DeclaredBound { trait_id, .. } => *trait_id,
     }
 }
 
@@ -1167,7 +1148,6 @@ impl LoweredOwnerVisitor for InitializerBindingCheckVisitor<'_, '_> {
                 | LoweredCallableTarget::ExternalFunction { .. }
                 | LoweredCallableTarget::Intrinsic { .. }
                 | LoweredCallableTarget::Constructor { .. }
-                | LoweredCallableTarget::CompilerHelper { .. }
         );
         self.validator
             .check_site(LoweredBindingSite::Call(id), needs_target);
@@ -1196,7 +1176,6 @@ impl LoweredOwnerVisitor for InitializerBindingCheckVisitor<'_, '_> {
             LoweredCallableTarget::IndirectClosure { .. }
                 | LoweredCallableTarget::ExternalFunction { .. }
                 | LoweredCallableTarget::Intrinsic { .. }
-                | LoweredCallableTarget::CompilerHelper { .. }
         );
         self.validator
             .check_site(LoweredBindingSite::CallableValue(id), needs_target);

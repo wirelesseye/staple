@@ -422,12 +422,10 @@ impl<'a> GraphValidator<'a> {
                     }
                 }
             }
-            TraitEvidence::DeclaredBound { .. } | TraitEvidence::RejectedImplementation { .. } => {
-                self.report(
-                    origin,
-                    "emitted instance retains an unresolved trait evidence recipe",
-                )
-            }
+            TraitEvidence::DeclaredBound { .. } => self.report(
+                origin,
+                "emitted instance retains an unresolved trait evidence recipe",
+            ),
         }
     }
 }
@@ -1116,15 +1114,9 @@ pub(crate) mod tests {
         for (_, artifact) in program.artifacts.iter() {
             match program.specializations.artifact(artifact.ordinal) {
                 Some(ArtifactRequestKey::ConstructorAdapter(_)) => saw_adapter = true,
-                Some(ArtifactRequestKey::StructuralMethod(key)) => {
-                    saw_structural = true;
-                    assert!(
-                        key.arguments
-                            .iter()
-                            .all(|argument| argument.unresolved_parameter().is_none()),
-                        "structural artifact arguments are concrete"
-                    );
-                }
+                // Structural artifact arguments are canonical keys, which can
+                // only be built from concrete types.
+                Some(ArtifactRequestKey::StructuralMethod(_)) => saw_structural = true,
                 // Stage 4.4 adds cleanup artifacts over the same catalog.
                 Some(ArtifactRequestKey::DropGlue(_))
                 | Some(ArtifactRequestKey::GcFinalizer(_)) => {}

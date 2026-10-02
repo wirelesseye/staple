@@ -228,7 +228,6 @@ pub(crate) struct LoweredArtifactRequest {
 pub(crate) enum LoweredArtifactRequestRoot {
     Initializer {
         initializer: InitializerId,
-        origin: Origin,
     },
     Instance {
         instance: FunctionInstanceId,
@@ -544,10 +543,7 @@ impl GraphRecorder {
         if ordinal.index() >= self.artifacts.len() {
             let request = match owner {
                 TraversalOwner::Initializer(initializer) => {
-                    LoweredArtifactRequestRoot::Initializer {
-                        initializer,
-                        origin: origin.clone(),
-                    }
+                    LoweredArtifactRequestRoot::Initializer { initializer }
                 }
                 TraversalOwner::Instance(instance) => LoweredArtifactRequestRoot::Instance {
                     instance,
@@ -895,13 +891,11 @@ impl<'a> WorklistBuilder<'a> {
             .instance(record.ordinal)
             .expect("interned instance has a catalog key")
             .clone();
-        let origin = record.request.origin(&record.origin);
         ResolvedInstanceRequest {
             key,
             environment: record.environment.clone(),
             relevant: record.relevant.clone(),
             evidence: record.evidence.clone(),
-            origin,
         }
     }
 
@@ -972,29 +966,6 @@ impl<'a> WorklistBuilder<'a> {
     ) {
         self.recorder
             .request_artifact(key, plan, origin, owner, kind);
-    }
-
-    /// A compiler-helper target has no generated artifact: every owner reports
-    /// it as a diagnostic. Generated artifact plans must name their callees
-    /// explicitly, and an instance or initializer body that reaches the
-    /// category is a lowering gap, never something the graph defers.
-    fn request_helper(&mut self, function: FunctionId, origin: &Origin, owner: TraversalOwner) {
-        let owner_label = match owner {
-            TraversalOwner::Initializer(initializer) => {
-                format!("initializer {}", initializer.index())
-            }
-            TraversalOwner::Instance(instance) => format!("function instance {}", instance.index()),
-            TraversalOwner::Artifact(artifact) => {
-                format!("generated artifact {}", artifact.index())
-            }
-        };
-        self.diagnostics.push(Diagnostic::new(
-            origin.span.clone(),
-            format!(
-                "{owner_label} has a compiler-helper target function {} with no generated artifact",
-                function.0
-            ),
-        ));
     }
 
     // ------------------------------------------------------------------
@@ -1107,7 +1078,7 @@ impl<'a> WorklistBuilder<'a> {
             return;
         };
         match &expression.kind {
-            LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::Stage26Deferred(_) => {}
+            LoweredExpressionKind::Deferred(_) => {}
             LoweredExpressionKind::Block(block) => {
                 self.traverse_block(*block, owner, enclosing);
             }
@@ -1540,9 +1511,6 @@ impl<'a> WorklistBuilder<'a> {
                     owner,
                 );
             }
-            LoweredCallableTarget::CompilerHelper { function } => {
-                self.request_helper(*function, &call.origin, owner);
-            }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
             | LoweredCallableTarget::Intrinsic { .. }
@@ -1624,9 +1592,6 @@ impl<'a> WorklistBuilder<'a> {
                     enclosing,
                     owner,
                 );
-            }
-            LoweredCallableTarget::CompilerHelper { function } => {
-                self.request_helper(*function, &value.origin, owner);
             }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
@@ -1808,7 +1773,7 @@ impl<'a> WorklistBuilder<'a> {
                     Err(diagnostic) => self.diagnostics.push(diagnostic),
                 }
             }
-            TraitEvidence::DeclaredBound { .. } | TraitEvidence::RejectedImplementation { .. } => {
+            TraitEvidence::DeclaredBound { .. } => {
                 self.diagnostics.push(Diagnostic::new(
                     origin.span.clone(),
                     "trait evidence did not resolve to a concrete selection",
@@ -1976,8 +1941,7 @@ fn evidence_trait_id(evidence: &TraitEvidence) -> TraitId {
     match evidence {
         TraitEvidence::ExplicitImplementation { trait_id, .. }
         | TraitEvidence::Structural { trait_id, .. }
-        | TraitEvidence::DeclaredBound { trait_id, .. }
-        | TraitEvidence::RejectedImplementation { trait_id, .. } => *trait_id,
+        | TraitEvidence::DeclaredBound { trait_id, .. } => *trait_id,
     }
 }
 
@@ -3184,34 +3148,6 @@ mod tests {
             .expect("artifact")
             .origin
             .clone()
-    }
-
-    #[test]
-    fn compiler_helper_targets_are_diagnosed_for_every_owner() {
-        let (_, program) = lower("let x = 1\n");
-        let origin = program
-            .initializers
-            .iter()
-            .next()
-            .map(|(_, initializer)| initializer.origin.clone())
-            .expect("an initializer");
-        let owners = [
-            TraversalOwner::Initializer(InitializerId::from_index(0)),
-            TraversalOwner::Instance(FunctionInstanceId::from_index(0)),
-            TraversalOwner::Artifact(LoweredArtifactRequestId::for_test(0)),
-        ];
-        for (index, owner) in owners.into_iter().enumerate() {
-            let mut builder = WorklistBuilder::new(&program);
-            builder.request_helper(FunctionId(0), &origin, owner);
-            assert!(
-                builder.diagnostics.iter().any(|diagnostic| diagnostic
-                    .message
-                    .contains("compiler-helper target function 0")
-                    && diagnostic.message.contains("no generated artifact")),
-                "owner {index} should report a diagnostic: {:?}",
-                builder.diagnostics
-            );
-        }
     }
 
     #[test]

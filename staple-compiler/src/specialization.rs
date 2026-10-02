@@ -7,18 +7,15 @@
 //! nominal representations never participate in equality. The worklist that
 //! consumes these keys belongs to Stage 3.3.
 
-#![allow(dead_code)] // Stage 3.1 defines and tests keys before Stage 3.3 uses them.
-
 use std::collections::{HashMap, HashSet};
 
 use staple_syntax::Diagnostic;
 
 use crate::{
-    ArenaId, CallSubstitutions, CheckedEffectSet, CheckedFunctionType, CheckedMutation,
-    CheckedResource, CheckedStateEffect, CheckedType, FunctionId, InitializerId,
-    LoweredCallableAdapter, LoweredReactiveCallbackId, LoweredReactiveOperationId, Origin,
-    StructuralTraitMethod, SymbolId, TraitEvidence, TraitId, TraitMethodId, TypeId,
-    TypeParameterId,
+    CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedResource, CheckedStateEffect,
+    CheckedType, FunctionId, InitializerId, LoweredCallableAdapter, LoweredReactiveCallbackId,
+    LoweredReactiveOperationId, Origin, StructuralTraitMethod, SymbolId, TraitEvidence, TraitId,
+    TraitMethodId, TypeId, TypeParameterId,
 };
 
 /// One canonical structural type. Every vector preserves the checked semantic
@@ -51,9 +48,6 @@ pub(crate) enum CanonicalType {
     },
     CString,
     CChar,
-    /// A template-level declared type parameter. Concrete keys reject it; the
-    /// parameter's display name and `sized` metadata are not identity.
-    Parameter(TypeParameterId),
     Nominal {
         kind: CanonicalNominalKind,
         id: TypeId,
@@ -116,11 +110,10 @@ pub(crate) enum CanonicalMutation {
     Element(usize),
 }
 
-/// A canonical effect row. Template keys may retain a declared effect-variable
-/// ID; concrete keys require Stage 3.2 to have substituted it away.
+/// A canonical concrete effect row. Conversion rejects an unsubstituted
+/// effect variable, so a key's row is always fully resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CanonicalEffectSet {
-    pub variable: Option<TypeParameterId>,
     pub resources: Vec<CanonicalResource>,
     pub state: Option<CanonicalStateEffect>,
 }
@@ -138,35 +131,15 @@ pub(crate) enum CanonicalStateEffect {
     ReadWrite,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConversionMode {
-    /// Template keys keep declared type/effect parameters as typed IDs.
-    Template,
-    /// Concrete keys reject any unresolved parameter, effect variable, and
-    /// `Inferred`/`Error` placeholder.
-    Concrete,
-}
-
 impl CanonicalType {
-    /// Converts a checked type into a template-level key. Declared parameters
-    /// stay by semantic ID so nested closure and enclosing-parameter
-    /// substitutions can be added by Stage 3.2.
-    pub(crate) fn template(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
-        Self::convert(value_type, origin, ConversionMode::Template)
-    }
-
     /// Converts a checked type into a concrete key, rejecting unresolved
     /// parameters and checker placeholders with a diagnostic at the
     /// requesting record's origin.
     pub(crate) fn concrete(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
-        Self::convert(value_type, origin, ConversionMode::Concrete)
+        Self::convert(value_type, origin)
     }
 
-    fn convert(
-        value_type: &CheckedType,
-        origin: &Origin,
-        mode: ConversionMode,
-    ) -> Result<Self, Diagnostic> {
+    fn convert(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
         let key = match value_type {
             CheckedType::Inferred => {
                 return Err(origin_diagnostic(
@@ -199,41 +172,38 @@ impl CanonicalType {
                 CanonicalType::StringLiteralSet(values.clone())
             }
             CheckedType::Ref(payload) => {
-                CanonicalType::Ref(Box::new(Self::convert(payload, origin, mode)?))
+                CanonicalType::Ref(Box::new(Self::convert(payload, origin)?))
             }
             CheckedType::Slice(payload) => {
-                CanonicalType::Slice(Box::new(Self::convert(payload, origin, mode)?))
+                CanonicalType::Slice(Box::new(Self::convert(payload, origin)?))
             }
             CheckedType::Buffer(payload) => {
-                CanonicalType::Buffer(Box::new(Self::convert(payload, origin, mode)?))
+                CanonicalType::Buffer(Box::new(Self::convert(payload, origin)?))
             }
             CheckedType::Array { element, count } => CanonicalType::Array {
-                element: Box::new(Self::convert(element, origin, mode)?),
-                count: Box::new(Self::convert(count, origin, mode)?),
+                element: Box::new(Self::convert(element, origin)?),
+                count: Box::new(Self::convert(count, origin)?),
             },
             CheckedType::CString => CanonicalType::CString,
             CheckedType::CChar => CanonicalType::CChar,
-            CheckedType::Parameter { id, name, .. } => match mode {
-                ConversionMode::Template => CanonicalType::Parameter(*id),
-                ConversionMode::Concrete => {
-                    return Err(origin_diagnostic(
-                        origin,
-                        format!("type parameter `{name}` is not resolved for a concrete key"),
-                    ));
-                }
-            },
+            CheckedType::Parameter { name, .. } => {
+                return Err(origin_diagnostic(
+                    origin,
+                    format!("type parameter `{name}` is not resolved for a concrete key"),
+                ));
+            }
             CheckedType::TypeConstructor { id, arguments, .. } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::TypeConstructor,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin, mode)?,
+                arguments: Self::convert_arguments(arguments, origin)?,
             },
             CheckedType::Opaque { id, arguments, .. } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::Opaque,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin, mode)?,
+                arguments: Self::convert_arguments(arguments, origin)?,
             },
             CheckedType::CPointer { pointee } => CanonicalType::CPointer {
-                pointee: Box::new(Self::convert(pointee, origin, mode)?),
+                pointee: Box::new(Self::convert(pointee, origin)?),
             },
             CheckedType::Product(product) => CanonicalType::Product {
                 elements: product
@@ -242,14 +212,14 @@ impl CanonicalType {
                     .map(|element| {
                         Ok(CanonicalProductElement {
                             name: element.name.clone(),
-                            value_type: Self::convert(&element.value_type, origin, mode)?,
+                            value_type: Self::convert(&element.value_type, origin)?,
                         })
                     })
                     .collect::<Result<Vec<_>, Diagnostic>>()?,
                 variadic: product.variadic,
             },
             CheckedType::Sum(sum) => CanonicalType::Sum {
-                alternatives: Self::convert_arguments(&sum.alternatives, origin, mode)?,
+                alternatives: Self::convert_arguments(&sum.alternatives, origin)?,
             },
             CheckedType::Function(function) => {
                 // A concrete effect row is encoded as a function type with
@@ -268,11 +238,11 @@ impl CanonicalType {
                         ..function.clone()
                     };
                     CanonicalType::Function(Box::new(CanonicalFunctionType::convert(
-                        &marker, origin, mode,
+                        &marker, origin,
                     )?))
                 } else {
                     CanonicalType::Function(Box::new(CanonicalFunctionType::convert(
-                        function, origin, mode,
+                        function, origin,
                     )?))
                 }
             }
@@ -284,7 +254,7 @@ impl CanonicalType {
             } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::Distinct,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin, mode)?,
+                arguments: Self::convert_arguments(arguments, origin)?,
             },
         };
         Ok(key)
@@ -293,73 +263,27 @@ impl CanonicalType {
     fn convert_arguments(
         arguments: &[CheckedType],
         origin: &Origin,
-        mode: ConversionMode,
     ) -> Result<Vec<CanonicalType>, Diagnostic> {
         arguments
             .iter()
-            .map(|argument| Self::convert(argument, origin, mode))
+            .map(|argument| Self::convert(argument, origin))
             .collect()
     }
 }
 
-impl CanonicalType {
-    /// The first declared type parameter reachable from this value, used to
-    /// reject programmatically-built substitution values that are not
-    /// concrete. Traversal follows structural field order.
-    pub(crate) fn unresolved_parameter(&self) -> Option<TypeParameterId> {
-        match self {
-            CanonicalType::Parameter(parameter) => Some(*parameter),
-            CanonicalType::Ref(payload)
-            | CanonicalType::Slice(payload)
-            | CanonicalType::Buffer(payload)
-            | CanonicalType::CPointer { pointee: payload } => payload.unresolved_parameter(),
-            CanonicalType::Array { element, count } => element
-                .unresolved_parameter()
-                .or_else(|| count.unresolved_parameter()),
-            CanonicalType::Nominal { arguments, .. }
-            | CanonicalType::Sum {
-                alternatives: arguments,
-            } => arguments
-                .iter()
-                .find_map(CanonicalType::unresolved_parameter),
-            CanonicalType::Product { elements, .. } => elements
-                .iter()
-                .find_map(|element| element.value_type.unresolved_parameter()),
-            CanonicalType::Function(function) => function.unresolved_parameter(),
-            _ => None,
-        }
-    }
-}
+impl CanonicalType {}
 
 impl CanonicalFunctionType {
-    fn unresolved_parameter(&self) -> Option<TypeParameterId> {
-        self.parameter
-            .unresolved_parameter()
-            .or_else(|| self.effects.unresolved_variable())
-            .or_else(|| self.result.unresolved_parameter())
-    }
-
-    pub(crate) fn template(
-        function: &CheckedFunctionType,
-        origin: &Origin,
-    ) -> Result<Self, Diagnostic> {
-        Self::convert(function, origin, ConversionMode::Template)
-    }
-
     pub(crate) fn concrete(
         function: &CheckedFunctionType,
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
-        Self::convert(function, origin, ConversionMode::Concrete)
+        Self::convert(function, origin)
     }
 
-    fn convert(
-        function: &CheckedFunctionType,
-        origin: &Origin,
-        mode: ConversionMode,
-    ) -> Result<Self, Diagnostic> {
+    fn convert(function: &CheckedFunctionType, origin: &Origin) -> Result<Self, Diagnostic> {
         Ok(CanonicalFunctionType {
-            parameter: Box::new(CanonicalType::convert(&function.parameter, origin, mode)?),
+            parameter: Box::new(CanonicalType::convert(&function.parameter, origin)?),
             parameter_style: match function.parameter_style {
                 staple_syntax::FunctionParameterStyle::Single => CanonicalParameterStyle::Single,
                 staple_syntax::FunctionParameterStyle::Juxtaposed => {
@@ -368,59 +292,35 @@ impl CanonicalFunctionType {
             },
             mutations: function.mutations.iter().cloned().map(Into::into).collect(),
             moves: function.moves.iter().cloned().map(Into::into).collect(),
-            effects: CanonicalEffectSet::convert(&function.effects, origin, mode)?,
-            result: Box::new(CanonicalType::convert(&function.result, origin, mode)?),
+            effects: CanonicalEffectSet::convert(&function.effects, origin)?,
+            result: Box::new(CanonicalType::convert(&function.result, origin)?),
         })
     }
 }
 
 impl CanonicalEffectSet {
-    fn unresolved_variable(&self) -> Option<TypeParameterId> {
-        self.variable.or_else(|| {
-            self.resources
-                .iter()
-                .find_map(|resource| resource.value_type.unresolved_parameter())
-        })
-    }
-
-    pub(crate) fn template(
-        effects: &CheckedEffectSet,
-        origin: &Origin,
-    ) -> Result<Self, Diagnostic> {
-        Self::convert(effects, origin, ConversionMode::Template)
-    }
-
     pub(crate) fn concrete(
         effects: &CheckedEffectSet,
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
-        Self::convert(effects, origin, ConversionMode::Concrete)
+        Self::convert(effects, origin)
     }
 
-    fn convert(
-        effects: &CheckedEffectSet,
-        origin: &Origin,
-        mode: ConversionMode,
-    ) -> Result<Self, Diagnostic> {
-        let variable = match (&effects.variable, mode) {
-            (None, _) => None,
-            (Some(variable), ConversionMode::Template) => Some(variable.id),
-            (Some(variable), ConversionMode::Concrete) => {
-                return Err(origin_diagnostic(
-                    origin,
-                    format!(
-                        "effect variable `{}` is not resolved for a concrete key",
-                        variable.name
-                    ),
-                ));
-            }
-        };
+    fn convert(effects: &CheckedEffectSet, origin: &Origin) -> Result<Self, Diagnostic> {
+        if let Some(variable) = &effects.variable {
+            return Err(origin_diagnostic(
+                origin,
+                format!(
+                    "effect variable `{}` is not resolved for a concrete key",
+                    variable.name
+                ),
+            ));
+        }
         Ok(CanonicalEffectSet {
-            variable,
             resources: effects
                 .resources
                 .iter()
-                .map(|resource| CanonicalResource::convert(resource, origin, mode))
+                .map(|resource| CanonicalResource::convert(resource, origin))
                 .collect::<Result<Vec<_>, Diagnostic>>()?,
             state: effects.state.map(Into::into),
         })
@@ -428,13 +328,9 @@ impl CanonicalEffectSet {
 }
 
 impl CanonicalResource {
-    fn convert(
-        resource: &CheckedResource,
-        origin: &Origin,
-        mode: ConversionMode,
-    ) -> Result<Self, Diagnostic> {
+    fn convert(resource: &CheckedResource, origin: &Origin) -> Result<Self, Diagnostic> {
         Ok(CanonicalResource {
-            value_type: CanonicalType::convert(&resource.value_type, origin, mode)?,
+            value_type: CanonicalType::convert(&resource.value_type, origin)?,
             mutable: resource.mutable,
         })
     }
@@ -502,10 +398,6 @@ pub(crate) enum InstanceKeyError {
     DuplicateParameter(TypeParameterId),
     /// A parameter appeared as both a type and an effect entry.
     ConflictingParameter(TypeParameterId),
-    /// A substitution value still contains a declared type parameter.
-    UnresolvedTypeParameter(TypeParameterId),
-    /// An effect substitution still carries its declared effect variable.
-    UnresolvedEffectVariable(TypeParameterId),
 }
 
 impl InstanceKeyError {
@@ -517,14 +409,6 @@ impl InstanceKeyError {
             ),
             InstanceKeyError::ConflictingParameter(parameter) => format!(
                 "instance key has both a type and an effect substitution for parameter {}",
-                parameter.0
-            ),
-            InstanceKeyError::UnresolvedTypeParameter(parameter) => format!(
-                "instance key substitution for parameter {} still contains a declared type parameter",
-                parameter.0
-            ),
-            InstanceKeyError::UnresolvedEffectVariable(parameter) => format!(
-                "instance key effect substitution for parameter {} still names its declared effect variable",
                 parameter.0
             ),
         }
@@ -559,26 +443,6 @@ impl InstanceKey {
                     InstanceKeyError::ConflictingParameter(pair[0].parameter())
                 });
             }
-        }
-        for substitution in &substitutions {
-            match substitution {
-                InstanceSubstitution::Type { value, .. } => {
-                    if let Some(unresolved) = value.unresolved_parameter() {
-                        return Err(InstanceKeyError::UnresolvedTypeParameter(unresolved));
-                    }
-                }
-                InstanceSubstitution::Effect { effects, .. } => {
-                    if let Some(unresolved) = effects.unresolved_variable() {
-                        return Err(InstanceKeyError::UnresolvedEffectVariable(unresolved));
-                    }
-                }
-            }
-        }
-        if let Some(unresolved) = evidence
-            .as_ref()
-            .and_then(CanonicalEvidence::unresolved_parameter)
-        {
-            return Err(InstanceKeyError::UnresolvedTypeParameter(unresolved));
         }
         Ok(InstanceKey {
             function,
@@ -623,70 +487,7 @@ pub(crate) enum CanonicalEvidence {
     },
 }
 
-impl CanonicalEvidence {
-    fn unresolved_parameter(&self) -> Option<TypeParameterId> {
-        let arguments = match self {
-            CanonicalEvidence::ExplicitImplementation { arguments, .. }
-            | CanonicalEvidence::Structural { arguments, .. } => arguments,
-        };
-        arguments
-            .iter()
-            .find_map(CanonicalType::unresolved_parameter)
-    }
-}
-
-/// A Stage 2 site recipe whose substitutions or evidence may still be
-/// unresolved. `resolve` either produces a concrete `InstanceKey` or reports
-/// the unresolved input at the requesting record's origin.
-#[derive(Debug, Clone)]
-pub(crate) struct InstanceRequest {
-    pub function: FunctionId,
-    pub origin: Origin,
-    pub substitutions: CallSubstitutions,
-    pub evidence: Option<TraitEvidence>,
-}
-
-impl InstanceRequest {
-    pub(crate) fn new(
-        function: FunctionId,
-        origin: Origin,
-        substitutions: CallSubstitutions,
-        evidence: Option<TraitEvidence>,
-    ) -> Self {
-        InstanceRequest {
-            function,
-            origin,
-            substitutions,
-            evidence,
-        }
-    }
-
-    pub(crate) fn resolve(&self) -> Result<InstanceKey, Diagnostic> {
-        let mut substitutions =
-            Vec::with_capacity(self.substitutions.types.len() + self.substitutions.effects.len());
-        for substitution in &self.substitutions.types {
-            substitutions.push(InstanceSubstitution::Type {
-                parameter: substitution.parameter,
-                value: CanonicalType::concrete(&substitution.value_type, &self.origin)?,
-            });
-        }
-        for substitution in &self.substitutions.effects {
-            substitutions.push(InstanceSubstitution::Effect {
-                parameter: substitution.parameter,
-                effects: CanonicalEffectSet::concrete(&substitution.effects, &self.origin)?,
-            });
-        }
-        InstanceKey::new(
-            self.function,
-            substitutions,
-            self.evidence
-                .as_ref()
-                .map(|evidence| canonical_evidence(evidence, &self.origin))
-                .transpose()?,
-        )
-        .map_err(|error| origin_diagnostic(&self.origin, error.message()))
-    }
-}
+impl CanonicalEvidence {}
 
 /// Converts resolved trait evidence into its canonical key form. Declared
 /// bounds and negative obligations never reach a key.
@@ -725,13 +526,6 @@ pub(crate) fn canonical_evidence(
                 trait_id.0
             ),
         )),
-        TraitEvidence::RejectedImplementation { trait_id, .. } => Err(origin_diagnostic(
-            origin,
-            format!(
-                "trait {} evidence is a negative implementation and never forms an instance key",
-                trait_id.0
-            ),
-        )),
     }
 }
 
@@ -753,9 +547,7 @@ pub(crate) enum CanonicalAdapterKind {
     None,
     Constructor,
     External,
-    Curried,
     NestedClosure,
-    ImplicitThunk,
 }
 
 impl From<LoweredCallableAdapter> for CanonicalAdapterKind {
@@ -764,9 +556,7 @@ impl From<LoweredCallableAdapter> for CanonicalAdapterKind {
             LoweredCallableAdapter::None => CanonicalAdapterKind::None,
             LoweredCallableAdapter::Constructor => CanonicalAdapterKind::Constructor,
             LoweredCallableAdapter::External => CanonicalAdapterKind::External,
-            LoweredCallableAdapter::Curried => CanonicalAdapterKind::Curried,
             LoweredCallableAdapter::NestedClosure => CanonicalAdapterKind::NestedClosure,
-            LoweredCallableAdapter::ImplicitThunk => CanonicalAdapterKind::ImplicitThunk,
         }
     }
 }
@@ -845,8 +635,6 @@ pub(crate) enum ArtifactSiteOwner {
     Initializer(InitializerId),
     /// A materialized source-function instance.
     Instance(InstanceOrdinal),
-    /// A generated artifact's own plan, for nested artifacts.
-    Artifact(ArtifactOrdinal),
 }
 
 /// The identity of one drop-glue plan for a concrete value type. Type-keyed
@@ -889,8 +677,6 @@ pub(crate) enum ArtifactSite {
     Callback(LoweredReactiveCallbackId),
     /// A lowered reactive operation record (derived creation).
     Operation(LoweredReactiveOperationId),
-    /// A site ordinal inside another artifact's own plan.
-    PlanLocal(usize),
 }
 
 /// The identity of one reactive runner body (reaction, `until`, or derived),
@@ -947,453 +733,6 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::DerivedRunner(_) => "derived-runner",
             ArtifactRequestKey::ExternAdapter(_) => "extern-adapter",
         }
-    }
-}
-
-/// The complete namespace separation for Stage 3.3: source-function instances
-/// and generated artifacts are distinct key families.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum SpecializationKey {
-    Instance(InstanceKey),
-    Artifact(ArtifactRequestKey),
-}
-
-/// Version byte of the canonical key encoding. Any change to the encoding
-/// rules requires bumping this constant so old and new bytes can never be
-/// silently compared as the same identity. Stage 4.1 added the generated
-/// cleanup, coroutine, reactive-runner, and extern-adapter artifact families.
-pub(crate) const SPECIALIZATION_KEY_ENCODING_VERSION: u8 = 2;
-
-const INSTANCE_FAMILY_TAG: u8 = 0;
-const ARTIFACT_FAMILY_TAG: u8 = 1;
-const CONSTRUCTOR_ADAPTER_ARTIFACT_TAG: u8 = 0;
-const STRUCTURAL_METHOD_ARTIFACT_TAG: u8 = 1;
-const DROP_GLUE_ARTIFACT_TAG: u8 = 2;
-const GC_FINALIZER_ARTIFACT_TAG: u8 = 3;
-const COROUTINE_CODES_ARTIFACT_TAG: u8 = 4;
-const REACTION_RUNNER_ARTIFACT_TAG: u8 = 5;
-const UNTIL_RUNNER_ARTIFACT_TAG: u8 = 6;
-const DERIVED_RUNNER_ARTIFACT_TAG: u8 = 7;
-const EXTERN_ADAPTER_ARTIFACT_TAG: u8 = 8;
-
-impl CanonicalType {
-    /// Appends the explicitly tagged canonical encoding of this value. The
-    /// encoding is injective over the structural model: tags, lengths, and
-    /// ordered fields make every semantic distinction byte-distinct.
-    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            CanonicalType::Never => out.push(0),
-            CanonicalType::I8 => out.push(1),
-            CanonicalType::I16 => out.push(2),
-            CanonicalType::I32 => out.push(3),
-            CanonicalType::I64 => out.push(4),
-            CanonicalType::U8 => out.push(5),
-            CanonicalType::U16 => out.push(6),
-            CanonicalType::U32 => out.push(7),
-            CanonicalType::U64 => out.push(8),
-            CanonicalType::ISize => out.push(9),
-            CanonicalType::USize => out.push(10),
-            CanonicalType::F32 => out.push(11),
-            CanonicalType::F64 => out.push(12),
-            CanonicalType::NumberLiteral(value) => {
-                out.push(13);
-                encode_u64(*value, out);
-            }
-            CanonicalType::String => out.push(14),
-            CanonicalType::StringLiteralSet(values) => {
-                out.push(15);
-                encode_usize(values.len(), out);
-                for value in values {
-                    encode_string(value, out);
-                }
-            }
-            CanonicalType::Ref(payload) => {
-                out.push(16);
-                payload.encode(out);
-            }
-            CanonicalType::Slice(payload) => {
-                out.push(17);
-                payload.encode(out);
-            }
-            CanonicalType::Buffer(payload) => {
-                out.push(18);
-                payload.encode(out);
-            }
-            CanonicalType::Array { element, count } => {
-                out.push(19);
-                element.encode(out);
-                count.encode(out);
-            }
-            CanonicalType::CString => out.push(20),
-            CanonicalType::CChar => out.push(21),
-            CanonicalType::Parameter(parameter) => {
-                out.push(22);
-                encode_usize(parameter.0, out);
-            }
-            CanonicalType::Nominal {
-                kind,
-                id,
-                arguments,
-            } => {
-                out.push(23);
-                out.push(match kind {
-                    CanonicalNominalKind::TypeConstructor => 0,
-                    CanonicalNominalKind::Opaque => 1,
-                    CanonicalNominalKind::Distinct => 2,
-                });
-                encode_usize(id.0, out);
-                encode_types(arguments, out);
-            }
-            CanonicalType::CPointer { pointee } => {
-                out.push(24);
-                pointee.encode(out);
-            }
-            CanonicalType::Product { elements, variadic } => {
-                out.push(25);
-                encode_usize(elements.len(), out);
-                for element in elements {
-                    match &element.name {
-                        Some(name) => {
-                            out.push(1);
-                            encode_string(name, out);
-                        }
-                        None => out.push(0),
-                    }
-                    element.value_type.encode(out);
-                }
-                out.push(u8::from(*variadic));
-            }
-            CanonicalType::Sum { alternatives } => {
-                out.push(26);
-                encode_types(alternatives, out);
-            }
-            CanonicalType::Function(function) => {
-                out.push(27);
-                function.encode(out);
-            }
-        }
-    }
-}
-
-impl CanonicalFunctionType {
-    fn encode(&self, out: &mut Vec<u8>) {
-        out.push(0);
-        self.parameter.encode(out);
-        out.push(match self.parameter_style {
-            CanonicalParameterStyle::Single => 0,
-            CanonicalParameterStyle::Juxtaposed => 1,
-        });
-        encode_usize(self.mutations.len(), out);
-        for mutation in &self.mutations {
-            encode_mutation(*mutation, out);
-        }
-        encode_usize(self.moves.len(), out);
-        for mutation in &self.moves {
-            encode_mutation(*mutation, out);
-        }
-        self.effects.encode(out);
-        self.result.encode(out);
-    }
-}
-
-impl CanonicalEffectSet {
-    fn encode(&self, out: &mut Vec<u8>) {
-        out.push(1);
-        match self.variable {
-            Some(variable) => {
-                out.push(1);
-                encode_usize(variable.0, out);
-            }
-            None => out.push(0),
-        }
-        encode_usize(self.resources.len(), out);
-        for resource in &self.resources {
-            resource.encode(out);
-        }
-        match self.state {
-            Some(state) => {
-                out.push(1);
-                out.push(match state {
-                    CanonicalStateEffect::Read => 0,
-                    CanonicalStateEffect::Write => 1,
-                    CanonicalStateEffect::ReadWrite => 2,
-                });
-            }
-            None => out.push(0),
-        }
-    }
-}
-
-impl CanonicalResource {
-    fn encode(&self, out: &mut Vec<u8>) {
-        out.push(2);
-        self.value_type.encode(out);
-        out.push(u8::from(self.mutable));
-    }
-}
-
-impl CanonicalEvidence {
-    fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            CanonicalEvidence::ExplicitImplementation {
-                trait_id,
-                method,
-                function,
-                arguments,
-            } => {
-                out.push(0);
-                encode_usize(trait_id.0, out);
-                encode_usize(method.0, out);
-                encode_usize(function.0, out);
-                encode_types(arguments, out);
-            }
-            CanonicalEvidence::Structural {
-                trait_id,
-                method,
-                structural,
-                arguments,
-            } => {
-                out.push(1);
-                encode_usize(trait_id.0, out);
-                encode_usize(method.0, out);
-                out.push(structural_tag(*structural));
-                encode_types(arguments, out);
-            }
-        }
-    }
-}
-
-impl InstanceKey {
-    /// The versioned canonical byte encoding of this key. Equal keys always
-    /// produce identical bytes; distinct keys cannot share bytes because every
-    /// identity input is tagged and length-prefixed in order.
-    pub(crate) fn canonical_encoding(&self) -> Vec<u8> {
-        let mut out = vec![SPECIALIZATION_KEY_ENCODING_VERSION, INSTANCE_FAMILY_TAG];
-        encode_usize(self.function.0, &mut out);
-        encode_usize(self.substitutions.len(), &mut out);
-        for substitution in &self.substitutions {
-            match substitution {
-                InstanceSubstitution::Type { parameter, value } => {
-                    out.push(0);
-                    encode_usize(parameter.0, &mut out);
-                    value.encode(&mut out);
-                }
-                InstanceSubstitution::Effect { parameter, effects } => {
-                    out.push(1);
-                    encode_usize(parameter.0, &mut out);
-                    effects.encode(&mut out);
-                }
-            }
-        }
-        match &self.evidence {
-            Some(evidence) => {
-                out.push(1);
-                evidence.encode(&mut out);
-            }
-            None => out.push(0),
-        }
-        out
-    }
-}
-
-impl ConstructorAdapterKey {
-    fn encode(&self, out: &mut Vec<u8>) {
-        out.push(CONSTRUCTOR_ADAPTER_ARTIFACT_TAG);
-        encode_usize(self.symbol.0, out);
-        encode_usize(self.type_id.0, out);
-        out.push(adapter_tag(self.adapter));
-        self.callable_type.encode(out);
-    }
-}
-
-impl StructuralMethodKey {
-    fn encode(&self, out: &mut Vec<u8>) {
-        out.push(STRUCTURAL_METHOD_ARTIFACT_TAG);
-        out.push(structural_tag(self.structural));
-        encode_usize(self.trait_id.0, out);
-        encode_usize(self.method.0, out);
-        encode_types(&self.arguments, out);
-        self.callable_type.encode(out);
-    }
-}
-
-impl ArtifactSiteOwner {
-    fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            ArtifactSiteOwner::Initializer(initializer) => {
-                out.push(0);
-                encode_usize(initializer.index(), out);
-            }
-            ArtifactSiteOwner::Instance(instance) => {
-                out.push(1);
-                encode_usize(instance.index(), out);
-            }
-            ArtifactSiteOwner::Artifact(artifact) => {
-                out.push(2);
-                encode_usize(artifact.index(), out);
-            }
-        }
-    }
-}
-
-impl GcFinalizerKey {
-    fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            GcFinalizerKey::Payload(payload) => {
-                out.push(0);
-                payload.encode(out);
-            }
-            GcFinalizerKey::Cell(value_type) => {
-                out.push(1);
-                value_type.encode(out);
-            }
-            GcFinalizerKey::ClosureEnvironment { closure, captures } => {
-                out.push(2);
-                encode_usize(closure.index(), out);
-                encode_types(captures, out);
-            }
-            GcFinalizerKey::Buffer(element) => {
-                out.push(3);
-                element.encode(out);
-            }
-        }
-    }
-}
-
-impl ArtifactSite {
-    fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            ArtifactSite::Callback(callback) => {
-                out.push(0);
-                encode_usize(callback.index(), out);
-            }
-            ArtifactSite::Operation(operation) => {
-                out.push(1);
-                encode_usize(operation.index(), out);
-            }
-            ArtifactSite::PlanLocal(site) => {
-                out.push(2);
-                encode_usize(*site, out);
-            }
-        }
-    }
-}
-
-impl ReactiveRunnerKey {
-    fn encode(&self, out: &mut Vec<u8>) {
-        self.owner.encode(out);
-        self.site.encode(out);
-    }
-}
-
-impl ExternAdapterKey {
-    fn encode(&self, out: &mut Vec<u8>) {
-        encode_usize(self.symbol.0, out);
-        self.callable_type.encode(out);
-    }
-}
-
-impl ArtifactRequestKey {
-    /// The versioned canonical byte encoding of this artifact key, with the
-    /// variant tag keeping every artifact family's namespace distinct.
-    pub(crate) fn canonical_encoding(&self) -> Vec<u8> {
-        let mut out = vec![SPECIALIZATION_KEY_ENCODING_VERSION, ARTIFACT_FAMILY_TAG];
-        match self {
-            ArtifactRequestKey::ConstructorAdapter(key) => key.encode(&mut out),
-            ArtifactRequestKey::StructuralMethod(key) => key.encode(&mut out),
-            ArtifactRequestKey::DropGlue(value_type) => {
-                out.push(DROP_GLUE_ARTIFACT_TAG);
-                value_type.encode(&mut out);
-            }
-            ArtifactRequestKey::GcFinalizer(key) => {
-                out.push(GC_FINALIZER_ARTIFACT_TAG);
-                key.encode(&mut out);
-            }
-            ArtifactRequestKey::CoroutineCodes(key) => {
-                out.push(COROUTINE_CODES_ARTIFACT_TAG);
-                encode_usize(key.body.index(), &mut out);
-            }
-            ArtifactRequestKey::ReactionRunner(key) => {
-                out.push(REACTION_RUNNER_ARTIFACT_TAG);
-                key.encode(&mut out);
-            }
-            ArtifactRequestKey::UntilRunner(key) => {
-                out.push(UNTIL_RUNNER_ARTIFACT_TAG);
-                key.encode(&mut out);
-            }
-            ArtifactRequestKey::DerivedRunner(key) => {
-                out.push(DERIVED_RUNNER_ARTIFACT_TAG);
-                key.encode(&mut out);
-            }
-            ArtifactRequestKey::ExternAdapter(key) => {
-                out.push(EXTERN_ADAPTER_ARTIFACT_TAG);
-                key.encode(&mut out);
-            }
-        }
-        out
-    }
-}
-
-impl SpecializationKey {
-    /// The versioned canonical byte encoding across both key families.
-    pub(crate) fn canonical_encoding(&self) -> Vec<u8> {
-        match self {
-            SpecializationKey::Instance(key) => key.canonical_encoding(),
-            SpecializationKey::Artifact(key) => key.canonical_encoding(),
-        }
-    }
-}
-
-fn encode_u64(value: u64, out: &mut Vec<u8>) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn encode_usize(value: usize, out: &mut Vec<u8>) {
-    encode_u64(value as u64, out);
-}
-
-fn encode_string(value: &str, out: &mut Vec<u8>) {
-    encode_usize(value.len(), out);
-    out.extend_from_slice(value.as_bytes());
-}
-
-fn encode_types(values: &[CanonicalType], out: &mut Vec<u8>) {
-    encode_usize(values.len(), out);
-    for value in values {
-        value.encode(out);
-    }
-}
-
-fn encode_mutation(mutation: CanonicalMutation, out: &mut Vec<u8>) {
-    match mutation {
-        CanonicalMutation::Whole => out.push(0),
-        CanonicalMutation::Element(index) => {
-            out.push(1);
-            encode_usize(index, out);
-        }
-    }
-}
-
-fn adapter_tag(adapter: CanonicalAdapterKind) -> u8 {
-    match adapter {
-        CanonicalAdapterKind::None => 0,
-        CanonicalAdapterKind::Constructor => 1,
-        CanonicalAdapterKind::External => 2,
-        CanonicalAdapterKind::Curried => 3,
-        CanonicalAdapterKind::NestedClosure => 4,
-        CanonicalAdapterKind::ImplicitThunk => 5,
-    }
-}
-
-fn structural_tag(structural: StructuralTraitMethod) -> u8 {
-    match structural {
-        StructuralTraitMethod::Debug => 0,
-        StructuralTraitMethod::Index => 1,
-        StructuralTraitMethod::DerefIndex => 2,
-        StructuralTraitMethod::MutateIndex => 3,
-        StructuralTraitMethod::DerefMutateIndex => 4,
-        StructuralTraitMethod::IntoIterator => 5,
-        StructuralTraitMethod::Iterator => 6,
     }
 }
 
@@ -1501,6 +840,7 @@ impl SpecializationCatalog {
             .map(|(index, key)| (ArtifactOrdinal(index), key))
     }
 
+    #[cfg(test)]
     /// The planned emitted symbol names in emission order. Names are
     /// collision-checked: a repeated name is reported instead of silently
     /// aliasing two semantic keys.
@@ -1570,13 +910,6 @@ impl SpecializationCatalog {
         }
         instance_ordinal_name(ordinal)
     }
-
-    /// The planned name of one artifact. `None` when the ordinal was never
-    /// reserved.
-    pub(crate) fn planned_artifact_name(&self, ordinal: ArtifactOrdinal) -> Option<String> {
-        self.artifact(ordinal)
-            .map(|key| artifact_ordinal_name(ordinal, key))
-    }
 }
 
 fn instance_ordinal_name(ordinal: InstanceOrdinal) -> String {
@@ -1641,7 +974,6 @@ mod tests {
 
     use crate::{
         CheckedFunctionParameterDefault, CheckedProductType, CheckedSumType, CheckedTypeElement,
-        LoweredTraitImplementationId,
     };
 
     fn requesting_origin() -> Origin {
@@ -1719,11 +1051,6 @@ mod tests {
         }
     }
 
-    fn canonical(value_type: &CheckedType) -> CanonicalType {
-        CanonicalType::template(value_type, &requesting_origin())
-            .expect("template conversion should succeed")
-    }
-
     fn concrete(value_type: &CheckedType) -> CanonicalType {
         CanonicalType::concrete(value_type, &requesting_origin())
             .expect("concrete conversion should succeed")
@@ -1768,104 +1095,23 @@ mod tests {
     }
 
     #[test]
-    fn template_conversion_covers_every_checked_type_variant() {
-        let function = function_type(
-            CheckedType::Product(CheckedProductType {
-                elements: vec![element(Some("x"), CheckedType::I32, None)],
-                variadic: false,
-            }),
-            FunctionParameterStyle::Juxtaposed,
-            vec![CheckedMutation::Element(0)],
-            vec![CheckedMutation::Whole],
-            CheckedEffectSet {
-                variable: Some(crate::CheckedEffectVariable {
-                    id: TypeParameterId(4),
-                    name: "E".to_owned(),
-                }),
-                resources: vec![CheckedResource {
-                    value_type: CheckedType::I32,
-                    mutable: true,
-                }],
-                state: Some(CheckedStateEffect::ReadWrite),
-            },
-            CheckedType::Never,
-        );
-        let variants = [
-            CheckedType::Never,
-            CheckedType::I8,
-            CheckedType::I16,
-            CheckedType::I32,
-            CheckedType::I64,
-            CheckedType::U8,
-            CheckedType::U16,
-            CheckedType::U32,
-            CheckedType::U64,
-            CheckedType::ISize,
-            CheckedType::USize,
-            CheckedType::F32,
-            CheckedType::F64,
-            CheckedType::NumberLiteral(9),
-            CheckedType::String,
-            CheckedType::StringLiteralSet(vec!["a".to_owned()]),
-            CheckedType::Ref(Box::new(CheckedType::I32)),
-            CheckedType::Slice(Box::new(CheckedType::I32)),
-            CheckedType::Buffer(Box::new(CheckedType::I32)),
-            CheckedType::Array {
-                element: Box::new(CheckedType::I32),
-                count: Box::new(CheckedType::NumberLiteral(3)),
-            },
-            CheckedType::CString,
-            CheckedType::CChar,
-            CheckedType::Parameter {
-                id: TypeParameterId(1),
-                name: "T".to_owned(),
-                sized: true,
-            },
-            nominal(2, "Named"),
-            opaque(3, "Opaque"),
-            CheckedType::CPointer {
-                pointee: Box::new(CheckedType::I32),
-            },
-            CheckedType::Product(CheckedProductType {
-                elements: vec![element(None, CheckedType::I32, None)],
-                variadic: true,
-            }),
-            CheckedType::Sum(CheckedSumType {
-                alternatives: vec![CheckedType::I32, CheckedType::F64],
-            }),
-            CheckedType::Function(function),
-            distinct(4, "Distinct", Vec::new(), CheckedType::I32),
-        ];
-        for value_type in &variants {
-            CanonicalType::template(value_type, &requesting_origin()).unwrap_or_else(
-                |diagnostic| panic!("{value_type} failed to convert: {diagnostic}"),
-            );
-        }
-        for placeholder in [CheckedType::Inferred, CheckedType::Error] {
-            let diagnostic = CanonicalType::template(&placeholder, &requesting_origin())
-                .expect_err("checker placeholders never form keys");
-            assert_eq!(diagnostic.span, requesting_origin().span);
-        }
-    }
-
-    #[test]
     fn equivalent_checked_types_deduplicate() {
         assert_eq!(
-            canonical(&nominal(7, "First")),
-            canonical(&nominal(7, "Second"))
+            concrete(&nominal(7, "First")),
+            concrete(&nominal(7, "Second"))
         );
         assert_eq!(
-            canonical(&opaque(8, "First")),
-            canonical(&opaque(8, "Second"))
+            concrete(&opaque(8, "First")),
+            concrete(&opaque(8, "Second"))
         );
         assert_eq!(
-            canonical(&distinct(
+            concrete(&distinct(
                 9,
                 "First",
                 vec![CheckedType::I32],
                 CheckedType::I32,
             )),
-            canonical(&distinct(
+            concrete(&distinct(
                 9,
                 "Second",
                 vec![CheckedType::I32],
@@ -1877,11 +1123,11 @@ mod tests {
             "nominal identity ignores display names and expanded representations"
         );
         assert_eq!(
-            canonical(&CheckedType::Product(CheckedProductType {
+            concrete(&CheckedType::Product(CheckedProductType {
                 elements: vec![element(Some("x"), CheckedType::I32, None)],
                 variadic: false,
             })),
-            canonical(&CheckedType::Product(CheckedProductType {
+            concrete(&CheckedType::Product(CheckedProductType {
                 elements: vec![element(
                     Some("x"),
                     CheckedType::I32,
@@ -1921,22 +1167,19 @@ mod tests {
 
     #[test]
     fn nominal_identity_counts_and_shapes_separate() {
+        assert_ne!(concrete(&nominal(1, "Same")), concrete(&nominal(2, "Same")));
         assert_ne!(
-            canonical(&nominal(1, "Same")),
-            canonical(&nominal(2, "Same"))
-        );
-        assert_ne!(
-            canonical(&nominal(1, "Same")),
-            canonical(&opaque(1, "Same")),
+            concrete(&nominal(1, "Same")),
+            concrete(&opaque(1, "Same")),
             "nominal kind is part of identity"
         );
         assert_ne!(
-            canonical(&CheckedType::TypeConstructor {
+            concrete(&CheckedType::TypeConstructor {
                 id: TypeId(1),
                 name: "Same".to_owned(),
                 arguments: vec![CheckedType::I32],
             }),
-            canonical(&CheckedType::TypeConstructor {
+            concrete(&CheckedType::TypeConstructor {
                 id: TypeId(1),
                 name: "Same".to_owned(),
                 arguments: vec![CheckedType::I64],
@@ -1949,17 +1192,17 @@ mod tests {
                 variadic: false,
             })
         };
-        assert_ne!(canonical(&named(Some("x"))), canonical(&named(Some("y"))));
-        assert_ne!(canonical(&named(Some("x"))), canonical(&named(None)));
+        assert_ne!(concrete(&named(Some("x"))), concrete(&named(Some("y"))));
+        assert_ne!(concrete(&named(Some("x"))), concrete(&named(None)));
         assert_ne!(
-            canonical(&CheckedType::Product(CheckedProductType {
+            concrete(&CheckedType::Product(CheckedProductType {
                 elements: vec![
                     element(None, CheckedType::I32, None),
                     element(None, CheckedType::I64, None),
                 ],
                 variadic: false,
             })),
-            canonical(&CheckedType::Product(CheckedProductType {
+            concrete(&CheckedType::Product(CheckedProductType {
                 elements: vec![
                     element(None, CheckedType::I64, None),
                     element(None, CheckedType::I32, None),
@@ -1969,21 +1212,21 @@ mod tests {
             "field order is identity"
         );
         assert_ne!(
-            canonical(&CheckedType::Product(CheckedProductType {
+            concrete(&CheckedType::Product(CheckedProductType {
                 elements: vec![element(None, CheckedType::I32, None)],
                 variadic: false,
             })),
-            canonical(&CheckedType::Product(CheckedProductType {
+            concrete(&CheckedType::Product(CheckedProductType {
                 elements: vec![element(None, CheckedType::I32, None)],
                 variadic: true,
             })),
             "the variadic flag is identity"
         );
         assert_ne!(
-            canonical(&CheckedType::Sum(CheckedSumType {
+            concrete(&CheckedType::Sum(CheckedSumType {
                 alternatives: vec![CheckedType::I32, CheckedType::I64],
             })),
-            canonical(&CheckedType::Sum(CheckedSumType {
+            concrete(&CheckedType::Sum(CheckedSumType {
                 alternatives: vec![CheckedType::I64, CheckedType::I32],
             })),
             "alternative order is identity"
@@ -1996,27 +1239,27 @@ mod tests {
             CanonicalType::Array { .. }
         ));
         assert_ne!(
-            canonical(&CheckedType::Array {
+            concrete(&CheckedType::Array {
                 element: Box::new(CheckedType::I32),
                 count: Box::new(CheckedType::NumberLiteral(2)),
             }),
-            canonical(&CheckedType::Array {
+            concrete(&CheckedType::Array {
                 element: Box::new(CheckedType::I32),
                 count: Box::new(CheckedType::NumberLiteral(3)),
             }),
             "repeated counts are identity"
         );
         assert_ne!(
-            canonical(&CheckedType::NumberLiteral(1)),
-            canonical(&CheckedType::NumberLiteral(2)),
+            concrete(&CheckedType::NumberLiteral(1)),
+            concrete(&CheckedType::NumberLiteral(2)),
             "literal payloads are identity"
         );
         assert_ne!(
-            canonical(&CheckedType::StringLiteralSet(vec![
+            concrete(&CheckedType::StringLiteralSet(vec![
                 "a".to_owned(),
                 "b".to_owned()
             ])),
-            canonical(&CheckedType::StringLiteralSet(vec![
+            concrete(&CheckedType::StringLiteralSet(vec![
                 "b".to_owned(),
                 "a".to_owned()
             ])),
@@ -2132,7 +1375,7 @@ mod tests {
             "resource order is identity"
         );
         assert_ne!(
-            canonical(&CheckedType::Function(function_type(
+            concrete(&CheckedType::Function(function_type(
                 CheckedType::I32,
                 FunctionParameterStyle::Single,
                 Vec::new(),
@@ -2146,7 +1389,7 @@ mod tests {
                 ),
                 CheckedType::I32,
             ))),
-            canonical(&CheckedType::Function(function_type(
+            concrete(&CheckedType::Function(function_type(
                 CheckedType::I32,
                 FunctionParameterStyle::Single,
                 Vec::new(),
@@ -2163,7 +1406,7 @@ mod tests {
             "resource mutability is identity"
         );
         let stateful = |state| {
-            canonical(&CheckedType::Function(function_type(
+            concrete(&CheckedType::Function(function_type(
                 CheckedType::I32,
                 FunctionParameterStyle::Single,
                 Vec::new(),
@@ -2186,7 +1429,7 @@ mod tests {
             stateful(Some(CheckedStateEffect::Read))
         );
         assert_ne!(
-            canonical(&CheckedType::Function(function_type(
+            concrete(&CheckedType::Function(function_type(
                 CheckedType::I32,
                 FunctionParameterStyle::Single,
                 Vec::new(),
@@ -2194,7 +1437,7 @@ mod tests {
                 effects(Vec::new(), None),
                 CheckedType::I32,
             ))),
-            canonical(&CheckedType::Function(function_type(
+            concrete(&CheckedType::Function(function_type(
                 CheckedType::I32,
                 FunctionParameterStyle::Single,
                 Vec::new(),
@@ -2213,23 +1456,12 @@ mod tests {
     }
 
     #[test]
-    fn parameters_are_template_identity_only() {
+    fn parameters_never_form_concrete_keys() {
         let first = CheckedType::Parameter {
             id: TypeParameterId(5),
             name: "First".to_owned(),
             sized: false,
         };
-        let second = CheckedType::Parameter {
-            id: TypeParameterId(5),
-            name: "Second".to_owned(),
-            sized: true,
-        };
-        assert_eq!(canonical(&first), canonical(&second));
-        assert_eq!(
-            canonical(&first),
-            CanonicalType::Parameter(TypeParameterId(5))
-        );
-
         let diagnostic = CanonicalType::concrete(&first, &requesting_origin())
             .expect_err("an unresolved parameter never forms a concrete key");
         assert_eq!(diagnostic.span, requesting_origin().span);
@@ -2261,10 +1493,6 @@ mod tests {
             }],
             state: Some(CheckedStateEffect::Read),
         };
-        let key = CanonicalEffectSet::template(&template, &requesting_origin())
-            .expect("template keys retain effect-variable IDs");
-        assert_eq!(key.variable, Some(TypeParameterId(3)));
-
         let diagnostic = CanonicalEffectSet::concrete(&template, &requesting_origin())
             .expect_err("an unresolved effect variable never forms a concrete key");
         assert_eq!(diagnostic.span, requesting_origin().span);
@@ -2289,28 +1517,6 @@ mod tests {
             parameter: TypeParameterId(parameter),
             effects: CanonicalEffectSet::concrete(effects, &requesting_origin())
                 .expect("concrete effect substitution"),
-        }
-    }
-
-    fn substitutions(
-        types: &[(usize, CheckedType)],
-        effects: &[(usize, CheckedEffectSet)],
-    ) -> CallSubstitutions {
-        CallSubstitutions {
-            types: types
-                .iter()
-                .map(|(parameter, value_type)| crate::CallTypeSubstitution {
-                    parameter: TypeParameterId(*parameter),
-                    value_type: value_type.clone(),
-                })
-                .collect(),
-            effects: effects
-                .iter()
-                .map(|(parameter, effects)| crate::CallEffectSubstitution {
-                    parameter: TypeParameterId(*parameter),
-                    effects: effects.clone(),
-                })
-                .collect(),
         }
     }
 
@@ -2379,203 +1585,10 @@ mod tests {
             InstanceKeyError::ConflictingParameter(TypeParameterId(1))
         );
 
-        let unresolved = InstanceKey::new(
-            FunctionId(1),
-            vec![InstanceSubstitution::Type {
-                parameter: TypeParameterId(1),
-                value: CanonicalType::Ref(Box::new(CanonicalType::Parameter(TypeParameterId(9)))),
-            }],
-            None,
-        )
-        .expect_err("a nested declared parameter is not concrete");
-        assert_eq!(
-            unresolved,
-            InstanceKeyError::UnresolvedTypeParameter(TypeParameterId(9))
-        );
-
-        let unresolved_effect = InstanceKey::new(
-            FunctionId(1),
-            vec![InstanceSubstitution::Effect {
-                parameter: TypeParameterId(1),
-                effects: CanonicalEffectSet {
-                    variable: Some(TypeParameterId(8)),
-                    resources: Vec::new(),
-                    state: None,
-                },
-            }],
-            None,
-        )
-        .expect_err("a declared effect variable is not concrete");
-        assert_eq!(
-            unresolved_effect,
-            InstanceKeyError::UnresolvedEffectVariable(TypeParameterId(8))
-        );
-
-        for evidence in [
-            CanonicalEvidence::ExplicitImplementation {
-                trait_id: TraitId(1),
-                method: TraitMethodId(2),
-                function: FunctionId(3),
-                arguments: vec![CanonicalType::Parameter(TypeParameterId(9))],
-            },
-            CanonicalEvidence::Structural {
-                trait_id: TraitId(1),
-                method: TraitMethodId(2),
-                structural: StructuralTraitMethod::Debug,
-                arguments: vec![CanonicalType::Parameter(TypeParameterId(9))],
-            },
-        ] {
-            assert_eq!(
-                InstanceKey::new(FunctionId(1), Vec::new(), Some(evidence))
-                    .expect_err("selected evidence must be concrete"),
-                InstanceKeyError::UnresolvedTypeParameter(TypeParameterId(9))
-            );
-        }
-
         let unparameterized = instance_key(3, Vec::new(), None);
         assert!(unparameterized.substitutions().is_empty());
         assert!(unparameterized.evidence().is_none());
         assert_eq!(unparameterized, instance_key(3, Vec::new(), None));
-    }
-
-    #[test]
-    fn instance_requests_resolve_or_fail_at_their_origin() {
-        let origin = requesting_origin();
-
-        let explicit = InstanceRequest::new(
-            FunctionId(4),
-            origin.clone(),
-            substitutions(&[(1, CheckedType::I32)], &[]),
-            None,
-        );
-        let key = explicit.resolve().expect("resolved request");
-        assert_eq!(key.function(), FunctionId(4));
-        assert_eq!(key.substitutions().len(), 1);
-
-        let explicit_evidence = InstanceRequest::new(
-            FunctionId(4),
-            origin.clone(),
-            CallSubstitutions::default(),
-            Some(TraitEvidence::ExplicitImplementation {
-                trait_id: TraitId(5),
-                implementation: LoweredTraitImplementationId::for_test(1),
-                method: TraitMethodId(6),
-                function: FunctionId(7),
-                arguments: vec![CheckedType::I32],
-            }),
-        );
-        assert!(matches!(
-            explicit_evidence
-                .resolve()
-                .expect("resolved evidence")
-                .evidence(),
-            Some(CanonicalEvidence::ExplicitImplementation {
-                function: FunctionId(7),
-                ..
-            })
-        ));
-
-        let structural_evidence = InstanceRequest::new(
-            FunctionId(4),
-            origin.clone(),
-            CallSubstitutions::default(),
-            Some(TraitEvidence::Structural {
-                trait_id: TraitId(5),
-                method: TraitMethodId(6),
-                structural: StructuralTraitMethod::Debug,
-                arguments: vec![CheckedType::Product(CheckedProductType {
-                    elements: vec![element(Some("x"), CheckedType::I32, None)],
-                    variadic: false,
-                })],
-            }),
-        );
-        assert!(matches!(
-            structural_evidence
-                .resolve()
-                .expect("resolved structural evidence")
-                .evidence(),
-            Some(CanonicalEvidence::Structural {
-                structural: StructuralTraitMethod::Debug,
-                ..
-            })
-        ));
-
-        let declared = InstanceRequest::new(
-            FunctionId(4),
-            origin.clone(),
-            CallSubstitutions::default(),
-            Some(TraitEvidence::DeclaredBound {
-                trait_id: TraitId(2),
-                method: None,
-                arguments: Vec::new(),
-                prerequisites: Vec::new(),
-            }),
-        );
-        let diagnostic = declared
-            .resolve()
-            .expect_err("declared bounds are unresolved");
-        assert_eq!(diagnostic.span, origin.span);
-        assert!(diagnostic.message.contains("declared bound"));
-
-        let rejected = InstanceRequest::new(
-            FunctionId(4),
-            origin.clone(),
-            CallSubstitutions::default(),
-            Some(TraitEvidence::RejectedImplementation {
-                trait_id: TraitId(2),
-                implementation: LoweredTraitImplementationId::for_test(0),
-                arguments: Vec::new(),
-            }),
-        );
-        let diagnostic = rejected
-            .resolve()
-            .expect_err("negative evidence is not a key");
-        assert_eq!(diagnostic.span, origin.span);
-        assert!(diagnostic.message.contains("negative implementation"));
-
-        let unresolved = InstanceRequest::new(
-            FunctionId(4),
-            origin.clone(),
-            substitutions(
-                &[(
-                    1,
-                    CheckedType::Parameter {
-                        id: TypeParameterId(3),
-                        name: "T".to_owned(),
-                        sized: false,
-                    },
-                )],
-                &[],
-            ),
-            None,
-        );
-        let diagnostic = unresolved
-            .resolve()
-            .expect_err("unresolved substitutions are not a key");
-        assert_eq!(diagnostic.span, origin.span);
-
-        let unresolved_arguments = InstanceRequest::new(
-            FunctionId(4),
-            origin.clone(),
-            CallSubstitutions::default(),
-            Some(TraitEvidence::Structural {
-                trait_id: TraitId(5),
-                method: TraitMethodId(6),
-                structural: StructuralTraitMethod::Index,
-                arguments: vec![CheckedType::Parameter {
-                    id: TypeParameterId(11),
-                    name: "K".to_owned(),
-                    sized: false,
-                }],
-            }),
-        );
-        assert_eq!(
-            unresolved_arguments
-                .resolve()
-                .expect_err("unresolved evidence arguments are not a key")
-                .span,
-            origin.span
-        );
     }
 
     #[test]
@@ -2723,17 +1736,6 @@ mod tests {
             ArtifactRequestKey::StructuralMethod(structural_key.clone()),
             "constructor-adapter and structural-method namespaces are distinct"
         );
-        let instance = instance_key(1, vec![type_substitution(1, CheckedType::I32)], None);
-        assert_ne!(
-            SpecializationKey::Instance(instance.clone()),
-            SpecializationKey::Artifact(ArtifactRequestKey::ConstructorAdapter(constructor_key)),
-            "source-function instances and generated artifacts never share a namespace"
-        );
-        assert_eq!(
-            SpecializationKey::Instance(instance.clone()),
-            SpecializationKey::Instance(instance)
-        );
-
         let unresolved_callable = function_type(
             CheckedType::Parameter {
                 id: TypeParameterId(4),
@@ -2800,94 +1802,6 @@ mod tests {
             )
             .expect("concrete structural artifact"),
         )
-    }
-
-    #[test]
-    fn canonical_encoding_is_versioned_stable_and_injective() {
-        let instance = instance_key(1, vec![type_substitution(1, CheckedType::I32)], None);
-        let encoding = instance.canonical_encoding();
-        assert_eq!(encoding[0], SPECIALIZATION_KEY_ENCODING_VERSION);
-        assert_eq!(
-            encoding,
-            instance_key(1, vec![type_substitution(1, CheckedType::I32)], None)
-                .canonical_encoding()
-        );
-        assert_eq!(
-            SpecializationKey::Instance(instance.clone()).canonical_encoding(),
-            encoding
-        );
-        assert_eq!(
-            instance_key(
-                1,
-                vec![
-                    type_substitution(2, CheckedType::I64),
-                    type_substitution(1, CheckedType::I32),
-                ],
-                None
-            )
-            .canonical_encoding(),
-            instance_key(
-                1,
-                vec![
-                    type_substitution(1, CheckedType::I32),
-                    type_substitution(2, CheckedType::I64),
-                ],
-                None
-            )
-            .canonical_encoding(),
-            "construction order never changes the encoding"
-        );
-
-        let other = instance_key(1, vec![type_substitution(1, CheckedType::I64)], None);
-        assert_ne!(encoding, other.canonical_encoding());
-        assert_ne!(
-            encoding,
-            instance_key(
-                1,
-                vec![effect_substitution(1, &CheckedEffectSet::default())],
-                None
-            )
-            .canonical_encoding(),
-            "type and effect entries with the same parameter still differ"
-        );
-        assert_ne!(
-            encoding,
-            instance_key(
-                1,
-                vec![type_substitution(1, CheckedType::I32)],
-                Some(CanonicalEvidence::Structural {
-                    trait_id: TraitId(1),
-                    method: TraitMethodId(2),
-                    structural: StructuralTraitMethod::Debug,
-                    arguments: vec![concrete(&CheckedType::I32)],
-                })
-            )
-            .canonical_encoding(),
-            "evidence participates in the encoding"
-        );
-
-        let artifact = ArtifactRequestKey::ConstructorAdapter(
-            ConstructorAdapterKey::new(
-                SymbolId(1),
-                TypeId(1),
-                LoweredCallableAdapter::Constructor,
-                &simple_callable(),
-                &requesting_origin(),
-            )
-            .expect("concrete constructor artifact"),
-        );
-        let artifact_encoding = artifact.canonical_encoding();
-        assert_eq!(artifact_encoding[0], SPECIALIZATION_KEY_ENCODING_VERSION);
-        assert_ne!(artifact_encoding, encoding);
-        assert_eq!(
-            SpecializationKey::Artifact(artifact.clone()).canonical_encoding(),
-            artifact_encoding
-        );
-        assert_ne!(
-            SpecializationKey::Instance(instance).canonical_encoding(),
-            SpecializationKey::Artifact(artifact).canonical_encoding(),
-            "the family tag separates instances from artifacts"
-        );
     }
 
     #[test]
@@ -3034,11 +1948,11 @@ mod tests {
         );
         assert_eq!(
             left.instances()
-                .map(|(_, key)| key.canonical_encoding())
+                .map(|(_, key)| key.clone())
                 .collect::<Vec<_>>(),
             right
                 .instances()
-                .map(|(_, key)| key.canonical_encoding())
+                .map(|(_, key)| key.clone())
                 .collect::<Vec<_>>()
         );
         assert_eq!(
@@ -3156,18 +2070,9 @@ mod tests {
                 "family name `{}` is unique",
                 key.family_name()
             );
-            let encoding = key.canonical_encoding();
-            assert_eq!(
-                encoding[0], SPECIALIZATION_KEY_ENCODING_VERSION,
-                "every artifact encoding is versioned"
-            );
-            assert_eq!(
-                encoding[1], ARTIFACT_FAMILY_TAG,
-                "artifact encodings stay in the artifact family"
-            );
             assert!(
-                encodings.insert(encoding),
-                "family `{}` has a distinct encoding",
+                encodings.insert(key.clone()),
+                "family `{}` has a distinct key",
                 key.family_name()
             );
         }
@@ -3195,10 +2100,7 @@ mod tests {
             "runner kinds never alias on the same owner and site"
         );
         assert_ne!(runners[1], runners[2]);
-        assert_ne!(
-            runners[0].canonical_encoding(),
-            runners[2].canonical_encoding()
-        );
+        assert_ne!(runners[0].clone(), runners[2].clone());
     }
 
     #[test]
@@ -3220,13 +2122,12 @@ mod tests {
         let owners = [
             ArtifactSiteOwner::Initializer(InitializerId::for_test(0)),
             ArtifactSiteOwner::Instance(InstanceOrdinal(0)),
-            ArtifactSiteOwner::Artifact(ArtifactOrdinal(0)),
         ];
         let mut encodings = HashSet::new();
         for owner in owners {
             let key = ArtifactRequestKey::UntilRunner(ReactiveRunnerKey { owner, site });
             assert!(
-                encodings.insert(key.canonical_encoding()),
+                encodings.insert(key.clone()),
                 "each owner namespace separates"
             );
         }
@@ -3264,7 +2165,7 @@ mod tests {
                 ArtifactRequestKey::CoroutineCodes(CoroutineCodesKey {
                     body: InstanceOrdinal(body),
                 })
-                .canonical_encoding(),
+                .clone(),
             );
         }
         assert_eq!(coroutine_encodings.len(), 2);
@@ -3278,10 +2179,7 @@ mod tests {
             first, display_alias,
             "display names never separate type-keyed artifacts"
         );
-        assert_eq!(
-            first.canonical_encoding(),
-            display_alias.canonical_encoding()
-        );
+        assert_eq!(first.clone(), display_alias.clone());
         assert_ne!(
             first,
             ArtifactRequestKey::DropGlue(concrete(&nominal(8, "Node")))

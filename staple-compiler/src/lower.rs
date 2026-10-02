@@ -4,8 +4,6 @@
 //! owned representation consumed by code generation. The output carries the
 //! closed specialization catalog and concrete emission plans.
 
-#![allow(dead_code)] // Stage 2 populates and consumes this schema incrementally.
-
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -16,12 +14,12 @@ use staple_syntax::{Diagnostic, Expression, Item, Pattern, Span, SyntaxId};
 use crate::specialization::SpecializationCatalog;
 use crate::{
     BuiltinType, CheckedAccess, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
-    CheckedFunctionalDependency, CheckedMutation, CheckedProductType, CheckedPropagation,
-    CheckedResource, CheckedTraitBound, CheckedTraitDispatch, CheckedType, DefinitionId, FloatType,
-    FunctionId, IntegerType, IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction,
-    ResolvedModule, SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId,
-    TypeParameterId, TypedModule, contains_type_parameter, infer_type_parameters,
-    select_sum_alternative, slice_ref_length,
+    CheckedMutation, CheckedProductType, CheckedPropagation, CheckedResource, CheckedTraitBound,
+    CheckedTraitDispatch, CheckedType, DefinitionId, FloatType, FunctionId, IntegerType,
+    IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction, ResolvedModule,
+    SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId, TypeParameterId,
+    TypedModule, contains_type_parameter, infer_type_parameters, select_sum_alternative,
+    slice_ref_length,
 };
 
 mod artifact_closure;
@@ -118,7 +116,9 @@ macro_rules! arena_id {
             }
         }
 
+        // Generated for every arena ID type; tests build only some of them.
         #[cfg(test)]
+        #[allow(dead_code)]
         impl $name {
             pub(crate) fn for_test(index: usize) -> Self {
                 Self(index)
@@ -396,10 +396,6 @@ pub(crate) enum Stage24Family {
 pub(crate) enum DeferredExpressionFamily {
     /// Stage 2.5 owns function values and calls.
     Callable,
-    /// Stage 2.6 owns `with` and resource access.
-    Resource,
-    /// Stage 2.6 owns coroutine construction and `await`.
-    Coroutine,
 }
 
 /// The concrete Stage 2.6 route for a resource or coroutine expression. Every
@@ -422,6 +418,7 @@ pub(crate) enum Stage26Route {
 }
 
 impl Stage26Route {
+    #[cfg(test)]
     /// Every route, checked by the route-table test.
     pub(crate) const ALL: [Stage26Route; 6] = [
         Stage26Route::ResourceUse,
@@ -432,20 +429,7 @@ impl Stage26Route {
         Stage26Route::AwaitWait,
     ];
 
-    /// The deferred family whose record ultimately replaces this route. Used
-    /// only while the route's concrete payload lands in later steps.
-    pub(crate) fn deferred_family(self) -> DeferredExpressionFamily {
-        match self {
-            Stage26Route::ResourceUse | Stage26Route::ResourceProvider => {
-                DeferredExpressionFamily::Resource
-            }
-            Stage26Route::CoroutineCreation
-            | Stage26Route::AwaitChildCoroutine
-            | Stage26Route::AwaitTask
-            | Stage26Route::AwaitWait => DeferredExpressionFamily::Coroutine,
-        }
-    }
-
+    #[cfg(test)]
     /// The expression kind name a populated route produces, used by the route
     /// table to prove every route has exactly one owned record family.
     pub(crate) fn record_family(self) -> &'static str {
@@ -471,6 +455,7 @@ pub(crate) enum ReactiveIntrinsicRoute {
 }
 
 impl ReactiveIntrinsicRoute {
+    #[cfg(test)]
     pub(crate) const ALL: [ReactiveIntrinsicRoute; 5] = [
         ReactiveIntrinsicRoute::Scope,
         ReactiveIntrinsicRoute::Reaction,
@@ -503,6 +488,7 @@ pub(crate) enum CoroutineIntrinsicRoute {
 }
 
 impl CoroutineIntrinsicRoute {
+    #[cfg(test)]
     pub(crate) const ALL: [CoroutineIntrinsicRoute; 15] = [
         CoroutineIntrinsicRoute::BlockOn,
         CoroutineIntrinsicRoute::SchedulerCreate,
@@ -538,7 +524,6 @@ pub(crate) enum ExpressionDisposition {
     Ordinary(Stage24Family),
     /// A Stage 2.6 resource or coroutine expression with its concrete route.
     Stage26(Stage26Route),
-    Deferred(DeferredExpressionFamily),
     /// Compile-time-only survivors that earlier phases must eliminate.
     Rejected,
 }
@@ -681,10 +666,6 @@ impl LoweredCoercionPlan {
 pub(crate) enum LoweredExpressionKind {
     /// Explicitly deferred to Stage 2.5 or Stage 2.6 with its owning family.
     Deferred(DeferredExpressionFamily),
-    /// A Stage 2.6 resource/coroutine expression whose owning record family
-    /// and route are explicit while Steps 2-6 populate the payload. No
-    /// untyped fallback remains: every route is classified.
-    Stage26Deferred(Stage26Route),
     Block(BlockId),
     /// An ordinary value read: a local, parameter, global, mutable cell,
     /// captured cell, or singleton. Callable-valued names and constructors are
@@ -738,6 +719,8 @@ pub(crate) enum LoweredStringTemplatePart {
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredInterpolation {
     pub expression: ExpressionId,
+    /// Tests pick the expected `Display` or `Debug` body by the format.
+    #[cfg(test)]
     pub format: staple_syntax::StringInterpolationFormat,
     pub value_type: CheckedType,
     pub trait_id: TraitId,
@@ -758,8 +741,6 @@ pub(crate) struct LoweredStringFormatting {
 /// The eight explicit callable categories. Every call and callable value has
 /// exactly one category; there is no unknown/fallback variant. Variants carry
 /// semantic IDs only, never backend symbol strings or debug-formatted keys.
-/// The instance graph rejects `CompilerHelper`: a body or generated plan that
-/// reaches the category is a lowering diagnostic, not a deferred request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LoweredCallableCategory {
     DirectKnownFunction,
@@ -769,13 +750,13 @@ pub(crate) enum LoweredCallableCategory {
     Constructor,
     TraitImplementation,
     StructuralTraitMethod,
-    CompilerHelper,
 }
 
 impl LoweredCallableCategory {
+    #[cfg(test)]
     /// Every category, used by the decision-table test to prove that each one
     /// has at least one explicit route and target representation.
-    pub(crate) const ALL: [LoweredCallableCategory; 8] = [
+    pub(crate) const ALL: [LoweredCallableCategory; 7] = [
         LoweredCallableCategory::DirectKnownFunction,
         LoweredCallableCategory::IndirectClosure,
         LoweredCallableCategory::ExternalFunction,
@@ -783,7 +764,6 @@ impl LoweredCallableCategory {
         LoweredCallableCategory::Constructor,
         LoweredCallableCategory::TraitImplementation,
         LoweredCallableCategory::StructuralTraitMethod,
-        LoweredCallableCategory::CompilerHelper,
     ];
 }
 
@@ -829,12 +809,6 @@ pub(crate) enum LoweredCallableTarget {
         method: TraitMethodId,
         structural: StructuralTraitMethod,
     },
-    /// A compiler helper function selected by checked operations. Kept in the
-    /// Stage 2 schema so the eight-category decision table stays complete, but
-    /// the lowered graph rejects it: an instance or artifact that reaches this
-    /// target is a lowering diagnostic because every generated helper must be
-    /// a source-function instance or a typed artifact.
-    CompilerHelper { function: FunctionId },
 }
 
 impl LoweredCallableTarget {
@@ -857,7 +831,6 @@ impl LoweredCallableTarget {
             LoweredCallableTarget::StructuralTraitMethod { .. } => {
                 LoweredCallableCategory::StructuralTraitMethod
             }
-            LoweredCallableTarget::CompilerHelper { .. } => LoweredCallableCategory::CompilerHelper,
         }
     }
 }
@@ -878,9 +851,7 @@ pub(crate) enum LoweredCallableAdapter {
     None,
     Constructor,
     External,
-    Curried,
     NestedClosure,
-    ImplicitThunk,
 }
 
 /// How a closure environment holds one capture.
@@ -915,15 +886,8 @@ pub(crate) struct LoweredClosureCapture {
     pub access: LoweredCaptureAccess,
     /// The constructed environment owns the capture value.
     pub owns_value: bool,
-    /// The capture requires a drop when the environment is destroyed.
-    pub drops_value: bool,
     /// The captured symbol requires initialization state.
     pub requires_initialization_state: bool,
-    /// The captured symbol needs mutable storage (a `mut` binding, signal, or
-    /// mutating parameter).
-    pub mutable_storage: bool,
-    /// The captured symbol is a derived binding.
-    pub derived: bool,
 }
 
 /// A closure construction plan: the target function, its ordered captures,
@@ -986,12 +950,6 @@ pub(crate) enum TraitEvidence {
         method: Option<TraitMethodId>,
         arguments: Vec<CheckedType>,
         prerequisites: Vec<CheckedTraitBound>,
-    },
-    /// Rejection data from a negative implementation.
-    RejectedImplementation {
-        trait_id: TraitId,
-        implementation: LoweredTraitImplementationId,
-        arguments: Vec<CheckedType>,
     },
 }
 
@@ -1085,9 +1043,6 @@ pub(crate) struct LoweredCall {
     /// Ordered hidden resource requirements from the checked effect row,
     /// resolved to their selected lexical providers in effect-row order.
     pub resource_bindings: Vec<LoweredResourceUseId>,
-    /// Checked mutation and move markers for the parameter slots.
-    pub mutations: Vec<CheckedMutation>,
-    pub moves: Vec<CheckedMutation>,
     /// Symbols whose initialization state the call must check.
     pub initialization_checks: Vec<SymbolId>,
     /// Ordered evaluation steps.
@@ -1496,14 +1451,13 @@ pub(crate) enum CallRoute {
     Constructor,
     /// A primitive macro call (`c_string`).
     PrimitiveMacro,
-    /// A compiler helper selected by checked operations.
-    CompilerHelper,
 }
 
 impl CallRoute {
+    #[cfg(test)]
     /// Every route, checked by the decision-table test against the exhaustive
     /// category mapping.
-    pub(crate) const ALL: [CallRoute; 13] = [
+    pub(crate) const ALL: [CallRoute; 12] = [
         CallRoute::Juxtaposed,
         CallRoute::JuxtaposedIntrinsic,
         CallRoute::CurriedDefault,
@@ -1516,23 +1470,9 @@ impl CallRoute {
         CallRoute::Indirect,
         CallRoute::Constructor,
         CallRoute::PrimitiveMacro,
-        CallRoute::CompilerHelper,
     ];
 
-    /// Whether this route passes hidden effect-row resources as ABI arguments.
-    /// External and intrinsic calls resolve no hidden resource arguments;
-    /// reactive intrinsics select an ambient provider inside their operation
-    /// record instead. Constructors carry no effects.
-    pub(crate) fn passes_hidden_resources(self) -> bool {
-        !matches!(
-            self,
-            CallRoute::External
-                | CallRoute::Intrinsic
-                | CallRoute::JuxtaposedIntrinsic
-                | CallRoute::Constructor
-        )
-    }
-
+    #[cfg(test)]
     /// The single explicit callable category this route produces. The
     /// exhaustive match is the compile-time half of the decision table.
     pub(crate) fn category(self) -> LoweredCallableCategory {
@@ -1549,7 +1489,6 @@ impl CallRoute {
             CallRoute::GenericDirect => DirectKnownFunction,
             CallRoute::External => ExternalFunction,
             CallRoute::Constructor => Constructor,
-            CallRoute::CompilerHelper => CompilerHelper,
         }
     }
 }
@@ -1578,6 +1517,7 @@ pub(crate) enum CallableValueRoute {
 }
 
 impl CallableValueRoute {
+    #[cfg(test)]
     /// Every construction route, checked by the decision-table test.
     pub(crate) const ALL: [CallableValueRoute; 8] = [
         CallableValueRoute::TraitMethod,
@@ -1734,9 +1674,6 @@ pub(crate) struct LoweredLoop {
     pub result_type: CheckedType,
     /// The body result must be dropped before the back edge.
     pub drops_body_result: bool,
-    /// The body can complete normally; a body whose tail diverges exits only
-    /// through `break` or an enclosing return.
-    pub body_falls_through: bool,
     /// One-based nesting depth of this loop, matching the `loop_depth`
     /// recorded on the break/continue items it owns.
     pub depth: usize,
@@ -1881,16 +1818,9 @@ impl LoweredRepeatedProduct {
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredName {
     pub symbol: SymbolId,
-    pub storage: SymbolStorage,
     pub requires_initialization_check: bool,
     /// The symbol's storage is mutable and reads must go through its cell.
     pub mutable: bool,
-    /// The symbol is reached through a shared capture cell.
-    pub captured_cell: bool,
-    /// This occurrence transfers the symbol's value.
-    pub moved: bool,
-    /// The symbol is a `move`-marked parameter.
-    pub move_parameter: bool,
     /// Singleton type identity when the name denotes a singleton value.
     pub singleton: Option<TypeId>,
     /// The tracked signal read or derived read this occurrence performs, when
@@ -2531,25 +2461,33 @@ pub(crate) struct LoweredInitializer {
     pub name: String,
     pub origin: Origin,
     pub module: ModuleId,
-    pub executable_entry: bool,
     pub resources: Vec<LoweredEntryResource>,
     /// The module's ordered runtime items, lowered into `body`'s item list.
     pub body: BlockId,
+    /// Tests locate the executable entry's initializer by this flag.
+    #[cfg(test)]
+    pub executable_entry: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredModuleInfo {
     pub origin: Origin,
     pub semantic_id: ModuleId,
-    pub qualified_name: String,
     /// The stable, load-order-independent prefix used to mangle the module's
     /// symbols (`__staple_m{prefix}.{name}`, `__staple_init_m{prefix}`).
     pub symbol_prefix: String,
     pub parent: Option<ModuleId>,
-    pub companion: bool,
     pub initialization_index: usize,
-    pub executable_entry: bool,
     pub initializer: InitializerId,
+    /// Tests identify modules by their qualified name.
+    #[cfg(test)]
+    pub qualified_name: String,
+    /// Tests locate a companion module by this flag.
+    #[cfg(test)]
+    pub companion: bool,
+    /// Tests locate the executable entry module by this flag.
+    #[cfg(test)]
+    pub executable_entry: bool,
 }
 
 /// The primary storage category of a symbol. Independent facts (mutation,
@@ -2593,7 +2531,6 @@ pub(crate) struct LoweredSymbol {
     pub derived: bool,
     pub signal: bool,
     pub mutated_parameter: bool,
-    pub move_parameter: bool,
     pub captured_cell: bool,
     pub function: Option<FunctionId>,
     pub constructor: Option<TypeId>,
@@ -2616,28 +2553,16 @@ pub(crate) struct LoweredSymbol {
     pub global_root: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LoweredTypeKind {
-    Alias,
-    Distinct,
-    Opaque,
-    Singleton,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredTypeMetadata {
     pub origin: Origin,
     pub semantic_id: TypeId,
+    /// Tests locate a type's metadata by its declared name.
+    #[cfg(test)]
     pub name: String,
     pub module: ModuleId,
-    pub kind: LoweredTypeKind,
     pub builtin: Option<BuiltinType>,
     pub recursive_construction: Option<RecursiveConstruction>,
-    /// Checked parameter templates in declaration order.
-    pub parameters: Vec<CheckedType>,
-    /// Compact representation template; nested nominal types are references.
-    /// Absent for opaque types without a representation.
-    pub representation: Option<CheckedType>,
 }
 
 #[derive(Debug, Clone)]
@@ -2648,7 +2573,6 @@ pub(crate) struct LoweredTraitMetadata {
     pub module: ModuleId,
     pub parameters: Vec<CheckedType>,
     pub prerequisites: Vec<CheckedTraitBound>,
-    pub functional_dependencies: Vec<CheckedFunctionalDependency>,
     /// Declared method order.
     pub methods: Vec<TraitMethodId>,
     /// Default implementations, in declared method order.
@@ -2711,7 +2635,6 @@ pub(crate) struct LoweredSemanticIds {
     pub io_resource: Option<CheckedResource>,
     pub reactive_resource: Option<CheckedResource>,
     pub string_representation: Option<CheckedType>,
-    pub entry_reactive_required: bool,
 }
 
 /// The complete owned Stage 2 representation. Arena order is insertion order,
@@ -2872,7 +2795,6 @@ impl LoweredProgram {
             io_resource: module.io_resource(),
             reactive_resource: module.reactive_resource(),
             string_representation: module.string_representation().cloned(),
-            entry_reactive_required: module.entry_reactive_required(),
         };
         let formatting = module.string_formatting();
         self.string_formatting = LoweredStringFormatting {
@@ -2904,22 +2826,14 @@ impl LoweredProgram {
                 ));
                 continue;
             };
-            let kind = match declaration.kind() {
-                staple_syntax::TypeDeclarationKind::Alias => LoweredTypeKind::Alias,
-                staple_syntax::TypeDeclarationKind::Distinct => LoweredTypeKind::Distinct,
-                staple_syntax::TypeDeclarationKind::Opaque => LoweredTypeKind::Opaque,
-                staple_syntax::TypeDeclarationKind::Singleton => LoweredTypeKind::Singleton,
-            };
             let value = LoweredTypeMetadata {
                 origin: origin.clone(),
                 semantic_id: id,
+                #[cfg(test)]
                 name: declaration.name.clone(),
                 module: module_id,
-                kind,
                 builtin: resolved.builtin_type(id),
                 recursive_construction: resolved.recursive_construction(id),
-                parameters: module.type_parameter_templates(id).to_vec(),
-                representation: module.type_representation(id).cloned(),
             };
             if let Err(diagnostic) = self.types.insert("type", id, origin, value) {
                 diagnostics.push(diagnostic);
@@ -2995,7 +2909,6 @@ impl LoweredProgram {
                     .cloned()
                     .unwrap_or_default(),
                 prerequisites: module.trait_prerequisites(trait_id).to_vec(),
-                functional_dependencies: module.trait_functional_dependencies(trait_id).to_vec(),
                 methods: trait_.methods.clone(),
                 default_methods,
             };
@@ -3215,7 +3128,6 @@ impl LoweredProgram {
             derived,
             signal,
             mutated_parameter: module.is_mutated_parameter(symbol),
-            move_parameter: module.is_move_parameter(symbol),
             captured_cell: capture_requires_cell(module, symbol),
             function,
             constructor,
@@ -3494,20 +3406,24 @@ impl LoweredProgram {
                 name: String::new(),
                 origin: origin.clone(),
                 module: module_id,
-                executable_entry: is_entry,
                 resources,
                 body,
+                #[cfg(test)]
+                executable_entry: is_entry,
             });
             let info = LoweredModuleInfo {
                 origin: origin.clone(),
                 semantic_id: module_id,
-                qualified_name: source.qualified_name.clone(),
                 symbol_prefix: program.mangled_module_prefix(module_id),
                 parent: source.parent,
-                companion: source.companion,
                 initialization_index: index,
-                executable_entry: is_entry,
                 initializer,
+                #[cfg(test)]
+                qualified_name: source.qualified_name.clone(),
+                #[cfg(test)]
+                companion: source.companion,
+                #[cfg(test)]
+                executable_entry: is_entry,
             };
             if let Err(diagnostic) = self.modules.insert("module", module_id, origin, info) {
                 diagnostics.push(diagnostic);
@@ -4941,7 +4857,6 @@ impl LoweredProgram {
             ExpressionDisposition::Stage26(route) => {
                 self.lower_stage26_expression(module, owner, context, route, expression)?
             }
-            ExpressionDisposition::Deferred(family) => LoweredExpressionKind::Deferred(family),
             ExpressionDisposition::Rejected => unreachable!("rejected above"),
         };
         let id = self.expressions.push(LoweredExpression {
@@ -5283,18 +5198,14 @@ impl LoweredProgram {
                 "cannot lower a name without a resolved symbol",
             ));
         };
-        let Some(catalog) = self.symbols.get(symbol) else {
+        if self.symbols.get(symbol).is_none() {
             return Err(Diagnostic::new(
                 span,
                 format!("symbol {symbol:?} is missing from the lowered symbol catalog"),
             ));
-        };
-        let storage = catalog.storage;
-        let captured_cell = catalog.captured_cell;
-        let move_parameter = catalog.move_parameter;
+        }
         let requires_initialization_check = resolved.requires_initialization_check(syntax);
         let mutable = module.has_mutable_storage(symbol);
-        let moved = module.moved_symbols(syntax).any(|moved| moved == symbol);
         let singleton = resolved.singleton_type(symbol);
         let reactive = self.lower_name_reactive_operation(
             module,
@@ -5306,12 +5217,8 @@ impl LoweredProgram {
         );
         Ok(LoweredExpressionKind::Name(LoweredName {
             symbol,
-            storage,
             requires_initialization_check,
             mutable,
-            captured_cell,
-            moved,
-            move_parameter,
             singleton,
             reactive,
         }))
@@ -6025,6 +5932,7 @@ impl LoweredProgram {
                     parts.push(LoweredStringTemplatePart::Interpolation(
                         LoweredInterpolation {
                             expression,
+                            #[cfg(test)]
                             format: interpolation.format,
                             value_type,
                             trait_id,
@@ -6168,12 +6076,10 @@ impl LoweredProgram {
         let drops_body_result = body_type
             .as_ref()
             .is_some_and(|body_type| module.type_needs_drop(body_type));
-        let body_falls_through = self.block_falls_through(body);
         Ok(LoweredLoop {
             body,
             result_type,
             drops_body_result,
-            body_falls_through,
             depth: self.loop_depth + 1,
         })
     }
@@ -6246,57 +6152,6 @@ impl LoweredProgram {
             count,
             collapsed,
         })
-    }
-
-    /// Whether control can reach the end of a lowered block: a `return`,
-    /// `break`, `continue`, or unconditionally diverging (`Never`) expression
-    /// stops the sequence, matching the backend's `did_return` handling.
-    fn block_falls_through(&self, block: BlockId) -> bool {
-        let Some(block) = self.blocks.get(block) else {
-            return false;
-        };
-        for item in &block.items {
-            let Some(item) = self.items.get(*item) else {
-                return false;
-            };
-            match &item.kind {
-                LoweredItemKind::Return(_)
-                | LoweredItemKind::Break(_)
-                | LoweredItemKind::Continue(_) => return false,
-                LoweredItemKind::Binding(binding) => {
-                    if binding
-                        .value
-                        .is_some_and(|value| self.expression_diverges(value))
-                    {
-                        return false;
-                    }
-                }
-                LoweredItemKind::PatternBinding(binding) => {
-                    if self.expression_diverges(binding.value) {
-                        return false;
-                    }
-                }
-                LoweredItemKind::Assignment(assignment) => {
-                    if self.expression_diverges(assignment.value) {
-                        return false;
-                    }
-                }
-                LoweredItemKind::Expression(statement) => {
-                    if self.expression_diverges(statement.expression) {
-                        return false;
-                    }
-                }
-            }
-        }
-        block
-            .result
-            .is_none_or(|result| !self.expression_diverges(result))
-    }
-
-    fn expression_diverges(&self, expression: ExpressionId) -> bool {
-        self.expressions
-            .get(expression)
-            .is_some_and(|expression| expression.value_type == CheckedType::Never)
     }
 
     fn expression_needs_drop(&self, module: &TypedModule, expression: ExpressionId) -> bool {
@@ -6708,18 +6563,16 @@ impl LoweredProgram {
                 None,
                 Some(evidence),
             )),
-            TraitEvidence::DeclaredBound { .. } | TraitEvidence::RejectedImplementation { .. } => {
-                Ok((
-                    LoweredCallableTarget::TraitImplementation {
-                        trait_id,
-                        method: dispatch.method,
-                        function: None,
-                    },
-                    LoweredCallableAdapter::None,
-                    None,
-                    Some(evidence),
-                ))
-            }
+            TraitEvidence::DeclaredBound { .. } => Ok((
+                LoweredCallableTarget::TraitImplementation {
+                    trait_id,
+                    method: dispatch.method,
+                    function: None,
+                },
+                LoweredCallableAdapter::None,
+                None,
+                Some(evidence),
+            )),
         }
     }
 
@@ -6872,21 +6725,15 @@ impl LoweredProgram {
                 LoweredCaptureAccess::ByValue
             };
             let owns_value = access == LoweredCaptureAccess::ByValue && !capture.non_owning;
-            let drops_value = owns_value && module.type_needs_drop(&value_type);
             let requires_initialization_state = module
                 .resolved()
                 .requires_initialization_state(capture.symbol);
-            let mutable_storage = module.has_mutable_storage(capture.symbol);
-            let derived = module.is_derived_symbol(capture.symbol);
             captures.push(LoweredClosureCapture {
                 capture: capture.clone(),
                 value_type,
                 access,
                 owns_value,
-                drops_value,
                 requires_initialization_state,
-                mutable_storage,
-                derived,
             });
         }
         Ok(LoweredClosureConstruction {
@@ -7136,8 +6983,7 @@ impl LoweredProgram {
                 let completed = match &recipe {
                     TraitEvidence::ExplicitImplementation { arguments, .. }
                     | TraitEvidence::Structural { arguments, .. }
-                    | TraitEvidence::DeclaredBound { arguments, .. }
-                    | TraitEvidence::RejectedImplementation { arguments, .. } => arguments.clone(),
+                    | TraitEvidence::DeclaredBound { arguments, .. } => arguments.clone(),
                 };
                 let function_type = module
                     .instantiated_trait_method_type(trait_id, &completed, dispatch.method)
@@ -7241,8 +7087,6 @@ impl LoweredProgram {
             function_type: function_type.clone(),
             arguments,
             resource_bindings,
-            mutations: function_type.mutations.clone(),
-            moves: function_type.moves.clone(),
             initialization_checks,
             steps,
             result_type: function_type.result.as_ref().clone(),
@@ -7374,8 +7218,6 @@ impl LoweredProgram {
             function_type: function_type.clone(),
             arguments,
             resource_bindings,
-            mutations: function_type.mutations.clone(),
-            moves: function_type.moves.clone(),
             initialization_checks: Vec::new(),
             steps,
             result_type: function_type.result.as_ref().clone(),
@@ -9303,8 +9145,7 @@ impl LoweredProgram {
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         match target {
-            LoweredCallableTarget::DirectFunction { function, .. }
-            | LoweredCallableTarget::CompilerHelper { function } => {
+            LoweredCallableTarget::DirectFunction { function, .. } => {
                 if self.functions.get(*function).is_none() {
                     diagnostics.push(invalid_reference(
                         origin,
@@ -9500,23 +9341,6 @@ impl LoweredProgram {
                     self.validate_trait_method_reference(origin, *trait_id, *method, diagnostics);
                 }
             }
-            TraitEvidence::RejectedImplementation {
-                trait_id,
-                implementation,
-                ..
-            } => match self.trait_implementations.get(*implementation) {
-                Some(metadata) if metadata.trait_id == *trait_id && metadata.negative => {}
-                Some(_) => diagnostics.push(Diagnostic::new(
-                    origin.span.clone(),
-                    "rejected trait evidence is not a negative implementation of its trait",
-                )),
-                None => diagnostics.push(invalid_reference(
-                    origin,
-                    "trait evidence",
-                    "trait implementation",
-                    implementation.index(),
-                )),
-            },
         }
     }
 
@@ -9563,24 +9387,6 @@ impl LoweredProgram {
                     diagnostics.push(Diagnostic::new(
                         expression.origin.span.clone(),
                         "callable expression was not lowered",
-                    ));
-                }
-                LoweredExpressionKind::Deferred(DeferredExpressionFamily::Resource) => {
-                    diagnostics.push(Diagnostic::new(
-                        expression.origin.span.clone(),
-                        "resource expression was not lowered",
-                    ));
-                }
-                LoweredExpressionKind::Deferred(DeferredExpressionFamily::Coroutine) => {
-                    diagnostics.push(Diagnostic::new(
-                        expression.origin.span.clone(),
-                        "coroutine expression was not lowered",
-                    ));
-                }
-                LoweredExpressionKind::Stage26Deferred(route) => {
-                    diagnostics.push(Diagnostic::new(
-                        expression.origin.span.clone(),
-                        format!("Stage 2.6 `{route:?}` expression was not lowered"),
                     ));
                 }
                 LoweredExpressionKind::String(_) => {}
@@ -10553,10 +10359,7 @@ impl LoweredProgram {
             }
         }
         for (_, expression) in self.expressions.iter() {
-            if matches!(
-                expression.kind,
-                LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::Stage26Deferred(_)
-            ) {
+            if matches!(expression.kind, LoweredExpressionKind::Deferred(_)) {
                 continue;
             }
             reject(
@@ -11199,8 +11002,7 @@ impl LoweredProgram {
                     self.visit_owned_reactive_operation(operation, reached);
                 }
             }
-            LoweredExpressionKind::Stage26Deferred(_)
-            | LoweredExpressionKind::Deferred(_)
+            LoweredExpressionKind::Deferred(_)
             | LoweredExpressionKind::Integer(_)
             | LoweredExpressionKind::Float(_)
             | LoweredExpressionKind::String(_)
@@ -12024,8 +11826,7 @@ impl LoweredProgram {
                     self.collect_loop_expression(await_.operand, depth, reached, diagnostics);
                 }
             }
-            LoweredExpressionKind::Stage26Deferred(_)
-            | LoweredExpressionKind::Deferred(_)
+            LoweredExpressionKind::Deferred(_)
             | LoweredExpressionKind::Resource(_)
             | LoweredExpressionKind::Name(_)
             | LoweredExpressionKind::Integer(_)
@@ -13312,7 +13113,6 @@ fn evidence_matches(
         TraitEvidence::DeclaredBound {
             trait_id, method, ..
         } => (*trait_id, *method),
-        TraitEvidence::RejectedImplementation { trait_id, .. } => (*trait_id, None),
     };
     evidence_trait == trait_id && method.is_none_or(|method| evidence_method == Some(method))
 }
@@ -14015,7 +13815,7 @@ impl<'a> SourceCoverage<'a> {
             // Primitive macros decode their literal argument, curried calls are
             // rejected during resolution, and compiler helpers are selected by
             // checked operations rather than source call syntax.
-            CallRoute::PrimitiveMacro | CallRoute::CurriedDefault | CallRoute::CompilerHelper => {}
+            CallRoute::PrimitiveMacro | CallRoute::CurriedDefault => {}
             CallRoute::Juxtaposed | CallRoute::JuxtaposedIntrinsic => {
                 let Some(plan) = self.module.juxtaposed_call_plan(call.syntax.id) else {
                     return;
@@ -14429,12 +14229,6 @@ mod tests {
             .map(|symbol| symbol.id.0)
             .collect::<Vec<_>>();
         assert!(symbol_ids.windows(2).all(|ids| ids[0] < ids[1]));
-        let parameter_ids = resolved
-            .type_parameters_in_id_order()
-            .into_iter()
-            .map(|parameter| parameter.id.0)
-            .collect::<Vec<_>>();
-        assert!(parameter_ids.windows(2).all(|ids| ids[0] < ids[1]));
         let type_ids = resolved
             .types_in_id_order()
             .into_iter()
@@ -14482,9 +14276,6 @@ mod tests {
             .map(|(id, _)| id.0)
             .collect::<Vec<_>>();
         assert!(checked_trait_ids.windows(2).all(|ids| ids[0] < ids[1]));
-        for (trait_id, _) in module.trait_parameter_arguments_in_id_order() {
-            let _ = module.trait_functional_dependencies(trait_id);
-        }
         let _ = module.checked_trait_implementations();
         let semantic_ids = module.semantic_ids();
         assert!(semantic_ids.copy_trait.is_some());
@@ -15201,7 +14992,7 @@ mod tests {
 
         let global = lowered_symbol(&program, binding_symbol(&module, "global"));
         assert_eq!(global.storage, SymbolStorage::GlobalStorage);
-        assert!(!global.captured_cell && !global.mutated_parameter && !global.move_parameter);
+        assert!(!global.captured_cell && !global.mutated_parameter);
         let mutable_global = lowered_symbol(&program, binding_symbol(&module, "mutable_global"));
         assert_eq!(mutable_global.storage, SymbolStorage::GlobalStorage);
 
@@ -15471,75 +15262,17 @@ mod tests {
         assert_eq!(actual, expected);
         assert!(actual.windows(2).all(|ids| ids[0].0 < ids[1].0));
 
-        let pair = lowered_type(&program, "TestPair");
-        assert_eq!(pair.kind, LoweredTypeKind::Distinct);
-        assert_eq!(pair.parameters.len(), 1);
-        assert!(matches!(pair.parameters[0], CheckedType::Parameter { .. }));
-        let Some(CheckedType::Product(product)) = pair.representation.as_ref() else {
-            panic!("TestPair representation should be a product");
-        };
-        assert_eq!(product.elements.len(), 2);
-        assert!(
-            product
-                .elements
-                .iter()
-                .all(|element| matches!(element.value_type, CheckedType::Parameter { .. }))
-        );
-
         let inner = lowered_type(&program, "TestInner");
-        assert_eq!(inner.kind, LoweredTypeKind::Distinct);
         assert_eq!(
             Some(inner.module),
             module
                 .resolved()
                 .definition_module(DefinitionId::Type(inner.semantic_id))
         );
-        assert!(inner.parameters.is_empty());
-
-        let outer = lowered_type(&program, "TestOuter");
-        let Some(CheckedType::Product(product)) = outer.representation.as_ref() else {
-            panic!("TestOuter representation should be a product");
-        };
-        assert_eq!(product.elements.len(), 2);
-        for element in &product.elements {
-            assert!(
-                matches!(&element.value_type, CheckedType::Opaque { id, .. } if *id == inner.semantic_id),
-                "nested nominal representations should stay compact references"
-            );
-        }
-
-        let alias = lowered_type(&program, "TestAlias");
-        assert_eq!(alias.kind, LoweredTypeKind::Alias);
-        assert_eq!(
-            alias.representation, outer.representation,
-            "an alias expands to its target's compact representation"
-        );
-
-        let callback = lowered_type(&program, "TestCallback");
-        let Some(CheckedType::Function(parameter_template)) = callback.parameters.first() else {
-            panic!("effect parameter should use an effect-substitution template");
-        };
-        let parameter = parameter_template
-            .effects
-            .variable
-            .as_ref()
-            .expect("effect parameter template should retain its variable");
-        let Some(CheckedType::Function(representation)) = callback.representation.as_ref() else {
-            panic!("effect-parameterized alias should retain its representation");
-        };
-        assert_eq!(representation.effects.variable.as_ref(), Some(parameter));
-
-        let hidden = lowered_type(&program, "TestHidden");
-        assert_eq!(hidden.kind, LoweredTypeKind::Opaque);
-        assert!(hidden.representation.is_none());
-
-        let enabled = lowered_type(&program, "TestEnabled");
-        assert_eq!(enabled.kind, LoweredTypeKind::Singleton);
-        assert_eq!(enabled.representation, Some(CheckedType::empty_product()));
     }
 
     #[test]
-    fn trait_catalog_preserves_parameters_dependencies_methods_and_defaults() {
+    fn trait_catalog_preserves_parameters_methods_and_defaults() {
         let module = checked_program(concat!(
             "trait TestBase T { test_base: T -> T }\n",
             "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
@@ -15556,9 +15289,6 @@ mod tests {
 
         let convert = lowered_trait(&program, "TestConvert");
         assert_eq!(convert.parameters.len(), 3);
-        assert_eq!(convert.functional_dependencies.len(), 1);
-        let dependency = &convert.functional_dependencies[0];
-        assert_eq!(dependency.determinants.len(), 2);
         assert_eq!(convert.methods.len(), 1);
         let method = program
             .trait_methods
@@ -15675,7 +15405,6 @@ mod tests {
         assert!(ids.string_representation.is_some());
         assert!(ids.io_resource.is_some());
         assert!(ids.reactive_resource.is_some());
-        assert!(!ids.entry_reactive_required);
         assert!(program.validate().is_empty());
 
         let program = snapshot(concat!("use std.coroutine.*\n", "let answer: I32 = 42\n",));
@@ -15708,7 +15437,6 @@ mod tests {
             "count = 1\n",
         ));
         let ids = &program.semantic_ids;
-        assert!(ids.entry_reactive_required);
         assert!(ids.reactive_resource.is_some());
         assert_eq!(
             nominal_type_id(&ids.reactive_resource.as_ref().unwrap().value_type),
@@ -16292,45 +16020,6 @@ mod tests {
     }
 
     #[test]
-    fn validator_rejects_remaining_resource_and_coroutine_deferrals() {
-        let mut program = LoweredProgram::default();
-        for (family, message) in [
-            (
-                DeferredExpressionFamily::Resource,
-                "resource expression was not lowered",
-            ),
-            (
-                DeferredExpressionFamily::Coroutine,
-                "coroutine expression was not lowered",
-            ),
-        ] {
-            let key = ExpressionKey {
-                syntax: SyntaxId(900_000 + family as usize),
-                owner: ExpressionOwner::Module(ModuleId(0)),
-                context: ExpressionContext::Primary,
-            };
-            let id = program.expressions.push(LoweredExpression {
-                key,
-                origin: Origin::compiler(),
-                value_type: CheckedType::Never,
-                effects: CheckedEffectSet::default(),
-                coercion: None,
-                coercion_plan: None,
-                moved_symbols: Vec::new(),
-                kind: LoweredExpressionKind::Deferred(family),
-            });
-            program.expression_lookup.insert(key, id);
-            assert!(
-                program
-                    .validate()
-                    .iter()
-                    .any(|diagnostic| diagnostic.message.contains(message)),
-                "the {family:?} deferral should diagnose"
-            );
-        }
-    }
-
-    #[test]
     fn semantic_ids_match_transition_typed_module_selections() {
         let module = checked_program(concat!("use std.coroutine.*\n", "let answer: I32 = 42\n",));
         let mut program = LoweredProgram::default();
@@ -16365,10 +16054,6 @@ mod tests {
             ids.string_representation.as_ref(),
             module.string_representation()
         );
-        assert_eq!(
-            ids.entry_reactive_required,
-            module.entry_reactive_required()
-        );
     }
 
     #[test]
@@ -16395,9 +16080,9 @@ mod tests {
             name: String::new(),
             origin: Origin::compiler(),
             module: entry_id,
-            executable_entry: false,
             resources: Vec::new(),
             body,
+            executable_entry: false,
         });
         let diagnostics = program.validate();
         assert!(
@@ -16761,20 +16446,6 @@ mod tests {
             .iter()
             .filter_map(|(_, expression)| match expression.kind {
                 LoweredExpressionKind::Deferred(family) => Some(family),
-                LoweredExpressionKind::Stage26Deferred(route) => Some(route.deferred_family()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The explicit Stage 2.6 routes a lowered program recorded. Routes replace
-    /// their records one step at a time, so the set shrinks as Steps 2-6 land.
-    fn stage26_routes(program: &LoweredProgram) -> Vec<Stage26Route> {
-        program
-            .expressions
-            .iter()
-            .filter_map(|(_, expression)| match expression.kind {
-                LoweredExpressionKind::Stage26Deferred(route) => Some(route),
                 _ => None,
             })
             .collect()
@@ -16834,10 +16505,6 @@ mod tests {
         assert!(program.snapshot(&module).is_empty());
         assert!(program.validate().is_empty());
 
-        assert!(
-            stage26_routes(&program).is_empty(),
-            "every Stage 2.6 route lowers to an owned record"
-        );
         let mut kinds = program
             .expressions
             .iter()
@@ -16849,16 +16516,6 @@ mod tests {
             assert!(
                 kinds.iter().any(|kind| kind == expected),
                 "every Stage 2.6 expression should lower concretely; have {kinds:?}"
-            );
-        }
-        for route in Stage26Route::ALL {
-            assert_eq!(
-                route.deferred_family(),
-                match route {
-                    Stage26Route::ResourceUse | Stage26Route::ResourceProvider =>
-                        DeferredExpressionFamily::Resource,
-                    _ => DeferredExpressionFamily::Coroutine,
-                }
             );
         }
         let mut families = Stage26Route::ALL
@@ -16990,9 +16647,6 @@ mod tests {
                 trait_id: TraitId(0),
                 method: TraitMethodId(0),
                 structural: StructuralTraitMethod::Debug,
-            },
-            LoweredCallableTarget::CompilerHelper {
-                function: FunctionId(0),
             },
         ];
         let target_categories = targets
@@ -17421,10 +17075,6 @@ mod tests {
                     capture.owns_value,
                     capture.access == LoweredCaptureAccess::ByValue && !capture.capture.non_owning
                 );
-                assert_eq!(
-                    capture.drops_value,
-                    capture.owns_value && module.type_needs_drop(&capture.value_type)
-                );
             }
         }
         assert!(
@@ -17600,7 +17250,11 @@ mod tests {
                         && argument.temporary == false
                 }))
         );
-        assert!(calls.iter().any(|call| !call.mutations.is_empty()));
+        assert!(
+            calls
+                .iter()
+                .any(|call| !call.function_type.mutations.is_empty())
+        );
         assert!(calls.iter().any(|call| !call.resource_bindings.is_empty()));
 
         for call in &calls {
@@ -17786,8 +17440,6 @@ mod tests {
                     .collect::<Vec<_>>(),
                 call.function_type.effects.resources
             );
-            assert_eq!(call.mutations, call.function_type.mutations);
-            assert_eq!(call.moves, call.function_type.moves);
             assert_eq!(call.result_type, *call.function_type.result);
             assert!(
                 !call.c_string_temporary
@@ -18355,8 +18007,6 @@ mod tests {
                     .collect::<Vec<_>>(),
                 call.function_type.effects.resources
             );
-            assert_eq!(call.mutations, call.function_type.mutations);
-            assert_eq!(call.moves, call.function_type.moves);
             assert_eq!(call.result_type, *call.function_type.result);
             match &call.target {
                 LoweredCallableTarget::DirectFunction { function, .. } => {
@@ -18403,9 +18053,6 @@ mod tests {
                         _ => unreachable!(),
                     };
                     assert!(evidence_matches(evidence, trait_id, method));
-                }
-                LoweredCallableTarget::CompilerHelper { function } => {
-                    assert!(program.functions.get(*function).is_some());
                 }
             }
             if let Some(plan) = module.juxtaposed_call_plan(call.origin.syntax) {
@@ -18744,19 +18391,19 @@ mod tests {
             .collect::<Vec<_>>();
         let global = binding_symbol(&module, "global");
         let counter = binding_symbol(&module, "counter");
-        assert!(names.iter().any(|name| {
-            name.symbol == global && name.storage == SymbolStorage::GlobalStorage && !name.mutable
-        }));
-        assert!(names.iter().any(|name| {
-            name.symbol == counter && name.storage == SymbolStorage::GlobalStorage && name.mutable
-        }));
+        assert!(
+            names
+                .iter()
+                .any(|name| { name.symbol == global && !name.mutable })
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| { name.symbol == counter && name.mutable })
+        );
         assert!(
             names.iter().any(|name| name.singleton.is_some()),
             "singleton values keep their identity on the lowered name"
-        );
-        assert!(
-            names.iter().any(|name| name.captured_cell),
-            "mutable captures lower as captured-cell reads"
         );
         for (_, expression) in program.expressions.iter() {
             if let LoweredExpressionKind::Name(name) = &expression.kind {
@@ -19566,16 +19213,12 @@ mod tests {
             loop_.drops_body_result,
             "owned loop bodies drop their result"
         );
-        assert!(loop_.body_falls_through);
         assert_eq!(loop_.result_type, CheckedType::Never);
 
         let forever = expression_body(&program, "forever");
-        let LoweredExpressionKind::Loop(loop_) = &forever.kind else {
-            panic!("`loop` lowers to a loop node");
-        };
         assert!(
-            !loop_.body_falls_through,
-            "a diverging body has no back edge"
+            matches!(forever.kind, LoweredExpressionKind::Loop(_)),
+            "`loop` lowers to a loop node"
         );
     }
 
@@ -20255,15 +19898,6 @@ mod tests {
             LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable) => {
                 "deferred.callable".to_owned()
             }
-            LoweredExpressionKind::Deferred(DeferredExpressionFamily::Resource) => {
-                "deferred.resource".to_owned()
-            }
-            LoweredExpressionKind::Deferred(DeferredExpressionFamily::Coroutine) => {
-                "deferred.coroutine".to_owned()
-            }
-            LoweredExpressionKind::Stage26Deferred(route) => {
-                format!("stage26.{}", route.record_family())
-            }
             LoweredExpressionKind::Block(_) => "block".to_owned(),
             LoweredExpressionKind::Name(_) => "name".to_owned(),
             LoweredExpressionKind::Integer(_) => "integer".to_owned(),
@@ -20863,12 +20497,8 @@ mod tests {
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Name(LoweredName {
                 symbol: SymbolId(0),
-                storage: SymbolStorage::ImmutableValue,
                 requires_initialization_check: false,
                 mutable: false,
-                captured_cell: false,
-                moved: false,
-                move_parameter: false,
                 singleton: None,
                 reactive: None,
             }),

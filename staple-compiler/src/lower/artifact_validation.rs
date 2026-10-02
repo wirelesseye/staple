@@ -374,7 +374,7 @@ mod tests {
         }
         for (_, id, symbol) in program.symbols.iter() {
             out.push_str(&format!(
-                "symbol {} name={} storage={:?} module={} module_symbol={} has_global={} global_root={} overloaded={} flags=[mut={} captured={} non_owning={} derived={} signal={} mutated_param={} move_param={} captured_cell={} external={}]\n",
+                "symbol {} name={} storage={:?} module={} module_symbol={} has_global={} global_root={} overloaded={} flags=[mut={} captured={} non_owning={} derived={} signal={} mutated_param={} captured_cell={} external={}]\n",
                 id.0,
                 symbol.name,
                 symbol.storage,
@@ -389,7 +389,6 @@ mod tests {
                 symbol.derived,
                 symbol.signal,
                 symbol.mutated_parameter,
-                symbol.move_parameter,
                 symbol.captured_cell,
                 symbol.external,
             ));

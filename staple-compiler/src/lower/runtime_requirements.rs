@@ -90,6 +90,7 @@ impl RuntimeRequirement {
             .expect("every requirement is listed in ALL")
     }
 
+    #[cfg(test)]
     /// The requirement a fixed runtime symbol belongs to, when the symbol is
     /// one of the recorded surfaces. Used by the legacy transition comparison.
     pub(crate) fn for_runtime_symbol(name: &str) -> Option<RuntimeRequirement> {
@@ -151,12 +152,9 @@ impl LoweredRuntimeRequirements {
         self.requirements.contains(&requirement)
     }
 
+    #[cfg(test)]
     pub(crate) fn requirements(&self) -> &[RuntimeRequirement] {
         &self.requirements
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.requirements.is_empty()
     }
 
     /// The requirements the two sets disagree on, as `(extra, missing)`.

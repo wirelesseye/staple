@@ -327,12 +327,6 @@ pub(super) fn expand_reactive_runner(
             };
             OwnerArenas::Instance(body)
         }
-        ArtifactSiteOwner::Artifact(_) => {
-            return Err(vec![Diagnostic::new(
-                origin.span.clone(),
-                "reactive runners are never owned by generated artifacts".to_string(),
-            )]);
-        }
     };
     let body = match family {
         ReactiveRunnerFamily::Reaction => {
@@ -1038,12 +1032,6 @@ impl Stage45ScanVisitor<'_> {
                         )]);
                     };
                     operation
-                }
-                ArtifactSite::PlanLocal(_) => {
-                    return Err(vec![Diagnostic::new(
-                        origin.span.clone(),
-                        "plan-local sites never request runners".to_string(),
-                    )]);
                 }
             })),
         });
@@ -1816,7 +1804,6 @@ mod tests {
                 .and_then(|(_, instance)| program.functions.get(instance.template))
                 .map(|function| function.name.clone())
                 .unwrap_or_else(|| format!("<instance {}>", ordinal.index())),
-            ArtifactSiteOwner::Artifact(ordinal) => format!("<artifact {}>", ordinal.index()),
         }
     }
 

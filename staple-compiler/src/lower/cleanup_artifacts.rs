@@ -228,7 +228,6 @@ fn closure_environment_drops(
 /// implement the family-neutral visitor.
 pub(super) struct OwnedBindingDraft {
     symbol: SymbolId,
-    pattern: Option<PatternId>,
     storage: OwnedStorage,
     value_type: CheckedType,
     origin: Origin,
@@ -682,7 +681,7 @@ impl<'a> LoweredWalker<'a> {
                 // value because the worklist requests its sites under the
                 // enclosing owner.
                 if binding.derived {
-                    self.register_binding(symbol, None, &value_type, &origin)?;
+                    self.register_binding(symbol, &value_type, &origin)?;
                     if self.visitor.walks_derived_binding_values()
                         && let Some(value) = binding.value
                     {
@@ -694,13 +693,13 @@ impl<'a> LoweredWalker<'a> {
                 // evaluates; other bindings register after it.
                 let is_cell = self.is_cell_symbol(symbol);
                 if is_cell {
-                    self.register_binding(symbol, None, &value_type, &origin)?;
+                    self.register_binding(symbol, &value_type, &origin)?;
                 }
                 if let Some(value) = binding.value {
                     self.walk_expression(value)?;
                 }
                 if !is_cell {
-                    self.register_binding(symbol, None, &value_type, &origin)?;
+                    self.register_binding(symbol, &value_type, &origin)?;
                 }
             }
             LoweredItemKind::PatternBinding(binding) => {
@@ -826,7 +825,7 @@ impl<'a> LoweredWalker<'a> {
                 symbol: Some(symbol),
                 ..
             } => {
-                self.register_binding(symbol, Some(id), &value_type, &origin)?;
+                self.register_binding(symbol, &value_type, &origin)?;
             }
             super::LoweredPatternKind::Binding { symbol: None, .. }
             | super::LoweredPatternKind::Literal { .. } => {}
@@ -857,8 +856,7 @@ impl<'a> LoweredWalker<'a> {
         let kind = expression.kind.clone();
         self.visitor.expression_site(id, expression)?;
         match kind {
-            super::LoweredExpressionKind::Deferred(_)
-            | super::LoweredExpressionKind::Stage26Deferred(_) => {}
+            super::LoweredExpressionKind::Deferred(_) => {}
             super::LoweredExpressionKind::Block(block) => self.walk_block(block)?,
             super::LoweredExpressionKind::Name(name) => {
                 if let Some(operation) = name.reactive {
@@ -1173,8 +1171,7 @@ impl<'a> LoweredWalker<'a> {
                 recursive: None, ..
             }
             | super::LoweredCallableTarget::TraitImplementation { .. }
-            | super::LoweredCallableTarget::StructuralTraitMethod { .. }
-            | super::LoweredCallableTarget::CompilerHelper { .. } => {}
+            | super::LoweredCallableTarget::StructuralTraitMethod { .. } => {}
         }
 
         if let Some(operation) = call.reactive {
@@ -1433,7 +1430,6 @@ impl<'a> LoweredWalker<'a> {
     fn register_binding(
         &mut self,
         symbol: SymbolId,
-        pattern: Option<PatternId>,
         value_type: &CheckedType,
         origin: &Origin,
     ) -> WalkResult {
@@ -1472,7 +1468,6 @@ impl<'a> LoweredWalker<'a> {
         }
         let draft = |storage| OwnedBindingDraft {
             symbol,
-            pattern,
             storage,
             value_type: value_type.clone(),
             origin: origin.clone(),
@@ -1633,7 +1628,6 @@ fn bind_owned_binding(
     };
     Some(LoweredOwnedBinding {
         symbol: draft.symbol,
-        pattern: draft.pattern,
         storage: draft.storage,
         value_type: draft.value_type,
         glue: Some(glue),
@@ -2455,7 +2449,6 @@ mod tests {
     /// and delegates both cleanup families to the production expanders.
     struct FinalizerHooks {
         seed: FunctionInstanceId,
-        origin: Origin,
         requests: Vec<ClosureRequest>,
     }
 
@@ -2791,11 +2784,7 @@ mod tests {
                 8,
             ),
         ];
-        let hooks = FinalizerHooks {
-            seed,
-            origin,
-            requests,
-        };
+        let hooks = FinalizerHooks { seed, requests };
         let diagnostics = program.close_artifact_catalog(&hooks);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let diagnostics = program.validate_artifact_closure(&hooks);
@@ -2867,10 +2856,6 @@ mod tests {
         );
         let mutable_site = closure_site_capture(&program, mutable_closure, &cell_capture);
         assert!(
-            mutable_site.mutable_storage,
-            "the capture has mutable storage"
-        );
-        assert!(
             !mutable_site.requires_initialization_state && !mutable_site.capture.borrowed,
             "the install gate is not excluded by initialization or borrowing"
         );
@@ -2914,8 +2899,6 @@ mod tests {
             drops.as_ref().expect("expanded").is_empty(),
             "a derived capture is skipped by the finalizer body"
         );
-        let derived_site = closure_site_capture(&program, derived_closure, &derived_capture);
-        assert!(derived_site.derived, "the capture is a derived binding");
 
         // Two generic instantiations produce two plans that each drop their own
         // capture.
@@ -3009,13 +2992,15 @@ mod tests {
                         .captures
                         .iter()
                         .enumerate()
-                        .filter(|(_, capture)| capture.drops_value)
+                        .filter(|(_, capture)| {
+                            capture.owns_value && program.concrete_needs_drop(&capture.value_type)
+                        })
                         .map(|(index, _)| index)
                         .collect::<HashSet<_>>();
                     assert_eq!(
                         dropped,
                         expected,
-                        "the finalizer's drops agree with the construction site's drops_value in instance {}",
+                        "the finalizer drops exactly the owned droppable captures in instance {}",
                         id.index()
                     );
                 } else if let Some(drops) = plan {

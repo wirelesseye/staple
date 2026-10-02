@@ -22,16 +22,11 @@ use crate::{CheckedEffectSet, CheckedType, IntrinsicFunction, SymbolId, TypedMod
 pub(crate) struct CoroutinePlan {
     /// The `coro` body block's syntax id — the key the implicit thunk and this
     /// plan share.
-    #[allow(dead_code)]
     pub body_syntax: SyntaxId,
     /// The value the coroutine yields (`T` in `Coroutine{E} T`).
     pub result_type: CheckedType,
     /// The coroutine's deferred effect row (`E`).
     pub deferred_effects: CheckedEffectSet,
-    /// Symbols captured by the body; code generation reads this from the
-    /// implicit thunk directly, kept here for completeness.
-    #[allow(dead_code)]
-    pub captures: Vec<SymbolId>,
     /// Number of `await` suspension points in the body (not counting nested
     /// `coro` / function bodies). Resume states are `0..=resume_points`.
     pub resume_points: usize,
@@ -84,10 +79,6 @@ pub(crate) fn plan(module: &TypedModule) -> (HashMap<SyntaxId, CoroutinePlan>, V
             .and_then(|ty| module.coroutine_parts(ty))
             .map(|(effects, result)| (effects.clone(), result.clone()))
             .unwrap_or((CheckedEffectSet::default(), CheckedType::Error));
-        let captures = module
-            .implicit_thunk_for(coro.body.syntax.id)
-            .map(|thunk| thunk.captures.clone())
-            .unwrap_or_default();
 
         let mut info = BodyInfo::default();
         for item in &coro.body.items {
@@ -100,7 +91,6 @@ pub(crate) fn plan(module: &TypedModule) -> (HashMap<SyntaxId, CoroutinePlan>, V
                 body_syntax: coro.body.syntax.id,
                 result_type,
                 deferred_effects,
-                captures,
                 resume_points: info.awaits.len(),
                 frame_bindings: info.bindings,
                 await_result_types: info

@@ -64,12 +64,9 @@ impl RelevantParameters {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn contains_type(&self, parameter: TypeParameterId) -> bool {
         self.types.contains(&parameter)
-    }
-
-    pub(crate) fn contains_effect(&self, parameter: TypeParameterId) -> bool {
-        self.effects.contains(&parameter)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -83,13 +80,9 @@ impl RelevantParameters {
     pub(crate) fn effect_parameters(&self) -> impl Iterator<Item = TypeParameterId> + '_ {
         self.effects.iter().copied()
     }
-
-    fn extend(&mut self, other: &RelevantParameters) {
-        self.types.extend(other.types.iter().copied());
-        self.effects.extend(other.effects.iter().copied());
-    }
 }
 
+#[cfg(test)]
 /// Every record family the parameter collector visits. The collector's
 /// exhaustive matches over the lowered enums are the compile-time half of the
 /// coverage contract; this list is the declared decision table checked by
@@ -275,10 +268,12 @@ impl SubstitutionEnvironment {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
@@ -1690,16 +1685,6 @@ impl LoweredProgram {
                     }
                 }
             }
-            TraitEvidence::RejectedImplementation { trait_id, .. } => Err(Diagnostic::new(
-                origin.span.clone(),
-                format!(
-                    "trait `{}` evidence is a negative implementation and never forms an instance",
-                    self.traits
-                        .get(*trait_id)
-                        .map(|trait_| trait_.name.clone())
-                        .unwrap_or_else(|| format!("trait {}", trait_id.0))
-                ),
-            )),
         }
     }
 }
@@ -1952,7 +1937,6 @@ pub(crate) struct ResolvedInstanceRequest {
     pub environment: SubstitutionEnvironment,
     pub relevant: RelevantParameters,
     pub evidence: Option<TraitEvidence>,
-    pub origin: Origin,
 }
 
 /// How a request relates to the enclosing instance.
@@ -2036,7 +2020,6 @@ impl LoweredProgram {
                 environment: enclosing.environment.clone(),
                 relevant: enclosing.relevant.clone(),
                 evidence: enclosing.evidence.clone(),
-                origin: request.origin.clone(),
             });
         }
         Ok(ResolvedInstanceRequest {
@@ -2044,7 +2027,6 @@ impl LoweredProgram {
             environment,
             relevant,
             evidence,
-            origin: request.origin.clone(),
         })
     }
 
@@ -2412,7 +2394,7 @@ impl<'a> ParameterCollector<'a> {
             // No accepted lowered program retains a deferral, so this branch
             // has no record family of its own; it is still an explicit
             // decision so a new unlowered route cannot be silently collected.
-            LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::Stage26Deferred(_) => {}
+            LoweredExpressionKind::Deferred(_) => {}
             LoweredExpressionKind::Block(block) => {
                 self.family("expression.block");
                 self.collect_block(*block);
@@ -2880,8 +2862,7 @@ impl<'a> ParameterCollector<'a> {
         self.family("trait-evidence");
         match evidence {
             TraitEvidence::ExplicitImplementation { arguments, .. }
-            | TraitEvidence::Structural { arguments, .. }
-            | TraitEvidence::RejectedImplementation { arguments, .. } => {
+            | TraitEvidence::Structural { arguments, .. } => {
                 for argument in arguments {
                     self.collect_type(argument);
                 }

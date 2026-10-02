@@ -266,8 +266,7 @@ pub(super) fn select_concrete_trait_method_with_kind(
     let completed = match &resolved {
         TraitEvidence::ExplicitImplementation { arguments, .. }
         | TraitEvidence::Structural { arguments, .. } => arguments.clone(),
-        TraitEvidence::DeclaredBound { trait_id, .. }
-        | TraitEvidence::RejectedImplementation { trait_id, .. } => {
+        TraitEvidence::DeclaredBound { trait_id, .. } => {
             return Err(Diagnostic::new(
                 origin.span.clone(),
                 format!(
@@ -356,7 +355,7 @@ pub(super) fn select_concrete_trait_method_with_kind(
                 },
             })
         }
-        TraitEvidence::DeclaredBound { .. } | TraitEvidence::RejectedImplementation { .. } => {
+        TraitEvidence::DeclaredBound { .. } => {
             unreachable!("checked above")
         }
     }

@@ -1096,7 +1096,6 @@ fn format_type_application(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
 pub(crate) struct CheckedSemanticIds {
     pub natural_trait: Option<TraitId>,
     pub sized_trait: Option<TraitId>,
@@ -1126,8 +1125,6 @@ pub(crate) struct CheckedSemanticIds {
 #[derive(Debug, Clone)]
 pub struct TypedModule {
     resolved: ResolvedModule,
-    type_representations: HashMap<TypeId, CheckedType>,
-    type_parameter_templates: HashMap<TypeId, Vec<CheckedType>>,
     trait_prerequisites: HashMap<TraitId, Vec<CheckedTraitBound>>,
     expression_types: HashMap<SyntaxId, CheckedType>,
     product_default_plans: HashMap<SyntaxId, CheckedProductDefaultPlan>,
@@ -1136,7 +1133,6 @@ pub struct TypedModule {
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
-    expression_state_accesses: HashMap<SyntaxId, StateAccesses>,
     function_state_accesses: HashMap<FunctionId, StateAccesses>,
     resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
@@ -1163,23 +1159,14 @@ pub struct TypedModule {
     iterator_trait: Option<TraitId>,
     io_type: Option<TypeId>,
     reactive_type: Option<TypeId>,
-    #[allow(dead_code)]
     coroutine_type: Option<TypeId>,
-    #[allow(dead_code)]
     task_type: Option<TypeId>,
-    #[allow(dead_code)]
     completed_type: Option<TypeId>,
-    #[allow(dead_code)]
     cancelled_type: Option<TypeId>,
-    #[allow(dead_code)]
     tasks_type: Option<TypeId>,
-    #[allow(dead_code)]
     scheduler_type: Option<TypeId>,
-    #[allow(dead_code)]
     wait_type: Option<TypeId>,
-    #[allow(dead_code)]
     resolver_type: Option<TypeId>,
-    #[allow(dead_code)]
     completion_token_type: Option<TypeId>,
     entry_reactive_required: bool,
     mutated_parameter_symbols: HashSet<SymbolId>,
@@ -1239,14 +1226,12 @@ impl TypedModule {
         self.implicit_thunks.values()
     }
 
-    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
     pub(crate) fn implicit_thunks_in_id_order(&self) -> Vec<&ResolvedFunction> {
         let mut thunks = self.implicit_thunks.values().collect::<Vec<_>>();
         thunks.sort_by_key(|function| function.id.0);
         thunks
     }
 
-    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
     pub(crate) fn derived_evaluators_in_symbol_order(&self) -> Vec<(SymbolId, FunctionId)> {
         let mut evaluators = self
             .derived_evaluators
@@ -1257,7 +1242,6 @@ impl TypedModule {
         evaluators
     }
 
-    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
     pub(crate) fn trait_method_types_in_id_order(&self) -> Vec<(TraitMethodId, &CheckedType)> {
         let mut methods = self
             .trait_method_types
@@ -1268,7 +1252,6 @@ impl TypedModule {
         methods
     }
 
-    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
     pub(crate) fn trait_parameter_arguments_in_id_order(&self) -> Vec<(TraitId, &[CheckedType])> {
         let mut traits = self
             .trait_parameter_arguments
@@ -1279,36 +1262,10 @@ impl TypedModule {
         traits
     }
 
-    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
-    pub(crate) fn trait_functional_dependencies(
-        &self,
-        trait_id: TraitId,
-    ) -> &[CheckedFunctionalDependency] {
-        self.trait_functional_dependencies
-            .get(&trait_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
     pub(crate) fn checked_trait_implementations(&self) -> &[CheckedTraitImplementation] {
         &self.trait_implementations
     }
 
-    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
-    pub(crate) fn type_representation(&self, id: TypeId) -> Option<&CheckedType> {
-        self.type_representations.get(&id)
-    }
-
-    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
-    pub(crate) fn type_parameter_templates(&self, id: TypeId) -> &[CheckedType] {
-        self.type_parameter_templates
-            .get(&id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
     pub(crate) fn trait_prerequisites(&self, trait_id: TraitId) -> &[CheckedTraitBound] {
         self.trait_prerequisites
             .get(&trait_id)
@@ -1316,7 +1273,6 @@ impl TypedModule {
             .unwrap_or(&[])
     }
 
-    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
     pub(crate) fn semantic_ids(&self) -> CheckedSemanticIds {
         CheckedSemanticIds {
             natural_trait: self.resolved.standard_trait("Natural"),
@@ -1446,10 +1402,6 @@ impl TypedModule {
 
     pub fn effects_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedEffectSet> {
         self.expression_effects.get(&syntax_id)
-    }
-
-    pub fn state_accesses_of_expression(&self, syntax_id: SyntaxId) -> Option<&StateAccesses> {
-        self.expression_state_accesses.get(&syntax_id)
     }
 
     pub fn state_accesses_of_function(&self, function: FunctionId) -> Option<&StateAccesses> {
@@ -1614,7 +1566,6 @@ impl TypedModule {
     }
 
     /// The yielded type of a `Task T` handle.
-    #[allow(dead_code)]
     pub(crate) fn task_result<'t>(&self, value_type: &'t CheckedType) -> Option<&'t CheckedType> {
         let CheckedType::Opaque { id, arguments, .. } = value_type else {
             return None;
@@ -2244,8 +2195,6 @@ impl TypeChecker {
 
         let typed = TypedModule {
             resolved: module,
-            type_representations: self.type_representations,
-            type_parameter_templates: self.type_parameter_templates,
             trait_prerequisites: self.trait_prerequisites,
             expression_types: self.expression_types,
             product_default_plans: self.product_default_plans,
@@ -2254,7 +2203,6 @@ impl TypeChecker {
             symbol_types: self.symbol_types,
             function_types: self.function_types,
             expression_effects: self.expression_effects,
-            expression_state_accesses: self.expression_state_accesses,
             function_state_accesses: self.function_state_accesses,
             resource_types: self.resource_types,
             function_bounds: self.function_bounds,

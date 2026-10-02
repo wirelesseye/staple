@@ -23,8 +23,6 @@
 //! Target-specific LLVM layout stays in the backend; a plan records lowered
 //! identities and concrete checked values only.
 
-#![allow(dead_code)] // Stage 4.4-4.6 fill the placeholder fields.
-
 use super::{
     ArenaId, FunctionInstanceId, LoweredArtifactDependencyKind, LoweredCallableAdapter,
     LoweredInstanceDependencyKind,

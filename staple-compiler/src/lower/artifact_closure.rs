@@ -1099,7 +1099,7 @@ impl<'a> UseEdge<'a> {
 #[derive(Clone, Copy)]
 enum UseSiteOwner<'a> {
     Instance(&'a LoweredInstanceBody),
-    Initializer(InitializerId),
+    Initializer,
 }
 
 /// The request-root walk node used by the acyclicity check.
@@ -1511,7 +1511,7 @@ impl LoweredProgram {
                 .iter()
                 .map(UseEdge::instance_edge)
                 .collect::<Vec<_>>();
-            let site_owner = UseSiteOwner::Initializer(id);
+            let site_owner = UseSiteOwner::Initializer;
             self.agree_uses_with_edges(
                 &owner,
                 site_owner,
@@ -1580,35 +1580,35 @@ impl LoweredProgram {
         };
         let item = |id: ItemId| match site_owner {
             UseSiteOwner::Instance(body) => body.item(id).is_some(),
-            UseSiteOwner::Initializer(_) => self.items.get(id).is_some(),
+            UseSiteOwner::Initializer => self.items.get(id).is_some(),
         };
         let expression = |id: ExpressionId| match site_owner {
             UseSiteOwner::Instance(body) => body.expression(id).is_some(),
-            UseSiteOwner::Initializer(_) => self.expressions.get(id).is_some(),
+            UseSiteOwner::Initializer => self.expressions.get(id).is_some(),
         };
         let pattern = |id: PatternId| match site_owner {
             UseSiteOwner::Instance(body) => body.pattern(id).is_some(),
-            UseSiteOwner::Initializer(_) => self.patterns.get(id).is_some(),
+            UseSiteOwner::Initializer => self.patterns.get(id).is_some(),
         };
         let call = |id: LoweredCallId| match site_owner {
             UseSiteOwner::Instance(body) => body.call(id).is_some(),
-            UseSiteOwner::Initializer(_) => self.calls.get(id).is_some(),
+            UseSiteOwner::Initializer => self.calls.get(id).is_some(),
         };
         let callable_value = |id: LoweredCallableValueId| match site_owner {
             UseSiteOwner::Instance(body) => body.callable_value(id).is_some(),
-            UseSiteOwner::Initializer(_) => self.callable_values.get(id).is_some(),
+            UseSiteOwner::Initializer => self.callable_values.get(id).is_some(),
         };
         let coro = |id: LoweredCoroId| match site_owner {
             UseSiteOwner::Instance(body) => body.coro(id).is_some(),
-            UseSiteOwner::Initializer(_) => self.coros.get(id).is_some(),
+            UseSiteOwner::Initializer => self.coros.get(id).is_some(),
         };
         let reactive_operation = |id: LoweredReactiveOperationId| match site_owner {
             UseSiteOwner::Instance(body) => body.reactive_operation(id).is_some(),
-            UseSiteOwner::Initializer(_) => self.reactive_operations.get(id).is_some(),
+            UseSiteOwner::Initializer => self.reactive_operations.get(id).is_some(),
         };
         let reactive_callback = |id: LoweredReactiveCallbackId| match site_owner {
             UseSiteOwner::Instance(body) => body.reactive_callback(id).is_some(),
-            UseSiteOwner::Initializer(_) => self.reactive_callbacks.get(id).is_some(),
+            UseSiteOwner::Initializer => self.reactive_callbacks.get(id).is_some(),
         };
         match site {
             #[cfg(test)]
@@ -1651,7 +1651,7 @@ impl LoweredProgram {
             ArtifactUseSite::ThunkArgumentEnvironment { call: id, argument } => {
                 let thunk_argument = match site_owner {
                     UseSiteOwner::Instance(body) => body.call(id),
-                    UseSiteOwner::Initializer(_) => self.calls.get(id),
+                    UseSiteOwner::Initializer => self.calls.get(id),
                 }
                 .and_then(|record| record.arguments.get(argument))
                 .is_some_and(|record| record.thunk.is_some());
@@ -2775,7 +2775,7 @@ mod tests {
 
         let first_owner = program.instances.get(first).expect("instance").ordinal;
         let second_owner = program.instances.get(second).expect("instance").ordinal;
-        let site = ArtifactSite::PlanLocal(7);
+        let site = ArtifactSite::Callback(LoweredReactiveCallbackId::for_test(7));
         let mut hooks = TestHooks::default();
         hooks.instance_requests.insert(
             first.index(),
@@ -2864,7 +2864,7 @@ mod tests {
                 ),
                 runner_request(
                     ArtifactSiteOwner::Initializer(InitializerId::from_index(0)),
-                    ArtifactSite::PlanLocal(0),
+                    ArtifactSite::Callback(LoweredReactiveCallbackId::for_test(0)),
                     &origin,
                     Some(ArtifactUseSite::Test(1)),
                 ),

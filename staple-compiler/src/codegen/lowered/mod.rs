@@ -101,7 +101,6 @@ enum DropSource<'context> {
 /// One provider's bound resource value. Stage 5.4 reads these when it emits
 /// `LoweredResourceUse` reads and call `resource_bindings`.
 #[derive(Clone)]
-#[allow(dead_code)]
 struct BoundResource<'context> {
     resource: CheckedResource,
     value: AnyValueEnum<'context>,
@@ -3193,12 +3192,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     environment,
                 )
             }
-            LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::Stage26Deferred(_) => {
-                Err(Diagnostic::new(
-                    expression.origin.span.clone(),
-                    "internal invariant: deferred expression reached lowered emission",
-                ))
-            }
+            LoweredExpressionKind::Deferred(_) => Err(Diagnostic::new(
+                expression.origin.span.clone(),
+                "internal invariant: deferred expression reached lowered emission",
+            )),
             LoweredExpressionKind::String(string) => {
                 // Stage 5.4 Step 3: the literal core is shared with legacy.
                 self.backend
@@ -4541,9 +4538,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredCallableTarget::Intrinsic { .. } => {
                 return Err(unsupported("intrinsic callable value"));
             }
-            LoweredCallableTarget::CompilerHelper { .. } => {
-                return Err(unsupported("compiler helper callable value"));
-            }
         };
         let pointer = match &callable.closure {
             Some(closure) => match closure.environment {
@@ -5257,9 +5251,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let function =
                     self.bound_function(owner, LoweredBindingSite::Call(id), &call.origin.span)?;
                 self.emit_structural_call(owner, &call, function, &values)
-            }
-            LoweredCallableTarget::CompilerHelper { .. } => {
-                Err(unsupported("compiler helper call"))
             }
         };
         let value = result?;

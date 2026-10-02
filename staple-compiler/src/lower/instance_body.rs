@@ -111,8 +111,7 @@ pub(crate) enum LoweredBindingSite {
 
 /// The concrete target bound at one site. Variants distinguish source-function
 /// instances from generated artifacts and the non-instance routes that
-/// intentionally stay indirect/external/intrinsic. A `CompilerHelper` site has
-/// no binding: the graph rejects the category with a diagnostic.
+/// intentionally stay indirect/external/intrinsic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LoweredBoundTarget {
     /// A known source function interned as a concrete instance.
@@ -129,14 +128,6 @@ impl LoweredBoundTarget {
     pub(crate) fn instance_id(&self) -> Option<FunctionInstanceId> {
         match self {
             LoweredBoundTarget::Instance(id) => Some(*id),
-            _ => None,
-        }
-    }
-
-    /// The artifact ordinal a generated-artifact binding must agree with.
-    pub(crate) fn artifact_ordinal(&self) -> Option<ArtifactOrdinal> {
-        match self {
-            LoweredBoundTarget::Artifact(ordinal) => Some(*ordinal),
             _ => None,
         }
     }
@@ -157,10 +148,6 @@ pub(crate) enum OwnedStorage {
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredOwnedBinding {
     pub symbol: SymbolId,
-    /// The owner-local pattern that introduces the symbol, when the binding
-    /// has one (a parameter, `let` pattern, or match arm pattern). A plain
-    /// `let name = value` binding lowers to a binding item without a pattern.
-    pub pattern: Option<PatternId>,
     pub storage: OwnedStorage,
     /// The concrete value type from the owner's binding pattern.
     pub value_type: CheckedType,
@@ -388,6 +375,7 @@ impl LoweredInstanceBody {
         self.bindings.get(&site)
     }
 
+    #[cfg(test)]
     /// The resolved evidence at a trait-dependent site.
     pub(crate) fn resolved_evidence(&self, site: LoweredBindingSite) -> Option<&TraitEvidence> {
         self.evidence.get(&site)
@@ -442,18 +430,17 @@ impl LoweredProgram {
                 }
                 continue;
             };
-            diagnostics.extend(self.validate_instance_body(id, instance, body));
+            diagnostics.extend(self.validate_instance_body(instance, body));
         }
         diagnostics
     }
 
     fn validate_instance_body(
         &self,
-        id: FunctionInstanceId,
         instance: &super::LoweredFunctionInstance,
         body: &LoweredInstanceBody,
     ) -> Vec<Diagnostic> {
-        let mut validator = BodyValidator::new(self, id, instance, body);
+        let mut validator = BodyValidator::new(self, instance, body);
         validator.run();
         validator.diagnostics
     }
@@ -842,15 +829,6 @@ impl<'a> BodyCloner<'a> {
                 arguments: arguments.iter().map(|argument| self.ty(argument)).collect(),
                 prerequisites: self.bounds(prerequisites),
             },
-            TraitEvidence::RejectedImplementation {
-                trait_id,
-                implementation,
-                arguments,
-            } => TraitEvidence::RejectedImplementation {
-                trait_id: *trait_id,
-                implementation: *implementation,
-                arguments: arguments.iter().map(|argument| self.ty(argument)).collect(),
-            },
         }
     }
 
@@ -1059,9 +1037,6 @@ impl<'a> BodyCloner<'a> {
         let original_kind = expression.kind.clone();
         let kind = match expression.kind {
             LoweredExpressionKind::Deferred(family) => LoweredExpressionKind::Deferred(family),
-            LoweredExpressionKind::Stage26Deferred(route) => {
-                LoweredExpressionKind::Stage26Deferred(route)
-            }
             LoweredExpressionKind::Block(block) => {
                 LoweredExpressionKind::Block(self.clone_block(block))
             }
@@ -2014,13 +1989,11 @@ fn enclosing_request(
         .instance(record.ordinal)
         .expect("interned instance has a catalog key")
         .clone();
-    let origin = record.request.origin(&record.origin);
     ResolvedInstanceRequest {
         key,
         environment: record.environment.clone(),
         relevant: record.relevant.clone(),
         evidence: record.evidence.clone(),
-        origin,
     }
 }
 
@@ -2029,8 +2002,7 @@ fn evidence_trait_id(evidence: &TraitEvidence) -> crate::TraitId {
     match evidence {
         TraitEvidence::ExplicitImplementation { trait_id, .. }
         | TraitEvidence::Structural { trait_id, .. }
-        | TraitEvidence::DeclaredBound { trait_id, .. }
-        | TraitEvidence::RejectedImplementation { trait_id, .. } => *trait_id,
+        | TraitEvidence::DeclaredBound { trait_id, .. } => *trait_id,
     }
 }
 
@@ -2192,15 +2164,11 @@ impl<'a> BodyCloner<'a> {
                         let symbol = self.program.symbols.get(capture.capture.symbol);
                         LoweredClosureCapture {
                             capture: capture.capture.clone(),
-                            drops_value: capture.owns_value
-                                && self.program.concrete_needs_drop(&value_type),
                             value_type,
                             access: capture.access,
                             owns_value: capture.owns_value,
                             requires_initialization_state: symbol
                                 .is_some_and(|symbol| symbol.requires_initialization_check),
-                            mutable_storage: symbol.is_some_and(|symbol| symbol.mutable_storage),
-                            derived: symbol.is_some_and(|symbol| symbol.derived),
                         }
                     })
                     .collect(),
@@ -2826,15 +2794,6 @@ impl<'a> BodyCloner<'a> {
                     original.substitutions.clone(),
                 );
             }
-            LoweredCallableTarget::CompilerHelper { function } => {
-                self.diagnostics.push(Diagnostic::new(
-                    original.origin.span.clone(),
-                    format!(
-                        "compiler-helper target function {} has no generated artifact",
-                        function.0
-                    ),
-                ));
-            }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
             | LoweredCallableTarget::Intrinsic { .. }
@@ -2908,15 +2867,6 @@ impl<'a> BodyCloner<'a> {
                     &original.function_type,
                     &original.origin,
                 );
-            }
-            LoweredCallableTarget::CompilerHelper { function } => {
-                self.diagnostics.push(Diagnostic::new(
-                    original.origin.span.clone(),
-                    format!(
-                        "compiler-helper target function {} has no generated artifact",
-                        function.0
-                    ),
-                ));
             }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
@@ -3067,7 +3017,7 @@ impl<'a> BodyCloner<'a> {
                     Err(diagnostic) => self.diagnostics.push(diagnostic),
                 }
             }
-            TraitEvidence::DeclaredBound { .. } | TraitEvidence::RejectedImplementation { .. } => {
+            TraitEvidence::DeclaredBound { .. } => {
                 self.diagnostics.push(Diagnostic::new(
                     origin.span.clone(),
                     "trait evidence did not resolve to a concrete selection",
@@ -3167,8 +3117,6 @@ impl<'a> BodyCloner<'a> {
             function_type: self.error_signature(),
             arguments: Vec::new(),
             resource_bindings: Vec::new(),
-            mutations: Vec::new(),
-            moves: Vec::new(),
             initialization_checks: Vec::new(),
             steps: Vec::new(),
             result_type: CheckedType::Error,
@@ -3234,7 +3182,6 @@ fn error_with(cloner: &mut BodyCloner<'_>) -> LoweredWithId {
 /// every bound target agrees with the recorded Stage 3.3 graph.
 struct BodyValidator<'a> {
     program: &'a LoweredProgram,
-    owner: FunctionInstanceId,
     instance: &'a super::LoweredFunctionInstance,
     body: &'a LoweredInstanceBody,
     diagnostics: Vec<Diagnostic>,
@@ -3259,13 +3206,11 @@ struct BodyValidator<'a> {
 impl<'a> BodyValidator<'a> {
     fn new(
         program: &'a LoweredProgram,
-        owner: FunctionInstanceId,
         instance: &'a super::LoweredFunctionInstance,
         body: &'a LoweredInstanceBody,
     ) -> Self {
         BodyValidator {
             program,
-            owner,
             instance,
             body,
             diagnostics: Vec::new(),
@@ -3636,7 +3581,7 @@ impl<'a> BodyValidator<'a> {
             }
         }
         match &expression.kind {
-            LoweredExpressionKind::Deferred(_) | LoweredExpressionKind::Stage26Deferred(_) => {
+            LoweredExpressionKind::Deferred(_) => {
                 self.report(
                     origin.span.clone(),
                     "instance body retains a template-only deferred expression",
@@ -3777,8 +3722,7 @@ impl<'a> BodyValidator<'a> {
     fn check_effects_of_evidence(&mut self, origin: &Origin, evidence: &TraitEvidence) {
         match evidence {
             TraitEvidence::ExplicitImplementation { arguments, .. }
-            | TraitEvidence::Structural { arguments, .. }
-            | TraitEvidence::RejectedImplementation { arguments, .. } => {
+            | TraitEvidence::Structural { arguments, .. } => {
                 for argument in arguments {
                     self.check_concrete_type(origin, argument, "evidence argument");
                 }
@@ -5105,37 +5049,6 @@ mod tests {
     }
 
     #[test]
-    fn owned_capture_drop_is_derived_from_its_concrete_type() {
-        let (_, mut program) = lower_with_worklist(concat!(
-            "use std.cinterop.*\n",
-            "extern \"c\" { inspect: CString -> I32 }\n",
-            "def make = (move value: CString) => { let callback = () => inspect value; callback }\n",
-            "let callback = make (c_string \"owned\")\n",
-        ));
-        for value in &mut program.callable_values.values {
-            if let Some(closure) = &mut value.closure {
-                for capture in &mut closure.captures {
-                    if capture.value_type == CheckedType::CString {
-                        capture.drops_value = false;
-                    }
-                }
-            }
-        }
-        materialize(&mut program);
-        let (_, instance) = instance_of(&program, function_id(&program, "make"));
-        let body = instance.body.as_ref().unwrap();
-        let capture = body
-            .callable_values
-            .iter()
-            .filter_map(|(_, value)| value.closure.as_ref())
-            .flat_map(|closure| &closure.captures)
-            .find(|capture| capture.value_type == CheckedType::CString)
-            .expect("closure captures the concrete CString");
-        assert!(capture.owns_value);
-        assert!(capture.drops_value);
-    }
-
-    #[test]
     fn resource_uses_recompute_pass_mode_and_provider_indirectness() {
         let (_, mut program) = lower_with_worklist(concat!(
             "type A = ctor (value: I32)\n",
@@ -5291,11 +5204,7 @@ mod tests {
             let body = instance.body.as_ref().expect("instance body");
             for (site, evidence) in &body.evidence {
                 assert!(
-                    !matches!(
-                        evidence,
-                        TraitEvidence::DeclaredBound { .. }
-                            | TraitEvidence::RejectedImplementation { .. }
-                    ),
+                    !matches!(evidence, TraitEvidence::DeclaredBound { .. }),
                     "body evidence at {site:?} is not a concrete selection"
                 );
                 assert!(
@@ -5311,11 +5220,7 @@ mod tests {
                             | LoweredCallableCategory::StructuralTraitMethod
                     ) {
                         assert!(
-                            !matches!(
-                                evidence,
-                                TraitEvidence::DeclaredBound { .. }
-                                    | TraitEvidence::RejectedImplementation { .. }
-                            ),
+                            !matches!(evidence, TraitEvidence::DeclaredBound { .. }),
                             "a trait call keeps a deferred recipe"
                         );
                     }
@@ -5529,12 +5434,7 @@ mod tests {
             }
             for (_, value) in body.callable_values.iter() {
                 if let Some(closure) = &value.closure {
-                    for capture in &closure.captures {
-                        assert_eq!(
-                            capture.drops_value,
-                            capture.owns_value && module.type_needs_drop(&capture.value_type),
-                            "capture drop disagrees with checking"
-                        );
+                    if !closure.captures.is_empty() {
                         saw_capture = true;
                     }
                 }

@@ -131,3 +131,113 @@ Step 1 → Step 2 → Step 3 → Step 4 → Step 5 → Step 6 → Step 7
 - **Step 3 before Step 5**, so the module docs are written against comments that already state rules rather than history.
 - **Step 4 is independent** of Step 3 but touches the same files. Doing it after Step 3 avoids rewriting the same comments twice.
 - **Size.** Step 3 is the largest, about 870 comment sites, but it is mechanical and C4 guards it completely. Steps 2 and 4 need judgment per item: 38 dead-code warnings and about 66 panic sites. Two or three implementation turns are realistic, splitting after Step 2 and after Step 4, with a review between.
+
+## Execution Notes
+
+### Step 1: Baseline (complete)
+
+- The reference is a release build of `9428582` (this plan's commit). `dump_corpus_sources` wrote 84 corpus programs; with the 11 examples and `game_loop`, that makes 96 paths, and all 96 self-compare as single variants.
+- **Baseline counts** over `staple-compiler/src`, `staple-compiler/tests`, `staple-cli/src`, and `scripts`:
+
+  | Category | Count | Command |
+  | --- | --- | --- |
+  | stage references | 488 | `rg -n "Stage [0-9]"` |
+  | plan-file names | 4 | `rg -n "STAGE_\|_PLAN\|BREAKDOWN"` |
+  | decision IDs | 62 | `rg -n "\((D[1-6]\|O[1-4]\|K[1-6]\|M[1-4]\|P[1-6]\|R[1-5]\|E[1-9]\|F[1-9])\)\|Contract [1-7]"` |
+  | legacy comments | 307 | `rg -n "//.*[Ll]egacy"` |
+  | `stage_` test names | 13 | `rg -n "fn stage_[0-9]"` |
+  | file-wide dead-code allowances | 3 | in `staple-compiler/src` |
+  | item-level dead-code allowances | 41 | in `staple-compiler/src` and `staple-cli/src` |
+
+### Step 2: Unused accessors and dead code (complete)
+
+**Method.** Every dead-code allowance except the justified ones was removed, then each warning was resolved in two passes:
+
+- Items that warned even in the library's test build (`cargo check --lib --profile test`) were dead outright and deleted.
+- Items that warned only in the plain library build were used only by tests. Each became `#[cfg(test)]`, or was deleted together with the tests that existed only to exercise it.
+
+**Deleted (production and test code):**
+
+- **`specialization.rs`, superseded designs:**
+  - the canonical byte encoding of keys (`SpecializationKey`, the version and family-tag constants, every `encode`/`canonical_encoding`);
+  - template-mode key conversion (`ConversionMode`, the `template` constructors, `CanonicalType::Parameter`, `CanonicalEffectSet::variable`, and the `unresolved_*` checks with their `InstanceKeyError` variants);
+  - the raw `InstanceRequest` recipe;
+  - the never-built `ArtifactSiteOwner::Artifact` and `ArtifactSite::PlanLocal`, and the `Curried`/`ImplicitThunk` adapter kinds.
+
+  Canonical keys are now concrete by construction: the type has no way to hold an unresolved parameter.
+- **Never-constructed lowering variants and their match arms:**
+  - `ExpressionDisposition::Deferred`;
+  - `LoweredExpressionKind::Stage26Deferred`;
+  - `DeferredExpressionFamily::{Resource, Coroutine}`;
+  - `LoweredCallableAdapter::{Curried, ImplicitThunk}`;
+  - `TraitEvidence::RejectedImplementation`;
+  - `CompilerHelper` from `LoweredCallableTarget`, `LoweredCallableCategory`, and `CallRoute`, with `request_helper`.
+- **Lowering-schema fields nothing reads:**
+  - `LoweredName::{storage, captured_cell, moved, move_parameter}`;
+  - `LoweredClosureCapture::{drops_value, mutable_storage, derived}`;
+  - `LoweredCall::{mutations, moves}`;
+  - `LoweredLoop::body_falls_through`, together with `block_falls_through` and `expression_diverges`;
+  - `LoweredSymbol::move_parameter`;
+  - `LoweredTypeMetadata::{kind, parameters, representation}` and `LoweredTypeKind`;
+  - `LoweredTraitMetadata::functional_dependencies`;
+  - `LoweredSemanticIds::entry_reactive_required`;
+  - `LoweredOwnedBinding::pattern`;
+  - `ResolvedInstanceRequest::origin`;
+  - the initializer request root's `origin`;
+  - `BodyValidator::owner`;
+  - a test hook's `origin`.
+- **Unused methods:**
+  - the emission view's `types`, `type_metadata`, `traits`, `string_formatting`, `instance_evidence`, `initializer_evidence`, and `plan`;
+  - `LoweredBoundTarget::artifact_ordinal`;
+  - `RelevantParameters::{contains_effect, extend}`;
+  - `RuntimeRequirementSet::is_empty`;
+  - `SpecializationCatalog::planned_artifact_name`.
+- **Checker and resolver:**
+  - `TypedModule::state_accesses_of_expression` and the `expression_state_accesses` copy;
+  - the `type_representations`/`type_parameter_templates` copies with their accessors;
+  - `trait_functional_dependencies`;
+  - `ResolvedTypeParameterInfo` and `type_parameters_in_id_order`;
+  - `CoroutinePlan::captures`.
+- **Six tests** that tested only removed code:
+  - template conversion;
+  - `InstanceRequest` resolution;
+  - the canonical encoding;
+  - the deferred-family validator;
+  - the `CompilerHelper` rejection;
+  - `drops_value` recomputation.
+
+  Tests that used the encoding as a stand-in for key equality now compare keys directly. The finalizer cross-check that used `drops_value` now inlines its rule (an owned capture of a droppable type).
+
+**Test-only (`#[cfg(test)]`):**
+
+- **Methods and constants:**
+  - the `ALL` decision-table constants;
+  - `CallRoute::category`;
+  - `Stage26Route::record_family`;
+  - the emission view's `modules`, `concrete_needs_drop`, `instance_captures`, and `instance_parameters`;
+  - `resolved_evidence`;
+  - `contains_type`, `is_empty`, and `len`;
+  - `PARAMETER_RECORD_FAMILIES`;
+  - `for_runtime_symbol` and `requirements`;
+  - `SpecializationCatalog::planned_names`.
+- **Lookup fields**, still filled by lowering under the same attribute:
+  - `LoweredTypeMetadata::name`;
+  - `LoweredModuleInfo::{qualified_name, companion, executable_entry}`;
+  - `LoweredInitializer::executable_entry`;
+  - `LoweredInterpolation::format`.
+
+**Kept, with a stated reason:**
+
+- the nine `codegen/layout.rs` runtime-layout constants, each naming the `.ll` runtime that reads it;
+- the macro-generated `for_test` arena constructor, which tests use for only some ID types;
+- the LSP's `KEYWORD` legend slot, kept for protocol stability.
+
+`TypedModule::syntax` and `state_accesses_of_function` stay public API: the integration tests use them, and those compile as a separate crate, where `#[cfg(test)]` cannot reach.
+
+**Results:**
+
+- **Allowances:** none file-wide, down from 3, and 11 item-level, down from 41, each with a reason.
+- **Warnings:** `cargo build --workspace` and `cargo check --workspace --tests` are warning-free.
+- **Suite:** 1301 tests pass. That is six fewer than before, because the deleted tests covered only removed code.
+- **IR identity (C4):** all 96 paths are `same` against the reference.
+- **Size:** 19 files changed, 2120 lines deleted.

@@ -20,23 +20,22 @@
 use std::collections::BTreeMap;
 
 use crate::specialization::ArtifactOrdinal;
-use crate::{CheckedFunctionType, FunctionId, ModuleId, SymbolId, TraitId, TypeId};
+use crate::{CheckedFunctionType, FunctionId, ModuleId, SymbolId};
 
 use super::artifact_closure::{LoweredArtifactUse, LoweredInstanceUse};
 use super::instance_body::{
-    LoweredBindingSite, LoweredBoundTarget, LoweredInstanceBody, LoweredInstanceCapture,
-    LoweredInstanceParameter, LoweredOwnedBinding,
+    LoweredBindingSite, LoweredBoundTarget, LoweredInstanceBody, LoweredOwnedBinding,
 };
+#[cfg(test)]
+use super::instance_body::{LoweredInstanceCapture, LoweredInstanceParameter};
 use super::{
     ArenaId, BlockId, ExpressionId, FunctionInstanceId, InitializerId, ItemId,
     LoweredArtifactRequest, LoweredArtifactRequestId, LoweredAwait, LoweredBlock, LoweredCall,
-    LoweredCallableValue, LoweredCoro, LoweredCoroutinePlan, LoweredCoroutinePlanId,
-    LoweredExpression, LoweredFunction, LoweredFunctionInstance, LoweredInitializer,
-    LoweredModuleInfo, LoweredPattern, LoweredProgram, LoweredReactiveCallback,
+    LoweredCallableValue, LoweredCoro, LoweredExpression, LoweredFunction, LoweredFunctionInstance,
+    LoweredInitializer, LoweredModuleInfo, LoweredPattern, LoweredProgram, LoweredReactiveCallback,
     LoweredReactiveOperation, LoweredResourceProvider, LoweredResourceProviderId,
     LoweredResourceUse, LoweredResourceUseId, LoweredRuntimeRequirements, LoweredSemanticIds,
-    LoweredStringFormatting, LoweredSymbol, LoweredTraitMetadata, LoweredTypeMetadata, LoweredWith,
-    PatternId, PlaceId, TraitEvidence,
+    LoweredSymbol, LoweredWith, PatternId, PlaceId,
 };
 
 /// The owner shape a backend node ID belongs to.
@@ -265,6 +264,7 @@ impl<'a> EmissionView<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn modules(&self) -> impl Iterator<Item = (ModuleId, &'a LoweredModuleInfo)> + 'a {
         self.program.modules.iter().map(|(_, id, info)| (id, info))
     }
@@ -297,24 +297,6 @@ impl<'a> EmissionView<'a> {
         self.program.symbols.get(id)
     }
 
-    pub(crate) fn types(&self) -> impl Iterator<Item = (TypeId, &'a LoweredTypeMetadata)> + 'a {
-        self.program
-            .types
-            .iter()
-            .map(|(_, id, metadata)| (id, metadata))
-    }
-
-    pub(crate) fn type_metadata(&self, id: TypeId) -> Option<&'a LoweredTypeMetadata> {
-        self.program.types.get(id)
-    }
-
-    pub(crate) fn traits(&self) -> impl Iterator<Item = (TraitId, &'a LoweredTraitMetadata)> + 'a {
-        self.program
-            .traits
-            .iter()
-            .map(|(_, id, metadata)| (id, metadata))
-    }
-
     /// The `LoweredSemanticIds` layout context (`runtime_opaque_kind`, string
     /// representation, entry resources, standard trait IDs).
     pub(crate) fn semantic_ids(&self) -> &'a LoweredSemanticIds {
@@ -327,6 +309,7 @@ impl<'a> EmissionView<'a> {
         self.program.concrete_is_copy(value_type)
     }
 
+    #[cfg(test)]
     /// The catalog's concrete needs-drop decision: the shared predicate the
     /// checker also uses (Stage 5.11 F5).
     pub(crate) fn concrete_needs_drop(&self, value_type: &crate::CheckedType) -> bool {
@@ -341,10 +324,6 @@ impl<'a> EmissionView<'a> {
         value_type: &crate::CheckedType,
     ) -> Option<super::instance_resolution::RuntimeOpaqueKind> {
         self.program.runtime_opaque_kind(value_type)
-    }
-
-    pub(crate) fn string_formatting(&self) -> &'a LoweredStringFormatting {
-        &self.program.string_formatting
     }
 
     /// The ordered runtime surfaces the closed catalog needs.
@@ -384,18 +363,6 @@ impl<'a> EmissionView<'a> {
             .map(|body| &body.bindings)
     }
 
-    /// The resolved evidence of one instance body.
-    pub(crate) fn instance_evidence(
-        &self,
-        instance: FunctionInstanceId,
-    ) -> Option<&'a BTreeMap<LoweredBindingSite, TraitEvidence>> {
-        self.program
-            .instances
-            .get(instance)
-            .and_then(|record| record.body.as_ref())
-            .map(|body| &body.evidence)
-    }
-
     /// The concrete dispatch bindings of one module initializer (D4).
     pub(crate) fn initializer_bindings(
         &self,
@@ -404,14 +371,7 @@ impl<'a> EmissionView<'a> {
         self.program.initializer_bindings.get(initializer.index())
     }
 
-    /// The resolved evidence of one module initializer (D4).
-    pub(crate) fn initializer_evidence(
-        &self,
-        initializer: InitializerId,
-    ) -> Option<&'a BTreeMap<LoweredBindingSite, TraitEvidence>> {
-        self.program.initializer_evidence.get(initializer.index())
-    }
-
+    #[cfg(test)]
     /// The ordered captures of one instance body.
     pub(crate) fn instance_captures(
         &self,
@@ -499,6 +459,7 @@ impl<'a> EmissionView<'a> {
         self.symbol(symbol).map(|symbol| &symbol.value_type)
     }
 
+    #[cfg(test)]
     /// The ordered parameters of one instance body.
     pub(crate) fn instance_parameters(
         &self,
@@ -743,17 +704,6 @@ impl<'a> OwnerArenas<'a> {
         match self {
             OwnerArenas::Instance(body) => body.reactive_callback(id),
             OwnerArenas::Initializer(_) => program.reactive_callbacks.get(id),
-        }
-    }
-
-    pub(crate) fn plan(
-        self,
-        program: &'a LoweredProgram,
-        id: LoweredCoroutinePlanId,
-    ) -> Option<&'a LoweredCoroutinePlan> {
-        match self {
-            OwnerArenas::Instance(body) => body.plan(id),
-            OwnerArenas::Initializer(_) => program.coroutine_plans.get(id),
         }
     }
 
