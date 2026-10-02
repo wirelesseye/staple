@@ -680,7 +680,7 @@ fn until_rejects_a_predicate_that_is_not_pure_signal_reads() {
     );
 }
 
-/// Stage 5.11 F3: a `return` from inside `with Tasks` closes the scope on the
+/// A `return` from inside `with Tasks` closes the scope on the
 /// return path. The scope's normal exit is unreachable here, so any close in
 /// `early` comes from the return; it must precede the function's `ret`.
 #[test]

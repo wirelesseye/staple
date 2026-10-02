@@ -241,3 +241,28 @@ Step 1 → Step 2 → Step 3 → Step 4 → Step 5 → Step 6 → Step 7
 - **Suite:** 1301 tests pass. That is six fewer than before, because the deleted tests covered only removed code.
 - **IR identity (C4):** all 96 paths are `same` against the reference.
 - **Size:** 19 files changed, 2120 lines deleted.
+
+### Step 3: Self-contained comments, names, and corpus metadata (complete)
+
+- Rewrote migration-prefixed comments as current rules. Removed obsolete
+  guard/placeholder explanations and deleted-function citations, including
+  runtime LLVM comments. The largest emitter and lowering files were reviewed
+  for ownership order, linkage, captures, coercions, and pattern tests.
+- Renamed stage-prefixed tests, helpers, validator hooks, and the extern fixture.
+  The compact `stage26` route-table name is now
+  `resource_coroutine_route_table_covers_every_route`. The schema families are
+  `OrdinaryExpressionFamily` and `ResourceCoroutineRoute`; coroutine scanning
+  uses `CoroutineScanVisitor`.
+- Replaced `CorpusProgram::substage` with `topic`. Structural coverage still
+  selects precisely the former structural entries. Replaced `CorpusD5` and
+  `d5` with `CorpusGenericArtifacts` and `generic_artifacts`.
+- The comparison script documents normalized, variant-aware compiler comparison
+  without referring to a migration plan.
+- Rebuilt the reference from `9428582` in `/private/tmp/staple-cleanup-reference`
+  and exported all 84 current corpus entries to `/private/tmp/staple-cleanup-corpus`.
+
+**Results:** 1301 workspace tests pass; the workspace build is warning-free.
+Formatting and whitespace checks pass. All 96 paths are `same` against
+`9428582` (the 12 example paths sampled twice; all 84 dumped corpus entries
+compared as single variants). The required mechanical scans, plus compact
+stage-prefix and substage scans, are empty.

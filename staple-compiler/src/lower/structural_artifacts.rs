@@ -1,14 +1,8 @@
-//! Stage 4.3: the constructor-adapter and structural-method artifact
-//! expanders.
+//! Constructor adapter and structural method planning.
 //!
-//! Each expander reads one artifact's request-time plan, derives the owned
-//! body from lowered metadata (never `TypedModule`), and returns the finished
-//! plan plus the closure requests the body needs. Bodies record concrete
-//! checked types and catalog identities only; LLVM layout stays in the
-//! backend.
-//!
-//! Constructor adapters are implemented in Step 2; the seven structural
-//! method kinds and the nested trait-method selection follow in Steps 3-4.
+//! Expanders derive owned bodies from lowered metadata, select nested trait
+//! callees, and return ordered closure requests. Concrete types and catalog
+//! identities are recorded here; LLVM layout belongs to codegen.
 
 use std::collections::HashMap;
 
@@ -127,9 +121,7 @@ pub(super) fn expand_constructor_adapter(
     ))
 }
 
-/// Expands one structural-method artifact. Step 3 implements `Index`,
-/// `MutateIndex`, `IntoIterator`, and `Iterator.next`; `Debug`, `DerefIndex`,
-/// and `DerefMutateIndex` keep the request-time marker until Step 4.
+/// Expands a structural method and records its nested trait callees.
 pub(super) fn expand_structural_method(
     program: &LoweredProgram,
     artifact: LoweredArtifactRequestId,
@@ -216,8 +208,7 @@ pub(super) struct SelectedTraitMethod {
 /// Selects one concrete trait method against the owned catalogs, mirroring
 /// `TypedModule::trait_impl_method` precedence: an explicit implementation
 /// first (with generic implementations resolved from the implementation
-/// header), structural derivation otherwise. Any divergence from legacy
-/// `trait_method_code` is a resolver bug, not an expander workaround.
+/// header), structural derivation otherwise. Selection uses the owned catalogs and reports unresolved concrete obligations.
 pub(super) fn select_concrete_trait_method(
     program: &LoweredProgram,
     origin: &Origin,
@@ -1060,15 +1051,15 @@ mod tests {
             assert_eq!(product, payload);
             assert_eq!(parameters.len(), 1);
             let expected_finalizer = module.type_needs_drop(payload);
-            let legacy_is_copy = module.is_copy_type(payload);
+            let checked_is_copy = module.is_copy_type(payload);
             assert_eq!(
                 finalizer.is_some(),
                 expected_finalizer,
-                "the planned finalizer matches the legacy `build_ref_value` predicate"
+                "the planned finalizer matches build ref value predicate"
             );
             if expected_finalizer {
                 saw_droppable = true;
-                assert!(!legacy_is_copy, "a droppable payload is never `Copy`");
+                assert!(!checked_is_copy, "a droppable payload is never `Copy`");
                 let finalizer = finalizer.as_ref().expect("the planned finalizer");
                 let artifact = lowered
                     .program
@@ -1129,7 +1120,7 @@ mod tests {
             .collect()
     }
 
-    /// Stage 5.7 review: the iterator's `Done`/`Yield` injections are recorded
+    /// The iterator's `Done`/`Yield` injections are recorded
     /// plans, revalidated by re-expansion like the element coercions.
     #[test]
     fn iterator_step_injections_are_recorded_and_revalidated() {
@@ -1288,7 +1279,7 @@ mod tests {
             assert_eq!(
                 drop_previous.is_some(),
                 module.type_needs_drop(element),
-                "the planned drop matches the legacy `type_needs_drop` predicate for {element:?}"
+                "the planned drop matches type needs drop predicate for {element:?}"
             );
             if let Some(drop_previous) = drop_previous {
                 let artifact = lowered
@@ -1498,7 +1489,7 @@ mod tests {
                     assert_eq!(element, &CheckedType::I32);
                     assert_eq!(*length, 2);
                     assert_eq!(output, &CheckedType::I32);
-                    // The owned `Copy` predicate must agree with the legacy
+                    // The owned `Copy` predicate must agree with the emitter
                     // per-function predicate the fast path uses.
                     assert_eq!(
                         lowered.program.concrete_is_copy(element),

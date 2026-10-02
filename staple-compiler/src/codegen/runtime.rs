@@ -1,4 +1,4 @@
-//! Stage 5.2: the backend-local runtime layer.
+//! the backend-local runtime layer.
 //!
 //! Installs the hand-written `.ll` runtime modules, declares the lazily
 //! referenced libc/runtime helpers, and emits the fixed UTF-8 validator. These helpers depend only on LLVM and recorded layouts.
@@ -158,7 +158,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// Emits the fixed `__staple_is_valid_utf8` validator and returns it, so the
-    /// caller can register it with the test-only legacy recorder.
+    /// caller can record its runtime requirement in tests.
     pub(crate) fn build_utf8_validator(
         &mut self,
     ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {

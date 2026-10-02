@@ -1,4 +1,4 @@
-//! Stage 5.2: the backend-local LLVM layout layer.
+//! the backend-local LLVM layout layer.
 //!
 //! Everything here decides the machine representation of a concrete Stanza
 //! type without consulting the checker: integer, float, product, sum, closure,
@@ -55,7 +55,7 @@ pub(crate) const CORO_STATUS_WAIT_EXTERNAL: u64 = CORO_STATUS_WAIT_TASK;
 /// `%Completion` field indices (see `coroutine.ll`). The record is
 /// `{ i8 state, i8 flags, {{SIZE}} generation, ptr scheduler, ptr waiter,
 /// ptr cancel_env, ptr cancel_fn, T value }`; the runtime only touches the
-/// header, and 4a leaves the cancel-callback fields zero.
+/// header. Cancel callbacks are null until armed.
 #[allow(dead_code)] // field 0; loaded directly through the record pointer
 pub(crate) const COMPLETION_STATE: u32 = 0;
 pub(crate) const COMPLETION_FLAGS: u32 = 1;
@@ -91,7 +91,7 @@ pub(crate) const TASK_RECORD_RESULT: u32 = 6;
 pub(crate) const TASK_STATE_CANCELLED: u64 = 2;
 
 /// The storage of a lowered sum value: one `i32` tag plus a payload buffer
-/// aligned for the widest alternative. The legacy `compile_sum_value` builds
+/// aligned for the widest alternative. compile sum value builds
 /// it; moving it here keeps the layout decision with `compile_sum_type`.
 #[derive(Clone)]
 pub(crate) struct SumStorage<'context> {
@@ -102,7 +102,7 @@ pub(crate) struct SumStorage<'context> {
 
 /// The layout facts `compile_type` needs, sourced from the lowered program
 /// (`LoweredSemanticIds`, the type catalog, and `runtime_opaque_kind`) so the
-/// legacy and lowered emitters cannot disagree.
+/// the emitter and lowered emitters cannot disagree.
 #[derive(Clone, Copy)]
 pub(crate) struct LayoutContext<'program> {
     view: EmissionView<'program>,
@@ -508,7 +508,7 @@ mod tests {
         types
     }
 
-    /// The Stage 5.2 `LayoutContext` must select exactly the representations
+    /// The emission `LayoutContext` must select exactly the representations
     /// and pass modes the checker-based predicates selected: `Copy`, `IO`,
     /// `Reactive`, and the pointer-represented runtime handles. Divergence
     /// would silently change IR, so a fixture sweep locks the two sources
@@ -636,8 +636,8 @@ mod tests {
     }
 }
 
-/// Stage 5.5 Step 5: strips `Distinct` wrappers from a place's container type
-/// before projecting a product field, shared by both emitters' place pointers.
+/// Strips `Distinct` wrappers from a place's container type
+/// before projecting a product field, shared by the emitter' place pointers.
 pub(crate) fn strip_place_wrappers(mut value_type: crate::CheckedType) -> crate::CheckedType {
     loop {
         match value_type {

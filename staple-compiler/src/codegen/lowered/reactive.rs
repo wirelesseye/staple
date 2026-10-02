@@ -1,4 +1,4 @@
-//! Stage 5.8 Step 7: signal, derived, and reactive-call emission.
+//! signal, derived, and reactive-call emission.
 use super::*;
 use crate::{
     LoweredReactiveCallbackId, LoweredReactiveOperationId, LoweredReactiveOperationKind,
@@ -7,7 +7,7 @@ use crate::{
 use inkwell::{types::BasicTypeEnum, values::StructValue};
 
 impl<'program, 'context> LoweredEmitter<'program, 'context> {
-    /// Legacy `signal_metadata_value`: the `%Signal*` a signal symbol's
+    /// The `%Signal*` a signal symbol's
     /// storage cell or module metadata global holds.
     pub(super) fn signal_metadata_value(
         &self,
@@ -41,7 +41,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))
     }
 
-    /// Legacy `force_derived_read`: the value cell/global's metadata slot.
+    /// The value cell/global's metadata slot.
     fn derived_metadata_value(
         &self,
         owner: EmissionOwner,
@@ -78,7 +78,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Legacy `track_signal_read`: subscribe the current reaction to a signal
+    /// Subscribe the current reaction to a signal
     /// read. A non-signal symbol tracks nothing.
     pub(super) fn track_signal_read(
         &self,
@@ -100,7 +100,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `force_derived_read`: recompute a stale derived binding before
+    /// Recompute a stale derived binding before
     /// its value cell is read.
     pub(super) fn force_derived_read(
         &self,
@@ -122,7 +122,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `__staple_signal_create`: allocate a fresh signal.
+    /// Allocate a fresh signal.
     pub(super) fn emit_signal_create(
         &self,
         span: &staple_syntax::Span,
@@ -145,8 +145,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// The ambient `Reactive` scope pointer one provider supplies, loaded
-    /// through its storage when the provider is indirect (legacy's
-    /// `compile_reaction`/`compile_until` scope search, resolved by record).
+    /// through its storage when the provider is indirect (the emitter's
+    /// compile reaction/compile until scope search, resolved by record).
     fn reactive_scope(
         &self,
         provider: Option<LoweredResourceProviderId>,
@@ -315,7 +315,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .collect()
     }
 
-    /// Legacy `compile_reaction`: closure, resources, ambient scope, payload
+    /// Closure, resources, ambient scope, payload
     /// with recorded slot pass modes, runner, and `__staple_reaction_create`.
     fn emit_reaction(
         &mut self,
@@ -379,7 +379,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(self.backend.unit_value())
     }
 
-    /// Legacy `compile_batch`: begin, indirect callback call, end.
+    /// Begin, indirect callback call, end.
     fn emit_batch(
         &mut self,
         owner: EmissionOwner,
@@ -417,7 +417,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(self.backend.unit_value())
     }
 
-    /// Legacy `compile_until`: predicate closure, ambient scope, until runner,
+    /// Predicate closure, ambient scope, until runner,
     /// and the hand-written until coroutine frame.
     fn emit_until(
         &mut self,
@@ -450,7 +450,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_any_value_enum())
     }
 
-    /// Legacy `compile_intrinsic_call`'s `Snapshot`: evaluate the operand
+    /// Compile intrinsic call's `Snapshot`: evaluate the operand
     /// between a tracking suspend and restore.
     pub(super) fn emit_snapshot(
         &mut self,
@@ -544,7 +544,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.8 Step 7: legacy `compile_derived_create`. The evaluator
+    /// Compile derived create. The evaluator
     /// closure carries its recorded environment finalizer; the runner body is
     /// emitted with the artifact.
     #[allow(clippy::too_many_arguments)]
@@ -639,7 +639,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Stage 5.8 Step 7: one runner artifact body from its plan.
+    /// One runner artifact body from its plan.
     pub(super) fn emit_runner_body(
         &mut self,
         ordinal: ArtifactOrdinal,

@@ -42,50 +42,52 @@ mod worklist;
 
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
 
-// Stage 5.1/5.2 backend read view. `LoweredModule::program` returns this
-// type; Stage 5.2's `codegen::layout::LayoutContext` stores it so the shared
+// Read-only emission view. `LoweredModule::program` returns this
+// type; `codegen::layout::LayoutContext` stores it so the shared
 // layout layer can read semantic IDs and the concrete `Copy` decision without
 // naming the lowered arenas.
 pub(crate) use emission::EmissionOwner;
 pub(crate) use emission::EmissionView;
 
-// Stage 3.2 resolver API consumed by Stage 3.3. The implementation stays in a
+// Concrete specialization resolver. The implementation stays in a
 // lowering child module so it can read the owned `LoweredProgram` directly;
 // these re-exports name the handoff types for the rest of the crate.
-#[allow(unused_imports)] // Stage 3.3 consumes these handoff types.
+#[allow(unused_imports)]
+// Re-exported handoff types are also used within the lowering subtree.
 pub(crate) use instance_resolution::{
     InstanceResolutionRequest, InstanceResolutionTarget, RelevantParameters,
     ResolvedInstanceRequest, SubstitutionEntry, SubstitutionEnvironment, SubstitutionSource,
     SubstitutionValue,
 };
 
-// Stage 3.3 worklist API. The graph records identity, roots, dependency edges,
-// and artifact requests; Stage 3.4 materializes instance bodies.
-#[allow(unused_imports)] // Stage 3.4 consumes these worklist types.
+// Specialization worklist. The graph records identity, roots, dependency edges,
+// and artifact requests; specialization materializes instance bodies.
+#[allow(unused_imports)] // Worklist API types are also used within the lowering subtree.
 pub(crate) use worklist::{
     LoweredArtifactDependency, LoweredArtifactDependencyKind, LoweredArtifactRequest,
     LoweredArtifactRequestRoot, LoweredFunctionInstance, LoweredInstanceDependency,
     LoweredInstanceDependencyKind, LoweredInstanceRequest, LoweredScanOwner,
 };
 
-// Stage 3.4 instance-body API. Bodies are instance-owned and instance-local;
+// Concrete instance bodies. Bodies are instance-owned and instance-local;
 // shared semantic catalogs stay at the program level.
-#[allow(unused_imports)] // Stage 3.5 and the backend consume these types.
+#[allow(unused_imports)] // Instance API types are also used within the lowering subtree.
 pub(crate) use instance_body::{
     LoweredBindingSite, LoweredBoundTarget, LoweredInstanceBody, LoweredInstanceCapture,
     LoweredInstanceParameter, LoweredOwnedBinding, OwnedStorage,
 };
 
-// Stage 4.2 closure API. The engine scans owners and expands artifacts through
-// the hook surface; Stage 4.3-4.6 register their family hooks.
-#[allow(unused_imports)] // Stage 4.3-4.6 flesh out the hook surface.
+// Artifact closure. The engine scans owners and expands artifacts through
+// family scanners and expanders.
+#[allow(unused_imports)] // Hook types are shared with lowering tests.
 use artifact_closure::{ArtifactFamilyHooks, ClosureRequest, ProductionHooks};
-#[allow(unused_imports)] // Stage 4.4-4.6 and tests name use sites.
+#[allow(unused_imports)] // Use records are shared with validators and tests.
 pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredInstanceUse};
 
-// Stage 4.1 artifact-plan API. Plans are attached to artifact requests and
-// filled by the substage that owns each artifact family.
-#[allow(unused_imports)] // Stage 4.2+ attach and validate these plans.
+// Generated artifact plans. Plans are attached to artifact requests and
+// filled by each artifact family's expander.
+#[allow(unused_imports)]
+// Family-specific plan types are also used within the lowering subtree.
 pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
     CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DropGlueBody,
@@ -96,9 +98,9 @@ pub(crate) use artifact_plan::{
     StructuralMethodPlan, SumAlternative, TraitDelegate,
 };
 
-// Stage 4.6 runtime-requirement API. Fixed-named runtime surfaces are not an
+// Runtime requirements. Fixed-named runtime surfaces are not an
 // artifact family; each program carries the ordered set its operations need.
-#[allow(unused_imports)] // Stage 4.7 and Stage 5 consume the requirement set.
+#[allow(unused_imports)] // Requirement types are shared with emission and tests.
 pub(crate) use runtime_requirements::{LoweredRuntimeRequirements, RuntimeRequirement};
 
 macro_rules! arena_id {
@@ -127,8 +129,8 @@ macro_rules! arena_id {
     };
 }
 
-/// The shared dense-position accessor for lowered arena handles. Stage 4
-/// per-site artifact keys encode these positions, never source `SyntaxId`s.
+/// Dense-position access for lowered arena handles. Per-site artifact keys
+/// encode these positions rather than source syntax IDs.
 pub(crate) trait ArenaId: Copy {
     fn from_index(index: usize) -> Self;
     fn index(self) -> usize;
@@ -366,11 +368,9 @@ pub(crate) struct ExpressionKey {
 }
 
 /// An owned expression family. Every ordinary syntax variant maps to exactly
-/// one family, and every family has a concrete lowered payload. Stage 2.4
-/// established the families below `Function`; `Function` is the first Stage
-/// 2.5-owned family, and `Call` joins it in Step 3.
+/// one family, and every family has a concrete lowered payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stage24Family {
+pub(crate) enum OrdinaryExpressionFamily {
     Block,
     Satisfies,
     Match,
@@ -390,19 +390,19 @@ pub(crate) enum Stage24Family {
     Call,
 }
 
-/// An expression family explicitly deferred to a later lowering stage.
-/// Deferred nodes are not silently unlowered: later stages own them whole.
+/// A callable expression family.
+/// Callable lowering owns the complete payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeferredExpressionFamily {
-    /// Stage 2.5 owns function values and calls.
+    /// Lowering owns function values and calls.
     Callable,
 }
 
-/// The concrete Stage 2.6 route for a resource or coroutine expression. Every
+/// The concrete lowering route for a resource or coroutine expression. Every
 /// deferred syntax family maps to exactly one route, and each route names the
 /// record family that will own its populated payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Stage26Route {
+pub(crate) enum ResourceCoroutineRoute {
     /// A `resource` value read or resource place.
     ResourceUse,
     /// A `with` provider and its scoped body.
@@ -417,16 +417,16 @@ pub(crate) enum Stage26Route {
     AwaitWait,
 }
 
-impl Stage26Route {
+impl ResourceCoroutineRoute {
     #[cfg(test)]
     /// Every route, checked by the route-table test.
-    pub(crate) const ALL: [Stage26Route; 6] = [
-        Stage26Route::ResourceUse,
-        Stage26Route::ResourceProvider,
-        Stage26Route::CoroutineCreation,
-        Stage26Route::AwaitChildCoroutine,
-        Stage26Route::AwaitTask,
-        Stage26Route::AwaitWait,
+    pub(crate) const ALL: [ResourceCoroutineRoute; 6] = [
+        ResourceCoroutineRoute::ResourceUse,
+        ResourceCoroutineRoute::ResourceProvider,
+        ResourceCoroutineRoute::CoroutineCreation,
+        ResourceCoroutineRoute::AwaitChildCoroutine,
+        ResourceCoroutineRoute::AwaitTask,
+        ResourceCoroutineRoute::AwaitWait,
     ];
 
     #[cfg(test)]
@@ -434,12 +434,12 @@ impl Stage26Route {
     /// table to prove every route has exactly one owned record family.
     pub(crate) fn record_family(self) -> &'static str {
         match self {
-            Stage26Route::ResourceUse => "ResourceUse",
-            Stage26Route::ResourceProvider => "With",
-            Stage26Route::CoroutineCreation => "Coro",
-            Stage26Route::AwaitChildCoroutine
-            | Stage26Route::AwaitTask
-            | Stage26Route::AwaitWait => "Await",
+            ResourceCoroutineRoute::ResourceUse => "ResourceUse",
+            ResourceCoroutineRoute::ResourceProvider => "With",
+            ResourceCoroutineRoute::CoroutineCreation => "Coro",
+            ResourceCoroutineRoute::AwaitChildCoroutine
+            | ResourceCoroutineRoute::AwaitTask
+            | ResourceCoroutineRoute::AwaitWait => "Await",
         }
     }
 }
@@ -516,14 +516,13 @@ pub(crate) enum IntrinsicRoute {
     Coroutine(CoroutineIntrinsicRoute),
 }
 
-/// The single lowering decision for a syntax variant. Exhaustiveness is
-/// enforced by a match, and the coverage classifier test fails when a new
-/// variant is missing from the enumerated list.
+/// Classifies each runtime expression into a concrete lowering family.
+/// Every supported family has a payload; compile-time expressions are excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExpressionDisposition {
-    Ordinary(Stage24Family),
-    /// A Stage 2.6 resource or coroutine expression with its concrete route.
-    Stage26(Stage26Route),
+    Ordinary(OrdinaryExpressionFamily),
+    /// A lowering resource or coroutine expression with its concrete route.
+    ResourceCoroutine(ResourceCoroutineRoute),
     /// Compile-time-only survivors that earlier phases must eliminate.
     Rejected,
 }
@@ -535,7 +534,7 @@ pub(crate) struct LoweredExpression {
     pub value_type: CheckedType,
     pub effects: CheckedEffectSet,
     pub coercion: Option<CheckedCoercion>,
-    /// Stage 5.5 E1: the recursive plan legacy `coerce_value` executes for
+    /// The recursive plan coerce value executes for
     /// `coercion`. `None` exactly when `coercion` is `None`; a template whose
     /// types still contain declared parameters leaves the plan absent, and
     /// materialization recomputes it from the substituted types.
@@ -544,11 +543,10 @@ pub(crate) struct LoweredExpression {
     pub kind: LoweredExpressionKind,
 }
 
-/// Stage 5.5 E1: the checked emission plan for one expression coercion,
+/// The checked emission plan for one expression coercion,
 /// computed during lowering with the checker's `select_sum_alternative` rule
-/// so the emitter never re-selects an alternative. The variants are exactly
-/// the branches of legacy `coerce_value`/`coerce_sum_value`: every other
-/// source/target pair is a lowering diagnostic.
+/// so emission never re-selects an alternative. Unsupported concrete
+/// source/target pairs produce lowering diagnostics.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoweredCoercionPlan {
     /// The representation is unchanged: `source == target`, a string literal
@@ -564,7 +562,7 @@ pub(crate) enum LoweredCoercionPlan {
     },
     /// Widen every alternative of a source sum into the target sum, one arm
     /// per source alternative in source order. `None` is a source alternative
-    /// with no target; legacy reaches it only through a propagating binding
+    /// with no target; the emitter reaches it only through a propagating binding
     /// that narrowed the success tag first and emits `unreachable`.
     SumWiden {
         arms: Vec<Option<LoweredSumWidenArm>>,
@@ -579,12 +577,10 @@ pub(crate) struct LoweredSumWidenArm {
 }
 
 impl LoweredCoercionPlan {
-    /// Computes the plan for `source` → `target` with the same rule legacy
-    /// `coerce_value` uses. Returns a diagnostic message for a pair legacy
-    /// rejects; a template whose types still contain declared parameters
-    /// leaves the plan absent at the call site instead of failing.
+    /// Computes a coercion plan from source to target. Unsupported concrete pairs
+    /// produce a diagnostic; unresolved templates defer the plan to materialization.
     pub(crate) fn plan(source: &CheckedType, target: &CheckedType) -> Result<Self, String> {
-        // Legacy `compile_expression` emits `unreachable` for a `Never` source
+        // compile expression emits `unreachable` for a `Never` source
         // before any coercion runs, so the plan is never executed.
         if source == &CheckedType::Never {
             return Ok(LoweredCoercionPlan::Identity);
@@ -664,7 +660,7 @@ impl LoweredCoercionPlan {
 
 #[derive(Debug, Clone)]
 pub(crate) enum LoweredExpressionKind {
-    /// Explicitly deferred to Stage 2.5 or Stage 2.6 with its owning family.
+    /// A callable expression dispatched to its specialized lowerer.
     Deferred(DeferredExpressionFamily),
     Block(BlockId),
     /// An ordinary value read: a local, parameter, global, mutable cell,
@@ -704,7 +700,7 @@ pub(crate) enum LoweredExpressionKind {
 /// A string template with its ordered parts and checked formatting
 /// selections. Literal text is retained exactly after source decoding, and
 /// interpolations keep the selected formatting trait/method and value type.
-/// Helper instantiation and artifact deduplication remain Stage 2.5/4 work.
+/// Helper instantiation and artifact deduplication remain lowering work.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredStringTemplate {
     pub parts: Vec<LoweredStringTemplatePart>,
@@ -768,7 +764,7 @@ impl LoweredCallableCategory {
 }
 
 /// A typed callable target. This is the semantic identity a call or callable
-/// value invokes; concrete instances and generated adapters stay in Stage 3/4.
+/// value invokes; concrete instances and generated adapters stay in specialization.
 #[derive(Debug, Clone)]
 pub(crate) enum LoweredCallableTarget {
     /// A known function invoked directly. The environment is `None` for a
@@ -796,7 +792,7 @@ pub(crate) enum LoweredCallableTarget {
         recursive: Option<RecursiveConstruction>,
     },
     /// An explicit trait implementation method. `function` is absent while
-    /// the selection depends on Stage 3 substitution; the call's evidence
+    /// the selection depends on specialization substitution; the call's evidence
     /// recipe retains the declared obligation.
     TraitImplementation {
         trait_id: TraitId,
@@ -904,7 +900,7 @@ pub(crate) struct LoweredClosureConstruction {
 
 /// Compile-time substitutions recorded at a call or closure use site. The
 /// mapping retains unresolved declared template parameters instead of
-/// inventing a concrete instance; Stage 3 owns instance interning.
+/// inventing a concrete instance; specialization owns instance interning.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CallSubstitutions {
     pub types: Vec<CallTypeSubstitution>,
@@ -943,7 +939,7 @@ pub(crate) enum TraitEvidence {
         structural: StructuralTraitMethod,
         arguments: Vec<CheckedType>,
     },
-    /// A declared bound or implementation prerequisite that Stage 3 must
+    /// A declared bound or implementation prerequisite that specialization must
     /// realize after substitution; no implementation is chosen yet.
     DeclaredBound {
         trait_id: TraitId,
@@ -1080,7 +1076,7 @@ pub(crate) struct LoweredOptionAlternatives {
 
 impl LoweredOptionAlternatives {
     /// The alternatives of `Buffer.pop`'s result when `target` is that
-    /// intrinsic, with legacy `compile_buffer_pop`'s rule (the `Distinct`
+    /// intrinsic, with compile buffer pop's rule (the `Distinct`
     /// alternatives named `None` and `Some`); `None` for any other target.
     pub(crate) fn for_call(
         target: &LoweredCallableTarget,
@@ -1211,7 +1207,7 @@ pub(crate) enum LoweredResourceUseKind {
 
 /// A resolved resource requirement: the provider selected at the occurrence
 /// and how the value is read or passed. A generic template requirement keeps
-/// `provider` absent until Stage 3 substitutes it.
+/// `provider` absent until specialization substitutes it.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredResourceUse {
     pub origin: Origin,
@@ -1232,7 +1228,7 @@ pub(crate) struct LoweredWith {
     /// The provider value expression, evaluated before the body.
     pub value: ExpressionId,
     /// The source place the provider storage reuses
-    /// (`LoweredProviderStorage::Place`). Stage 5.4 Step 5 records it so the
+    /// (`LoweredProviderStorage::Place`). emission records it so the
     /// emitter does not re-derive the place decision.
     pub place: Option<PlaceId>,
     pub body: BlockId,
@@ -1389,7 +1385,7 @@ pub(crate) struct LoweredAwait {
 }
 
 /// The `Completed payload | Cancelled` injections of one external await,
-/// at legacy `compile_external_await`'s fixed positions (0 and 1).
+/// at compile external await's fixed positions (0 and 1).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LoweredAwaitOutcome {
     pub completed: LoweredCoercionPlan,
@@ -1434,7 +1430,7 @@ pub(crate) enum CallRoute {
     CurriedDefault,
     /// A trait-dispatched call with a selected explicit implementation.
     TraitImplementation,
-    /// A trait-dispatched call whose implementation depends on Stage 3
+    /// A trait-dispatched call whose implementation depends on specialization
     /// substitution.
     DeclaredTraitBound,
     /// A trait-dispatched call resolved structurally.
@@ -1532,7 +1528,7 @@ impl CallableValueRoute {
 }
 
 /// A checked index read: `base[index]`. The complete checked `Index` dispatch
-/// recipe is copied here; Stage 2.5 converts it into explicit callable
+/// recipe is copied here; lowering converts it into explicit callable
 /// evidence without consulting the type checker. The operands are lowered in
 /// source evaluation order (base before index).
 #[derive(Debug, Clone)]
@@ -1555,24 +1551,21 @@ pub(crate) struct LoweredIndex {
     pub base_temporary: bool,
     /// The index operand is materialized into a temporary for a mutation.
     pub index_temporary: bool,
-    /// Stage 5.5 Step 5: the base operand's place when it has one. Legacy
-    /// `compile_indirect_argument_pointer` reuses a place pointer for a
-    /// mutation or borrowed pass and materializes a temporary otherwise.
+    /// The base operand's place, reused for mutated or borrowed operands.
+    /// An operand without a place uses a recorded temporary.
     pub base_place: Option<PlaceId>,
     /// The index operand's place when it has one.
     pub index_place: Option<PlaceId>,
-    /// Stage 5.5 review: how the `Index` call passes its operands and which
+    /// How the `Index` call passes its operands and which
     /// operand temporaries it drops afterwards, so the emitter never derives
-    /// a pass mode or a cleanup from the operand types (Contract 1).
+    /// a pass mode or a cleanup from the operand types.
     pub operands: LoweredIndexOperands,
     /// The single validated evidence recipe for the `Index` dispatch.
     pub evidence: TraitEvidence,
 }
 
-/// The operand passing and cleanup facts of one `Index` call, mirroring legacy
-/// `compile_effect_arguments` over the `(base, index)` product and
-/// `drop_mutation_temporaries` after the call. Indexed by the method's
-/// flattened parameters.
+/// Operand passing and cleanup facts for an Index call, indexed by the
+/// method's flattened parameters. Mutation temporaries drop after the call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LoweredIndexOperands {
     /// The parameter is passed by address (a place pointer or a temporary).
@@ -1585,7 +1578,7 @@ pub(crate) struct LoweredIndexOperands {
 }
 
 impl LoweredIndexOperands {
-    /// Legacy's decisions for one `Index` call: a parameter is indirect when
+    /// The emitter's decisions for one `Index` call: a parameter is indirect when
     /// it is mutated or, unless moved, not `Copy` (for the two-operand shape,
     /// judged on the actual operand type); a mutation operand with no place
     /// gets a temporary dropped when its parameter type needs drop; a whole
@@ -1884,21 +1877,20 @@ pub(crate) enum LoweredAccessKind {
 
 /// A source pattern with its checked type and lowered children. Patterns are
 /// shared by function parameter templates, runtime pattern bindings, and
-/// (from Stage 2.4 on) match arms.
+/// match arms.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredPattern {
     pub origin: Origin,
     pub value_type: CheckedType,
     pub kind: LoweredPatternKind,
-    /// Stage 5.5 E1: the checked test plan legacy `compile_match_pattern_branch`
-    /// computes. Lowering records the decision; the emitter only reads it.
+    /// The checked pattern test plan, consumed directly by emission.
     pub test: LoweredPatternTestPlan,
 }
 
-/// Stage 5.5 E1: the checked test decisions for one pattern. A template whose
+/// The checked test decisions for one pattern. A template whose
 /// subject or patterns still contain declared parameters leaves the decisions
 /// undecided (`None` / `LoweredPatternIdentity::None`); materialization
-/// recomputes the plan from the substituted types like the other Stage 3.4
+/// recomputes the plan from the substituted types like the other specialization
 /// derived facts, and the instance-body validator requires it to agree.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LoweredPatternTestPlan {
@@ -1929,7 +1921,7 @@ impl LoweredPatternTestPlan {
     }
 }
 
-/// The nominal identity a pattern test uses. Legacy `compile_match_pattern_branch`
+/// The nominal identity a pattern test uses. compile match pattern branch
 /// selects each branch by asking the resolver for a builtin or singleton
 /// identity; lowering records the answer here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1960,11 +1952,9 @@ enum PatternPlanShape {
     Literal { literal: String },
 }
 
-/// Computes a pattern's test plan against the subject type the site supplies,
-/// mirroring legacy `compile_match_pattern_branch`'s decision order. The child
-/// subjects are returned in syntax order (At: binding then inner pattern;
-/// Product: element order; Nominal: the single argument) so the caller
-/// recurses with exactly the types legacy passes down.
+/// Computes a pattern test against its use site's subject type. Child subjects
+/// follow syntax order: at bindings before nested patterns, product elements
+/// in order, and nominal arguments as one child.
 fn pattern_test_plan(
     subject: &CheckedType,
     value_type: &CheckedType,
@@ -2173,7 +2163,7 @@ pub(crate) enum LoweredPatternKind {
     Wildcard,
     Binding {
         initialization_state_only: bool,
-        /// Source spelling retained for LLVM value names (Stage 5.9 P2).
+        /// Source spelling retained for LLVM value names .
         name: String,
         /// The symbol this pattern binds. Absent for singleton patterns such
         /// as `True`, which name an existing value instead of binding one.
@@ -2310,14 +2300,14 @@ pub(crate) struct LoweredPatternBindingItem {
     /// Checked propagation metadata, present exactly for propagating
     /// bindings.
     pub propagation: Option<CheckedPropagation>,
-    /// Stage 5.5 Step 7: the failure value's coercion plan when the propagated
-    /// result is itself a sum (`compile_propagating_binding`'s
-    /// `coerce_sum_value` path). `None` when the source is returned unchanged
+    /// The failure value's coercion plan when the propagated
+    /// result is itself a sum (compile propagating binding's
+    /// coerce sum value path). `None` when the source is returned unchanged
     /// or extracted as a residual variant.
     pub propagation_plan: Option<LoweredCoercionPlan>,
-    /// Stage 5.5 review (E1): the source alternative returned as the failure
+    /// The source alternative returned as the failure
     /// value when the propagated result is a single, non-sum residual variant
-    /// (`compile_propagating_binding`'s `extract_sum_alternative` path).
+    /// (compile propagating binding's `extract_sum_alternative` path).
     pub propagation_residual: Option<usize>,
 }
 
@@ -2353,9 +2343,9 @@ pub(crate) struct LoweredAssignmentItem {
     pub initialization_symbol: Option<SymbolId>,
     /// Whether the place's previous value must be dropped before the store.
     pub drop_previous: bool,
-    /// Stage 5.5 review: an indexed (`MutateIndex`) assignment whose base has
-    /// no place materializes it into a temporary that legacy
-    /// `drop_mutation_temporaries` drops after the call when it needs drop.
+    /// An indexed (`MutateIndex`) assignment whose base has
+    /// no place materializes it into a temporary that the emitter
+    /// drop mutation temporaries drops after the call when it needs drop.
     pub drops_base_temporary: bool,
     /// The signal write notification this assignment performs, when the place
     /// is rooted at a signal symbol.
@@ -2430,10 +2420,10 @@ pub(crate) struct LoweredFunction {
     pub body_origin: Origin,
     pub body_syntax: SyntaxId,
     pub body: Option<BlockId>,
-    /// Stage 5.5 Step 7: the body block's own header facts. When the function
+    /// The body block's own header facts. When the function
     /// body lowers to `LoweredExpressionKind::Block`, the block expression's
     /// coercion (and moved symbols) would otherwise be lost by unwrapping it
-    /// to its root block; legacy `compile_expression` applies them.
+    /// to its root block; compile expression applies them.
     pub body_coercion: Option<CheckedCoercion>,
     pub body_coercion_plan: Option<LoweredCoercionPlan>,
     pub body_moved_symbols: Vec<SymbolId>,
@@ -2610,7 +2600,7 @@ pub(crate) struct LoweredSemanticIds {
     pub natural_trait: Option<TraitId>,
     pub sized_trait: Option<TraitId>,
     pub copy_trait: Option<TraitId>,
-    /// The checker-selected `Clone` trait, used by Stage 4's buffer-clone
+    /// The checker-selected `Clone` trait, used by artifact planning's buffer-clone
     /// artifact and evidence recording.
     pub clone_trait: Option<TraitId>,
     pub drop_trait: Option<TraitId>,
@@ -2637,7 +2627,7 @@ pub(crate) struct LoweredSemanticIds {
     pub string_representation: Option<CheckedType>,
 }
 
-/// The complete owned Stage 2 representation. Arena order is insertion order,
+/// The complete owned lowering representation. Arena order is insertion order,
 /// which lowering defines to be deterministic program/source order.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LoweredProgram {
@@ -2676,46 +2666,46 @@ pub(crate) struct LoweredProgram {
     coros: Arena<LoweredCoro, LoweredCoroId>,
     awaits: Arena<LoweredAwait, LoweredAwaitId>,
     initializers: Arena<LoweredInitializer, InitializerId>,
-    /// Stage 3.3 reachable function instances in first-discovery order; the
+    /// Specialization reachable function instances in first-discovery order; the
     /// matching key of each instance is interned in `specializations` at the
     /// instance's own ordinal.
     instances: Arena<LoweredFunctionInstance, FunctionInstanceId>,
     /// Constructor-adapter and structural-method requests in first-discovery
     /// order; the matching key is interned in `specializations`.
     artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
-    /// Stage 4.2 closure artifact uses recorded on module initializers, indexed
-    /// by `InitializerId` in scan order. Stage 3 initializer requests stay
+    /// Artifact planning closure artifact uses recorded on module initializers, indexed
+    /// by `InitializerId` in scan order. specialization initializer requests stay
     /// request-root-only, so this starts empty and only closure-phase scanners
     /// add entries.
     initializer_artifact_uses: Vec<Vec<LoweredArtifactUse>>,
-    /// Stage 4.2 closure artifact edges owned by module initializers, indexed
+    /// Artifact planning closure artifact edges owned by module initializers, indexed
     /// by `InitializerId` in request order.
     initializer_artifacts: Vec<Vec<LoweredArtifactDependency>>,
-    /// Stage 4.2 closure instance uses recorded on module initializers by
+    /// Artifact planning closure instance uses recorded on module initializers by
     /// scanners, indexed by `InitializerId` in scan order.
     initializer_instance_uses: Vec<Vec<LoweredInstanceUse>>,
-    /// Stage 4.2 closure instance edges owned by module initializers, indexed
-    /// by `InitializerId` in request order. Stage 3 initializer instance
+    /// Artifact planning closure instance edges owned by module initializers, indexed
+    /// by `InitializerId` in request order. specialization initializer instance
     /// requests stay request-root-only; only closure-phase scans add entries.
     initializer_instances: Vec<Vec<LoweredInstanceDependency>>,
-    /// Stage 4.4 owned bindings of nested initializer block locals, indexed by
+    /// Artifact planning owned bindings of nested initializer block locals, indexed by
     /// `InitializerId` in registration order. Module globals are never owned.
     initializer_owned_bindings: Vec<Vec<LoweredOwnedBinding>>,
-    /// Stage 5.1 (D4) concrete bindings for every dispatch/construction site in
+    /// Emission concrete bindings for every dispatch/construction site in
     /// each module initializer, keyed by program-arena `LoweredBindingSite` and
     /// indexed by `InitializerId`. Built at the closure fixed point; instance
     /// bodies carry the same table per body.
     initializer_bindings: Vec<std::collections::BTreeMap<LoweredBindingSite, LoweredBoundTarget>>,
-    /// Stage 5.1 (D4) resolved trait evidence for the initializer sites that
+    /// Emission resolved trait evidence for the initializer sites that
     /// need it, indexed by `InitializerId`.
     initializer_evidence: Vec<std::collections::BTreeMap<LoweredBindingSite, TraitEvidence>>,
-    /// Append-only instance/artifact key catalog. Stage 3.3 alone reserves
+    /// Append-only instance/artifact key catalog. specialization alone reserves
     /// ordinals, before visiting a body, so recursion converges.
     specializations: SpecializationCatalog,
     semantic_ids: LoweredSemanticIds,
     string_formatting: LoweredStringFormatting,
-    /// Stage 4.6 ordered, deduplicated runtime surfaces the closed catalog
-    /// needs. Recorded after the closure fixed point; Stage 5 installs each
+    /// Artifact planning ordered, deduplicated runtime surfaces the closed catalog
+    /// needs. Recorded after the closure fixed point; emission installs each
     /// surface only when present.
     pub(crate) runtime_requirements: LoweredRuntimeRequirements,
     /// Transient lowering state: the number of currently enclosing loops,
@@ -2727,10 +2717,10 @@ pub(crate) struct LoweredProgram {
     consumed_calls: HashSet<SyntaxId>,
     /// Transient lowering state: the active lexical provider stack while one
     /// function body or module initializer lowers. The last matching provider
-    /// by checked value type is the one the legacy backend would select.
+    /// by checked value type is the one the emitter backend would select.
     active_resource_providers: Vec<LoweredResourceProviderId>,
     /// Test-only: the rounds and total growth the last closed artifact catalog
-    /// observed, so the substage notes can record the observed maxima rather
+    /// observed, so the closure statistics can record the observed maxima rather
     /// than assert the defensive bounds blindly.
     #[cfg(test)]
     pub(crate) closure_stats: Option<ClosureStats>,
@@ -3501,7 +3491,7 @@ impl LoweredProgram {
         let body = self.lower_expression(module, owner, ExpressionContext::Primary, &function.body);
         self.active_resource_providers.truncate(provider_base);
         let body = body?;
-        // Stage 5.5 Step 7: when the body lowers to a block expression, its
+        // when the body lowers to a block expression, its
         // header coercion and moved symbols would be lost by unwrapping it to
         // its root block; they ride back to the caller with the root. A
         // non-block body keeps its header on the wrapped result expression,
@@ -3628,7 +3618,7 @@ impl LoweredProgram {
         Ok(Some(self.items.push(LoweredItem { origin, kind })))
     }
 
-    /// Legacy `bind_pattern_value`'s cell rule: a mutable (or
+    /// Bind pattern value's cell rule: a mutable (or
     /// initialization-checked) symbol without module storage gets a binding
     /// cell; a mutated parameter arrives as a caller-provided pointer instead.
     fn symbol_requires_cell(&self, module: &TypedModule, symbol: SymbolId) -> bool {
@@ -3709,7 +3699,7 @@ impl LoweredProgram {
                 "cannot lower a propagating binding without checked propagation metadata",
             ));
         }
-        // Stage 5.5 Step 7: the failure path's sum coercion plan.
+        // the failure path's sum coercion plan.
         let propagation_plan = propagation.as_ref().and_then(|propagation| {
             (propagation.source != propagation.result
                 && matches!(propagation.result, CheckedType::Sum(_)))
@@ -3946,9 +3936,8 @@ impl LoweredProgram {
         }
     }
 
-    /// Lowers an ambient resource occurrence into a use bound to the nearest
-    /// active provider. Missing providers produce the same source diagnostic
-    /// the legacy backend raises.
+    /// Binds an ambient resource occurrence to its nearest active provider.
+    /// A missing provider produces a source diagnostic.
     fn lower_resource_use(
         &mut self,
         module: &TypedModule,
@@ -4263,7 +4252,7 @@ impl LoweredProgram {
                     .reactive_callbacks
                     .get(predicate)
                     .expect("the predicate callback was just recorded");
-                // D25: pure apart from reading signals.
+                // Pure apart from reading signals.
                 if !predicate_record.function_type.effects.resources.is_empty()
                     || matches!(
                         predicate_record.function_type.effects.state,
@@ -4341,7 +4330,7 @@ impl LoweredProgram {
             LoweredProviderStorage::Materialized
         };
         // Record the reused source place once, so emission never re-derives
-        // the place decision (Stage 5.4 Step 5).
+        // the place decision .
         let place = match storage {
             LoweredProviderStorage::Place => {
                 Some(self.lower_place(module, owner, context, &with.value)?)
@@ -4374,7 +4363,7 @@ impl LoweredProgram {
     }
 
     /// Whether code generation can reuse an existing pointer for a `with`
-    /// value. This follows `compile_place_pointer`, including resource places
+    /// value. This follows compile place pointer, including resource places
     /// and transparent single-value wrappers, rather than the narrower
     /// symbol-root test used for call argument mutation.
     fn provider_value_has_place(&self, module: &TypedModule, value: &Expression) -> bool {
@@ -4414,8 +4403,8 @@ impl LoweredProgram {
     /// code generation's place-pointer result: direct storage keeps its symbol,
     /// slice and dereference places do not.
     /// The root symbol of an assignment target's place: a direct symbol or
-    /// captured cell, or a representation/product projection of one. Stage
-    /// 5.11 (F2): a field write resolves to its base's root symbol for
+    /// captured cell, or a representation/product projection of one. A
+    /// field write resolves to its base's root symbol for
     /// notification, so a reaction over a signal product field re-runs. The
     /// emitter never writes the base's initialization state for a field
     /// projection; a projection only executes on an already-initialized base
@@ -4663,7 +4652,7 @@ impl LoweredProgram {
     }
 
     /// Lowers a checked pattern recursively, recording bound symbols,
-    /// singleton targets, and the Stage 5.5 E1 test plan against the subject
+    /// singleton targets, and the emission test plan against the subject
     /// type the use site supplies.
     fn lower_pattern(
         &mut self,
@@ -4691,7 +4680,7 @@ impl LoweredProgram {
             Err(message) => {
                 // A template whose subject still contains declared parameters
                 // cannot decide the plan; materialization recomputes it once
-                // the types are concrete. A concrete subject that legacy
+                // the types are concrete. A concrete subject that the emitter
                 // rejects is a lowering diagnostic.
                 if instance_resolution::unresolved_type_problem(subject).is_some()
                     || instance_resolution::unresolved_type_problem(&value_type).is_some()
@@ -4854,8 +4843,8 @@ impl LoweredProgram {
             ExpressionDisposition::Ordinary(family) => {
                 self.lower_ordinary_expression(module, owner, context, family, expression)?
             }
-            ExpressionDisposition::Stage26(route) => {
-                self.lower_stage26_expression(module, owner, context, route, expression)?
+            ExpressionDisposition::ResourceCoroutine(route) => {
+                self.lower_resource_expression(module, owner, context, route, expression)?
             }
             ExpressionDisposition::Rejected => unreachable!("rejected above"),
         };
@@ -4876,7 +4865,7 @@ impl LoweredProgram {
         Ok(id)
     }
 
-    /// Lowers the children and payload of one Stage 2.4-owned expression
+    /// Lowers the children and payload of one ordinary expression
     /// family. Every family has a concrete payload; a family/expression
     /// mismatch is a defensive diagnostic.
     fn lower_ordinary_expression(
@@ -4884,40 +4873,41 @@ impl LoweredProgram {
         module: &TypedModule,
         owner: ExpressionOwner,
         context: ExpressionContext,
-        family: Stage24Family,
+        family: OrdinaryExpressionFamily,
         expression: &Expression,
     ) -> Result<LoweredExpressionKind, Diagnostic> {
         match (family, expression) {
-            (Stage24Family::Block, Expression::Block(block)) => Ok(LoweredExpressionKind::Block(
-                self.lower_block(module, owner, context, block)?,
-            )),
-            (Stage24Family::Satisfies, Expression::Satisfies(satisfies)) => {
+            (OrdinaryExpressionFamily::Block, Expression::Block(block)) => Ok(
+                LoweredExpressionKind::Block(self.lower_block(module, owner, context, block)?),
+            ),
+            (OrdinaryExpressionFamily::Satisfies, Expression::Satisfies(satisfies)) => {
                 let value = self.lower_expression(module, owner, context, &satisfies.value)?;
                 Ok(LoweredExpressionKind::Satisfies(LoweredSatisfies { value }))
             }
-            (Stage24Family::Match, Expression::Match(match_)) => self
+            (OrdinaryExpressionFamily::Match, Expression::Match(match_)) => self
                 .lower_match(module, owner, context, match_)
                 .map(LoweredExpressionKind::Match),
-            (Stage24Family::Loop, Expression::Loop(loop_)) => self
+            (OrdinaryExpressionFamily::Loop, Expression::Loop(loop_)) => self
                 .lower_loop(module, owner, context, loop_)
                 .map(LoweredExpressionKind::Loop),
-            (Stage24Family::Product, Expression::Product(product)) => self
+            (OrdinaryExpressionFamily::Product, Expression::Product(product)) => self
                 .lower_product(module, owner, context, product)
                 .map(LoweredExpressionKind::Product),
-            (Stage24Family::RepeatedProduct, Expression::RepeatedProduct(repeated)) => self
-                .lower_repeated_product(module, owner, context, repeated)
-                .map(LoweredExpressionKind::RepeatedProduct),
-            (Stage24Family::Access, Expression::Access(access)) => {
+            (OrdinaryExpressionFamily::RepeatedProduct, Expression::RepeatedProduct(repeated)) => {
+                self.lower_repeated_product(module, owner, context, repeated)
+                    .map(LoweredExpressionKind::RepeatedProduct)
+            }
+            (OrdinaryExpressionFamily::Access, Expression::Access(access)) => {
                 self.lower_access(module, owner, context, access)
             }
-            (Stage24Family::Name, Expression::Name(name)) => self.lower_name(
+            (OrdinaryExpressionFamily::Name, Expression::Name(name)) => self.lower_name(
                 module,
                 owner,
                 name.syntax.id,
                 name.syntax.span.clone(),
                 module.symbol_for(name.syntax.id),
             ),
-            (Stage24Family::Function, Expression::Function(function)) => {
+            (OrdinaryExpressionFamily::Function, Expression::Function(function)) => {
                 let value = self.lower_callable_value(
                     module,
                     owner,
@@ -4927,32 +4917,33 @@ impl LoweredProgram {
                 )?;
                 Ok(LoweredExpressionKind::CallableValue(value))
             }
-            (Stage24Family::Call, Expression::Call(call)) => {
+            (OrdinaryExpressionFamily::Call, Expression::Call(call)) => {
                 self.lower_call(module, owner, context, call)
             }
-            (Stage24Family::Integer, Expression::Integer(integer)) => self
+            (OrdinaryExpressionFamily::Integer, Expression::Integer(integer)) => self
                 .lower_integer(module, integer)
                 .map(LoweredExpressionKind::Integer),
-            (Stage24Family::Float, Expression::Float(float)) => self
+            (OrdinaryExpressionFamily::Float, Expression::Float(float)) => self
                 .lower_float(module, float)
                 .map(LoweredExpressionKind::Float),
-            (Stage24Family::String, Expression::String(string)) => {
+            (OrdinaryExpressionFamily::String, Expression::String(string)) => {
                 let value = staple_syntax::string_literal::decode(&string.literal)
                     .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
                 Ok(LoweredExpressionKind::String(LoweredString { value }))
             }
-            (Stage24Family::CString, Expression::CString(string)) => self
+            (OrdinaryExpressionFamily::CString, Expression::CString(string)) => self
                 .lower_c_string(string)
                 .map(LoweredExpressionKind::CString),
-            (Stage24Family::Index, Expression::Index(index)) => self
+            (OrdinaryExpressionFamily::Index, Expression::Index(index)) => self
                 .lower_index(module, owner, context, index)
                 .map(LoweredExpressionKind::Index),
-            (Stage24Family::Logical, Expression::Logical(logical)) => self
+            (OrdinaryExpressionFamily::Logical, Expression::Logical(logical)) => self
                 .lower_logical(module, owner, context, logical)
                 .map(LoweredExpressionKind::Logical),
-            (Stage24Family::StringTemplate, Expression::StringTemplate(template)) => self
-                .lower_string_template(module, owner, context, template)
-                .map(LoweredExpressionKind::StringTemplate),
+            (OrdinaryExpressionFamily::StringTemplate, Expression::StringTemplate(template)) => {
+                self.lower_string_template(module, owner, context, template)
+                    .map(LoweredExpressionKind::StringTemplate)
+            }
             _ => Err(Diagnostic::new(
                 expression.syntax().span.clone(),
                 format!(
@@ -4963,19 +4954,18 @@ impl LoweredProgram {
         }
     }
 
-    /// Lowers one Stage 2.6-owned family. Resource reads, providers, and places
-    /// have concrete payloads; coroutine creation and `await` keep their
-    /// explicit route until Steps 5 and 6 populate their records.
-    fn lower_stage26_expression(
+    /// Lowers one lowering-owned family. Resource reads, providers, and places
+    /// have concrete payloads, as do coroutine creation and `await`.
+    fn lower_resource_expression(
         &mut self,
         module: &TypedModule,
         owner: ExpressionOwner,
         context: ExpressionContext,
-        route: Stage26Route,
+        route: ResourceCoroutineRoute,
         expression: &Expression,
     ) -> Result<LoweredExpressionKind, Diagnostic> {
         match (route, expression) {
-            (Stage26Route::ResourceUse, Expression::Resource(resource)) => {
+            (ResourceCoroutineRoute::ResourceUse, Expression::Resource(resource)) => {
                 let use_ = self.lower_resource_use(
                     module,
                     resource.syntax.id,
@@ -4984,10 +4974,10 @@ impl LoweredProgram {
                 )?;
                 Ok(LoweredExpressionKind::Resource(use_))
             }
-            (Stage26Route::ResourceProvider, Expression::With(with)) => self
+            (ResourceCoroutineRoute::ResourceProvider, Expression::With(with)) => self
                 .lower_with(module, owner, context, with)
                 .map(LoweredExpressionKind::With),
-            (Stage26Route::CoroutineCreation, Expression::Coro(coro)) => {
+            (ResourceCoroutineRoute::CoroutineCreation, Expression::Coro(coro)) => {
                 self.lower_coro(coro).map(LoweredExpressionKind::Coro)
             }
             (_, Expression::Await(await_)) => self
@@ -4995,7 +4985,7 @@ impl LoweredProgram {
                 .map(LoweredExpressionKind::Await),
             (_, _) => Err(Diagnostic::new(
                 expression.syntax().span.clone(),
-                format!("Stage 2.6 route {route:?} does not match its syntax variant"),
+                format!("lowering route {route:?} does not match its syntax variant"),
             )),
         }
     }
@@ -5041,7 +5031,7 @@ impl LoweredProgram {
         &mut self,
         module: &TypedModule,
         owner: ExpressionOwner,
-        route: Stage26Route,
+        route: ResourceCoroutineRoute,
         await_: &staple_syntax::AwaitExpression,
     ) -> Result<LoweredAwaitId, Diagnostic> {
         let span = await_.syntax.span.clone();
@@ -5057,7 +5047,7 @@ impl LoweredProgram {
             .type_of_expression(await_.operand.syntax().id)
             .cloned();
         let kind = match route {
-            Stage26Route::AwaitTask => {
+            ResourceCoroutineRoute::AwaitTask => {
                 let result = operand_type
                     .as_ref()
                     .and_then(|ty| module.task_result(ty))
@@ -5065,7 +5055,7 @@ impl LoweredProgram {
                     .unwrap_or(CheckedType::Error);
                 LoweredAwaitKind::Task { result }
             }
-            Stage26Route::AwaitWait => {
+            ResourceCoroutineRoute::AwaitWait => {
                 let result = operand_type
                     .as_ref()
                     .and_then(|ty| module.wait_result(ty))
@@ -5073,7 +5063,7 @@ impl LoweredProgram {
                     .unwrap_or(CheckedType::Error);
                 LoweredAwaitKind::Wait { result }
             }
-            Stage26Route::AwaitChildCoroutine => {
+            ResourceCoroutineRoute::AwaitChildCoroutine => {
                 let Some((child_deferred, child_result)) = operand_type
                     .as_ref()
                     .and_then(|ty| module.coroutine_parts(ty))
@@ -5432,7 +5422,7 @@ impl LoweredProgram {
         let Some(final_type) = final_type else {
             // The checker diverged before recording a product shape, so the
             // product is unreachable. Lower every element in source order and
-            // record it positionally; later stages never emit this value.
+            // record it positionally; subsequent consumers never emit this value.
             let mut steps = Vec::new();
             let mut elements = Vec::new();
             for element in &product.elements {
@@ -5993,7 +5983,7 @@ impl LoweredProgram {
                 }
             }
         }
-        // Stage 5.5 Step 5: record the operand places so emission can reuse
+        // record the operand places so emission can reuse
         // them without re-deriving `expression_has_place_root`.
         let base_place = if base_is_place {
             self.lower_place(module, owner, context, &index.value).ok()
@@ -6085,7 +6075,7 @@ impl LoweredProgram {
     }
 
     /// Lowers a match subject first, then arms in source order, reusing the
-    /// Stage 2.3 pattern lowering and copying the checked subject type.
+    /// lowering pattern lowering and copying the checked subject type.
     fn lower_match(
         &mut self,
         module: &TypedModule,
@@ -6160,10 +6150,9 @@ impl LoweredProgram {
             .is_some_and(|expression| module.type_needs_drop(&expression.value_type))
     }
 
-    /// Classifies one checked call into its single explicit route, mirroring
-    /// the backend's decision order: juxtaposed chain, curried defaults, trait
-    /// dispatch, intrinsic, generic direct, external, then the indirect
-    /// closure fallback. There is no unknown-callable outcome.
+    /// Classifies a checked call: juxtaposition, curried defaults, trait dispatch,
+    /// intrinsic, generic direct, external, then indirect closure. Every call has
+    /// an explicit route.
     fn classify_call_route(
         &self,
         module: &TypedModule,
@@ -6234,7 +6223,7 @@ impl LoweredProgram {
 
     /// Resolves the trait-dispatch route into explicit evidence: a selected
     /// implementation, a structural method, or a declared bound whose
-    /// selection waits for Stage 3 substitution.
+    /// selection waits for specialization substitution.
     fn classify_trait_call_route(
         &self,
         module: &TypedModule,
@@ -6262,14 +6251,12 @@ impl LoweredProgram {
             return Ok(CallRoute::StructuralTraitMethod);
         }
         // A generic argument's implementation may only be selectable after
-        // Stage 3 has canonical substitutions.
+        // specialization has canonical substitutions.
         Ok(CallRoute::DeclaredTraitBound)
     }
 
-    /// Classifies a callable value expression into its construction route,
-    /// mirroring the backend's value routes: trait method, constructor,
-    /// intrinsic, extern, generic or declared function, anonymous function,
-    /// or an ordinary function-typed read.
+    /// Classifies a callable construction as a trait method, constructor, intrinsic,
+    /// extern, declared or generic function, anonymous function, or stored read.
     fn classify_callable_value_route(
         &self,
         module: &TypedModule,
@@ -6578,7 +6565,7 @@ impl LoweredProgram {
 
     /// Builds the single evidence recipe for a checked trait dispatch:
     /// a selected explicit implementation, a structural method, or the
-    /// declared bound Stage 3 must realize after substitution. Selection never
+    /// declared bound specialization must realize after substitution. Selection never
     /// uses display names.
     fn trait_evidence_for(
         &self,
@@ -6634,7 +6621,7 @@ impl LoweredProgram {
     }
 
     /// The enclosing function's declared bounds for one trait, retained on a
-    /// deferred evidence recipe so Stage 3 can realize the obligation without
+    /// deferred evidence recipe so specialization can realize the obligation without
     /// a resolver lookup.
     fn declared_prerequisites(
         &self,
@@ -7033,7 +7020,7 @@ impl LoweredProgram {
                 evidence = Some(recipe);
                 (target, None, function_type)
             }
-            _ => unreachable!("non-Step-3 call routes defer above"),
+            _ => unreachable!("non-concrete call routes defer above"),
         };
         let (arguments, mut steps) = if matches!(
             route,
@@ -7057,7 +7044,7 @@ impl LoweredProgram {
         } else {
             // External, intrinsic, and constructor calls have no hidden
             // resource ABI arguments; reactive intrinsics resolve their ambient
-            // provider inside their reactive operation record (Step 4).
+            // provider inside their reactive operation record.
             Vec::new()
         };
         for index in 0..resource_bindings.len() {
@@ -7453,11 +7440,8 @@ impl LoweredProgram {
         Ok((vec![entry], vec![LoweredCallStep::Argument { argument: 0 }]))
     }
 
-    /// Evaluates a product argument into final ABI slots, mirroring the
-    /// backend's product-element and contextual-default handling: source
-    /// elements evaluate in order, spreads expand to slot mappings, and
-    /// checked defaults fill the remaining slots in final order. Returns
-    /// `None` when the argument is not a product.
+    /// Evaluates source product arguments in order, expands spread slot mappings,
+    /// and fills checked defaults in final slot order. Returns None for non-products.
     fn place_call_arguments(
         &mut self,
         module: &TypedModule,
@@ -7787,16 +7771,15 @@ impl LoweredProgram {
     /// Proves every runtime source construct has exactly one lowered
     /// counterpart by walking the checked program's functions, module
     /// initializers, items, expressions, patterns, and assignment places. A
-    /// construct that survives only in the transitional `TypedModule` payload
-    /// diagnoses here instead of surfacing during Stage 5.
+    /// construct that survives only in the checked `TypedModule` payload
+    /// diagnoses here instead of surfacing during emission.
     fn validate_source_coverage(&self, module: &TypedModule) -> Vec<Diagnostic> {
         SourceCoverage::run(self, module)
     }
 
-    /// Checks the Stage 2.6 resource provider/use, `with`, reactive, and
-    /// coroutine arenas against the catalogs and each other. Records populate
-    /// in Steps 2-6; the checks are already in place so a populated record can
-    /// never silently dangle.
+    /// Checks the lowering resource provider/use, `with`, reactive, and
+    /// coroutine arenas against the catalogs and each other, rejecting dangling
+    /// records and inconsistent provider or callback facts.
     fn validate_resource_and_coroutine_records(&self) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         for (_, provider) in self.resource_providers.iter() {
@@ -8167,7 +8150,7 @@ impl LoweredProgram {
                 } => {
                     match self.reactive_callbacks.get(*predicate) {
                         Some(callback) => {
-                            // D25: pure apart from reading signals.
+                            // Pure apart from reading signals.
                             if !callback.function_type.effects.resources.is_empty()
                                 || matches!(
                                     callback.function_type.effects.state,
@@ -9675,7 +9658,7 @@ impl LoweredProgram {
                     if index.method_type.is_none() {
                         diagnostics.push(Diagnostic::new(
                             expression.origin.span.clone(),
-                            "index dispatch has no instantiated method type for Stage 2.5",
+                            "index dispatch has no instantiated method type for lowering",
                         ));
                     }
                     self.validate_trait_evidence(
@@ -10041,7 +10024,7 @@ impl LoweredProgram {
                         binding.value.index(),
                         self.expressions.contains(binding.value),
                     );
-                    // Stage 5.5 Step 7: a propagation whose residual result is
+                    // a propagation whose residual result is
                     // a sum needs the failure coercion plan.
                     if let Some(propagation) = &binding.propagation {
                         let needs_plan = propagation.source != propagation.result
@@ -10665,7 +10648,7 @@ impl LoweredProgram {
         }
         // A coroutine plan is owned by its body thunk's catalog entry, and the
         // function catalog is a root set; `coro` expressions reach the same
-        // plans again in Step 6.
+        // plans again after materialization.
         for (id, plan) in self.coroutine_plans.iter() {
             if self.functions.get(plan.thunk).is_some() {
                 self.visit_owned_coroutine_plan(id, &mut reached);
@@ -11421,7 +11404,7 @@ impl LoweredProgram {
         let Some(coercion) = &expression.coercion else {
             return;
         };
-        // Stage 5.5 E1: a plan must exist once the coercion types are
+        // a plan must exist once the coercion types are
         // concrete, and it must equal a fresh computation from the recorded
         // source and target. Templates whose types still contain declared
         // parameters may leave it absent until materialization.
@@ -11487,7 +11470,7 @@ impl LoweredProgram {
         }
     }
 
-    /// Stage 5.5 E1: a pattern's test plan must equal a fresh computation from
+    /// A pattern's test plan must equal a fresh computation from
     /// its recorded subject and kind, and every nested pattern must be
     /// connected to the subject its parent plan supplies. Templates whose
     /// types still contain parameters are recomputed at materialization.
@@ -12482,19 +12465,19 @@ fn module_origin(module: &SourceModule) -> Origin {
 /// owned/deferred/rejected decision, and the coverage classifier test keeps
 /// the enumerated variant list in agreement.
 fn classify_expression(module: &TypedModule, expression: &Expression) -> ExpressionDisposition {
-    use ExpressionDisposition::{Ordinary, Rejected, Stage26};
-    use Stage24Family as Family;
-    use Stage26Route as Route;
+    use ExpressionDisposition::{Ordinary, Rejected, ResourceCoroutine};
+    use OrdinaryExpressionFamily as Family;
+    use ResourceCoroutineRoute as Route;
     match expression {
         Expression::Function(_) => Ordinary(Family::Function),
         Expression::Call(_) => Ordinary(Family::Call),
         Expression::Satisfies(_) => Ordinary(Family::Satisfies),
         Expression::Match(_) => Ordinary(Family::Match),
         Expression::Loop(_) => Ordinary(Family::Loop),
-        Expression::Coro(_) => Stage26(Route::CoroutineCreation),
-        Expression::Await(await_) => Stage26(classify_await_route(module, await_)),
-        Expression::Resource(_) => Stage26(Route::ResourceUse),
-        Expression::With(_) => Stage26(Route::ResourceProvider),
+        Expression::Coro(_) => ResourceCoroutine(Route::CoroutineCreation),
+        Expression::Await(await_) => ResourceCoroutine(classify_await_route(module, await_)),
+        Expression::Resource(_) => ResourceCoroutine(Route::ResourceUse),
+        Expression::With(_) => ResourceCoroutine(Route::ResourceProvider),
         Expression::Block(_) => Ordinary(Family::Block),
         Expression::Product(_) => Ordinary(Family::Product),
         Expression::RepeatedProduct(_) => Ordinary(Family::RepeatedProduct),
@@ -12521,17 +12504,17 @@ fn classify_expression(module: &TypedModule, expression: &Expression) -> Express
 fn classify_await_route(
     module: &TypedModule,
     await_: &staple_syntax::AwaitExpression,
-) -> Stage26Route {
+) -> ResourceCoroutineRoute {
     let Some(operand_type) = module.type_of_expression(await_.operand.syntax().id) else {
-        return Stage26Route::AwaitChildCoroutine;
+        return ResourceCoroutineRoute::AwaitChildCoroutine;
     };
     if module.task_result(operand_type).is_some() {
-        return Stage26Route::AwaitTask;
+        return ResourceCoroutineRoute::AwaitTask;
     }
     if module.wait_result(operand_type).is_some() {
-        return Stage26Route::AwaitWait;
+        return ResourceCoroutineRoute::AwaitWait;
     }
-    Stage26Route::AwaitChildCoroutine
+    ResourceCoroutineRoute::AwaitChildCoroutine
 }
 
 /// Whether an `await` operand is a call to the `until` intrinsic. Mirrors the
@@ -12623,26 +12606,26 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
     }
 }
 
-/// The stable name of a Stage 2.4 expression family.
-fn family_name(family: Stage24Family) -> &'static str {
+/// The stable name of a ordinary expression family.
+fn family_name(family: OrdinaryExpressionFamily) -> &'static str {
     match family {
-        Stage24Family::Block => "Block",
-        Stage24Family::Satisfies => "Satisfies",
-        Stage24Family::Match => "Match",
-        Stage24Family::Loop => "Loop",
-        Stage24Family::Product => "Product",
-        Stage24Family::RepeatedProduct => "RepeatedProduct",
-        Stage24Family::Access => "Access",
-        Stage24Family::Index => "Index",
-        Stage24Family::Logical => "Logical",
-        Stage24Family::Name => "Name",
-        Stage24Family::String => "String",
-        Stage24Family::StringTemplate => "StringTemplate",
-        Stage24Family::CString => "CString",
-        Stage24Family::Integer => "Integer",
-        Stage24Family::Float => "Float",
-        Stage24Family::Function => "Function",
-        Stage24Family::Call => "Call",
+        OrdinaryExpressionFamily::Block => "Block",
+        OrdinaryExpressionFamily::Satisfies => "Satisfies",
+        OrdinaryExpressionFamily::Match => "Match",
+        OrdinaryExpressionFamily::Loop => "Loop",
+        OrdinaryExpressionFamily::Product => "Product",
+        OrdinaryExpressionFamily::RepeatedProduct => "RepeatedProduct",
+        OrdinaryExpressionFamily::Access => "Access",
+        OrdinaryExpressionFamily::Index => "Index",
+        OrdinaryExpressionFamily::Logical => "Logical",
+        OrdinaryExpressionFamily::Name => "Name",
+        OrdinaryExpressionFamily::String => "String",
+        OrdinaryExpressionFamily::StringTemplate => "StringTemplate",
+        OrdinaryExpressionFamily::CString => "CString",
+        OrdinaryExpressionFamily::Integer => "Integer",
+        OrdinaryExpressionFamily::Float => "Float",
+        OrdinaryExpressionFamily::Function => "Function",
+        OrdinaryExpressionFamily::Call => "Call",
     }
 }
 
@@ -12719,8 +12702,7 @@ fn owner_function(owner: ExpressionOwner) -> Option<FunctionId> {
     }
 }
 
-/// Whether an expression has a place root, mirroring code generation's
-/// mutation-argument test: a direct symbol or an access chain ending in one.
+/// Whether an expression is a direct symbol or an access chain rooted in one.
 fn expression_has_place_root(module: &ResolvedModule, expression: &Expression) -> bool {
     if module.symbol_for(expression.syntax().id).is_some() {
         return true;
@@ -12813,10 +12795,10 @@ fn compile_time_only_symbol(module: &TypedModule, symbol: SymbolId) -> bool {
     })
 }
 
-/// The declaration facts the legacy backend re-derived from the module AST:
+/// Declaration facts snapshotted from module syntax:
 /// each module-level symbol's declared name, and whether the backend declares
 /// module-level storage for it. Collected once during symbol snapshotting, so
-/// the Stage 5 emitter reads records instead of syntax.
+/// the emitter reads records instead of syntax.
 struct SymbolDeclarationFacts {
     names: HashMap<SymbolId, String>,
     globals: HashSet<SymbolId>,
@@ -12835,7 +12817,7 @@ impl SymbolDeclarationFacts {
                             continue;
                         };
                         names.insert(symbol, binding.name.clone());
-                        // Legacy skips generic bindings (no storage global) and
+                        // The emitter skips generic bindings (no storage global) and
                         // symbols that already have a declaration global
                         // (externs are predeclared before storage runs).
                         if binding.type_parameters.is_empty()
@@ -12862,8 +12844,7 @@ impl SymbolDeclarationFacts {
     }
 }
 
-/// Collects declared names and module-level storage symbols from one
-/// top-level pattern, mirroring `declare_pattern_storage`'s traversal.
+/// Collects declared names and storage symbols from a module-level pattern.
 fn collect_pattern_facts(
     resolved: &ResolvedModule,
     pattern: &Pattern,
@@ -12897,7 +12878,7 @@ fn collect_pattern_facts(
 }
 
 /// Whether one checked type contains a garbage-collector-managed reference.
-/// Ported from the legacy harness's `checked_type_contains_ref` so
+/// Records `checked_type_contains_ref` so
 /// `LoweredSymbol::global_root` records the decision lowering-side.
 fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
     match value_type {
@@ -13377,7 +13358,7 @@ fn runtime_item(item: &Item) -> bool {
     )
 }
 
-/// The Stage 2.7 completeness traversal. It mirrors the lowering walk over the
+/// The lowering completeness traversal. It mirrors the lowering walk over the
 /// checked program and diagnoses any runtime source function, item, expression,
 /// pattern, or assignment place without a lowered counterpart, plus any lowered
 /// node invented without a source. Implicit thunks are owned by their function
@@ -13695,7 +13676,7 @@ impl<'a> SourceCoverage<'a> {
         }
         if !matches!(
             classify_expression(self.module, expression),
-            ExpressionDisposition::Ordinary(_) | ExpressionDisposition::Stage26(_)
+            ExpressionDisposition::Ordinary(_) | ExpressionDisposition::ResourceCoroutine(_)
         ) {
             // Rejected and deferred families are diagnosed by the validator.
             return;
@@ -13973,8 +13954,8 @@ impl LoweredModule {
 }
 
 impl LoweredProgram {
-    /// Keep legacy initializer spellings when free, and use deterministic
-    /// suffixes when separate modules share a prefix or a catalog symbol.
+    /// Uses module initializer names when free and deterministic suffixes when
+    /// modules share a prefix or a catalog symbol.
     fn planned_initializer_names(&self) -> Vec<(InitializerId, String)> {
         let mut used = self.reserved_symbol_names();
         used.extend(
@@ -15678,7 +15659,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_2_2_catalogs_are_stable_across_repeated_lowering() {
+    fn catalogs_are_stable_across_repeated_lowering() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
             "let signal count: I32 = 1\n",
@@ -15707,7 +15688,7 @@ mod tests {
     }
 
     #[test]
-    fn closure_with_production_hooks_preserves_stage_3_identity() {
+    fn closure_with_production_hooks_preserves_specialization_identity() {
         let source = concat!(
             "use std.coroutine.*\n",
             "def identity: <T where Copy T> T -> T = value => value\n",
@@ -15722,7 +15703,7 @@ mod tests {
         );
         let module = checked_program(source);
 
-        // The pre-closure Stage 3 program: graph plus materialized bodies.
+        // The pre-closure specialization program: graph plus materialized bodies.
         let mut baseline = LoweredProgram::default();
         assert!(baseline.snapshot(&module).is_empty());
         assert!(baseline.validate().is_empty());
@@ -15731,8 +15712,8 @@ mod tests {
         assert!(baseline.validate_instance_bodies().is_empty());
 
         let lowered = Lowerer::new().lower(&module).expect("lowering succeeds");
-        // Stage 4.3/4.4 expand plans and the 4.4 scanner appends generated
-        // artifacts and uses, but the Stage 3 prefix keeps its ordinals,
+        // Artifact expansion and cleanup scanning append generated
+        // artifacts and uses, but the specialization prefix keeps its ordinals,
         // names, and keys. Only appended entries differ, so compare identity
         // rather than the full plan snapshot.
         assert!(lowered.program.instances.len() >= baseline.instances.len());
@@ -15750,7 +15731,7 @@ mod tests {
                 .take(baseline.instances.len())
                 .map(|(id, instance)| (id.index(), instance.name.clone()))
                 .collect::<Vec<_>>(),
-            "Stage 3 instance ordinals and names are unchanged"
+            "specialization instance ordinals and names are unchanged"
         );
         assert_eq!(
             baseline
@@ -15765,7 +15746,7 @@ mod tests {
                 .take(baseline.artifacts.len())
                 .map(|(id, artifact)| (id.index(), artifact.name.clone()))
                 .collect::<Vec<_>>(),
-            "Stage 3 artifact ordinals and names are unchanged"
+            "specialization artifact ordinals and names are unchanged"
         );
         let mut expanded_adapters = 0;
         for (_, artifact) in lowered.program.artifacts.iter() {
@@ -15781,7 +15762,7 @@ mod tests {
             expanded_adapters > 0,
             "the fixture reserves a constructor adapter"
         );
-        // The Stage 4.4 scanner records cleanup uses and edges, so the fixture
+        // The artifact planning scanner records cleanup uses and edges, so the fixture
         // must show at least one of each; the validator already proved the
         // one-to-one agreement inside `Lowerer::lower`.
         let mut artifact_uses = 0;
@@ -15803,7 +15784,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_2_6_records_agree_with_checked_metadata_and_are_stable() {
+    fn records_agree_with_checked_metadata_and_are_stable() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
             "type Counter = ctor (value: I32)\n",
@@ -15838,7 +15819,7 @@ mod tests {
         assert_eq!(
             normalized_program_snapshot(&first),
             normalized_program_snapshot(&second),
-            "repeated lowering is deterministic for every Stage 2.6 record"
+            "repeated lowering is deterministic for every lowering record"
         );
 
         // The executable entry installs exactly the checker's resources.
@@ -16392,8 +16373,8 @@ mod tests {
 
     #[test]
     fn coverage_classifier_decides_every_expression_variant() {
-        use ExpressionDisposition::{Ordinary, Rejected, Stage26};
-        use Stage26Route as Route;
+        use ExpressionDisposition::{Ordinary, Rejected, ResourceCoroutine};
+        use ResourceCoroutineRoute as Route;
         let module = checked_program("let value: I32 = 1\n");
         let representatives = representative_expressions();
         let mut names = representatives
@@ -16411,29 +16392,29 @@ mod tests {
         for (name, expression) in &representatives {
             assert_eq!(expression_variant_name(expression), *name);
             let expected = match *name {
-                "Function" => Ordinary(Stage24Family::Function),
-                "Call" => Ordinary(Stage24Family::Call),
-                "Resource" => Stage26(Route::ResourceUse),
-                "With" => Stage26(Route::ResourceProvider),
-                "Coro" => Stage26(Route::CoroutineCreation),
-                "Await" => Stage26(Route::AwaitChildCoroutine),
+                "Function" => Ordinary(OrdinaryExpressionFamily::Function),
+                "Call" => Ordinary(OrdinaryExpressionFamily::Call),
+                "Resource" => ResourceCoroutine(Route::ResourceUse),
+                "With" => ResourceCoroutine(Route::ResourceProvider),
+                "Coro" => ResourceCoroutine(Route::CoroutineCreation),
+                "Await" => ResourceCoroutine(Route::AwaitChildCoroutine),
                 "Unary" | "Binary" | "SyntaxArgument" | "VisibilityArgument" | "Quote"
                 | "Splice" => Rejected,
-                "Satisfies" => Ordinary(Stage24Family::Satisfies),
-                "Match" => Ordinary(Stage24Family::Match),
-                "Loop" => Ordinary(Stage24Family::Loop),
-                "Block" => Ordinary(Stage24Family::Block),
-                "Product" => Ordinary(Stage24Family::Product),
-                "RepeatedProduct" => Ordinary(Stage24Family::RepeatedProduct),
-                "Access" => Ordinary(Stage24Family::Access),
-                "Index" => Ordinary(Stage24Family::Index),
-                "Logical" => Ordinary(Stage24Family::Logical),
-                "Name" => Ordinary(Stage24Family::Name),
-                "String" => Ordinary(Stage24Family::String),
-                "StringTemplate" => Ordinary(Stage24Family::StringTemplate),
-                "CString" => Ordinary(Stage24Family::CString),
-                "Integer" => Ordinary(Stage24Family::Integer),
-                "Float" => Ordinary(Stage24Family::Float),
+                "Satisfies" => Ordinary(OrdinaryExpressionFamily::Satisfies),
+                "Match" => Ordinary(OrdinaryExpressionFamily::Match),
+                "Loop" => Ordinary(OrdinaryExpressionFamily::Loop),
+                "Block" => Ordinary(OrdinaryExpressionFamily::Block),
+                "Product" => Ordinary(OrdinaryExpressionFamily::Product),
+                "RepeatedProduct" => Ordinary(OrdinaryExpressionFamily::RepeatedProduct),
+                "Access" => Ordinary(OrdinaryExpressionFamily::Access),
+                "Index" => Ordinary(OrdinaryExpressionFamily::Index),
+                "Logical" => Ordinary(OrdinaryExpressionFamily::Logical),
+                "Name" => Ordinary(OrdinaryExpressionFamily::Name),
+                "String" => Ordinary(OrdinaryExpressionFamily::String),
+                "StringTemplate" => Ordinary(OrdinaryExpressionFamily::StringTemplate),
+                "CString" => Ordinary(OrdinaryExpressionFamily::CString),
+                "Integer" => Ordinary(OrdinaryExpressionFamily::Integer),
+                "Float" => Ordinary(OrdinaryExpressionFamily::Float),
                 other => panic!("unclassified expression variant {other}"),
             };
             assert_eq!(classify_expression(&module, expression), expected, "{name}");
@@ -16452,7 +16433,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatcher_lowers_every_stage_family_without_deferrals() {
+    fn dispatcher_lowers_every_expression_family_without_deferrals() {
         let module = checked_program(concat!(
             "use std.coroutine.(Coroutine)\n",
             "type Counter = ctor (value: I32)\n",
@@ -16480,7 +16461,7 @@ mod tests {
     }
 
     #[test]
-    fn stage26_route_table_covers_every_deferred_route() {
+    fn resource_coroutine_route_table_covers_every_route() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
             "type Counter = ctor (value: I32)\n",
@@ -16515,10 +16496,10 @@ mod tests {
         for expected in ["resource", "with", "coro", "await"] {
             assert!(
                 kinds.iter().any(|kind| kind == expected),
-                "every Stage 2.6 expression should lower concretely; have {kinds:?}"
+                "every lowering expression should lower concretely; have {kinds:?}"
             );
         }
-        let mut families = Stage26Route::ALL
+        let mut families = ResourceCoroutineRoute::ALL
             .iter()
             .map(|route| route.record_family())
             .collect::<Vec<_>>();
@@ -18964,7 +18945,7 @@ mod tests {
         );
 
         // Coercions recorded on deferred call headers (sum injection and
-        // `Ref` to `Slice`) are retained for Stage 2.5.
+        // `Ref` to `Slice`) are retained for lowering.
         let coercions = program
             .expressions
             .iter()
@@ -19262,7 +19243,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_5_5_coercion_and_pattern_plans_match_checked_decisions() {
+    fn coercion_and_pattern_plans_match_checked_decisions() {
         let module = checked_program(concat!(
             "use std.slice.Slice\n",
             "type Ok T = ctor T\n",
@@ -19850,7 +19831,7 @@ mod tests {
         )));
     }
 
-    /// A fixture exercising every Stage 2.4-owned family, every later-stage
+    /// A fixture exercising every lowering-owned family, every callable
     /// deferral, and the shared checked metadata the transition comparisons
     /// read back.
     fn complete_coverage_source() -> &'static str {
@@ -19967,7 +19948,7 @@ mod tests {
         }
     }
 
-    /// The Stage 2.7 completeness gate: every runtime construct of a fixture
+    /// The lowering completeness gate: every runtime construct of a fixture
     /// that exercises every expression family, resources, reactive operations,
     /// implicit thunks, captures, and coroutines has exactly one lowered
     /// counterpart, and no lowered node lacks a source.
@@ -20812,7 +20793,7 @@ mod tests {
         assert_eq!(
             assignment.initialization_symbol,
             program.place_root_symbol(*base),
-            "a field write resolves to its base's root symbol (Stage 5.11 F2)"
+            "a field write resolves to its base's root symbol "
         );
         assert!(
             assignment.signal_notify.is_none(),
@@ -22249,7 +22230,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_2_3_arenas_are_stable_across_repeated_lowering() {
+    fn arenas_are_stable_across_repeated_lowering() {
         let module = checked_program(concat!(
             "pub type Wrapper = pub ctor (value: I32)\n",
             "pub type Ok T = pub ctor T\n",

@@ -21,10 +21,10 @@ pub enum CorpusExpectation {
     MustRun,
 }
 
-/// The D5 artifact family a `MustRun` fixture must instantiate twice.
+/// The generic artifact family a `MustRun` fixture must instantiate twice.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CorpusD5 {
+pub enum CorpusGenericArtifacts {
     /// A generic coroutine's `resume`/`cleanup` pair.
     CoroutinePairs,
     /// A generic reaction's runner.
@@ -42,11 +42,11 @@ pub struct CorpusProgram {
     /// Stable label used in reports and failure messages.
     pub name: &'static str,
     pub source: CorpusSource,
-    /// The substage that added the entry.
-    pub substage: &'static str,
+    /// The feature family exercised by the entry.
+    pub topic: &'static str,
     /// What the CLI harness requires of the program.
     pub expectation: CorpusExpectation,
-    /// Stage 5.4 Step 1: template names from the program's own module
+    /// Template names from the program's own module
     /// (matched against `LoweredFunction::name`). Every instance of each
     /// listed template must be fully emitted by the lowered emitter and
     /// defined with its catalog name. This is the per-feature gate that does not
@@ -58,41 +58,44 @@ pub struct CorpusProgram {
     /// A `MustRun` program that must end in an `llvm.trap` (killed by a
     /// signal, so no exit code) under the default emitter.
     pub traps: bool,
-    /// A `MustRun` program's D5 artifact family: the in-process harness
+    /// A `MustRun` program's generic artifact family: the in-process harness
     /// requires two distinct artifacts of it.
-    pub d5: Option<CorpusD5>,
+    pub generic_artifacts: Option<CorpusGenericArtifacts>,
 }
 
-const fn inline(name: &'static str, source: &'static str, substage: &'static str) -> CorpusProgram {
+const fn inline(name: &'static str, source: &'static str, topic: &'static str) -> CorpusProgram {
     CorpusProgram {
         name,
         source: CorpusSource::Inline(source),
-        substage,
+        topic,
         expectation: CorpusExpectation::MustRun,
         emits: &[],
         expected_stdout: None,
         traps: false,
-        d5: None,
+        generic_artifacts: None,
     }
 }
 
-const fn file(name: &'static str, path: &'static str, substage: &'static str) -> CorpusProgram {
+const fn file(name: &'static str, path: &'static str, topic: &'static str) -> CorpusProgram {
     CorpusProgram {
         name,
         source: CorpusSource::File(path),
-        substage,
+        topic,
         expectation: CorpusExpectation::MustRun,
         emits: &[],
         expected_stdout: None,
         traps: false,
-        d5: None,
+        generic_artifacts: None,
     }
 }
 
-/// Stage 5.8 Step 8: a D5 generic fixture only the lowered emitter runs.
-const fn d5_fixture(mut program: CorpusProgram, d5: CorpusD5) -> CorpusProgram {
+/// A generic generic fixture only the lowered emitter runs.
+const fn generic_artifact_fixture(
+    mut program: CorpusProgram,
+    generic_artifacts: CorpusGenericArtifacts,
+) -> CorpusProgram {
     program.expectation = CorpusExpectation::MustRun;
-    program.d5 = Some(d5);
+    program.generic_artifacts = Some(generic_artifacts);
     program
 }
 
@@ -120,8 +123,7 @@ const fn expect_stdout(mut program: CorpusProgram, stdout: &'static str) -> Corp
     program
 }
 
-/// Stage 5.4 Step 1: names the functions the entry must fully emit. Step 10
-/// attaches the list to the 5.4 corpus entries.
+/// Names the functions the entry must fully emit.
 const fn emits(mut program: CorpusProgram, templates: &'static [&'static str]) -> CorpusProgram {
     program.emits = templates;
     program
@@ -129,7 +131,7 @@ const fn emits(mut program: CorpusProgram, templates: &'static [&'static str]) -
 
 /// The shared code-generation corpus: the empty program, a non-generic
 /// integer-arithmetic program, a two-module program with module globals and
-/// initialization state, the Stage 4.7 census programs plus an
+/// initialization state, the artifact planning census programs plus an
 /// every-artifact-family fixture, `staple-compiler/examples/*.sta` (excluding
 /// `macros.sta`, covered by the standalone example gate), and `game_loop`
 /// example.
@@ -139,7 +141,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
 }
 
 static CORPUS: [CorpusProgram; 84] = [
-    expect_stdout(must_run(inline("empty", "", "5.3")), ""),
+    expect_stdout(must_run(inline("empty", "", "core")), ""),
     expect_stdout(
         must_run(inline(
             "integer_arithmetic",
@@ -148,7 +150,7 @@ static CORPUS: [CorpusProgram; 84] = [
                 "let first = plus (1, 2)\n",
                 "let second = first + 3\n",
             ),
-            "5.3",
+            "core",
         )),
         "",
     ),
@@ -166,7 +168,7 @@ static CORPUS: [CorpusProgram; 84] = [
                 "}\n",
                 "let answer = first.doubled + second.total\n",
             ),
-            "5.3",
+            "core",
         )),
         "",
     ),
@@ -183,7 +185,7 @@ static CORPUS: [CorpusProgram; 84] = [
                 "let maker_i32: I32 -> Ref I32 = ref_maker ()\n",
                 "let maker_u8: U8 -> Ref U8 = ref_maker ()\n",
             ),
-            "5.3",
+            "core",
         )),
         "",
     ),
@@ -207,7 +209,7 @@ static CORPUS: [CorpusProgram; 84] = [
                 "let d = count_pair ((1 satisfies U8), 2)\n",
                 "let e = deref_mixed (Ref ((1 satisfies U8), 2))\n",
             ),
-            "5.3",
+            "core",
         )),
         "",
     ),
@@ -229,7 +231,7 @@ static CORPUS: [CorpusProgram; 84] = [
             "let absolute = abs\n",
             "let counted = counter ()\n",
         ),
-        "5.3",
+        "core",
     )),
     compile_only(inline(
         "census_coroutines_and_runners",
@@ -254,7 +256,7 @@ static CORPUS: [CorpusProgram; 84] = [
             "let f = with Reactive = reactive_scope () { reaction { () } }\n",
             "let doubled = flag + flag\n",
         ),
-        "5.3",
+        "core",
     )),
     compile_only(inline(
         "all_artifact_families",
@@ -292,13 +294,13 @@ static CORPUS: [CorpusProgram; 84] = [
             "let coroutine_scope = with Reactive = reactive_scope () { waiting () }\n",
             "let doubled = flag + flag\n",
         ),
-        "5.3",
+        "core",
     )),
     expect_stdout(
         must_run(file(
             "example_c_interop",
             "staple-compiler/examples/c_interop.sta",
-            "5.3",
+            "core",
         )),
         "hello, world!\nowned Staple String\nCString round trip\n",
     ),
@@ -306,7 +308,7 @@ static CORPUS: [CorpusProgram; 84] = [
         must_run(file(
             "example_coroutines",
             "staple-compiler/examples/coroutines.sta",
-            "5.3",
+            "core",
         )),
         "-- pump 1 --\nworker 4: start\nworker 9: start\npump 1: executed=4 ready=2\n-- pump 2 --\nworker 4: done\ngreeter: host sent 200\npump 2: executed=4 ready=1\n-- pump 3 --\nconsumer: worker produced 40\npump 3: executed=1 ready=0\ndoomed finished: True\nscope closed\n",
     ),
@@ -314,7 +316,7 @@ static CORPUS: [CorpusProgram; 84] = [
         must_run(file(
             "example_hello_world",
             "staple-compiler/examples/hello_world.sta",
-            "5.3",
+            "core",
         )),
         "Hello, world!\n",
     ),
@@ -322,7 +324,7 @@ static CORPUS: [CorpusProgram; 84] = [
         must_run(file(
             "example_language_tour",
             "staple-compiler/examples/language_tour.sta",
-            "5.3",
+            "core",
         )),
         "Staple language tour\nProducts, closures, nested patterns, and operators evaluated successfully.\n",
     ),
@@ -330,7 +332,7 @@ static CORPUS: [CorpusProgram; 84] = [
         must_run(file(
             "example_list_and_collections",
             "staple-compiler/examples/list_and_collections.sta",
-            "5.3",
+            "core",
         )),
         "8\n8\n0\n7\n128\n7\n7\n3\n",
     ),
@@ -338,7 +340,7 @@ static CORPUS: [CorpusProgram; 84] = [
         must_run(file(
             "example_modules_and_imports",
             "staple-compiler/examples/modules_and_imports.sta",
-            "5.3",
+            "core",
         )),
         "module imports\nNamespace, selected, renamed, and glob imports evaluated successfully.\n",
     ),
@@ -346,7 +348,7 @@ static CORPUS: [CorpusProgram; 84] = [
         must_run(file(
             "example_signals_and_reactions",
             "staple-compiler/examples/signals_and_reactions.sta",
-            "5.3",
+            "core",
         )),
         "count: 0, doubled: 0\ncount: 3, doubled: 6\ninitial snapshot: 0, current count: 3\n",
     ),
@@ -354,7 +356,7 @@ static CORPUS: [CorpusProgram; 84] = [
         must_run(file(
             "example_sums_and_propagation",
             "staple-compiler/examples/sums_and_propagation.sta",
-            "5.3",
+            "core",
         )),
         "found\nnot found\nExplicit return evaluated successfully.\n",
     ),
@@ -362,7 +364,7 @@ static CORPUS: [CorpusProgram; 84] = [
         must_run(file(
             "example_traits_and_generics",
             "staple-compiler/examples/traits_and_generics.sta",
-            "5.3",
+            "core",
         )),
         "integer\ntrue\n",
     ),
@@ -370,7 +372,7 @@ static CORPUS: [CorpusProgram; 84] = [
         must_run(file(
             "example_types_and_matching",
             "staple-compiler/examples/types_and_matching.sta",
-            "5.3",
+            "core",
         )),
         "Nominal patterns, generic constructors, and singleton matches evaluated successfully.\ndifferent\n",
     ),
@@ -380,15 +382,15 @@ static CORPUS: [CorpusProgram; 84] = [
         must_run(file(
             "example_game_loop",
             "staple-compiler/examples/game_loop/main.sta",
-            "5.3",
+            "core",
         )),
         "fixed tick 1\nfixed tick 2\nfixed tick 3\nentity destroyed\nwall sleeper woke: wall_ms=300\nfinal: game_ms=100 wall_ms=400 frame=4 fixed=3\n",
     ),
     expect_stdout(
         must_run(
-            // Stage 5.4: calls, callable values, closures, resources, and intrinsics.
+            // calls, callable values, closures, resources, and intrinsics.
             // Each entry names the functions its `emits` list must fully emit;
-            // Stage 5.6 Step 8 flipped every one of them to `MustRun`.
+            // emission flipped every one of them to `MustRun`.
             emits(
                 inline(
                     "calls_generic",
@@ -400,7 +402,7 @@ static CORPUS: [CorpusProgram; 84] = [
                         "let two = first 2\n",
                         "let total = one + two\n",
                     ),
-                    "5.4",
+                    "calls",
                 ),
                 &["identity", "first"],
             ),
@@ -425,7 +427,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let make = curried 1\n",
                     "let curried_value = make 2\n",
                 ),
-                "5.4",
+                "calls",
             ),
             &["total", "spread", "curried", "sum3", "pair_of"],
         )),
@@ -449,7 +451,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "}\n",
                     "let result = exercise 1\n",
                 ),
-                "5.4",
+                "calls",
             ),
             &["bump", "borrow", "exercise"],
         )),
@@ -485,7 +487,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let second = reader counted\n",
                     "let third = borrowed (MoveOnly 4)\n",
                 ),
-                "5.4",
+                "calls",
             ),
             &["keeper", "counter", "reader", "borrowed", "consume"],
         )),
@@ -510,7 +512,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let second = puts (c_string \"again\\n\")\n",
                     "let as_value = puts\n",
                 ),
-                "5.4",
+                "calls",
             ),
             &["call_extern", "extern_value"],
         )),
@@ -537,7 +539,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let point_value = make_point ()\n",
                     "let second = point_value (3, 4)\n",
                 ),
-                "5.4",
+                "calls",
             ),
             &["make", "call_make", "make_ref"],
         )),
@@ -564,7 +566,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let mut shared = Counter (value: 0)\n",
                     "with mut Counter = shared { bump () }\n",
                 ),
-                "5.4",
+                "calls",
             ),
             &["get", "forward", "value_of", "read", "run", "bump"],
         )),
@@ -588,7 +590,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let second = combine (\"staple\", \"!\")\n",
                     "let third = bytes_length second\n",
                 ),
-                "5.4",
+                "calls",
             ),
             &[
                 "integers",
@@ -613,14 +615,14 @@ static CORPUS: [CorpusProgram; 84] = [
                     "extern \"c\" { puts: CString -> I32 }\n",
                     // The thunk captures an owned `CString`, so lowering records a
                     // `ThunkArgumentEnvironment` finalizer use. `thunk_env` owns
-                    // its moved parameter; Stage 5.6 Step 4 emits its scope exit.
-                    // Stage 5.11 (F1) fixed the extern adapter ABI, so the thunk
+                    // its moved parameter; emission emits its scope exit.
+                    // emission fixed the extern adapter ABI, so the thunk
                     // can now call the `puts` extern value and print the text.
                     "def thunk_env: move CString -> I32 = move value => evaluate { puts value }\n",
                     "let first = thunk_plain 1\n",
                     "let second = thunk_env (c_string \"thunk\\n\")\n",
                 ),
-                "5.4",
+                "calls",
             ),
             &["evaluate", "thunk_plain", "thunk_env"],
         )),
@@ -667,7 +669,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let third = wildcard False\n",
                     "let fourth = flag True\n",
                 ),
-                "5.5",
+                "expressions",
             ),
             &["nested", "nominal", "wildcard", "flag"],
         )),
@@ -690,7 +692,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let first = fallback \"literal\"\n",
                     "let second = describe \"literal\"\n",
                 ),
-                "5.5",
+                "expressions",
             ),
             &["fallback", "describe"],
         )),
@@ -717,7 +719,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let outer = Outer (pair, \"text\")\n",
                     "let third = nested outer\n",
                 ),
-                "5.5",
+                "expressions",
             ),
             &["sum_pair", "destructure", "nested"],
         )),
@@ -754,7 +756,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let mut values: (I32; 2) = (0, 0)\n",
                     "places (direct, pair, wrapper, counter, values)\n",
                 ),
-                "5.5",
+                "expressions",
             ),
             &["places", "ref_place", "make_counter"],
         )),
@@ -787,7 +789,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let sliced = slice_ref (Ref source)\n",
                     "let used = consume ()\n",
                 ),
-                "5.5",
+                "expressions",
             ),
             &["read", "widen", "inject", "slice_ref", "take", "consume"],
         )),
@@ -825,7 +827,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let first = sum_to 4\n",
                     "let second = nested ()\n",
                 ),
-                "5.5",
+                "expressions",
             ),
             &["sum_to", "nested"],
         )),
@@ -849,7 +851,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let first = doubled True\n",
                     "let second = doubled False\n",
                 ),
-                "5.5",
+                "expressions",
             ),
             &["lookup", "doubled"],
         )),
@@ -868,13 +870,13 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let second = debug 2\n",
                     "let third = both 3\n",
                 ),
-                "5.5",
+                "expressions",
             ),
             &["show", "debug", "both"],
         )),
         "",
     ),
-    // Stage 5.6: ownership cleanup, finalizers, and buffers.
+    // ownership cleanup, finalizers, and buffers.
     must_run(expect_stdout(
         emits(
             inline(
@@ -959,7 +961,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "discarded ()\n",
                     "called ()\n",
                 ),
-                "5.6",
+                "ownership",
             ),
             &[
                 "scoped",
@@ -1019,7 +1021,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "wrapped ()\n",
                     "recursive ()\n",
                 ),
-                "5.6",
+                "ownership",
             ),
             &["nested_product", "sum_choice", "wrapped", "recursive"],
         )),
@@ -1049,7 +1051,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let celled = cell_finalizer ()\n",
                     "let closure = closure_environment (c_string \"environment\")\n",
                 ),
-                "5.6",
+                "ownership",
             ),
             &["make_ref", "cell_finalizer", "closure_environment"],
         )),
@@ -1113,7 +1115,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let frozen = freeze ()\n",
                     "let trap = trapped ()\n",
                 ),
-                "5.6",
+                "ownership",
             ),
             &["basics", "transfer", "clone_tags", "freeze", "trapped"],
         ))),
@@ -1149,7 +1151,7 @@ static CORPUS: [CorpusProgram; 84] = [
                     "let third = broken ()\n",
                     "let fourth = continued ()\n",
                 ),
-                "5.6",
+                "ownership",
             ),
             &["early", "broken", "continued"],
         )),
@@ -1171,13 +1173,13 @@ static CORPUS: [CorpusProgram; 84] = [
                     "\n",
                     "replace ()\n",
                 ),
-                "5.6",
+                "ownership",
             ),
             &["replace"],
         )),
         "",
     ),
-    // Stage 5.7: every structural body, formatting delegates, and cleanup.
+    // every structural body, formatting delegates, and cleanup.
     must_run(expect_stdout(
         emits(
             inline(
@@ -1201,7 +1203,7 @@ def nested_sum: ((I32, I32) | U8) -> String = value => "${value:?}"
 puts (CString.from_string (nested_sum ((12, 13) satisfies ((I32, I32) | U8))))
 puts (CString.from_string (nested_sum ((14 satisfies U8) satisfies ((I32, I32) | U8))))
 "#,
-                "5.7",
+                "structural",
             ),
             &[
                 "nested",
@@ -1235,7 +1237,7 @@ puts (CString.from_string "refs=${ref_uniform (Ref (5, 6))} ${ref_mixed (Ref ((9
 let replaced = ref_replace (Ref (1, 2))
 puts (CString.from_string "ref_replace=${replaced[0]} ${replaced[1]}")
 "#,
-                "5.7",
+                "structural",
             ),
             &[
                 "mixed",
@@ -1260,7 +1262,7 @@ def walk_uniform: (I32, I32) -> () = pair => { for item in pair { puts (CString.
 walk_mixed ((1 satisfies U8), 2)
 walk_uniform (3, 4)
 "#,
-                "5.7",
+                "structural",
             ),
             &["walk_mixed", "walk_uniform"],
         ),
@@ -1281,13 +1283,13 @@ def replace_owned: move (Tag, Tag) -> () = move pair => {
 }
 replace_owned (Tag (c_string "old"), Tag (c_string "second"))
 "#,
-                "5.7",
+                "structural",
             ),
             &["replace_owned"],
         ),
         "old\nsecond\nreplacement\n",
     )),
-    // Stage 5.7 review: runtime coverage for a droppable element replaced
+    // runtime coverage for a droppable element replaced
     // through a reference and for the structural bounds traps.
     must_run(expect_stdout(
         emits(
@@ -1304,7 +1306,7 @@ def ref_mutate: move (Ref (Tag, Tag)) -> () = move reference => {
 }
 ref_mutate (Ref (Tag (c_string "ref old"), Tag (c_string "ref second")))
 "#,
-                "5.7",
+                "structural",
             ),
             &["ref_mutate"],
         ),
@@ -1317,7 +1319,7 @@ ref_mutate (Ref (Tag (c_string "ref old"), Tag (c_string "ref second")))
                 r#"def at: ((U8, I32), USize) -> (I32 | U8) = (pair, position) => pair[position]
 let value = at (((1 satisfies U8), 2), (5 satisfies USize))
 "#,
-                "5.7",
+                "structural",
             ),
             &["at"],
         ))),
@@ -1330,17 +1332,17 @@ let value = at (((1 satisfies U8), 2), (5 satisfies USize))
                 r#"def at: (Ref (I32, I32), USize) -> I32 = (reference, position) => reference[position]
 let value = at (Ref (1, 2), (5 satisfies USize))
 "#,
-                "5.7",
+                "structural",
             ),
             &["at"],
         ))),
         "",
     ),
-    // Stage 5.8 Step 8: the D5 generic fixtures. Legacy rejects each of these
+    // the generic generic fixtures. The emitter rejects each of these
     // (an unspecialized type parameter reaches its emitter), so only the
     // lowered emitter runs them; each instantiates its artifact twice and
     // prints proof that the second instantiation used its own pair or runner.
-    d5_fixture(
+    generic_artifact_fixture(
         expect_stdout(
             inline(
                 "generic_coro_pair",
@@ -1354,18 +1356,18 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "let y = block_on b\n",
                     "println \"a=${x:?} b=${y:?}\"\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             "a=7 b=1\n",
         ),
-        CorpusD5::CoroutinePairs,
+        CorpusGenericArtifacts::CoroutinePairs,
     ),
-    // Stage 5.8 review: the D5 case legacy compiles but gets wrong. The
-    // result type is concrete while the capture is `T`, so legacy's
+    // the generic case the emitter compiles but gets wrong. The
+    // result type is concrete while the capture is `T`, so the emitter's
     // syntax-keyed cache reuses the `I32` pair for the `(U8, U8)` creation
     // and prints `513` (the bytes `01 02` read as an `I32`). The lowered
     // emitter runs each instantiation's own pair.
-    d5_fixture(
+    generic_artifact_fixture(
         expect_stdout(
             inline(
                 "generic_coro_alias",
@@ -1381,13 +1383,13 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "let x = block_on a\n",
                     "let y = block_on b\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             "7\n(1, 2)\n",
         ),
-        CorpusD5::CoroutinePairs,
+        CorpusGenericArtifacts::CoroutinePairs,
     ),
-    d5_fixture(
+    generic_artifact_fixture(
         expect_stdout(
             inline(
                 "generic_reaction_runner",
@@ -1401,13 +1403,13 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "  generic_reaction (1 satisfies U8)\n",
                     "}\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             "reaction 7\nreaction 1\n",
         ),
-        CorpusD5::ReactionRunners,
+        CorpusGenericArtifacts::ReactionRunners,
     ),
-    d5_fixture(
+    generic_artifact_fixture(
         expect_stdout(
             inline(
                 "generic_until_runner",
@@ -1429,13 +1431,13 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "  let _ = block_on b\n",
                     "}\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             "until 7\nuntil 1\n",
         ),
-        CorpusD5::UntilRunners,
+        CorpusGenericArtifacts::UntilRunners,
     ),
-    d5_fixture(
+    generic_artifact_fixture(
         expect_stdout(
             inline(
                 "generic_derived_runner",
@@ -1454,13 +1456,13 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "let b = generic_derived (1 satisfies U8)\n",
                     "println \"results ${a:?} ${b:?}\"\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             "derived 7 0\nderived 1 0\nresults 0 0\n",
         ),
-        CorpusD5::DerivedRunners,
+        CorpusGenericArtifacts::DerivedRunners,
     ),
-    // Stage 5.8 Step 9: the 4.5 fixture set as runnable programs, plus the
+    // Coroutine and reactive fixtures as runnable programs, plus the
     // cancellation drop-order fixture.
     must_run(expect_stdout(
         emits(
@@ -1478,7 +1480,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "let value = block_on (middle ())\n",
                     "println \"value ${value:?}\"\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             &["leaf", "middle"],
         ),
@@ -1505,7 +1507,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "  println \"finished ${Task.is_finished doomed:?}\"\n",
                     "}\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             &["worker"],
         ),
@@ -1516,7 +1518,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             inline(
                 "coroutine_parked_cancellation",
                 concat!(
-                    // Stage 5.8 review: cancel coroutines parked on an
+                    // cancel coroutines parked on an
                     // unresolved `Wait` (the unwind abandons the record) and
                     // on an `until` child (the unwind runs the child's
                     // cleanup); neither body resumes.
@@ -1552,7 +1554,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "  }\n",
                     "}\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             &["waiter", "waiting", "make_completion"],
         ),
@@ -1592,7 +1594,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "  }\n",
                     "}\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             &["waiter", "waiting", "make_completion"],
         ),
@@ -1614,7 +1616,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "  }\n",
                     "}\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             &["read", "subscribe"],
         ),
@@ -1637,7 +1639,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "println \"doubled ${doubled:?}\"\n",
                     "let result = make ()\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             &["make"],
         ),
@@ -1661,14 +1663,14 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "let value = make (c_string \"len\")\n",
                     "println \"value ${value}\"\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             &["render", "make"],
         ),
         "derived len\nvalue len\n",
     )),
-    // K2/D5: the cancel unwind drops the frame bindings in plan order
-    // (`first` then `second`); Stage 5.11 (F4) fixed the completed-coroutine
+    // generic: the cancel unwind drops the frame bindings in plan order
+    // (`first` then `second`); emission fixed the completed-coroutine
     // leak, so the completed sibling's `leaked` frame binding is dropped when
     // that coroutine completes.
     must_run(expect_stdout(
@@ -1705,7 +1707,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "}\n",
                     "println \"scope closed\"\n",
                 ),
-                "5.8",
+                "coroutines",
             ),
             &["tag", "with_tags", "completing"],
         ),
@@ -1715,7 +1717,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "slice_ref_coercion",
             "use std.slice.Slice\nlet fixed: Ref (I32; 3) = Ref (1, 2, 3)\nlet values: Slice I32 = fixed\n",
-            "5.9",
+            "emission",
         ),
         "",
     )),
@@ -1723,19 +1725,19 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "local_recursive_cells",
             "def outer: () -> I32 = () => {\n def f: () -> I32 = () => g ()\n def g: () -> I32 = () => f ()\n f ()\n}\n",
-            "5.9",
+            "emission",
         ),
         "",
     )),
-    // Step 5 shadow findings: a stored-closure callee builds legacy's unused
+    // Regression coverage: a stored-closure callee builds the emitter's unused
     // state slot, a captured `mut` field write checks its base without
-    // initializing it, and an await/until body's effect-less legacy pair maps
+    // initializing it, and an await/until body's effect-less the emitter pair maps
     // to its effect-specialized instance.
     must_run(expect_stdout(
         inline(
             "local_recursive_call_state_slot",
             "def outer = value: I32 => {\n  def recurse: I32 -> I32 = n => {\n    let captured = value\n    recurse n\n  }\n  recurse 1\n}\n",
-            "5.9",
+            "emission",
         ),
         "",
     )),
@@ -1743,7 +1745,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "captured_mut_field_write",
             "def make = () => {\n  let mut point = (x: 1, y: 2)\n  let update = () => { point.x = point.x + 1; point.x }\n  update ()\n}\n",
-            "5.9",
+            "emission",
         ),
         "",
     )),
@@ -1751,7 +1753,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "await_task_effect_pair",
             "use std.coroutine.*\nuse std.io.(IO, println)\ndef leaf: () -> Coroutine{} I32 = () => coro { 9 }\ndef waiter: () -> Coroutine{Tasks, IO} I32 = () => coro {\n    let t = spawn (leaf ())\n    let r = await t\n    match r {\n        Completed v => v,\n        Cancelled() => 0,\n    }\n}\nlet sched = scheduler ()\nwith Tasks = task_scope (sched) {\n    let _ = spawn (waiter ())\n    let _ = pump (sched, 8)\n}\n",
-            "5.9",
+            "emission",
         ),
         "",
     )),
@@ -1759,7 +1761,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "local_generic_cells",
             "def outer: () -> I32 = () => {\n def recur: <T> T -> T = value => recur value\n recur 1\n}\n",
-            "5.9",
+            "emission",
         ),
         "",
     )),
@@ -1767,7 +1769,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "natural_repeated_return",
             "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\nlet repeated: (I32; 3) = repeat 7 3\n",
-            "5.9",
+            "emission",
         ),
         "",
     )),
@@ -1775,7 +1777,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "effect_closure_resources",
             "use std.io.(IO, println)\ndef twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\ndef output: () ->{IO} () = () => println \"hello\"\ntwice output\n",
-            "5.9",
+            "emission",
         ),
         "hello\nhello\n",
     )),
@@ -1783,7 +1785,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "product_trait_argument",
             "trait Merge Left Right Output { merge: (Left, Right) -> Output }\nimpl Merge I32 I32 I32 { def merge = (left, right) => left + right }\ndef combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\nlet total: I32 = combine (20, 22)\n",
-            "5.9",
+            "emission",
         ),
         "",
     )),
@@ -1791,7 +1793,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "nested_expression_return",
             "def identity = (value: I32) => value\ndef answer = () => { identity { return 42; }; 0; }\nanswer ()\n",
-            "5.9",
+            "emission",
         ),
         "",
     )),
@@ -1799,7 +1801,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "sibling_initializer_names",
             "let a: I32 = { mod foo { pub let value: I32 = 1 }; foo.value }\nlet b: I32 = { mod foo { pub let value: I32 = 2 }; foo.value }\n",
-            "5.9",
+            "emission",
         ),
         "",
     )),
@@ -1807,11 +1809,11 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         inline(
             "block_tail_coroutine",
             "use std.coroutine.*\ndef f: () -> Coroutine{} I32 = () => { coro { 42 } }\nlet held = f ()\n",
-            "5.9",
+            "emission",
         ),
         "",
     ),
-    // Post-5.10 fix: a plain one-element product `(e)` is its element even
+    // Parenthesized product rule: a plain one-element product `(e)` is its element even
     // when `e`'s own type is a product (`()` or a pair); lowering used to read
     // that type as the parenthesized product's layout and reject the program.
     must_run(expect_stdout(
@@ -1837,13 +1839,13 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "show 7\n",
                     "show ()\n",
                 ),
-                "5.10",
+                "emission",
             ),
             &["show"],
         ),
         "effectful\n1 2 3 4\n(5, 6)\n7\n()\n",
     )),
-    // Stage 5.11 (F1): every route that reaches an extern callable value
+    // every route that reaches an extern callable value
     // receives closure-shaped parameters, so the adapter loads a borrowed
     // `CString` before the native call; the caller releases the temporary.
     must_run(expect_stdout(
@@ -1871,7 +1873,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "let fifth = thunk_env (c_string \"thunk\")\n",
                     "let sixth = thunk_temporary ()\n",
                 ),
-                "5.11",
+                "regressions",
             ),
             &[
                 "evaluate",
@@ -1885,7 +1887,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "callback\nvalue\nclosure\nthunk\ntemporary\n",
     )),
-    // Stage 5.11 (F2): a field write resolves to its base's signal for
+    // a field write resolves to its base's signal for
     // notification, so a reaction over a signal product field re-runs. A field
     // projection never writes initialization state; the base is already
     // initialized when the projection executes.
@@ -1914,13 +1916,13 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "}\n",
                     "println \"captured ${captured ()}\"\n",
                 ),
-                "5.11",
+                "regressions",
             ),
             &["captured"],
         ),
         "seen 0\nseen 5\nseen 7\nnested 0\nnested 4\ncaptured 9\n",
     )),
-    // Stage 5.11 (M3): an early exit closes every task scope opened since its
+    // an early exit closes every task scope opened since its
     // target, right after reactive disposal and before owned drops. A `break`
     // out of the loop abandons the inner scope, cancelling its child before
     // its next resume.
@@ -1955,7 +1957,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "}\n",
                     "println \"done\"\n",
                 ),
-                "5.11",
+                "regressions",
             ),
             &["worker", "abandoning"],
         ),
@@ -1997,7 +1999,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "}\n",
                     "println \"done\"\n",
                 ),
-                "5.11",
+                "regressions",
             ),
             &["worker", "continuing"],
         ),
@@ -2031,11 +2033,11 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                 "let _ = pump (sched, 16)\n",
                 "println \"done\"\n",
             ),
-            "5.11",
+            "regressions",
         ),
         "task start\nreturned 1\ndone\n",
     )),
-    // Stage 5.11 (F4): a coroutine that completes normally drops its live
+    // a coroutine that completes normally drops its live
     // frame bindings in plan order, before the result is published. The cell
     // state skips a moved-out or never-initialized binding, a cancelled
     // coroutine still drops exactly once through the unwind, and a
@@ -2095,7 +2097,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "}\n",
                     "println \"done\"\n",
                 ),
-                "5.11",
+                "regressions",
             ),
             &[
                 "tag",
@@ -2109,7 +2111,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "complete\nmoved\ncancel\nparent\nchild\ndone\n",
     )),
-    // Stage 5.11 (F5): a generic `Drop` implementation applies by header
+    // a generic `Drop` implementation applies by header
     // unification plus bound discharge. The conditional `Copy T` bound holds
     // for `Box I32`/`Box (I32, I32)` (user drop runs) and fails for
     // `Box CString` (no user drop; the `CString` is still freed), including
@@ -2143,7 +2145,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "run_sum False\n",
                     "println \"done\"\n",
                 ),
-                "5.11",
+                "regressions",
             ),
             &[
                 "run_i32",
@@ -2157,7 +2159,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
     )),
     // A generic `Drop` at two instantiations drops through its own instance:
     // an owned local, a moved-out local (dropped once), a returned value, a
-    // closure capture, a coroutine frame binding (F4), and a drop body whose
+    // closure capture, a coroutine frame binding, and a drop body whose
     // parameter is not owned by the method (no double drop of `Inner`).
     must_run(expect_stdout(
         emits(
@@ -2215,7 +2217,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "owned_parameter ()\n",
                     "println \"done\"\n",
                 ),
-                "5.11",
+                "regressions",
             ),
             &[
                 "wrap",
@@ -2257,7 +2259,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "}\n",
                     "println \"block_on ${block_on (wide ()):?}\"\n",
                 ),
-                "5.11",
+                "regressions",
             ),
             &["quiet", "outer", "wide"],
         ),
@@ -2284,7 +2286,7 @@ mod tests {
             .expect("compiler crate should have a workspace parent")
     }
 
-    /// Freeze CLI inputs for the Stage 5.10 IR identity gate.
+    /// Freeze CLI inputs for the emission IR identity gate.
     #[doc(hidden)]
     fn dump_corpus(destination: &Path) {
         fn copy_sources(source: &Path, destination: &Path) {
@@ -2367,15 +2369,14 @@ mod tests {
     }
 
     /// Strictly emit the full corpus and check catalog definitions, focus instances,
-    /// structural coverage, and distinct D5 artifacts.
+    /// structural coverage, and distinct generic artifacts.
     #[test]
     fn corpus_emits_catalog_definitions() {
         let mut structural_kinds = std::collections::HashSet::new();
         let mut structural_bodies = std::collections::HashSet::new();
         let mut defined = 0;
-        // The frozen oracle: every runnable entry pins the stdout (and, for a
-        // trap, the missing exit status) legacy produced, so the behavior
-        // check survives the deletion of the legacy emitter.
+        // Every runnable entry pins stdout and, for a trap, the missing exit
+        // status. These expectations detect changes in observable behavior.
         for program in codegen_corpus() {
             if matches!(program.expectation, super::CorpusExpectation::MustRun) {
                 assert!(
@@ -2388,7 +2389,7 @@ mod tests {
         for program in codegen_corpus() {
             let (source, root) = program_source(program);
             let lowered = lower(&source, &root);
-            if program.substage == "5.7" {
+            if program.topic == "structural" {
                 for (_, artifact) in lowered.program().artifacts() {
                     if let Some(crate::LoweredArtifactPlan::StructuralMethod(plan)) = &artifact.plan
                     {
@@ -2420,7 +2421,7 @@ mod tests {
                     )
                 },
             );
-            if program.d5.is_some() {
+            if program.generic_artifacts.is_some() {
                 assert_distinct_d5_artifacts(program, &lowered);
             }
             crate::lower::census::assert_catalog_census(program.name, &lowered, &emitted);
@@ -2440,7 +2441,7 @@ mod tests {
         ] {
             assert!(
                 structural_kinds.contains(&kind),
-                "5.7 corpus misses {kind:?}"
+                "structural corpus misses {kind:?}"
             );
         }
         for body in [
@@ -2454,14 +2455,17 @@ mod tests {
             "IntoIterator",
             "Next",
         ] {
-            assert!(structural_bodies.contains(body), "5.7 corpus misses {body}");
+            assert!(
+                structural_bodies.contains(body),
+                "structural corpus misses {body}"
+            );
         }
 
         eprintln!("codegen corpus: {defined} catalog definitions checked");
         assert!(defined > 0, "the corpus must define functions");
     }
 
-    /// The legacy-free catalog census rejects an unplanned function, a
+    /// The emitter-free catalog census rejects an unplanned function, a
     /// missing catalog function, and a mistyped declaration.
     #[test]
     fn catalog_census_rejects_corrupted_emissions() {
@@ -2518,7 +2522,7 @@ mod tests {
         );
     }
 
-    /// Stage 5.4 Step 1: every instance of an entry's `emits` templates is
+    /// Every instance of an entry's `emits` templates is
     /// defined with its planned catalog name. A template must exist in the module
     /// catalog and have at least one materialized instance.
     fn assert_focus_emissions(
@@ -2564,32 +2568,35 @@ mod tests {
         );
     }
 
-    /// Stage 5.8 Step 8: one D5 fixture instantiates its pair or runner twice,
+    /// One generic fixture instantiates its pair or runner twice,
     /// with distinct owners, so the emitted module proves the second
     /// instantiation did not reuse the first artifact.
     fn assert_distinct_d5_artifacts(program: &CorpusProgram, lowered: &LoweredModule) {
         use crate::{LoweredArtifactPlan, ReactiveRunnerBody};
-        let family = program.d5.expect("a MustRun fixture names its D5 family");
+        let family = program
+            .generic_artifacts
+            .expect("a MustRun fixture names its generic family");
         let mut owners = Vec::new();
         for (_, artifact) in lowered.program().artifacts() {
             match (family, artifact.plan.as_ref()) {
                 (
-                    super::CorpusD5::CoroutinePairs,
+                    super::CorpusGenericArtifacts::CoroutinePairs,
                     Some(LoweredArtifactPlan::CoroutineCodes(plan)),
                 ) => owners.push(format!("{:?}", plan.body)),
                 (
-                    super::CorpusD5::ReactionRunners,
+                    super::CorpusGenericArtifacts::ReactionRunners,
                     Some(LoweredArtifactPlan::ReactionRunner(plan)),
                 ) if matches!(plan.body, ReactiveRunnerBody::Reaction { .. }) => {
                     owners.push(format!("{:?}", plan.owner));
                 }
-                (super::CorpusD5::UntilRunners, Some(LoweredArtifactPlan::UntilRunner(plan)))
-                    if matches!(plan.body, ReactiveRunnerBody::Until { .. }) =>
-                {
+                (
+                    super::CorpusGenericArtifacts::UntilRunners,
+                    Some(LoweredArtifactPlan::UntilRunner(plan)),
+                ) if matches!(plan.body, ReactiveRunnerBody::Until { .. }) => {
                     owners.push(format!("{:?}", plan.owner));
                 }
                 (
-                    super::CorpusD5::DerivedRunners,
+                    super::CorpusGenericArtifacts::DerivedRunners,
                     Some(LoweredArtifactPlan::DerivedRunner(plan)),
                 ) if matches!(plan.body, ReactiveRunnerBody::Derived { .. }) => {
                     owners.push(format!("{:?}", plan.owner));
@@ -2600,12 +2607,12 @@ mod tests {
         assert_eq!(
             owners.len(),
             2,
-            "`{}`: the D5 fixture emits two artifacts, got {owners:?}",
+            "`{}`: the generic fixture emits two artifacts, got {owners:?}",
             program.name
         );
         assert_ne!(
             owners[0], owners[1],
-            "`{}`: the two D5 artifacts have distinct owners",
+            "`{}`: the two generic artifacts have distinct owners",
             program.name
         );
     }

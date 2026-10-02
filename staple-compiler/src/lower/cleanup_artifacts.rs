@@ -1,14 +1,10 @@
-//! Stage 4.4: the ownership-cleanup artifact expanders.
+//! Ownership cleanup and garbage-collector finalizer planning.
 //!
-//! `expand_drop_glue` mirrors `compile_drop_value` exactly: the user `Drop`
-//! selection with its representation drop, the coroutine/runtime opaque
-//! cleanup routes, the C-string free, and the structural product/sum/distinct
-//! recursion. Nested glues are requested as `DropGlue` artifacts, so a
-//! recursive nominal type terminates through the 4.2 key deduplication.
-//!
-//! `expand_gc_finalizer` (Step 3) mirrors the four `ensure_*_finalizer`
-//! builders, and the scanner/owned-binding collector (Step 4) reads the drop
-//! facts Stage 3.4 already computed on materialized bodies.
+//! Drop plans select user implementations, runtime releases, and recursive
+//! product, sum, and distinct cleanup. Canonical key deduplication terminates
+//! recursive requests. Finalizers record payload, cell, capture, and buffer
+//! cleanup; scanners attach uses to owners and collect owned bindings in order.
+//! Codegen expands these validated drop plans inline at their recorded sites.
 
 use std::collections::HashSet;
 
@@ -31,7 +27,7 @@ use crate::specialization::{ArtifactRequestKey, CanonicalType, GcFinalizerKey};
 use crate::{CheckedType, IntrinsicFunction};
 
 /// Expands one drop-glue artifact: the selected cleanup body for the plan's
-/// concrete value type, mirroring the legacy decision order, plus the nested
+/// concrete value type, mirroring the emitter decision order, plus the nested
 /// glue requests the body needs.
 pub(super) fn expand_drop_glue(
     program: &LoweredProgram,
@@ -50,7 +46,7 @@ pub(super) fn expand_drop_glue(
     let value_type = plan.value_type.clone();
     if !program.concrete_needs_drop(&value_type) {
         // A `DropGlue` key is only ever requested for a type that needs drop;
-        // requesting one for a type legacy would no-op means the requester's
+        // requesting one for a type the emitter would no-op means the requester's
         // `needs_drop` predicate and this expander disagree.
         return Err(vec![Diagnostic::new(
             origin.span.clone(),
@@ -142,7 +138,7 @@ fn request_finalizer_glue(
 }
 
 /// The captures a closure-environment finalizer drops, in reverse capture
-/// order, mirroring `ensure_closure_finalizer`: skip captures that require
+/// order, mirroring ensure closure finalizer: skip captures that require
 /// initialization state, have mutable storage, are derived, or are borrowed,
 /// then drop the rest that need drop.
 fn closure_environment_drops(
@@ -220,7 +216,7 @@ fn closure_environment_drops(
 }
 
 // ---------------------------------------------------------------------------
-// Stage 4.4 scanner and owned-binding collector.
+// artifact planning scanner and owned-binding collector.
 // ---------------------------------------------------------------------------
 
 /// One owned-binding draft produced by the shared walk, before its glue is
@@ -234,7 +230,7 @@ pub(super) struct OwnedBindingDraft {
 }
 
 /// The sites one owner walk reports. The walker itself is family-neutral: the
-/// Stage 4.4 cleanup scanner and the Stage 4.5 coroutine/reactive scanners each
+/// artifact planning cleanup scanner and the artifact planning coroutine/reactive scanners each
 /// override only the hooks they own (every hook defaults to ignoring the
 /// site), so the traversal exists once.
 pub(super) trait LoweredOwnerVisitor {
@@ -300,13 +296,13 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
-    /// One complete call after its callee and arguments were visited. Stage
-    /// 4.6 records runtime requirements from the call's target.
+    /// One complete call after its callee and arguments were visited. Runtime
+    /// requirements are recorded from the call's target.
     fn call_site(&mut self, _call: &super::LoweredCall) -> Result<(), Vec<Diagnostic>> {
         Ok(())
     }
 
-    /// One complete call with its owner-local ID. Stage 5.1 binds initializer
+    /// One complete call with its owner-local ID. emission binds initializer
     /// dispatch sites here; the default keeps every other visitor unchanged.
     fn call_id_site(
         &mut self,
@@ -344,15 +340,15 @@ pub(super) trait LoweredOwnerVisitor {
     }
 
     /// Whether the walk descends into a derived binding's value expression.
-    /// Legacy never evaluates a derived binding inline, so cleanup scanning
-    /// stops at the binding; Stage 5.1's initializer binder mirrors the
+    /// The emitter never evaluates a derived binding inline, so cleanup scanning
+    /// stops at the binding; emission's initializer binder mirrors the
     /// worklist traversal, which requests the value's sites under the
     /// enclosing owner.
     fn walks_derived_binding_values(&self) -> bool {
         false
     }
 
-    /// One first-class callable value. Stage 4.6 requests extern adapters and
+    /// One first-class callable value. artifact planning requests extern adapters and
     /// records closure-environment requirements here.
     fn callable_value_site(
         &mut self,
@@ -363,7 +359,7 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
-    /// One binding item. Stage 4.6 records captured binding cells here.
+    /// One binding item. artifact planning records captured binding cells here.
     fn binding_site(
         &mut self,
         _binding: &super::LoweredBindingItem,
@@ -372,7 +368,7 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
-    /// One pattern. Stage 4.6 records string-literal comparison here.
+    /// One pattern. artifact planning records string-literal comparison here.
     fn pattern_site(
         &mut self,
         _pattern: &super::LoweredPattern,
@@ -381,14 +377,14 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
-    /// One string literal expression. Stage 4.6 records its GC-allocated data
+    /// One string literal expression. artifact planning records its GC-allocated data
     /// here; a `c_string` literal lowers to `CString` instead and never reaches
     /// this hook.
     fn string_literal_site(&mut self, _origin: &Origin) -> Result<(), Vec<Diagnostic>> {
         Ok(())
     }
 
-    /// One string template. Stage 4.6 records literal-data allocation here.
+    /// One string template. artifact planning records literal-data allocation here.
     fn string_template_site(
         &mut self,
         _template: &super::LoweredStringTemplate,
@@ -397,7 +393,7 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
-    /// One `await` record. Stage 4.6 records the completion surfaces the
+    /// One `await` record. artifact planning records the completion surfaces the
     /// suspension implies.
     fn await_site(
         &mut self,
@@ -521,7 +517,7 @@ impl LoweredOwnerVisitor for ScanVisitor<'_> {
         _id: super::LoweredCoroId,
         _origin: &Origin,
     ) -> Result<(), Vec<Diagnostic>> {
-        // The Stage 4.5 coroutine scanner owns `CoroCreation` requests.
+        // The artifact planning coroutine scanner owns `CoroCreation` requests.
         Ok(())
     }
 }
@@ -585,10 +581,10 @@ impl LoweredOwnerVisitor for CollectVisitor {
 }
 
 /// Walks one owner in lowered evaluation order, reporting every site through
-/// its visitor. The traversal mirrors the Stage 3.3 first-visit order:
+/// its visitor. The traversal mirrors the specialization first-visit order:
 /// parameters first, then block items in order, then the block result, with
-/// each expression's operands in evaluation order. Stage 4.4 first used it for
-/// cleanup decisions; Stage 4.5 reuses it for coroutine and reactive sites.
+/// each expression's operands in evaluation order. artifact planning first used it for
+/// cleanup decisions; artifact planning reuses it for coroutine and reactive sites.
 struct LoweredWalker<'a> {
     program: &'a LoweredProgram,
     owner: OwnerArenas<'a>,
@@ -676,8 +672,8 @@ impl<'a> LoweredWalker<'a> {
                     return Ok(());
                 };
                 // A derived binding is evaluated lazily by its own evaluator
-                // thunk; legacy allocates its cell and never emits the
-                // initializer inline. The Stage 5.1 binder still walks the
+                // thunk; the emitter allocates its cell and never emits the
+                // initializer inline. The emission binder still walks the
                 // value because the worklist requests its sites under the
                 // enclosing owner.
                 if binding.derived {
@@ -899,7 +895,7 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredExpressionKind::Loop(loop_) => {
                 self.walk_block(loop_.body)?;
                 if loop_.drops_body_result {
-                    // Legacy drops the loop body's block value, not the
+                    // The emitter drops the loop body's block value, not the
                     // `break`-value result type.
                     let body_result = self
                         .owner
@@ -926,7 +922,7 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredExpressionKind::Index(index) => {
                 self.walk_expression(index.base)?;
                 self.walk_expression(index.index)?;
-                // Legacy `drop_mutation_temporaries` drops the call's operand
+                // drop mutation temporaries drops the call's operand
                 // temporaries after the call, in reverse collection order.
                 if let Some(method_type) = &index.method_type {
                     if index.operands.whole_drops_after_call {
@@ -1035,7 +1031,7 @@ impl<'a> LoweredWalker<'a> {
                         self.walk_expression(expression)?;
                     }
                     // A reactive intrinsic's callback thunk is the
-                    // `ReactiveCallbackEnvironment` site (Stage 4.5); every
+                    // `ReactiveCallbackEnvironment` site (artifact planning); every
                     // other implicit thunk argument builds its closure here.
                     if let Some(thunk) =
                         arguments.get(*argument).and_then(|argument| argument.thunk)
@@ -1184,7 +1180,7 @@ impl<'a> LoweredWalker<'a> {
                 &origin,
             )?;
         }
-        // Legacy drops mutation temporaries in reverse collection order.
+        // The emitter drops mutation temporaries in reverse collection order.
         for (index, argument) in arguments.iter().enumerate().rev() {
             if argument.drops_after_call {
                 self.visitor.drop_site(
@@ -1201,9 +1197,9 @@ impl<'a> LoweredWalker<'a> {
     }
 
     /// Requests the closure-environment finalizer of one implicit thunk
-    /// argument. Legacy builds the thunk's closure over the current scope when
-    /// the argument evaluates (`compile_adapted_call_argument` →
-    /// `build_closure`) and installs the finalizer under the same gate as a
+    /// argument. The emitter builds the thunk's closure over the current scope when
+    /// the argument evaluates (compile adapted call argument →
+    /// build closure) and installs the finalizer under the same gate as a
     /// fresh callable value: a non-empty environment with some capture that
     /// neither requires initialization state nor is borrowed and needs drop.
     /// The captures are the thunk instance's concrete captures.
@@ -1227,7 +1223,7 @@ impl<'a> LoweredWalker<'a> {
             Some(instance) => instance,
             None => {
                 // Initializer thunk arguments resolve the thunk's instance the
-                // same way Stage 3.3 does (root target, template signature).
+                // same way specialization does (root target, template signature).
                 let Some(function_type) = self
                     .program
                     .functions
@@ -1354,7 +1350,7 @@ impl<'a> LoweredWalker<'a> {
             Some(instance) => instance,
             None => {
                 // Initializer closures have no binding table; resolve the
-                // closure function's instance the same way Stage 3.3 does.
+                // closure function's instance the same way specialization does.
                 let request = InstanceResolutionRequest {
                     function: closure.function,
                     origin: origin.clone(),
@@ -1369,7 +1365,7 @@ impl<'a> LoweredWalker<'a> {
                     .map_err(|diagnostic| vec![diagnostic])?;
                 let Some(ordinal) = self.program.specializations.instance_ordinal(&resolved.key)
                 else {
-                    // Stage 3.3 interns every initializer closure instance
+                    // specialization interns every initializer closure instance
                     // before the closure runs, so a missing key is a bug, not
                     // an unrequested closure.
                     return Err(vec![Diagnostic::new(
@@ -1423,8 +1419,8 @@ impl<'a> LoweredWalker<'a> {
             .is_some_and(|record| record.mutable_storage || record.derived)
     }
 
-    /// Reports one bound symbol, mirroring legacy `bind_pattern_value` and
-    /// `compile_item`: a mutable or derived binding owns its cell (or gets a
+    /// Reports one bound symbol, mirroring bind pattern value and
+    /// compile item: a mutable or derived binding owns its cell (or gets a
     /// captured-cell finalizer), every other binding owns its value unless it
     /// is non-owning or arrives through a mutated-parameter pointer.
     fn register_binding(
@@ -1436,7 +1432,7 @@ impl<'a> LoweredWalker<'a> {
         if !self.seen_symbols.insert(symbol) {
             return Ok(());
         }
-        // A coroutine body's frame binding is a pre-seeded frame cell: legacy
+        // A coroutine body's frame binding is a pre-seeded frame cell: the emitter
         // neither registers it as owned nor drops it at completion. Its drop
         // is the pair plan's `unwind_drop`, emitted only on the cancel unwind.
         if let OwnerArenas::Instance(body) = self.owner
@@ -1455,7 +1451,7 @@ impl<'a> LoweredWalker<'a> {
         // A symbol with real module storage is written into its global and
         // never owned at scope exit. `module_symbol` alone is not that fact: a
         // `let` inside a top-level `with`/block is module-scoped but receives
-        // no global, and legacy still owns and drops it (it keys on its own
+        // no global, and the emitter still owns and drops it (it keys on its own
         // storage map, mirrored by `has_global`).
         if record.mutated_parameter
             || matches!(
@@ -1735,7 +1731,7 @@ fn check_owner_bindings(
     }
 }
 
-/// Builds one drop-glue body in the legacy decision order.
+/// Builds one drop-glue body in the emitter decision order.
 fn drop_glue_body(
     program: &LoweredProgram,
     value_type: &CheckedType,
@@ -1779,7 +1775,7 @@ fn drop_glue_body(
     match value_type {
         CheckedType::CString => Ok(DropGlueBody::CStringFree),
         CheckedType::Product(product) => {
-            // Legacy iterates and drops fields in reverse element order,
+            // The emitter iterates and drops fields in reverse element order,
             // skipping every field that does not need drop.
             let mut fields = Vec::new();
             for (index, element) in product.elements.iter().enumerate().rev() {
@@ -1796,7 +1792,7 @@ fn drop_glue_body(
             Ok(DropGlueBody::Product { fields })
         }
         CheckedType::Sum(sum) => {
-            // Legacy switches on the tag in alternative order and drops only
+            // The emitter switches on the tag in alternative order and drops only
             // alternatives that need drop.
             let mut alternatives = Vec::new();
             for (index, alternative) in sum.alternatives.iter().enumerate() {
@@ -1817,7 +1813,7 @@ fn drop_glue_body(
                 return Err(vec![Diagnostic::new(
                     origin.span.clone(),
                     format!(
-                        "drop glue for `{value_type}` needs drop but no legacy branch applies to its representation"
+                        "drop glue for `{value_type}` needs drop but no cleanup rule applies to its representation"
                     ),
                 )]);
             }
@@ -1828,16 +1824,16 @@ fn drop_glue_body(
         }
         other => Err(vec![Diagnostic::new(
             origin.span.clone(),
-            format!("drop glue for `{other}` needs drop but no legacy branch applies"),
+            format!("drop glue for `{other}` needs drop but no cleanup rule applies"),
         )]),
     }
 }
 
 /// Selects the user `Drop` method for a type and requests its instance, or
-/// returns `None` when legacy would fall through to the opaque/structural
+/// returns `None` when the emitter would fall through to the opaque/structural
 /// branches.
 /// The selected user `Drop` method for one concrete type, or `None` when no
-/// implementation applies. Stage 5.11 (F5) selects through the ordinary trait
+/// implementation applies. emission selects through the ordinary trait
 /// resolver with the `DropMethod` edge kind, so a generic implementation is
 /// resolved with its substitutions and becomes a specialized instance.
 fn user_drop_method(
@@ -1950,8 +1946,8 @@ mod tests {
             .expect("test source should type check")
     }
 
-    /// The Stage 3 program: graph built and materialized, closure not run.
-    fn stage_three(source: &str) -> LoweredProgram {
+    /// The specialization program: graph built and materialized, closure not run.
+    fn lowered_fixture(source: &str) -> LoweredProgram {
         let module = checked_program(source);
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
@@ -2101,9 +2097,9 @@ mod tests {
     );
 
     #[test]
-    fn drop_glue_bodies_mirror_the_legacy_decision_order() {
+    fn drop_glue_bodies_follow_cleanup_selection_order() {
         let module = checked_program(CLEANUP_FIXTURE);
-        let mut program = stage_three(CLEANUP_FIXTURE);
+        let mut program = lowered_fixture(CLEANUP_FIXTURE);
         let seed = FunctionInstanceId::from_index(0);
         let origin = program
             .instances
@@ -2313,7 +2309,7 @@ mod tests {
             DropGlueBody::RuntimeRelease(RuntimeRelease::CompletionTokenRelease)
         );
 
-        // Stage 5.11 (F5): the generic `impl<T where Copy T> Drop (Box T)`
+        // the generic `impl<T where Copy T> Drop (Box T)`
         // applies to `Box I32` (its bound discharges), so it selects a user
         // drop; `Box CString` and `Box Handle` fail the `Copy` bound and keep
         // the structural distinct branch. Two instantiations produce two keys.
@@ -2349,7 +2345,7 @@ mod tests {
             );
         }
 
-        // Every expanded key passes the transition gate against the typed
+        // Every expanded key passes the checker agreement gate against the typed
         // module: needs-drop gating and user-drop selection agree exactly.
         for (_, artifact) in program.artifacts.iter() {
             let Some(LoweredArtifactPlan::DropGlue(plan)) = &artifact.plan else {
@@ -2425,7 +2421,7 @@ mod tests {
             stats.growth <= 16,
             "drop glue growth stays small: {stats:?}"
         );
-        // Every stage-4.3-requested drop glue is expanded.
+        // Every requested drop glue is expanded.
         for (_, artifact) in lowered.program.artifacts.iter() {
             if let Some(LoweredArtifactPlan::DropGlue(plan)) = &artifact.plan {
                 assert!(
@@ -2435,11 +2431,11 @@ mod tests {
                 );
             }
         }
-        eprintln!("stage 4.4 drop-glue closure stats: {stats:?}");
+        eprintln!("artifact drop-glue closure stats: {stats:?}");
     }
 
     // ------------------------------------------------------------------
-    // Stage 4.4 gc-finalizer fixtures.
+    // artifact planning gc-finalizer fixtures.
     // ------------------------------------------------------------------
 
     use crate::GcFinalizerPlan;
@@ -2615,7 +2611,7 @@ mod tests {
 
     #[test]
     fn finalizer_bodies_reference_their_drop_glue_and_capture_drops() {
-        let mut program = stage_three(FINALIZER_FIXTURE);
+        let mut program = lowered_fixture(FINALIZER_FIXTURE);
         let seed = FunctionInstanceId::from_index(0);
         let origin = program
             .instances
@@ -2836,7 +2832,7 @@ mod tests {
         assert_finalizer_glue(&program, &drops[0].glue, &owned_capture);
 
         // The mutable capture fires the install gate but the body drops
-        // nothing (legacy `has_mutable_storage`).
+        // nothing (has mutable storage).
         let mutable_key = GcFinalizerKey::ClosureEnvironment {
             closure: program
                 .instances
@@ -3004,9 +3000,9 @@ mod tests {
                         id.index()
                     );
                 } else if let Some(drops) = plan {
-                    // The gate excludes this construction, so legacy never
+                    // The gate excludes this construction, so the emitter never
                     // installs the finalizer; a plan requested by a
-                    // transition fixture must still drop nothing.
+                    // cleanup fixture must still drop nothing.
                     assert!(
                         drops.is_empty(),
                         "a finalizer for a gate-excluded closure drops nothing in instance {}",
@@ -3016,7 +3012,7 @@ mod tests {
             }
         }
         eprintln!(
-            "stage 4.4 finalizer closure stats: {:?}",
+            "artifact finalizer closure stats: {:?}",
             program.closure_stats
         );
     }
@@ -3074,7 +3070,7 @@ mod tests {
                 };
                 let expected = module
                     .trait_impl_method(clone_trait, std::slice::from_ref(element), method)
-                    .expect("legacy selects a Clone method for the element");
+                    .expect("the emitter selects a Clone method for the element");
                 let bound = program
                     .instances
                     .get(use_.instance)
@@ -3371,7 +3367,7 @@ mod tests {
             "the standard-library fixture records owned bindings with bound glue"
         );
         eprintln!(
-            "stage 4.4 scanner closure stats: {:?}",
+            "artifact scanner closure stats: {:?}",
             lowered.program.closure_stats
         );
     }

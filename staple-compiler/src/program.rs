@@ -958,7 +958,7 @@ impl ProgramLoader {
     fn load_path_diagnostic(&mut self, entry: &Path) -> Result<Program, LoadDiagnostic> {
         let entry = canonical_file(entry).map_err(LoadDiagnostic::compiler)?;
         // A configured module root is an explicit package boundary. For the
-        // legacy implicit-root mode, `main.sta` likewise denotes a package;
+        // the emitter implicit-root mode, `main.sta` likewise denotes a package;
         // arbitrary standalone files must not cause their entire containing
         // directory (notably the system temp directory) to be indexed.
         let discover_companions = self.module_root.is_some()

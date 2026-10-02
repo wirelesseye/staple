@@ -1,12 +1,8 @@
-//! Stage 3.5: graph validation and the legacy-emission comparison.
+//! Validation of the closed specialization graph.
 //!
-//! `validate_specialization_graph` is the final audit of the Stage 3.3
-//! worklist and its Stage 3.4 bodies. It rebuilds each instance's canonical
-//! key from its pruned environment and resolved evidence, proves the graph is
-//! closed and name-stable, and walks every emitted body for template-only
-//! values. It runs inside `Lowerer::lower` after the Stage 3.4 body validator
-//! and never interns keys, materializes bodies, or touches the legacy backend.
-//!
+//! Checks catalog identity, instance bodies, artifact plans, dependency edges,
+//! and recorded runtime requirements without reserving new keys or emitting IR.
+//! Corruption tests exercise the invariants codegen relies on.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -23,7 +19,7 @@ use super::instance_body::LoweredInstanceBody;
 use super::{ArenaId, LoweredFunctionInstance, LoweredItemKind, LoweredProgram};
 
 impl LoweredProgram {
-    /// The Stage 3.5 graph audit: catalog/name agreement, complete concrete
+    /// The specialization graph audit: catalog/name agreement, complete concrete
     /// environments, resolved evidence, dependency and recursive back-edge
     /// integrity, and the absence of template-only values in emitted bodies.
     pub(super) fn validate_specialization_graph(&self) -> Vec<Diagnostic> {
@@ -119,7 +115,7 @@ impl<'a> GraphValidator<'a> {
     }
 
     /// Rebuild the instance key from its pruned environment and resolved
-    /// evidence with the Stage 3.1 canonical converters. A leftover declared
+    /// evidence with the specialization canonical converters. A leftover declared
     /// parameter, effect variable, or checker placeholder, an environment that
     /// does not hold exactly the relevant parameters, and an unresolved
     /// evidence recipe are all reported at the instance origin.
@@ -900,7 +896,7 @@ pub(crate) mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Stage 3.5 fixtures over the full lowering pipeline.
+    // specialization fixtures over the full lowering pipeline.
     // ------------------------------------------------------------------
 
     #[test]
@@ -1117,7 +1113,7 @@ pub(crate) mod tests {
                 // Structural artifact arguments are canonical keys, which can
                 // only be built from concrete types.
                 Some(ArtifactRequestKey::StructuralMethod(_)) => saw_structural = true,
-                // Stage 4.4 adds cleanup artifacts over the same catalog.
+                // artifact planning adds cleanup artifacts over the same catalog.
                 Some(ArtifactRequestKey::DropGlue(_))
                 | Some(ArtifactRequestKey::GcFinalizer(_)) => {}
                 Some(other) => panic!("unexpected artifact family `{}`", other.family_name()),
@@ -1149,13 +1145,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// Stage 4.3's first claim: every constructor-value and structural-method
+    /// Artifact planning's first claim: every constructor-value and structural-method
     /// site in a materialized instance body is already bound to its artifact
-    /// by the Stage 3.3 worklist and Stage 3.4 binder, and every constructor
-    /// or structural artifact is a Stage 3 request root. No 4.3 scanner or
+    /// by the specialization worklist and specialization binder, and every constructor
+    /// or structural artifact is a specialization request root. No scanner or
     /// use-site variant is needed.
     #[test]
-    fn constructor_and_structural_sites_need_no_stage_4_3_scanner() {
+    fn constructor_and_structural_sites_need_no_structural_scanner() {
         let lowered = lower(concat!(
             "type Point = ctor (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
@@ -1212,9 +1208,9 @@ pub(crate) mod tests {
             "the fixture exercises Debug/Index/MutateIndex/IntoIterator/Iterator: {structural_sites}"
         );
 
-        // Every constructor and structural artifact entered as a Stage 3
+        // Every constructor and structural artifact entered as a specialization
         // request root (from an initializer or an instance body), never as a
-        // closure-phase discovery, so 4.3 registers no scanner.
+        // closure-phase discovery, so no structural scanner is needed.
         let mut roots = 0;
         for (_, artifact) in program.artifacts.iter() {
             let Some(key) = program.specializations.artifact(artifact.ordinal) else {
@@ -1232,7 +1228,7 @@ pub(crate) mod tests {
                     LoweredArtifactRequestRoot::Instance { .. }
                         | LoweredArtifactRequestRoot::Initializer { .. }
                 ),
-                "artifact `{}` is not a Stage 3 request root",
+                "artifact `{}` is not a specialization request root",
                 key.family_name()
             );
             roots += 1;
@@ -1368,10 +1364,7 @@ pub(crate) mod tests {
 
     #[test]
     fn cross_module_calls_discover_their_dependencies() {
-        let root = std::env::temp_dir().join(format!(
-            "staple-stage-3-5-cross-module-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("staple-cross-module-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("temp root");
         std::fs::write(
             root.join("tools.sta"),
@@ -1478,14 +1471,14 @@ pub(crate) mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Stage 4.5 carried-over gap fixtures.
+    // artifact planning carried-over gap fixtures.
     // ------------------------------------------------------------------
 
-    /// Gap 1 (closed by Step 3): a reaction whose callback thunk captures a
-    /// droppable value gets a legacy closure-environment finalizer, and the
-    /// 4.5 scanner requests the same plan at the reactive site.
+    /// A reaction whose callback thunk captures a
+    /// droppable value gets a the emitter closure-environment finalizer, and the
+    /// reactive scanner requests the same plan at the reactive site.
     #[test]
-    fn stage_4_5_reactive_callback_environment_finalizer_is_planned() {
+    fn reactive_callback_environment_finalizer_is_planned() {
         let source = concat!(
             "use std.cinterop.(CString, c_string)\n",
             "extern \"c\" { inspect: CString -> I32 }\n",
@@ -1552,14 +1545,14 @@ pub(crate) mod tests {
         );
     }
 
-    /// Gap 2 (closed by Step 4): coroutine-body ownership parity. `resume`
+    /// Coroutine-body ownership agreement: `resume`
     /// emits with no `function_id`; the recorder now attributes state-0
     /// registrations to the body thunk, and the collector excludes frame
     /// cells. A completed coroutine never drops its droppable frame bindings:
-    /// legacy drops them only through the cancel unwind's conditional cell
+    /// the emitter drops them only through the cancel unwind's conditional cell
     /// drop, which the pair plan carries as `unwind_drop`. The fixture asserts
     /// both the empty ownership records and the planned unwind drop, so the
-    /// legacy leak is mirrored and recorded rather than fixed.
+    /// the emitter leak is mirrored and recorded rather than fixed.
     #[test]
     fn coroutine_frame_bindings_have_only_unwind_ownership() {
         let source = concat!(
@@ -1603,7 +1596,7 @@ pub(crate) mod tests {
 
         // The completed-body frame-binding leak, mirrored: the pair plan still
         // carries the cancel unwind's conditional cell drop for the frame
-        // binding, and legacy emits it through the unwind path, but no
+        // binding, and the emitter emits it through the unwind path, but no
         // completion path drops it.
         let plan_id = body.plan_template.expect("the body owns its plan");
         let plan = body.plan(plan_id).expect("the local plan");
@@ -1639,10 +1632,10 @@ pub(crate) mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Stage 4.6 extern adapters and runtime requirements.
+    // artifact planning extern adapters and runtime requirements.
     // ------------------------------------------------------------------
 
-    const STAGE_4_6_EXTERN_FIXTURE: &str = concat!(
+    const EXTERN_ADAPTER_FIXTURE: &str = concat!(
         "use std.cinterop.(CString, c_string)\n",
         "extern \"c\" { inspect: CString -> I32 }\n",
         "extern \"c\" { unused_extern: CString -> I32 }\n",
@@ -1683,7 +1676,7 @@ pub(crate) mod tests {
 
     #[test]
     fn extern_adapter_plans_cover_used_values_and_deduplicate_sites() {
-        let module = checked_program(STAGE_4_6_EXTERN_FIXTURE);
+        let module = checked_program(EXTERN_ADAPTER_FIXTURE);
         let lowered = Lowerer::new()
             .lower(&module)
             .expect("the extern fixture lowers and validates");
@@ -1706,7 +1699,7 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| panic!("extern adapter artifact {id:?} is expanded"));
             assert!(
                 declaration.eagerly_declared,
-                "the plan records the legacy eager foreign-symbol declaration: {plan:?}"
+                "the plan records the emitter eager foreign-symbol declaration: {plan:?}"
             );
             let expected_arity = if plan.callable_type.parameter_style
                 == staple_syntax::FunctionParameterStyle::Juxtaposed
@@ -1750,7 +1743,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn stage_4_6_variadic_extern_values_are_rejected_at_lowering() {
+    fn variadic_extern_values_are_rejected_at_lowering() {
         let module = checked_program(concat!(
             "extern \"c\" { report: (I32, ...) -> I32 }\n",
             "def forward: ((I32, ...) -> I32) -> ((I32, ...) -> I32) = f => f\n",
@@ -1768,8 +1761,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn stage_4_6_corrupted_extern_adapter_plans_and_uses_are_diagnosed() {
-        let module = checked_program(STAGE_4_6_EXTERN_FIXTURE);
+    fn corrupted_extern_adapter_plans_and_uses_are_diagnosed() {
+        let module = checked_program(EXTERN_ADAPTER_FIXTURE);
         let mut lowered = Lowerer::new()
             .lower(&module)
             .expect("the extern fixture lowers and validates");
@@ -1846,7 +1839,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn stage_4_6_unused_subsystems_record_no_requirement() {
+    fn unused_subsystems_record_no_requirement() {
         use crate::RuntimeRequirement::*;
 
         // The backend emits every eagerly declared standard-library template,
@@ -2080,7 +2073,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn stage_4_6_owner_requirements_match_each_emitted_function() {
+    fn owner_requirements_match_each_emitted_function() {
         use crate::RuntimeRequirement;
         use std::collections::HashSet;
 
@@ -2158,7 +2151,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn stage_4_6_runtime_requirements_are_deterministic_and_validated() {
+    fn runtime_requirements_are_deterministic_and_validated() {
         use crate::RuntimeRequirement;
 
         let source = concat!(
@@ -2200,12 +2193,12 @@ pub(crate) mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Stage 4.4 drop-glue transition comparison.
+    // artifact planning drop-glue agreement tests.
     // ------------------------------------------------------------------
 
     /// Every naturally requested `DropGlue` plan agrees with the typed module:
     /// the key's type needs drop, a user-drop body is planned exactly when the
-    /// general drop-implementation predicate applies (Stage 5.11 F5), and the
+    /// general drop-implementation predicate applies , and the
     /// checker and lowering `needs_drop`/`Copy` predicates agree on every
     /// concrete type the fixture's catalog reaches.
     fn assert_drop_glue_plans_agree(source: &str) -> (usize, crate::ClosureStats) {
@@ -2377,12 +2370,12 @@ pub(crate) mod tests {
             "drop glue converges in a few rounds: {max_rounds} rounds, growth {max_growth}"
         );
         eprintln!(
-            "stage 4.4 drop-glue transition fixtures: {plans} plans, max {max_rounds} rounds, max growth {max_growth}"
+            "artifact drop-glue cleanup fixtures: {plans} plans, max {max_rounds} rounds, max growth {max_growth}"
         );
     }
 
     // ------------------------------------------------------------------
-    // Stage 4.3 formatting closure and legacy transition comparison.
+    // artifact planning formatting closure and the runtime requirement tests.
     // ------------------------------------------------------------------
 
     /// Every string template in a materialized body binds its formatting
@@ -2516,7 +2509,7 @@ pub(crate) mod tests {
         assert!(product_debug_plans > 0);
     }
 
-    /// D2: non-generic declarations keep their available names verbatim;
+    /// Non-generic declarations keep their available names verbatim;
     /// reserved, duplicate and generic instances use catalog ordinal names.
     #[test]
     fn planned_names_preserve_unreserved_declarations() {
@@ -2596,12 +2589,12 @@ pub(crate) mod tests {
         );
     }
 
-    /// Stage 5.5 review: an indexed (`MutateIndex`) assignment never records a
-    /// replaced-value drop (the method replaces the element; legacy drops
+    /// An indexed (`MutateIndex`) assignment never records a
+    /// replaced-value drop (the method replaces the element; the emitter drops
     /// nothing at the site), in instance bodies as in lowering, and a
     /// droppable materialized base records `MutateIndexTemporary`.
     #[test]
-    fn stage_5_5_indexed_assignment_cleanup_facts_match_legacy() {
+    fn indexed_assignment_cleanup_facts_match_checked_rules() {
         let lowered = lower(concat!(
             "type Holder = ctor I32\n",
             "impl Drop Holder { def drop = Holder value => () }\n",

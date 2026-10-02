@@ -40,7 +40,7 @@ fn default_emitter_emits_the_entry_harness_and_reactive_body() {
     assert!(llvm.contains("call ptr @__staple_reaction_create"));
 }
 
-/// F8 held while bodies could still fail. Every construct family is now
+/// Held while bodies could still fail. Every construct family is now
 /// emitted, so strict lowered compilation of the bodies that used to fail
 /// collects no diagnostic at all.
 #[test]

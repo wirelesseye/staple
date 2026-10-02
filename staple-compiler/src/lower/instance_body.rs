@@ -1,14 +1,14 @@
-//! Stage 3.4: materialize concrete instance bodies.
+//! materialize concrete instance bodies.
 //!
 //! Every reachable `LoweredFunctionInstance` gets one immutable, instance-owned
-//! body. Bodies are cloned from the Stage 2 template arenas through a
-//! per-family old-to-new map and substituted with the Stage 3.2 environment, so
+//! body. Bodies are cloned from the lowering template arenas through a
+//! per-family old-to-new map and substituted with the specialization environment, so
 //! no body lookup needs the generic template or a `TypedModule` side table for
 //! type arguments, call targets, or trait selection. Dispatch sites are bound
-//! to the Stage 3.3 graph identities recorded in
+//! to the specialization graph identities recorded in
 //! `LoweredFunctionInstance::{dependencies, artifacts}`.
 //!
-//! Bodies are materialized in Stage 3.3 ordinal order. Instance-local ID types
+//! Bodies are materialized in specialization ordinal order. Instance-local ID types
 //! stay distinct from template IDs by living in these per-instance arenas:
 //! a body reference can never resolve into the template or another instance.
 
@@ -74,7 +74,7 @@ pub(crate) struct LoweredInstanceCapture {
 
 /// A dispatch or construction site inside one instance body. Sites are keys
 /// into the per-body binding tables; IDs are instance-local. Module
-/// initializers use the same variant keys over program-arena IDs (Stage 5.1).
+/// initializers use the same variant keys over program-arena IDs .
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum LoweredBindingSite {
     /// A direct, trait-dispatched, external, intrinsic, constructor, or helper
@@ -142,8 +142,8 @@ pub(crate) enum OwnedStorage {
     Cell,
 }
 
-/// One owned binding record: the symbol the legacy backend registers with
-/// `track_symbol_ownership` or `allocate_binding_cell`, with its concrete
+/// One owned binding record: the symbol the emitter backend registers with
+/// track symbol ownership or `allocate_binding_cell`, with its concrete
 /// type and the drop glue bound through the `OwnedBinding` use record.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredOwnedBinding {
@@ -176,12 +176,12 @@ pub(crate) struct LoweredInstanceBody {
     pub captures: Vec<LoweredInstanceCapture>,
     /// The instance-local root block; absent for body-less templates.
     pub root: Option<BlockId>,
-    /// Stage 5.5 Step 7: the body block expression's own coercion header,
+    /// The body block expression's own coercion header,
     /// substituted for this instance and applied before the return.
     pub body_coercion: Option<CheckedCoercion>,
     pub body_coercion_plan: Option<super::LoweredCoercionPlan>,
     pub body_moved_symbols: Vec<SymbolId>,
-    /// The global Stage 3.3 plan this body owns, when the template is a
+    /// The global specialization plan this body owns, when the template is a
     /// coroutine body thunk. The local plan is `plans[0]`.
     pub plan_template: Option<LoweredCoroutinePlanId>,
     /// The instance-local providers seeded from the concrete effect row, in
@@ -191,15 +191,15 @@ pub(crate) struct LoweredInstanceBody {
     pub bindings: BTreeMap<LoweredBindingSite, LoweredBoundTarget>,
     /// Resolved evidence for every trait-dependent site.
     pub evidence: BTreeMap<LoweredBindingSite, TraitEvidence>,
-    /// Generated-artifact uses recorded by Stage 4.2 scanners, in scan order.
+    /// Generated-artifact uses recorded by artifact planning scanners, in scan order.
     /// The validator proves these agree one-to-one with the instance's
     /// closure-phase artifact edges.
     pub artifact_uses: Vec<LoweredArtifactUse>,
-    /// Source-function instance uses recorded by Stage 4.2 scanners, in scan
+    /// Source-function instance uses recorded by artifact planning scanners, in scan
     /// order. The validator proves these agree one-to-one with the instance's
     /// closure-phase instance edges.
     pub instance_uses: Vec<LoweredInstanceUse>,
-    /// The symbols the legacy backend tracks for scope-exit cleanup, in
+    /// The symbols the emitter backend tracks for scope-exit cleanup, in
     /// registration order (pattern traversal order).
     pub owned_bindings: Vec<LoweredOwnedBinding>,
     // Instance-local arenas. IDs are meaningful only inside this body.
@@ -344,8 +344,8 @@ impl LoweredInstanceBody {
     }
 
     /// The concrete type of one body-local binding symbol, from its binding
-    /// item or binding pattern, mirroring the legacy `type_of_symbol` lookup
-    /// under the instance's own substitutions. The Stage 4.5 coroutine
+    /// item or binding pattern, mirroring type of symbol lookup
+    /// under the instance's own substitutions. The artifact planning coroutine
     /// expander uses this for the plan's frame bindings.
     pub(crate) fn binding_symbol_type(&self, symbol: SymbolId) -> Option<&CheckedType> {
         for (_, item) in self.items.iter() {
@@ -383,7 +383,7 @@ impl LoweredInstanceBody {
 }
 
 impl LoweredProgram {
-    /// Materializes one concrete body per reachable instance, in Stage 3.3
+    /// Materializes one concrete body per reachable instance, in specialization
     /// ordinal order. Bodies are installed on their instances only when every
     /// site bound to the existing graph; otherwise the diagnostics are
     /// returned and the caller discards lowering.
@@ -392,7 +392,7 @@ impl LoweredProgram {
     }
 
     /// Materializes one concrete body per instance that has none yet, in
-    /// ordinal order. The Stage 3 entry point calls this once; the Stage 4.2
+    /// ordinal order. The specialization entry point calls this once; the artifact planning
     /// closure loop calls it after each resumed worklist pass, so an instance
     /// requested by a generated artifact gets a body without re-cloning the
     /// bodies already installed. Installation is all-or-nothing per call:
@@ -415,7 +415,7 @@ impl LoweredProgram {
 
     /// Validates every installed instance body: local-arena reachability and
     /// bounds, concrete checked metadata, complete target bindings, and
-    /// agreement with the recorded Stage 3.3 dependency and artifact edges.
+    /// agreement with the recorded specialization dependency and artifact edges.
     pub(super) fn validate_instance_bodies(&self) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         for (id, instance) in self.instances.iter() {
@@ -478,7 +478,7 @@ impl<'a> BodyMaterializer<'a> {
     /// before this call; the resumed worklist guarantees it, and the existing
     /// "missing function instance" diagnostic reports a traversal bug
     /// otherwise. A template with no body still yields its empty body record,
-    /// exactly as the one-shot Stage 3.4 entry point always did.
+    /// exactly as the one-shot specialization entry point always did.
     fn build_pending(
         &self,
     ) -> (
@@ -610,7 +610,7 @@ impl<'a> BodyCloner<'a> {
             .iter()
             .filter_map(|bound| {
                 // A bound whose parameter is absent from the resolved
-                // environment is irrelevant to this instance. Stage 3.2
+                // environment is irrelevant to this instance. specialization
                 // deliberately excludes such parameters from its key, so
                 // there is no concrete bound to store in the body.
                 if bound
@@ -958,7 +958,7 @@ impl<'a> BodyCloner<'a> {
                 // records it; only a plain assignment recomputes the fact.
                 assignment.drop_previous = assignment.mutate_index.is_none()
                     && self.program.concrete_needs_drop(&concrete_target);
-                // Stage 5.5 review: the materialized base temporary's drop,
+                // the materialized base temporary's drop,
                 // recomputed from the substituted base type.
                 assignment.drops_base_temporary = assignment.mutate_index.is_some()
                     && self
@@ -1186,7 +1186,7 @@ impl<'a> BodyCloner<'a> {
                 index.base_place = index.base_place.map(|place| self.clone_place(place));
                 index.index_place = index.index_place.map(|place| self.clone_place(place));
                 index.evidence = self.evidence(&index.evidence);
-                // Stage 5.5 review: recompute the operand passing and cleanup
+                // recompute the operand passing and cleanup
                 // facts from the substituted operand and method types.
                 index.operands = match &index.method_type {
                     Some(method_type) => {
@@ -1239,9 +1239,9 @@ impl<'a> BodyCloner<'a> {
             .coercion
             .as_ref()
             .map(|coercion| self.coercion(coercion));
-        // Stage 5.5 E1: recompute the coercion plan from the substituted types,
+        // recompute the coercion plan from the substituted types,
         // like the other concrete-sensitive derived facts. A concrete pair
-        // legacy rejects is a diagnostic, never a silently missing plan.
+        // the emitter rejects is a diagnostic, never a silently missing plan.
         let coercion_plan = match &coercion {
             Some(coercion) => {
                 match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
@@ -1375,9 +1375,9 @@ impl<'a> BodyCloner<'a> {
         new
     }
 
-    /// Clones one pattern and recomputes its Stage 5.5 E1 test plan against
+    /// Clones one pattern and recomputes its emission test plan against
     /// the substituted subject type the use site supplies. Child subjects come
-    /// from the same plan decisions legacy passes down, so the concrete
+    /// from the same plan decisions the emitter passes down, so the concrete
     /// element/payload/representation plans agree with the tag compares that
     /// will guard them.
     fn clone_pattern(&mut self, id: PatternId, subject: &CheckedType) -> PatternId {
@@ -1975,7 +1975,7 @@ impl<'a> BodyCloner<'a> {
 }
 
 /// Reconstructs the enclosing resolver view of one interned instance, matching
-/// the Stage 3.3 worklist's `resolved_request`.
+/// the specialization worklist's `resolved_request`.
 fn enclosing_request(
     program: &LoweredProgram,
     instance: FunctionInstanceId,
@@ -2591,7 +2591,7 @@ impl<'a> BodyCloner<'a> {
     }
 
     // ------------------------------------------------------------------
-    // Binding sites to the Stage 3.3 graph.
+    // Binding sites to the specialization graph.
     // ------------------------------------------------------------------
 
     fn request_function(
@@ -3010,7 +3010,7 @@ impl<'a> BodyCloner<'a> {
                             }
                             None => self.diagnostics.push(Diagnostic::new(
                                 origin.span.clone(),
-                                "instance body requests a structural method Stage 3.3 did not reserve",
+                                "instance body requests a structural method specialization did not reserve",
                             )),
                         }
                     }
@@ -3100,7 +3100,7 @@ impl<'a> BodyCloner<'a> {
                     }
                     None => self.diagnostics.push(Diagnostic::new(
                         origin.span.clone(),
-                        "instance body requests a constructor adapter Stage 3.3 did not reserve",
+                        "instance body requests a constructor adapter specialization did not reserve",
                     )),
                 }
             }
@@ -3179,7 +3179,7 @@ fn error_with(cloner: &mut BodyCloner<'_>) -> LoweredWithId {
 
 /// Walks one instance body and verifies its local invariants: every local ID
 /// exists, every checked value is concrete, every arena node is reachable, and
-/// every bound target agrees with the recorded Stage 3.3 graph.
+/// every bound target agrees with the recorded specialization graph.
 struct BodyValidator<'a> {
     program: &'a LoweredProgram,
     instance: &'a super::LoweredFunctionInstance,
@@ -3313,7 +3313,7 @@ impl<'a> BodyValidator<'a> {
             &CheckedType::Function(self.body.signature.clone()),
             "signature",
         );
-        // Stage 5.5 Step 7: a concrete body header coercion needs its plan.
+        // a concrete body header coercion needs its plan.
         if let Some(coercion) = &self.body.body_coercion {
             self.check_concrete_type(&self.body.origin, &coercion.source, "body coercion source");
             self.check_concrete_type(&self.body.origin, &coercion.target, "body coercion target");
@@ -3553,7 +3553,7 @@ impl<'a> BodyValidator<'a> {
         if let Some(coercion) = &expression.coercion {
             self.check_concrete_type(&origin, &coercion.source, "coercion source");
             self.check_concrete_type(&origin, &coercion.target, "coercion target");
-            // Stage 5.5 E1: a concrete coercion must carry the plan
+            // a concrete coercion must carry the plan
             // materialization recomputed, and it must agree with a fresh
             // computation.
             match &expression.coercion_plan {
@@ -3755,7 +3755,7 @@ impl<'a> BodyValidator<'a> {
             &pattern.test.subject,
             "pattern subject type",
         );
-        // Stage 5.5 E1: the concrete plan must equal a fresh computation, and
+        // the concrete plan must equal a fresh computation, and
         // every nested pattern must be connected to the subject this plan
         // supplies. Placeholder-bearing subjects (coroutine thunk arguments)
         // stay deferred.
@@ -4388,7 +4388,7 @@ impl<'a> BodyValidator<'a> {
                                 .as_ref()
                                 .map(|origin| origin.span.clone())
                                 .unwrap_or(Span::Compiler),
-                            "instance body binding does not match a Stage 3.3 dependency",
+                            "instance body binding does not match a specialization dependency",
                         );
                     }
                 }
@@ -4425,7 +4425,7 @@ impl<'a> BodyValidator<'a> {
                                 .as_ref()
                                 .map(|origin| origin.span.clone())
                                 .unwrap_or(Span::Compiler),
-                            "instance body artifact binding does not match a Stage 3.3 artifact request",
+                            "instance body artifact binding does not match a specialization artifact request",
                         );
                     }
                 }
@@ -4451,7 +4451,7 @@ impl<'a> BodyValidator<'a> {
                 self.report(
                     dependency.origin.span.clone(),
                     format!(
-                        "Stage 3.3 {} dependency has no instance-body binding",
+                        "specialization {} dependency has no instance-body binding",
                         dependency.kind.description()
                     ),
                 );
@@ -4461,7 +4461,7 @@ impl<'a> BodyValidator<'a> {
             if !artifact.closure_phase && !matched_artifacts.contains(&index) {
                 self.report(
                     artifact.origin.span.clone(),
-                    "Stage 3.3 artifact request has no instance-body binding",
+                    "specialization artifact request has no instance-body binding",
                 );
             }
         }
@@ -4525,7 +4525,7 @@ impl<'a> BodyValidator<'a> {
         }
     }
 
-    /// The Stage 3.3 dependency kinds a source-function binding at this site
+    /// The specialization dependency kinds a source-function binding at this site
     /// may agree with. Route-only sites (indirect, external, intrinsic,
     /// ordinary constructor) have no dependency edge.
     fn site_dependency_kinds(
@@ -4715,7 +4715,7 @@ mod tests {
             .expect("test source should type check")
     }
 
-    /// Lowers a program through the Stage 3.3 worklist without materializing
+    /// Lowers a program through the specialization worklist without materializing
     /// bodies, so a test can observe the before/after boundary.
     fn lower_with_worklist(source: &str) -> (TypedModule, LoweredProgram) {
         let module = checked_program(source);
@@ -5198,7 +5198,7 @@ mod tests {
     }
 
     /// Every trait-dependent site in every body must carry resolved evidence,
-    /// and its binding must point at a Stage 3.3 instance or artifact.
+    /// and its binding must point at a specialization instance or artifact.
     fn assert_trait_sites_are_resolved(program: &LoweredProgram) {
         for (_, instance) in program.instances.iter() {
             let body = instance.body.as_ref().expect("instance body");
@@ -5840,7 +5840,7 @@ mod tests {
         }
     }
 
-    /// Stage 5.7 review: `Buffer.pop` records its `Option` alternatives per
+    /// `Buffer.pop` records its `Option` alternatives per
     /// concrete instance, and the instance validator rejects a corrupted
     /// record, so the emitter never searches the sum itself.
     #[test]
@@ -6086,7 +6086,7 @@ mod tests {
         assert_eq!(await_.resume_state, 1);
     }
 
-    /// Stage 5.8 review: an external await records its `Completed`/`Cancelled`
+    /// An external await records its `Completed`/`Cancelled`
     /// injections per concrete instance, and the instance validator rejects a
     /// corrupted record, so the emitter never plans them.
     #[test]

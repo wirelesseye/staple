@@ -1,4 +1,4 @@
-//! Stage 5.2: the backend-local calling-convention layer.
+//! the backend-local calling-convention layer.
 //!
 //! These functions build the LLVM function types and argument classifications
 //! the emitter uses. They are parameterized by [`LayoutContext`] for the
@@ -168,8 +168,8 @@ impl<'program, 'context> Backend<'program, 'context> {
         }
     }
 
-    /// Which flattened parameters pass indirectly: a `mut`/moved parameter, or
-    /// a parameter the catalog does not consider `Copy`.
+    /// Which flattened parameters pass indirectly: a mutated parameter, or a
+    /// borrowed non-`Copy` parameter. Moved values pass directly unless mutated.
     pub(crate) fn indirect_parameter_mask(&self, function_type: &CheckedFunctionType) -> Vec<bool> {
         let types = flattened_parameter_types(&function_type.parameter);
         let mutation_mask = mutation_parameter_mask(types.len(), &function_type.mutations);

@@ -1,9 +1,9 @@
-//! Stage 5.1 (D4): module-initializer dispatch bindings.
+//! module-initializer dispatch bindings.
 //!
 //! Module initializers own program-arena bodies, not instance-local bodies, so
-//! they never went through the Stage 3.4 site binder: their dispatch sites were
-//! recorded as request roots and closure edges, and the Stage 4.3-4.6 scanners
-//! re-resolved each one with the Stage 3.3 recipe. The Stage 5 emitter must
+//! they never went through the specialization site binder: their dispatch sites were
+//! recorded as request roots and closure edges, and the artifact planning scanners
+//! re-resolved each one with the specialization recipe. The emitter must
 //! instead read a binding table exactly as it does for instance bodies, because
 //! it must never resolve a dispatch site at LLVM time.
 //!
@@ -41,7 +41,7 @@ use super::{
 };
 
 impl LoweredProgram {
-    /// Builds the Stage 5.1 (D4) initializer binding and evidence tables over
+    /// Builds the emission initializer binding and evidence tables over
     /// the closed catalog. One table per initializer, indexed by
     /// `InitializerId`; instance bodies already carry the same tables.
     pub(super) fn bind_initializer_sites(&mut self) -> Vec<Diagnostic> {
@@ -176,7 +176,7 @@ impl<'a> InitializerBinder<'a> {
             .push(Diagnostic::new(origin.span.clone(), message.into()));
     }
 
-    /// Resolves one source-function target with the Stage 3.3 recipe, exactly
+    /// Resolves one source-function target with the specialization recipe, exactly
     /// as the initializer root traversal did (`Root` target, no enclosing
     /// environment), and records the interned instance.
     fn bind_instance(
@@ -502,7 +502,7 @@ impl<'a> InitializerBinder<'a> {
                             }
                             None => self.report(
                                 origin,
-                                "initializer requests a structural method Stage 3.3 did not reserve",
+                                "initializer requests a structural method specialization did not reserve",
                             ),
                         }
                     }
@@ -544,7 +544,7 @@ impl<'a> InitializerBinder<'a> {
                     }
                     None => self.report(
                         origin,
-                        "initializer requests a constructor adapter Stage 3.3 did not reserve",
+                        "initializer requests a constructor adapter specialization did not reserve",
                     ),
                 }
             }
@@ -1539,7 +1539,7 @@ mod tests {
             .find(|id| *id != bound)
             .expect("another instance");
         // A closure-phase use at the bound site that names a different
-        // instance is a corruption, not a Stage 4.2 failure: this table's
+        // instance is a corruption, not a artifact planning failure: this table's
         // contract is that the binding and the use agree.
         program.initializer_instance_uses[index].push(crate::LoweredInstanceUse {
             site: ArtifactUseSite::CoroCreation(coro),

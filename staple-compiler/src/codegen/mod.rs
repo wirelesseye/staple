@@ -113,7 +113,7 @@ impl<'context> CodeGenerator<'context> {
 /// Declaration snapshot: the LLVM type and linkage the catalog signatures
 /// compile to, taken before any body is emitted. Each entry is the LLVM type
 /// and whether the declaration is internal, so the comparison covers linkage
-/// as well as the ABI (F2).
+/// as well as the ABI.
 #[cfg(test)]
 pub(crate) fn lowered_catalog_types(
     context: &inkwell::context::Context,

@@ -1,4 +1,4 @@
-//! Stage 5.2: the backend-local pure-IR layer.
+//! the backend-local pure-IR layer.
 //!
 //! Small IR constructs the emitter uses: GC allocation, finalizer and root
 //! registration, traps, unit values, and the byte helpers the UTF-8 validator
@@ -232,9 +232,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Legacy `build_owned_c_string`: a malloc'd NUL-terminated copy of one
-    /// C-string payload. Shared (Stage 5.3 Step 5) so both emitters emit the
-    /// same instructions under the same SSA names.
+    /// Allocates a NUL-terminated copy of a C-string payload with malloc.
     pub(crate) fn build_owned_c_string(
         &self,
         value: &str,
@@ -258,9 +256,8 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(pointer.as_any_value_enum())
     }
 
-    /// Legacy's String literal: copy a global byte string to a GC allocation
-    /// and build the `{pointer, length}` value. Shared by both emitters (5.4
-    /// Step 3); the caller decodes the literal text.
+    /// The emitter's String literal: copy a global byte string to a GC allocation
+    /// and build the `{pointer, length}` value. The caller decodes literal text.
     pub(crate) fn build_string_literal(
         &self,
         value: &str,
@@ -279,7 +276,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.build_string_value(pointer, length, span)
     }
 
-    /// Legacy `build_string_value`: the `{pointer, length}` slice value.
+    /// The `{pointer, length}` slice value.
     pub(crate) fn build_string_value(
         &self,
         pointer: inkwell::values::PointerValue<'context>,
@@ -300,10 +297,8 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(value)
     }
 
-    /// Legacy `compile_string_from_c_string`'s core (the caller evaluates the
-    /// argument and, in legacy's case, releases the C string through its drop
-    /// machinery): validate the C string as UTF-8, copy it to the GC heap, and
-    /// return the owned String.
+    /// Validates a C string as UTF-8 and copies it to an owned GC String.
+    /// The caller evaluates the argument and emits its recorded release.
     pub(crate) fn build_string_from_c_string(
         &self,
         source: inkwell::values::PointerValue<'context>,
@@ -349,10 +344,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(result)
     }
 
-    /// The CString release call (`free`) both emitters emit for a consumed C
-    /// string. Legacy reaches it through `compile_drop_value`, so its test-only
-    /// drop-site recorder still sees the obligation; the lowered emitter calls
-    /// it directly at the same site.
+    /// Releases an owned CString through free.
     pub(crate) fn build_free_c_string(
         &self,
         source: inkwell::values::PointerValue<'context>,
@@ -369,9 +361,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `compile_string_to_c_string`'s core (the caller evaluates the
-    /// argument): trap on an interior NUL, allocate a NUL-terminated copy, and
-    /// return it.
+    /// Traps on an interior NUL and allocates a NUL-terminated String copy.
     pub(crate) fn build_string_to_c_string(
         &self,
         string: inkwell::values::StructValue<'context>,
@@ -456,7 +446,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(result)
     }
 
-    /// Legacy's integer binary builder with its SSA names
+    /// The emitter's integer binary builder with its SSA names
     /// (`{type}.add`/`.subtract`/`.multiply`/`.divide`).
     pub(crate) fn build_integer_binary(
         &self,
@@ -495,7 +485,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(value)
     }
 
-    /// Legacy's integer compare builder with its SSA name
+    /// The emitter's integer compare builder with its SSA name
     /// (`{type}.compare`).
     pub(crate) fn build_integer_compare(
         &self,
@@ -527,10 +517,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Legacy's float binary builder with its SSA names
-    /// (`{type}.add`/`.subtract`/`.multiply`/`.divide`). Stage 5.4 Step 2:
-    /// the emitter uses it, so the lower emitter's `FloatBinary` output is
-    /// identical to legacy's.
+    /// Emits floating-point arithmetic with the operation's stable SSA name.
     pub(crate) fn build_float_binary(
         &self,
         float: crate::FloatType,
@@ -559,7 +546,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(value)
     }
 
-    /// Legacy's float compare builder with its SSA name (`{type}.compare`).
+    /// The emitter's float compare builder with its SSA name (`{type}.compare`).
     pub(crate) fn build_float_compare(
         &self,
         float: crate::FloatType,
@@ -586,7 +573,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Legacy's Bool builder: tag 0 (`True`) or 1 (`False`) in the two-arm sum.
+    /// The emitter's Bool builder: tag 0 (`True`) or 1 (`False`) in the two-arm sum.
     pub(crate) fn build_bool_value(
         &self,
         condition: inkwell::values::IntValue<'context>,
@@ -611,8 +598,8 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
-    /// Legacy's symbol-initialization check: load the state byte and trap
-    /// unless it is 2. Both emitters share it (5.4 Step 2).
+    /// The emitter's symbol-initialization check: load the state byte and trap
+    /// unless it is 2.
     pub(crate) fn build_initialization_check(
         &self,
         state_slot: inkwell::values::PointerValue<'context>,
@@ -635,7 +622,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.build_trap_if(invalid, span)
     }
 
-    /// Legacy's bounds-checked element pointer: trap when `position >= length`,
+    /// The emitter's bounds-checked element pointer: trap when `position >= length`,
     /// then GEP. Shared by slice reads and other index paths.
     pub(crate) fn build_index_pointer(
         &self,
@@ -662,7 +649,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         .map_err(compiler_diagnostic)
     }
 
-    /// Legacy `SliceLength`'s core: field 1 of the `{pointer, length}` slice.
+    /// Field 1 of the `{pointer, length}` slice.
     pub(crate) fn build_slice_length(
         &self,
         slice: inkwell::values::StructValue<'context>,
@@ -673,7 +660,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Legacy `SliceGetRef`'s core: extract the slice's pointer and length and
+    /// Extract the slice's pointer and length and
     /// return the bounds-checked element pointer.
     pub(crate) fn build_slice_get_ref(
         &self,
@@ -695,7 +682,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.build_index_pointer(pointer, position, length, element_type, span)
     }
 
-    /// Legacy's `{code, environment}` closure value.
+    /// The emitter's `{code, environment}` closure value.
     pub(crate) fn build_closure_value(
         &self,
         code: inkwell::values::FunctionValue<'context>,
@@ -720,7 +707,7 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     /// The capture-environment struct layout: one field per capture, in capture
     /// order. `fields` are the per-capture storage types (`capture_field_type`
-    /// in the lowered emitter, legacy `compile_capture_type`).
+    /// in the lowered emitter, compile capture type).
     pub(crate) fn capture_environment_type(
         &self,
         fields: &[inkwell::types::BasicTypeEnum<'context>],
@@ -728,7 +715,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.context.struct_type(fields, false)
     }
 
-    /// One capture field insert, always named `capture` like legacy's.
+    /// Inserts one capture field with the SSA name capture.
     pub(crate) fn insert_capture(
         &self,
         environment: inkwell::values::StructValue<'context>,
@@ -742,8 +729,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
-    /// GC-allocate one built capture environment and store it, like legacy
-    /// `build_capture_environment`'s allocation tail.
+    /// Allocates a capture environment on the GC heap and stores its fields.
     pub(crate) fn allocate_capture_environment(
         &self,
         environment_type: inkwell::types::StructType<'context>,
@@ -762,7 +748,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(pointer)
     }
 
-    /// Legacy `build_product_value`: build a literal struct from the given
+    /// Build a literal struct from the given
     /// values (a single value is returned unchanged; the empty product is a
     /// zero-sized struct only when the caller passes no values). Shared by the
     /// constructor and product paths.
@@ -789,8 +775,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(product.into())
     }
 
-    /// The computed temporary legacy's indirect/mutation argument paths
-    /// materialize: alloca the parameter's concrete type and store the value.
+    /// Allocates storage for a concrete parameter type and stores its value.
     pub(crate) fn build_argument_temporary(
         &self,
         value: inkwell::values::BasicValueEnum<'context>,
@@ -808,9 +793,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(pointer)
     }
 
-    /// Legacy `compile_numeric_to_string`'s core (the caller evaluates the
-    /// argument): format the value into a stack buffer and copy it to a GC
-    /// String.
+    /// Formats a numeric value in a stack buffer and copies it to a GC String.
     pub(crate) fn build_numeric_to_string(
         &self,
         numeric: crate::NumericType,
@@ -916,9 +899,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .as_any_value_enum())
     }
 
-    /// Legacy `compile_string_add`'s core (the caller evaluates the operands):
-    /// concatenate two Strings into one GC allocation, with the same overflow
-    /// check and SSA names.
+    /// Concatenates two Strings into one GC allocation, checking length overflow.
     pub(crate) fn build_string_add(
         &self,
         left: inkwell::values::StructValue<'context>,
@@ -981,7 +962,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// Loads the value reached by following `payloads` (outermost first),
-    /// loading the final payload as well. Stage 5.5 Step 4 shares it with the
+    /// loading the final payload as well. emission shares it with the
     /// lowered `Ref` access and nominal pattern paths.
     pub(crate) fn load_ref_payloads(
         &self,
@@ -1034,7 +1015,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(pointer)
     }
 
-    /// Stage 5.5 Step 3: field 0 of a sum representation (the `i32` tag).
+    /// Field 0 of a sum representation (the `i32` tag).
     pub(crate) fn build_sum_tag(
         &self,
         value: inkwell::values::StructValue<'context>,
@@ -1046,7 +1027,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Stage 5.5 Step 3: compare a sum tag against one alternative index.
+    /// Compare a sum tag against one alternative index.
     pub(crate) fn build_sum_tag_compare(
         &self,
         tag: inkwell::values::IntValue<'context>,
@@ -1063,8 +1044,8 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Stage 5.5 Step 3: the alloca a sum coercion stores its result into,
-    /// with the tag/payload projection legacy `coerce_sum_value` builds.
+    /// The alloca a sum coercion stores its result into,
+    /// with the tag/payload projection coerce sum value builds.
     pub(crate) fn begin_sum_storage(
         &self,
         sum: &crate::CheckedSumType,
@@ -1101,7 +1082,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         })
     }
 
-    /// Stage 5.5 Step 3: load the finished sum value out of its storage slot.
+    /// Load the finished sum value out of its storage slot.
     pub(crate) fn load_sum_storage(
         &self,
         storage: &SumStorageSlot<'context>,
@@ -1113,7 +1094,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))
     }
 
-    /// Stage 5.5 Step 3: legacy `store_sum_payload`'s core — write the tag and
+    /// Write the tag and
     /// memcpy the alternative into the payload field.
     pub(crate) fn store_sum_payload(
         &self,
@@ -1155,7 +1136,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.5 Step 3: legacy `extract_sum_alternative`'s core — memcpy the
+    /// Memcpy the
     /// payload out and reinterpret it as the alternative type.
     pub(crate) fn extract_sum_alternative(
         &self,
@@ -1202,7 +1183,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
-    /// Stage 5.5 Step 3: legacy `coerce_slice_ref_value`'s core — build a
+    /// Build a
     /// `{pointer, length}` slice from a fixed-reference pointer.
     pub(crate) fn build_slice_ref_value(
         &self,
@@ -1228,9 +1209,8 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(result.as_any_value_enum())
     }
 
-    /// Stage 5.5 Step 3: legacy `compile_string_literal_pattern_branch`'s core
-    /// — compare the string fields against a literal with a length check and
-    /// `memcmp`, branching to `success` or `failure`.
+    /// Tests a String against a literal using a length check and memcmp,
+    /// branching to the supplied success or failure block.
     pub(crate) fn build_string_literal_pattern_compare(
         &self,
         value: inkwell::values::StructValue<'context>,
@@ -1531,9 +1511,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok((merge, cases.into_iter().map(|(_, block)| block).collect()))
     }
 
-    /// Stage 5.5 Step 3: the literal half of legacy
-    /// `compile_formatter_write_literal` once the target function is bound:
-    /// allocate a `String` from the literal and call `Formatter.write`.
+    /// Allocates a String from literal text and invokes the bound Formatter.write.
     pub(crate) fn build_formatter_write_literal(
         &self,
         function: inkwell::values::FunctionValue<'context>,
@@ -1569,7 +1547,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.6 Step 2: legacy `compile_drop_value`'s runtime releases (a
+    /// compile drop value's runtime releases (a
     /// dropped `Scheduler`, `Wait`, `Resolver`, or `CompletionToken`). Both
     /// emitters call it, so the call and its SSA shape are shared.
     pub(crate) fn build_runtime_release(
@@ -1595,7 +1573,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
-    /// Stage 5.6 Step 2: dropping a `Coroutine` value calls the frame's
+    /// Dropping a `Coroutine` value calls the frame's
     /// idempotent cleanup function through the header slot. Shared so both
     /// emitters emit the same loads and indirect call.
     pub(crate) fn build_coroutine_frame_cleanup(
@@ -1626,7 +1604,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
-    /// Stage 5.6 Step 2: legacy `compile_conditional_drop`'s branch, `drop`
+    /// compile conditional drop's branch, `drop`
     /// block, and continue block. Returns `(drop.live, drop.done)` and leaves
     /// the builder in the drop block with the live flag already cleared. The
     /// caller expands the glue, then calls [`Self::end_conditional_drop`].
@@ -1657,7 +1635,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok((drop_block, done_block))
     }
 
-    /// Stage 5.6 Step 2: close the skeleton [`Self::begin_conditional_drop`]
+    /// Close the skeleton [`Self::begin_conditional_drop`]
     /// opened.
     pub(crate) fn end_conditional_drop(
         &self,
@@ -1670,7 +1648,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.6 Step 2: legacy `compile_conditional_cell_drop`'s state test
+    /// compile conditional cell drop's state test
     /// and load. The caller expands the loaded value's glue, then calls
     /// [`Self::end_conditional_cell_drop`].
     pub(crate) fn begin_conditional_cell_drop(
@@ -1728,7 +1706,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         })
     }
 
-    /// Stage 5.6 Step 2: clear the cell state and close the skeleton
+    /// Clear the cell state and close the skeleton
     /// [`Self::begin_conditional_cell_drop`] opened.
     pub(crate) fn end_conditional_cell_drop(
         &self,
@@ -1744,7 +1722,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.6 Step 2: legacy finalizer bodies open with an `entry` block,
+    /// The emitter finalizer bodies open with an `entry` block,
     /// position the builder there, and take the payload pointer parameter.
     /// Restores the caller's position with
     /// [`Self::finish_finalizer_function`].
@@ -1766,7 +1744,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         })
     }
 
-    /// Stage 5.6 Step 2: emit the finalizer's `ret void` and restore the
+    /// Emit the finalizer's `ret void` and restore the
     /// caller's insertion point.
     pub(crate) fn finish_finalizer_function(
         &self,
@@ -1781,7 +1759,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.6 Step 2: field 3 of a buffer header, the element data pointer.
+    /// Field 3 of a buffer header, the element data pointer.
     pub(crate) fn buffer_data_pointer(
         &self,
         buffer: PointerValue<'context>,
@@ -1792,7 +1770,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Stage 5.6 Step 2: legacy `trap_if_buffer_frozen`.
+    /// Trap if buffer frozen.
     pub(crate) fn trap_if_buffer_frozen(
         &self,
         buffer: PointerValue<'context>,
@@ -1820,7 +1798,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.build_trap_if(frozen, span)
     }
 
-    /// Stage 5.6 Step 2: the capacity overflow trap `Buffer.with_capacity`
+    /// The capacity overflow trap `Buffer.with_capacity`
     /// performs before allocating its header.
     pub(crate) fn trap_if_buffer_capacity_overflows(
         &self,
@@ -1855,9 +1833,8 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.build_trap_if(too_large, span)
     }
 
-    /// Stage 5.6 Step 2: the header allocation `Buffer.with_capacity` and
-    /// `Buffer.clone` share. `prefix` is `"buffer"` or `"buffer.clone"` so the
-    /// SSA names match each legacy site.
+    /// Allocates the header shared by Buffer.with_capacity and Buffer.clone.
+    /// The prefix distinguishes their SSA names.
     pub(crate) fn build_buffer_allocation(
         &self,
         capacity: IntValue<'context>,
@@ -1919,7 +1896,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(buffer)
     }
 
-    /// Stage 5.6 Step 2: the address of one buffer element within an
+    /// The address of one buffer element within an
     /// already-computed data pointer.
     pub(crate) fn build_buffer_element_pointer(
         &self,
@@ -1932,7 +1909,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Stage 5.6 Step 2: load one buffer element through its element pointer,
+    /// Load one buffer element through its element pointer,
     /// returning the element's address too (a pop clears it after moving out).
     pub(crate) fn build_buffer_element_load(
         &self,
@@ -1950,7 +1927,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok((slot, value))
     }
 
-    /// Stage 5.6 Step 2: store one buffer element through its element pointer.
+    /// Store one buffer element through its element pointer.
     pub(crate) fn build_buffer_element_store(
         &self,
         data: PointerValue<'context>,
@@ -1967,7 +1944,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
-    /// Stage 5.6 Step 2: load a buffer header length field (field 0).
+    /// Load a buffer header length field (field 0).
     pub(crate) fn build_buffer_length(
         &self,
         buffer: PointerValue<'context>,
@@ -1985,7 +1962,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Stage 5.6 Step 2: load a buffer header capacity field (field 1).
+    /// Load a buffer header capacity field (field 1).
     pub(crate) fn build_buffer_capacity(
         &self,
         buffer: PointerValue<'context>,
@@ -2003,7 +1980,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Stage 5.6 Step 2: store a buffer header capacity field (field 1).
+    /// Store a buffer header capacity field (field 1).
     pub(crate) fn build_buffer_capacity_store(
         &self,
         buffer: PointerValue<'context>,
@@ -2021,7 +1998,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Stage 5.5 Step 3: the type-independent phi core legacy uses for logical
+    /// The type-independent phi core the emitter uses for logical
     /// short-circuits and match merges.
     pub(crate) fn build_phi_value(
         &self,
@@ -2045,14 +2022,14 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 }
 
-/// Stage 5.5 Step 3: a sum-coercion storage slot and its tag/payload views.
+/// A sum-coercion storage slot and its tag/payload views.
 pub(crate) struct SumStorageSlot<'context> {
     pub llvm_type: inkwell::types::StructType<'context>,
     pub slot: inkwell::values::PointerValue<'context>,
     pub storage: super::layout::SumStorage<'context>,
 }
 
-/// Stage 5.7: [`Backend::begin_structural_index`]'s output: the result slot
+/// [`Backend::begin_structural_index`]'s output: the result slot
 /// and its type, the merge block, and one `(position, block)` case per element.
 pub(crate) struct StructuralIndexBlocks<'context> {
     pub output_type: BasicTypeEnum<'context>,
@@ -2061,7 +2038,7 @@ pub(crate) struct StructuralIndexBlocks<'context> {
     pub cases: Vec<(IntValue<'context>, BasicBlock<'context>)>,
 }
 
-/// Stage 5.7: [`Backend::begin_structural_next`]'s output: the result slot and
+/// [`Backend::begin_structural_next`]'s output: the result slot and
 /// its type, and the `Done`, dispatch, unreachable, and merge blocks.
 pub(crate) struct StructuralNextBlocks<'context> {
     pub result_type: BasicTypeEnum<'context>,
@@ -2072,7 +2049,7 @@ pub(crate) struct StructuralNextBlocks<'context> {
     pub merge: BasicBlock<'context>,
 }
 
-/// Stage 5.6 Step 2: the state [`Backend::begin_conditional_cell_drop`] opened:
+/// The state [`Backend::begin_conditional_cell_drop`] opened:
 /// the loaded cell value, its state byte, and the merge block.
 pub(crate) struct CellDropBlocks<'context> {
     pub value: BasicValueEnum<'context>,
@@ -2080,7 +2057,7 @@ pub(crate) struct CellDropBlocks<'context> {
     pub continue_block: BasicBlock<'context>,
 }
 
-/// Stage 5.6 Step 2: the state [`Backend::enter_finalizer_function`] opened.
+/// The state [`Backend::enter_finalizer_function`] opened.
 pub(crate) struct FinalizerBody<'context> {
     pub previous_block: Option<BasicBlock<'context>>,
     pub payload: PointerValue<'context>,

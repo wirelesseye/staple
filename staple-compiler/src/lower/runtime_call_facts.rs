@@ -1,9 +1,9 @@
-//! Stage 5.8: intrinsic facts recorded before LLVM emission.
+//! intrinsic facts recorded before LLVM emission.
 
 use super::{LoweredCallArgument, LoweredCallableTarget, LoweredSemanticIds};
 use crate::{CheckedFunctionType, CheckedType, IntrinsicFunction};
 
-/// Per-call facts whose legacy equivalents query checked runtime types.
+/// Per-call facts whose the emitter equivalents query checked runtime types.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LoweredRuntimeCallFacts {
     pub completion_value_type: Option<CheckedType>,

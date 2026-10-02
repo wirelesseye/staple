@@ -302,8 +302,8 @@ pub enum IntrinsicFunction {
     Reaction,
     Batch,
     Snapshot,
-    /// Provisional Step-2 coroutine driver: runs a `Coroutine{E} T` to
-    /// completion and yields `T`. Replaced by the scheduler's `pump` in Step 3.
+    /// Synchronous coroutine driver: runs a `Coroutine{E} T` to
+    /// completion and yields `T`. Scheduler-driven tasks advance through `pump`.
     CoroutineBlockOn,
     SchedulerCreate,
     TaskScope,

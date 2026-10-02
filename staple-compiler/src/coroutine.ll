@@ -5,7 +5,7 @@
 ;   0  DONE          - the body ran to its end; the result is at frame->result_ptr
 ;   1  RESUME_CHILD   - the body awaits a child coroutine (the {i8,ptr} carries it)
 ;   2  SUSPENDED      - the body parked itself on the scheduler (`yield_now`)
-;   3  CANCELLED      - the body unwound after a cancellation request (Step 3d)
+;   3  CANCELLED      - the body unwound after a cancellation request
 ;   4  WAIT_TASK      - the body awaits a spawned `Task`; it has registered itself
 ;                       as that task's waiter and is woken on the task's completion
 ;
@@ -42,7 +42,7 @@
 ; The header of a `completion` record, shared by its `Wait` and `Resolver`
 ; handles. `completion` allocates `{ <this header>, T value }`. state: 0 pending,
 ; 1 completed, 2 cancelled (resolver), 3 consumer-gone. flags bit0: a waiter is
-; registered. generation: bumped on register — reserved for slice 4b.
+; registered. generation: incremented on registration.
 %Completion = type { i8, i8, {{SIZE}}, ptr, ptr, ptr, ptr }
 
 declare void @llvm.trap()

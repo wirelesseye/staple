@@ -1,4 +1,4 @@
-//! Stage 5.8 shared coroutine state-machine and reactive runner IR.
+//! emission shared coroutine state-machine and reactive runner IR.
 //! Inputs are compiled LLVM types/values; source and checked-type selection
 //! remain with the caller.
 use super::super::layout::*;
@@ -313,7 +313,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         // `state == 0` (created, never resumed) is the only case whose
         // captures are still owned by the frame; a completed body already
         // dropped its owned locals, and a mid-body suspension leaves its
-        // frame cells for the (Step 3d) unwind path.
+        // frame cells for the cancellation unwind path.
         let never_resumed = self
             .builder
             .build_int_compare(
@@ -980,7 +980,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 }
 
-/// Which external record an `await` parks on (`compile_external_await`).
+/// Which external record an `await` parks on (compile external await).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExternalAwaitKind {
     Task,

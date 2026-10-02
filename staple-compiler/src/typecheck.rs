@@ -1447,7 +1447,7 @@ impl TypedModule {
     }
 
     /// The bound-discharge callback of the general drop-implementation
-    /// predicate (Stage 5.11 F5): a `Copy` bound asks the structural `Copy`
+    /// predicate : a `Copy` bound asks the structural `Copy`
     /// predicate, any other bound asks the obligation resolver. A concrete
     /// substituted argument never carries a free function parameter, so the
     /// empty bound list is correct here.
@@ -1501,7 +1501,7 @@ impl TypedModule {
         )
     }
 
-    // Stage 5.2 moved layout's opaque-type selection to the lowered
+    // emission moved layout's opaque-type selection to the lowered
     // `LayoutContext`; only its agreement test still reads this accessor.
     #[cfg(test)]
     pub(crate) fn is_io_type(&self, value_type: &CheckedType) -> bool {
@@ -1516,7 +1516,7 @@ impl TypedModule {
         matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.coroutine_type)
     }
 
-    // Stage 5.2 moved layout's opaque-type selection to the lowered
+    // emission moved layout's opaque-type selection to the lowered
     // `LayoutContext`; only its agreement test still reads this accessor.
     #[cfg(test)]
     pub(crate) fn is_task_type(&self, value_type: &CheckedType) -> bool {
@@ -2700,7 +2700,7 @@ impl TypeChecker {
                 .iter()
                 .filter_map(|bound| self.resolve_trait_bound(module, bound))
                 .collect::<Vec<_>>();
-            // Stage 5.11 (F5): a `Drop` implementation's bounds may constrain
+            // a `Drop` implementation's bounds may constrain
             // only its own type parameters. A bound on any other type would
             // make discharging it ask about a type that may contain the header
             // itself, so the recursive matching predicate could not terminate.
@@ -10335,7 +10335,7 @@ impl TypeChecker {
     }
 
     /// The bound-discharge callback of the general drop-implementation
-    /// predicate (Stage 5.11 F5) for declaration-time checks: a `Copy` bound
+    /// predicate  for declaration-time checks: a `Copy` bound
     /// asks the structural `Copy` predicate under the active function bounds,
     /// any other bound asks the exact obligation resolver.
     fn drop_bound_holds(&self, bound: &CheckedTraitBound, bounds: &[CheckedTraitBound]) -> bool {
@@ -14996,7 +14996,7 @@ fn checked_type_contains_cstring(value_type: &CheckedType) -> bool {
 }
 
 /// Whether a `Drop` implementation applies to `value_type` under the general
-/// implementation-matching rule (Stage 5.11 F5): the implementation's header
+/// implementation-matching rule : the implementation's header
 /// unifies with the type and, for a concrete type, every conditional bound
 /// holds under that unification. `discharge` answers one already-substituted
 /// bound.

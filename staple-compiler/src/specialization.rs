@@ -1,11 +1,11 @@
-//! Canonical structural keys for Stage 3 specialization.
+//! Canonical structural keys for specialization specialization.
 //!
-//! Stage 3.1 defines the owned, typed identity of source-function instances
-//! and of the constructor-adapter and structural-method artifacts Stage 4
+//! specialization defines the owned, typed identity of source-function instances
+//! and of the constructor-adapter and structural-method artifacts artifact planning
 //! materializes. Keys are built from semantic IDs and structural checked data
 //! only: display names, source spans, contextual defaults, and expanded
 //! nominal representations never participate in equality. The worklist that
-//! consumes these keys belongs to Stage 3.3.
+//! consumes these keys belongs to specialization.
 
 use std::collections::{HashMap, HashSet};
 
@@ -383,7 +383,7 @@ impl InstanceSubstitution {
 /// depends on it, canonical trait evidence.
 ///
 /// Equality inputs are fixed here; which parameters are *relevant* to a given
-/// template is collected by Stage 3.2 and only affects which entries callers
+/// template is collected by specialization and only affects which entries callers
 /// add. A function with no relevant parameters or evidence has exactly one key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct InstanceKey {
@@ -465,7 +465,7 @@ impl InstanceKey {
 }
 
 /// Canonical trait evidence. Only resolved selections appear here; declared
-/// bounds and negative obligations stay in `InstanceRequest` until Stage 3.2
+/// bounds and negative obligations stay in `InstanceRequest` until specialization
 /// replaces them with a concrete selection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum CanonicalEvidence {
@@ -522,7 +522,7 @@ pub(crate) fn canonical_evidence(
         TraitEvidence::DeclaredBound { trait_id, .. } => Err(origin_diagnostic(
             origin,
             format!(
-                "trait {} evidence is still a declared bound; Stage 3.2 must resolve it before an instance key exists",
+                "trait {} evidence is still a declared bound; specialization must resolve it before an instance key exists",
                 trait_id.0
             ),
         )),
@@ -589,11 +589,11 @@ impl ConstructorAdapterKey {
     }
 }
 
-/// The identity of a generated structural-method body. The legacy backend
+/// The identity of a generated structural-method body. The emitter backend
 /// cached `(StructuralTraitMethod, Debug arguments)`: for the seven current
 /// methods the trait, method, and callable type are derivable from the
 /// structural kind plus completed arguments, but this key keeps them explicit
-/// so Stage 4 never depends on that derivability.
+/// so artifact planning never depends on that derivability.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct StructuralMethodKey {
     pub structural: StructuralTraitMethod,
@@ -698,7 +698,7 @@ pub(crate) struct ExternAdapterKey {
 /// Generated-artifact request keys. The variant is the namespace: keys from
 /// different families can never compare or hash equal, even when their numeric
 /// IDs coincide. `RuntimeHelper` is deliberately absent: runtime symbols have
-/// fixed names and no lowered bodies, so Stage 4 records them as a separate
+/// fixed names and no lowered bodies, so artifact planning records them as a separate
 /// ordered requirement set rather than an artifact family.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ArtifactRequestKey {
@@ -764,10 +764,10 @@ pub(crate) struct SpecializationNameCollision {
     pub name: String,
 }
 
-/// The Stage 3.3 deterministic catalog: interns instance and artifact keys in
+/// The specialization deterministic catalog: interns instance and artifact keys in
 /// first-discovery order and plans stable emitted symbol names.
 ///
-/// Stage 3.3 must call `reserve_instance` before visiting an instance body so
+/// Specialization must call `reserve_instance` before visiting an instance body so
 /// self-recursion and mutual recursion reuse the already-reserved ordinal
 /// instead of interning a second one. `planned_names` is the emission order
 /// contract: family order (`instances`, then `artifacts`) followed by ordinal.
@@ -806,8 +806,8 @@ impl SpecializationCatalog {
         self.instances.get(ordinal.0)
     }
 
-    /// The ordinal already interned for a key, when it was reserved. Stage 3.4
-    /// uses this to bind a re-resolved site to the Stage 3.3 instance and
+    /// The ordinal already interned for a key, when it was reserved. specialization
+    /// uses this to bind a re-resolved site to the specialization instance and
     /// must not introduce a second identity for the same key.
     pub(crate) fn instance_ordinal(&self, key: &InstanceKey) -> Option<InstanceOrdinal> {
         self.instance_lookup
@@ -848,7 +848,7 @@ impl SpecializationCatalog {
         self.planned_names_with(|_| None)
     }
 
-    /// The planned emitted symbol names in emission order, with the D2
+    /// The planned emitted symbol names in emission order, with the
     /// declared-name rule: an instance of a non-generic template (empty
     /// substitutions and evidence) keeps its declared mangled name, supplied
     /// by `declared`. Two distinct templates can share a declared name (for
@@ -876,7 +876,7 @@ impl SpecializationCatalog {
                 return Err(SpecializationNameCollision { name });
             }
             // A coroutine pair is emitted as two functions, `{name}_resume` and
-            // `{name}_cleanup` (Stage 5.3 F3). Both are planned names: reserve
+            // `{name}_cleanup` . Both are planned names: reserve
             // them here so they collide with any instance or artifact name and
             // the backend can read them instead of building unchecked names.
             if matches!(key, ArtifactRequestKey::CoroutineCodes(_)) {
@@ -2015,7 +2015,7 @@ mod tests {
         ArtifactSite::Callback(LoweredReactiveCallbackId::for_test(index))
     }
 
-    fn stage_4_artifact_families() -> Vec<ArtifactRequestKey> {
+    fn artifact_families() -> Vec<ArtifactRequestKey> {
         let value_type = concrete(&nominal(7, "Node"));
         let runner = ReactiveRunnerKey {
             owner: instance_owner(0),
@@ -2055,12 +2055,12 @@ mod tests {
     }
 
     #[test]
-    fn stage_4_artifact_families_are_namespaced_and_encoded() {
-        let families = stage_4_artifact_families();
+    fn artifact_families_are_namespaced_and_encoded() {
+        let families = artifact_families();
         assert_eq!(
             families.len(),
             12,
-            "every Stage 4.1 artifact family has a representative key"
+            "every artifact planning artifact family has a representative key"
         );
         let mut names = HashSet::new();
         let mut encodings = HashSet::new();
@@ -2225,7 +2225,7 @@ mod tests {
             DropGluePlan, ExternAdapterPlan, GcFinalizerPlan, LoweredArtifactPlan,
             ReactiveRunnerBody, ReactiveRunnerPlan, StructuralBody, StructuralMethodPlan,
         };
-        let keys = stage_4_artifact_families();
+        let keys = artifact_families();
         let node = nominal(7, "Node");
         let instance = crate::FunctionInstanceId::for_test(0);
         let runner = ReactiveRunnerPlan {

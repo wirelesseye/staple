@@ -19,7 +19,7 @@ pub(super) struct CoroutineContext<'context> {
     pub status_type: StructType<'context>,
     pub dispatch: Vec<BasicBlock<'context>>,
     pub pending_field: u32,
-    /// Stage 5.11 (F4): every frame binding symbol, including bindings inside
+    /// Every frame binding symbol, including bindings inside
     /// nested thunks. A move out of one clears its frame cell state so the
     /// completion and cancel drops skip it.
     pub frame_bindings: Vec<SymbolId>,
@@ -295,7 +295,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Diagnostic::new(span.clone(), "coroutine result is not first-class")
             })?;
             self.drop_all_owned(&environment, span)?;
-            // Stage 5.11 (F4): a coroutine that completes normally drops its
+            // a coroutine that completes normally drops its
             // live frame bindings, in plan order, before the result is
             // published. The recorded `unwind_drop` glue is the same type drop
             // the cancel unwind uses; the cell state skips a moved-out or
@@ -435,7 +435,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map(|frame| frame.as_any_value_enum())
     }
 
-    /// Stage 5.8 Step 5: one `await` suspension inside a coroutine body.
+    /// One `await` suspension inside a coroutine body.
     /// A child coroutine parks `RESUME_CHILD` after stashing the child frame
     /// and its deferred-resource bundle; on resume it loads the pending
     /// result. An external `Task`/`Wait` handle parks `WAIT_EXTERNAL` and
@@ -506,7 +506,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Legacy `compile_external_await`: register the frame as the record's
+    /// Register the frame as the record's
     /// waiter, park, and on resume read `Completed payload | Cancelled` from
     /// the record's state.
     fn emit_external_await(
@@ -695,7 +695,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(outcome.as_basic_value().as_any_value_enum())
     }
 
-    /// Legacy `store_coroutine_resources`: pack the recorded deferred
+    /// Pack the recorded deferred
     /// resources into a fresh GC bundle and store its pointer in
     /// `frame->resources`. Each use's recorded pass mode decides whether the
     /// bundle slot is the borrowed pointer or the value.
@@ -737,7 +737,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_coroutine_resource_bundle(frame, bundle_type, arguments, span.clone())
     }
 
-    /// Stage 5.8 Step 5: `block_on`'s synchronous drive (`compile_coroutine_drive`).
+    /// `block_on`'s synchronous drive (compile coroutine drive).
     /// The call's recorded activation names the concrete result type and the
     /// deferred-resource slots in its own `resource_bindings`.
     pub(super) fn emit_coroutine_drive(
@@ -785,8 +785,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .collect()
     }
 
-    /// Legacy `coroutine_current_task_scope`: the `Tasks` scope pointer the
-    /// call's recorded binding names. `spawn` is the only reader, and Step 2
+    /// The `Tasks` scope pointer the
+    /// call's recorded binding names. `spawn` is the only reader, and
     /// records the index into the call's own `resource_bindings`.
     fn current_task_scope(
         &self,
@@ -833,7 +833,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Legacy `coroutine_current_scheduler`: load `%TaskScope.scheduler`.
+    /// Load `%TaskScope.scheduler`.
     fn current_scheduler(
         &self,
         owner: EmissionOwner,
@@ -860,7 +860,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map(|value| value.into_pointer_value())
     }
 
-    /// Stage 5.8 Step 6: legacy `compile_scheduler_intrinsic`.
+    /// Compile scheduler intrinsic.
     pub(super) fn emit_scheduler_intrinsic(
         &mut self,
         owner: EmissionOwner,
@@ -1088,7 +1088,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.8 Step 6: legacy `compile_completion_intrinsic`.
+    /// Compile completion intrinsic.
     pub(super) fn emit_completion_intrinsic(
         &mut self,
         owner: EmissionOwner,
@@ -1369,8 +1369,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Legacy `compile_product_expression`'s packed struct build followed by
-    /// the field extractions legacy's intrinsic branches perform. A product
+    /// Compile product expression's packed struct build followed by
+    /// the field extractions the emitter's intrinsic branches perform. A product
     /// *literal* is lowered element by element, so its product expression is
     /// rebuilt here; a whole product value reaches `emit_intrinsic` already
     /// unpacked into its fields by `emit_call`.

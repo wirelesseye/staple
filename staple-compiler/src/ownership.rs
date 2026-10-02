@@ -858,7 +858,7 @@ impl<'a> OwnershipChecker<'a> {
     /// default to each top-level parameter position (the whole pattern, or a
     /// direct element of a top-level product — exactly the positions `mut`
     /// and `move` markers can address). A position freezes when it is
-    /// `drop_method`'s `self` (existing, always frozen) or when it is an
+    /// drop method's `self` (existing, always frozen) or when it is an
     /// ordinary, non-`Copy` position that isn't covered by a `mut` marker
     /// (a mutable borrow) or a `move` marker (ownership transfer). A nominal
     /// destructure freezes its fields unless the whole pattern is `move`.

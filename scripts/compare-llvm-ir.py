@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """Compare the LLVM IR two `staple` binaries emit for the same programs.
 
-Used for the Stage 5 behavior-preservation gates (see
-STAGE_5_LLVM_MIGRATION_BREAKDOWN.md): a refactor or a new emitter must produce
-the same normalized IR as the baseline binary.
+A refactor must preserve normalized IR against a reference compiler.
 
 Normalization makes the comparison independent of definition order:
 
 - top-level entities (each `define` body, and every other non-comment line)
   are sorted;
 - within a function, `__staple_gc_register_root` calls are sorted, because the
-  legacy `main` harness registers global roots in `HashMap` order.
+  entry harness registers global roots in `HashMap` order.
 
-The legacy backend is also nondeterministic in coroutine frame field
+A backend can also be nondeterministic in coroutine frame field
 assignment, so one program can normalize to several variants. Each binary
 therefore compiles each program `--runs` times, and the comparison is between
 the *sets* of variants. Sampling can miss a rare variant, so sets that differ
@@ -21,9 +19,8 @@ side produced more than one variant (or `--runs` is 1) as `INCONCLUSIVE`; both
 mean "re-run with more `--runs`". Only disjoint sets of one stable variant
 each are a definite `DIFF`.
 
-`--new-subset` checks the Stage 5.8 determinism transition: the new binary
-must emit one variant and that variant must occur in the old binary's set.
-Later shared-helper gates use the default equal-set comparison.
+`--new-subset` requires the new binary to emit a single variant that occurs
+in the reference binary's set. The default compares equal variant sets.
 
 Example:
 

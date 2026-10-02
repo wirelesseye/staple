@@ -51,8 +51,8 @@ struct FunctionEnvironment<'context> {
     reactive_scopes: Vec<PointerValue<'context>>,
     task_scopes: Vec<PointerValue<'context>>,
     loops: Vec<LoopContext<'context>>,
-    /// Stage 5.6 Step 4 (O3): the owned bindings currently in scope, keyed by
-    /// symbol. `owned_order` is legacy's `owned_order` registration order;
+    /// The owned bindings currently in scope, keyed by
+    /// symbol. `owned_order` preserves binding registration order;
     /// scope exits drop in reverse from a mark.
     owned: HashMap<SymbolId, OwnedValue<'context>>,
     owned_order: Vec<SymbolId>,
@@ -60,7 +60,7 @@ struct FunctionEnvironment<'context> {
     coroutine: Option<coroutines::CoroutineContext<'context>>,
 }
 
-/// Stage 5.6 Step 4 (O3): one registered owned binding. A `Value` owns its
+/// One registered owned binding. A `Value` owns its
 /// SSA local with an `i1` live flag; a `Cell` owns its binding cell and is
 /// dropped conditionally on the cell state. `glue` is the drop glue the
 /// owner's `OwnedBinding` use record names.
@@ -73,7 +73,7 @@ struct OwnedValue<'context> {
 }
 
 impl<'context> FunctionEnvironment<'context> {
-    /// Legacy `FunctionEnvironment::restore_local_state`: match arms and
+    /// Match arms and
     /// logical operands restore the caller's local bindings, including the
     /// owned-binding registration order.
     fn restore_local_state(&mut self, snapshot: &Self) {
@@ -85,20 +85,20 @@ impl<'context> FunctionEnvironment<'context> {
     }
 }
 
-/// Stage 5.6 Step 3: how a drop position obtains the value it drops.
+/// How a drop position obtains the value it drops.
 enum DropSource<'context> {
     /// The value is already evaluated.
     Value(BasicValueEnum<'context>),
-    /// Legacy `assignment.old`: load from the target place pointer.
+    /// Load from the target place pointer.
     Place(PointerValue<'context>),
-    /// Legacy `mutation.temporary.final`: load from a mutation temporary.
+    /// Load from a mutation temporary.
     Temporary(PointerValue<'context>),
-    /// Legacy `compile_conditional_cell_drop`: test the cell state, load the
+    /// Test the cell state, load the
     /// value, expand the glue, then clear the state.
     Cell(PointerValue<'context>),
 }
 
-/// One provider's bound resource value. Stage 5.4 reads these when it emits
+/// One provider's bound resource value. emission reads these when it emits
 /// `LoweredResourceUse` reads and call `resource_bindings`.
 #[derive(Clone)]
 struct BoundResource<'context> {
@@ -108,7 +108,7 @@ struct BoundResource<'context> {
     indirect: bool,
 }
 
-/// Stage 5.5 Step 8: one active loop's context. Legacy
+/// One active loop's context. The emitter
 /// `LoopCodegenContext` carries the header, exit, cleanup marks, and the
 /// break-value phi inputs.
 #[derive(Clone)]
@@ -124,7 +124,7 @@ struct LoopContext<'context> {
     reactive_before: usize,
     /// The task-scope depth at loop entry; `break` and `continue` close every
     /// scope opened since, right after the reactive disposal and before the
-    /// owned drops (Stage 5.11 M3).
+    /// owned drops .
     tasks_before: usize,
     incoming: Vec<(BasicValueEnum<'context>, BasicBlock<'context>)>,
 }
@@ -136,12 +136,12 @@ pub(super) struct LoweredEmitter<'program, 'context> {
     artifacts: HashMap<ArtifactOrdinal, Vec<FunctionValue<'context>>>,
     externs: HashMap<SymbolId, FunctionValue<'context>>,
     /// The declared adapter of each extern symbol used as a first-class value
-    /// (legacy `closure_codes`). A capture or name read of an extern value
+    /// (closure codes). A capture or name read of an extern value
     /// builds this closure instead of looking up local storage.
     extern_adapters: HashMap<SymbolId, FunctionValue<'context>>,
     /// The declared binding symbol of each function template. A `Stored`
     /// callable value loads its closure from that symbol's storage, mirroring
-    /// legacy `compile_symbol_value`.
+    /// compile symbol value.
     function_symbols: HashMap<crate::FunctionId, SymbolId>,
     storage: HashMap<SymbolId, GlobalValue<'context>>,
     initialization_states: HashMap<SymbolId, GlobalValue<'context>>,
@@ -174,7 +174,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// Strict emission: every body is attempted even after an earlier one
     /// fails, so the returned diagnostic list covers every unsupported body
-    /// (F8). The module is only verified when no body failed; a module with
+    ///The module is only verified when no body failed; a module with
     /// failed bodies is never returned.
     pub(super) fn compile(
         mut self,
@@ -272,12 +272,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     fn declare_instances(&mut self) -> CodeGenerationResult<()> {
-        // Linkage rule per family (F2, matching legacy): an instance whose
+        // Linkage rule per family: an instance whose
         // template signature still has a type parameter is declared on demand
-        // by legacy `ensure_function_specialization` with `Internal` linkage
+        // by ensure function specialization with `Internal` linkage
         // (the recorded lowering fact); an instance of a non-generic template
         // keeps the eager declaration's default (external) linkage. Names
-        // always come from the catalog, never from the backend (D2).
+        // always come from the catalog, never from the backend.
         for (id, instance) in self.view.instances() {
             let Some(signature) = self.view.instance_signature(id) else {
                 continue;
@@ -420,11 +420,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     fn declare_artifacts(&mut self) -> CodeGenerationResult<()> {
-        // Linkage rule per family (F2, matching legacy): constructor adapters,
+        // Linkage rule per family: constructor adapters,
         // extern adapters, runners, and the coroutine `resume`/`cleanup` pair
         // are `Internal`; structural methods and GC finalizers keep the
-        // default (external) linkage; drop glue emits no function (D3).
-        // Coroutine pair names come from the catalog (F3), where
+        // default (external) linkage; drop glue emits no function.
+        // Coroutine pair names come from the catalog, where
         // `planned_names_with` collision-checks them with every other planned
         // name. The remaining names are the artifact's planned name.
         let pointer = self.backend.context.ptr_type(AddressSpace::default());
@@ -620,22 +620,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.4 Step 1: a body that owns a droppable binding needs scope-exit
-    /// cleanup, which is Stage 5.6's job. Until 5.6 emits it, the body fails
-    /// up front, before its root block is emitted, so no drop is silently
-    /// skipped (Contract 2). Every collected record has drop glue (the
-    /// collector only records types that need drop), and a cell-storage record
-    /// is dropped through its cell state, so either fact makes the body 5.6's.
-    ///
-    /// Step 3 extends the same guard to a captured binding cell whose value
-    /// needs drop: legacy attaches a GC finalizer to the cell, which is 5.6's
-    /// `GcFinalizer` work, and emitting the cell without it would silently
-    /// change behavior.
-    ///
-    /// Stage 5.6 Step 3 (O1): a drop position looks up its exact artifact-use
-    /// record and expands the named drop glue. No record means the value needs
-    /// no drop, so the position emits nothing (exactly as legacy does). The
-    /// check is record-driven, never type-driven (Contract 1).
+    /// Looks up a drop position's exact artifact use and expands its glue inline.
+    /// No use means no cleanup is required. Cleanup selection is recorded by
+    /// lowering, including conditional cell cleanup and nested glue.
     fn emit_drop_site(
         &self,
         owner: EmissionOwner,
@@ -680,7 +667,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.6 Step 3 (O2): expand one `DropGlueBody` inline at its site,
+    /// Expand one `DropGlueBody` inline at its site,
     /// recursing through each nested planned glue. No function is emitted.
     fn emit_drop_glue(
         &self,
@@ -912,9 +899,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "function result is not a first-class value",
                 )
             })?;
-            // Legacy `compile_function`: after the body expression's own
+            // after the body expression's own
             // scope drops, drop every remaining owned binding (the
-            // parameters) before returning (O3).
+            // parameters) before returning.
             self.drop_all_owned(&environment, &body.origin.span)?;
             self.backend
                 .builder
@@ -932,9 +919,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment: &mut FunctionEnvironment<'context>,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let mut value = self.emit_block(owner, root, environment)?;
-        // Stage 5.5 Step 7: the body block expression's header, which legacy
-        // `compile_expression` applies after the block itself. The moved
-        // symbols release on every path, like legacy.
+        // Apply the body expression's header after its block. Moved symbols
+        // release on every path, including divergent paths.
         if !environment.returned
             && let Some(coercion) = &body.body_coercion
         {
@@ -973,7 +959,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// Strict: attempt every instance body, collecting one diagnostic per
-    /// failure (F8).
+    /// failure.
     fn emit_instance_bodies(&mut self, diagnostics: &mut Vec<Diagnostic>) {
         for (id, _) in self.view.instances() {
             if let Err(diagnostic) = self.emit_instance_body(id) {
@@ -1003,11 +989,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .into_pointer_value();
         environment.closure_environment = Some(environment_pointer);
 
-        // F7: bind the concrete effect-row resources from the body's
+        // bind the concrete effect-row resources from the body's
         // `function_providers`, in row order, keeping each provider's
-        // indirect/borrowed fact. 5.4 resolves `LoweredResourceUse` reads and
-        // call `resource_bindings` against these entries. Legacy binds the
-        // same list from the checked effect row (`bind_function_parameters`).
+        // indirect/borrowed fact. Emission resolves `LoweredResourceUse` reads and
+        // call `resource_bindings` against these entries. The emitter binds the
+        // same list from the checked effect row (bind function parameters).
         let resource_count = body.signature.effects.resources.len();
         if body.function_providers.len() != resource_count {
             return Err(Diagnostic::new(
@@ -1041,9 +1027,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             );
         }
 
-        // Every capture storage kind, with the same field layout legacy
-        // `build_capture_environment` uses (Stage 4.4's `ClosureEnvironment`
-        // finalizer plan fixes the order).
+        // Bind captures in the layout order shared with the planned
+        // closure-environment finalizer.
         self.bind_instance_captures(body, environment_pointer, environment)?;
         let raw = parameters.get(1 + resource_count..).ok_or_else(|| {
             Diagnostic::new(body.origin.span.clone(), "missing function resources")
@@ -1051,9 +1036,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let logical_types = flattened_parameter_types(&body.signature.parameter);
         let indirect_mask = self.backend.indirect_parameter_mask(&body.signature);
         let whole = body.signature.mutations.contains(&CheckedMutation::Whole);
-        // Legacy `bind_function_parameters`: load every indirect parameter
+        // load every indirect parameter
         // through its pointer (or the single whole-mutation pointer) and keep
-        // every one as a mutable pointer for `compile_place_pointer`.
+        // every one as a mutable pointer for compile place pointer.
         let mut values: Vec<BasicValueEnum<'context>> = Vec::new();
         let mut mutable_pointers: Vec<(usize, PointerValue<'context>)> = Vec::new();
         if whole {
@@ -1104,7 +1089,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         )
     }
 
-    /// Legacy `bind_mutable_parameter_pointers`: every indirect parameter
+    /// Every indirect parameter
     /// pointer replaces any capture cell for its top-level symbol, with a
     /// whole mutation projecting each product field.
     fn bind_mutable_parameter_pointers(
@@ -1157,7 +1142,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `bind_top_level_pattern`: a top-level non-product parameter
+    /// A top-level non-product parameter
     /// pattern binds the flattened values rebuilt into one product value, a
     /// one-element product collapses, and a product element binds its own
     /// flattened slot directly.
@@ -1285,11 +1270,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Whether one capture's environment field is a pointer: a cell,
-    /// initialization-state slot, derived cell, or borrowed parameter storage
-    /// is written and read through its pointer; every other capture (a plain
-    /// value or a `Copy` value) stores the value directly. The rule mirrors
-    /// legacy `build_capture_environment`'s field selection.
+    /// Whether a capture stores a pointer: cells, initialization-state slots,
+    /// derived cells, and borrowed parameter storage retain their pointer. Other
+    /// captures store the value directly.
     fn capture_stores_pointer(&self, capture: &LoweredInstanceCapture) -> bool {
         capture.requires_initialization_state
             || capture.mutable_storage
@@ -1299,7 +1282,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// Whether a pointer-kind capture's pointer is borrowed parameter storage
     /// (a mutated or borrowed parameter) rather than a binding cell. Mirrors
-    /// legacy `bind_environment_captures`.
+    /// bind environment captures.
     fn capture_is_parameter_pointer(&self, capture: &LoweredInstanceCapture) -> bool {
         capture.capture.borrowed
             || self
@@ -1324,7 +1307,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Legacy `store_global_initialization_state`: write a symbol's
+    /// Write a symbol's
     /// initialization state when it has one, and do nothing otherwise.
     fn store_initialization_state(&self, symbol: SymbolId, state: u64) -> CodeGenerationResult<()> {
         if let Some(slot) = self.initialization_states.get(&symbol) {
@@ -1339,9 +1322,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `compile_binding_cell_type` for a plain (non-signal, non-derived)
-    /// cell: `{value, state}`. Signal and derived cells carry a third metadata
-    /// field and are 5.8 diagnostics, so they never reach this helper.
+    /// The binding cell layout: value and initialization state, followed by a
+    /// metadata pointer for signal or derived storage.
     fn binding_cell_type(
         &self,
         owner: EmissionOwner,
@@ -1365,7 +1347,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })?;
         let value_type = self.backend.compile_type(&value_type)?;
         let mut fields = vec![value_type, self.backend.context.i8_type().into()];
-        // Legacy `compile_binding_cell_type`: a signal or derived cell carries
+        // a signal or derived cell carries
         // a metadata pointer in field 2.
         if self
             .view
@@ -1382,11 +1364,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(self.backend.context.struct_type(&fields, false))
     }
 
-    /// Legacy `allocate_binding_cell` for a symbol without reactive storage:
-    /// allocate the cell (GC when some function captures it, else the stack),
-    /// initialize its state byte to 0, and bind it in the environment. Drop
-    /// tracking and the captured-cell finalizer are 5.6, and the Step 1 guard
-    /// stops a body whose cell would need either.
+    /// Allocates a binding cell on the GC heap when captured, otherwise on the
+    /// stack. Initializes its state to zero and creates signal metadata when
+    /// required. Recorded finalizer uses supply captured-value cleanup.
     fn allocate_binding_cell(
         &mut self,
         owner: EmissionOwner,
@@ -1398,7 +1378,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(cell);
         }
         let cell_type = self.binding_cell_type(owner, symbol)?;
-        // Legacy `captured_cell_symbols`: a cell is GC-allocated exactly when
+        // a cell is GC-allocated exactly when
         // some function captures it.
         let captured = self
             .view
@@ -1427,7 +1407,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_store(state, self.backend.context.i8_type().const_zero())
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        // Legacy `allocate_binding_cell`: a signal cell creates its signal
+        // a signal cell creates its signal
         // before the value is evaluated and stores it in the metadata field.
         if self.view.symbol(symbol).is_some_and(|record| record.signal) {
             let metadata_slot = self
@@ -1450,10 +1430,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(cell)
     }
 
-    /// Stage 5.6 Step 5 install, needed to delete the owned-binding guard: a
-    /// captured droppable binding cell gets the `CellFinalizer` artifact its
-    /// `CellFinalizer` use record names (legacy `ensure_cell_finalizer`). No
-    /// record means the cell needs no finalizer.
+    /// Installs the finalizer named by a captured cell's recorded artifact use.
+    /// No use means the cell requires no finalizer.
     fn install_cell_finalizer(
         &self,
         owner: EmissionOwner,
@@ -1476,7 +1454,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.set_gc_finalizer(cell, finalizer)
     }
 
-    /// Legacy `store_local_initialization_state`: write a cell-backed symbol's
+    /// Write a cell-backed symbol's
     /// state byte, and do nothing when the symbol has no cell.
     fn store_local_initialization_state(
         &self,
@@ -1508,11 +1486,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.6 Step 4 (O3): register an owned binding from the owner's
-    /// recorded `owned_bindings`, mirroring legacy `track_symbol_ownership`
-    /// for a value and the owned-cell path of `allocate_binding_cell` for a
-    /// cell. A `Value` registration allocates a fresh `i1` live flag set
-    /// true, like legacy; a cell registration relies on the cell state.
+    /// Registers an owned binding from the owner's recorded cleanup facts.
+    /// Values get a fresh live flag set to true; cells use their initialization state.
     fn register_owned_binding(
         &self,
         owner: EmissionOwner,
@@ -1576,7 +1551,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `drop_owned_since`: emit the conditional drop of every owned
+    /// Emit the conditional drop of every owned
     /// binding registered since `start`, in reverse registration order, and
     /// remove them from the environment.
     fn drop_owned_since(
@@ -1595,9 +1570,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `drop_all_owned`: emit the conditional drop of every owned
-    /// binding in reverse registration order. The registrations stay in the
-    /// environment, as legacy's do.
+    /// Conditionally drops every owned binding in reverse registration order.
+    /// Registrations remain available for other emitted control-flow paths.
     fn drop_all_owned(
         &self,
         environment: &FunctionEnvironment<'context>,
@@ -1611,7 +1585,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy's compile-time-only cleanup on a diverged branch: forget the
+    /// The emitter's compile-time-only cleanup on a diverged branch: forget the
     /// owned bindings registered since `start` without emitting a drop.
     fn forget_owned_since(environment: &mut FunctionEnvironment<'context>, start: usize) {
         let cleanup_start = start.min(environment.owned_order.len());
@@ -1621,7 +1595,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment.owned_order.truncate(cleanup_start);
     }
 
-    /// Stage 5.6 Step 4: one owned binding's conditional drop: the live-flag
+    /// One owned binding's conditional drop: the live-flag
     /// skeleton around a value, or the cell-state skeleton around a cell.
     fn emit_owned_binding_drop(
         &self,
@@ -1769,7 +1743,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// Strict: attempt every initializer body, collecting one diagnostic per
-    /// failure (F8).
+    /// failure.
     fn emit_initializers(&mut self, diagnostics: &mut Vec<Diagnostic>) {
         for (id, _) in self.view.initializers() {
             if let Err(diagnostic) = self.emit_initializer_body(id) {
@@ -1778,7 +1752,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.4 Step 8: one artifact family that is a call shim. A
+    /// One artifact family that is a call shim. A
     /// constructor adapter rebuilds its product (or GC-allocates the managed
     /// reference and sets the planned payload finalizer); an extern adapter
     /// forwards the closure parameters to the foreign symbol. Every other
@@ -1803,9 +1777,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::GcFinalizer(plan) => {
                 self.emit_gc_finalizer_body(ordinal, plan, &artifact.origin.span)
             }
-            // Drop glue emits no function (D3); every other family's body is
-            // owned by a later substage, so strict emission reports it rather
-            // than leaving an undefined declaration behind.
+            // Drop glue expands inline at recorded use sites.
             LoweredArtifactPlan::DropGlue(_) => Ok(()),
             LoweredArtifactPlan::CoroutineCodes(plan) => {
                 self.emit_coroutine_pair(ordinal, plan, &artifact.origin.span)
@@ -1818,10 +1790,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.6 Step 5: one `GcFinalizer` body, mirroring legacy
-    /// `ensure_gc_finalizer` (`Payload`), `ensure_cell_finalizer` (`Cell`),
-    /// `ensure_closure_finalizer` (`ClosureEnvironment`), and
-    /// `ensure_buffer_finalizer` (`Buffer`).
+    /// Emits the recorded payload, cell, closure-environment, or buffer finalizer.
     fn emit_gc_finalizer_body(
         &mut self,
         ordinal: ArtifactOrdinal,
@@ -1864,7 +1833,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     Diagnostic::new(span.clone(), "closure finalizer plan was never expanded")
                 })?;
                 // The environment layout is the closure instance's own capture
-                // layout (legacy's `compile_capture_type`).
+                // layout recorded by the capture plan.
                 let capture_body = self
                     .view
                     .instance(*closure)
@@ -2021,7 +1990,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Legacy `ensure_constructor_adapter`'s body: rebuild the product from
+    /// Ensure constructor adapter's body: rebuild the product from
     /// the closure parameters (after the environment) and return it, or
     /// GC-allocate it as a `Ref` payload with the planned finalizer.
     fn emit_constructor_adapter_body(
@@ -2089,9 +2058,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `declare_external_functions`'s adapter body: forward the closure
-    /// parameters (after the environment) to the foreign symbol. Stage 5.11
-    /// (F1) gives the adapter the closure ABI's parameter shapes, so every
+    /// Declare external functions's adapter body: forward the closure
+    /// parameters (after the environment) to the foreign symbol. emission
+    /// gives the adapter the closure ABI's parameter shapes, so every
     /// by-pointer parameter is loaded before the native call.
     fn emit_extern_adapter_body(
         &mut self,
@@ -2294,8 +2263,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let block = self.view.block(owner, id).ok_or_else(|| {
             Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered block")
         })?;
-        // Legacy `compile_block`: every binding the block introduces is owned
-        // until the block's normal exit (O3).
+        // every binding the block introduces is owned
+        // until the block's normal exit.
         let owned_before = environment.owned_order.len();
         let span = block.origin.span.clone();
         let items = block.items.clone();
@@ -2346,7 +2315,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if binding.compile_time_only {
                     return Ok(());
                 }
-                // The storage-only part of legacy `compile_top_level_item`:
+                // The storage-only part of
                 // a generic binding records state 1 then 2 and evaluates
                 // nothing; a valued binding records state 1, evaluates,
                 // stores a module global when the symbol owns one (a nested
@@ -2377,7 +2346,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 if let Some(symbol) = binding.symbol {
                     if binding.cell {
-                        // Legacy `compile_item` allocates the cell before the
+                        // compile item allocates the cell before the
                         // state-1 store and the value evaluation.
                         self.allocate_binding_cell(owner, environment, symbol, &item.origin.span)?;
                     }
@@ -2446,7 +2415,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if let Some(symbol) = binding.symbol {
                     // A module-level signal creates and records its signal
                     // between the value evaluation and the global store
-                    // (legacy `compile_top_level_item`); a local signal cell
+                    // (compile top level item); a local signal cell
                     // already created it at allocation.
                     if binding.signal
                         && !environment.binding_cells.contains_key(&symbol)
@@ -2494,8 +2463,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredItemKind::Expression(statement) => {
-                // Legacy `compile_item` evaluates the statement, then drops
-                // its result when one was recorded (O1: the `DiscardedResult`
+                // compile item evaluates the statement, then drops
+                // its result when one was recorded (the `DiscardedResult`
                 // use record is the discriminant).
                 let value = self.emit_expression(owner, statement.expression, environment)?;
                 if !environment.returned {
@@ -2519,9 +2488,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Ok(());
                 }
                 let value = value_as_basic(value).ok_or_else(|| unimplemented("return value"))?;
-                // Legacy `compile_item`'s return: dispose every reactive
+                // compile item's return: dispose every reactive
                 // scope, close every task scope, then drop every owned binding
-                // before leaving the function (O3, M3).
+                // before leaving the function .
                 self.dispose_reactive_scopes(environment, 0, &item_span)?;
                 self.close_task_scopes(environment, 0)?;
                 self.drop_all_owned(environment, &item_span)?;
@@ -2533,7 +2502,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredItemKind::PatternBinding(binding) => {
-                // Legacy `compile_item`'s pattern-binding order: state 1,
+                // compile item's pattern-binding order: state 1,
                 // evaluate, bind, module-global stores, state 2.
                 self.store_pattern_initialization_state(owner, binding.pattern, 1)?;
                 let value = self.emit_expression(owner, binding.value, environment)?;
@@ -2587,9 +2556,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 else {
                     return Err(unimplemented("break target"));
                 };
-                // Legacy `compile_item`'s break disposes the reactive scopes,
+                // compile item's break disposes the reactive scopes,
                 // closes the task scopes, and drops every binding owned since
-                // the loop's marks (O3, M3).
+                // the loop's marks .
                 self.dispose_reactive_scopes(environment, reactive_before, &item_span)?;
                 self.close_task_scopes(environment, tasks_before)?;
                 self.drop_owned_since(environment, owned_before, &item_span)?;
@@ -2630,9 +2599,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 else {
                     return Err(unimplemented("continue target"));
                 };
-                // Legacy `compile_item`'s continue disposes the reactive
+                // compile item's continue disposes the reactive
                 // scopes, closes the task scopes, and drops every binding
-                // owned since the loop's marks (O3, M3).
+                // owned since the loop's marks .
                 self.dispose_reactive_scopes(environment, reactive_before, &item_span)?;
                 self.close_task_scopes(environment, tasks_before)?;
                 self.drop_owned_since(environment, owned_before, &item_span)?;
@@ -2671,8 +2640,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let span = pattern.origin.span.clone();
         match &pattern.kind {
             LoweredPatternKind::Wildcard => {
-                // Legacy `bind_pattern_value` drops the discarded subject when
-                // lowering recorded a `WildcardDiscard` use (O1).
+                // bind pattern value drops the discarded subject when
+                // lowering recorded a `WildcardDiscard` use.
                 let value = value_as_basic(value).ok_or_else(|| unsupported("wildcard cleanup"))?;
                 self.emit_drop_site(
                     owner,
@@ -2688,7 +2657,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 name,
                 ..
             } => {
-                // Legacy names every ordinary binding; singleton patterns
+                // The emitter names every ordinary binding; singleton patterns
                 // above bind no value. LLVM value names are not ABI symbols.
                 if let Some(value) = value_as_basic(value) {
                     value.set_name(name);
@@ -2722,7 +2691,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             },
             LoweredPatternKind::Nominal { argument, .. } => {
-                // Legacy `bind_pattern_value`'s nominal arm only loads the
+                // bind pattern value's nominal arm only loads the
                 // payload for a `Ref` pattern; every other nominal form binds
                 // its argument transparently.
                 let value = if pattern.test.identity == crate::LoweredPatternIdentity::Ref {
@@ -2750,11 +2719,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// One binding pattern's symbol, mirroring legacy `bind_pattern_value`:
-    /// a parameter pointer keeps the value in `locals`, a mutable symbol with
-    /// no module storage gets a binding cell and state 2, and every other
-    /// binding is a plain local. Owned droppable bindings stay stopped by the
-    /// body-level guard until 5.6.
+    /// Binds a pattern symbol. Parameter pointers retain the value in locals;
+    /// mutable local symbols get a binding cell with initialized state, and
+    /// other symbols are plain locals. Owned bindings register their cleanup.
     fn bind_symbol(
         &mut self,
         owner: EmissionOwner,
@@ -2792,7 +2759,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.register_owned_binding(owner, environment, symbol, span)
     }
 
-    /// Legacy `store_pattern_globals`: after a module-level pattern binding
+    /// After a module-level pattern binding
     /// has bound its symbols, write each symbol's local value into its module
     /// global.
     fn store_pattern_globals(
@@ -2845,7 +2812,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Legacy `store_pattern_initialization_state`: write the module
+    /// Write the module
     /// initialization state of every symbol a pattern binds.
     fn store_pattern_initialization_state(
         &mut self,
@@ -2896,15 +2863,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })?
             .clone();
         let value = self.emit_expression_value(owner, id, &expression, environment)?;
-        // Legacy `compile_expression`: a diverged body releases moved
+        // a diverged body releases moved
         // ownership and returns without coercing.
         if environment.returned {
             self.release_moved_ownership(owner, environment, &expression)?;
             return Ok(value);
         }
-        // Legacy `compile_expression`'s divergence handling: an expression of
+        // compile expression's divergence handling: an expression of
         // type `Never` (or one coerced from `Never`) ends the block. Order
-        // matches legacy: the `unreachable` comes first, then the moved-
+        // The `unreachable` instruction precedes the moved-
         // ownership release.
         let diverges = expression.value_type == CheckedType::Never
             || expression
@@ -2920,8 +2887,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.release_moved_ownership(owner, environment, &expression)?;
             return Ok(value);
         }
-        // Stage 5.5 Step 4: apply the recorded coercion plan. Lowering already
-        // selected the alternatives (E1), so emission never re-selects one.
+        // apply the recorded coercion plan. Lowering already
+        // selected the alternatives, so emission never re-selects one.
         let value = match (&expression.coercion, &expression.coercion_plan) {
             (Some(coercion), Some(plan)) => self.emit_coercion(
                 value,
@@ -2942,7 +2909,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(value)
     }
 
-    /// Legacy `compile_expression`'s `release_moved_ownership`: clear the
+    /// Compile expression's `release_moved_ownership`: clear the
     /// live flag of every moved owned value, then the initialization state of
     /// every symbol the expression moved out of a binding cell.
     fn release_moved_ownership(
@@ -2960,10 +2927,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_store(live, self.backend.context.bool_type().const_zero())
                     .map_err(compiler_diagnostic)?;
             }
-            // Legacy clears the binding cell's state only for a symbol with
+            // The emitter clears the binding cell's state only for a symbol with
             // mutable storage (`has_mutable_storage`); a coroutine frame cell
-            // for an ordinary `let` was not cleared because legacy never
-            // dropped it. Stage 5.11 (F4) drops live frame cells at
+            // for an ordinary `let` was not cleared because the emitter never
+            // dropped it. emission drops live frame cells at
             // completion, so a moved-out frame binding's state is cleared too;
             // otherwise the completion or cancel drop would double-drop it.
             let frame_binding = environment
@@ -2988,10 +2955,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.5 Step 4: execute one `LoweredCoercionPlan`, mirroring legacy
-    /// `coerce_value`/`coerce_sum_value`/`coerce_slice_ref_value` instruction
-    /// for instruction. `source`/`target` navigate the same recursion so the
-    /// nested payload plans and types stay in lockstep.
+    /// Executes a recorded coercion plan. Source and target types follow the
+    /// plan's recursive payload projections so nested layouts stay in lockstep.
     fn emit_coercion(
         &mut self,
         value: AnyValueEnum<'context>,
@@ -3140,7 +3105,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .into()),
             LoweredExpressionKind::Block(block) => self.emit_block(owner, *block, environment),
             LoweredExpressionKind::Name(name) => {
-                // Legacy `compile_expression_uncoerced`'s `Name` path returns
+                // compile expression uncoerced's `Name` path returns
                 // the unit value for a singleton before any storage read.
                 if name.singleton.is_some() {
                     return Ok(self.backend.unit_value());
@@ -3157,8 +3122,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             })?;
                     match operation.kind {
                         // A signal or derived read tracks through
-                        // `load_symbol_value`, exactly like legacy's
-                        // `compile_symbol_value`.
+                        // `load_symbol_value`, exactly using the recorded layout's
+                        // compile symbol value.
                         LoweredReactiveOperationKind::SignalRead { .. }
                         | LoweredReactiveOperationKind::DerivedRead { .. } => {}
                         LoweredReactiveOperationKind::SignalCreate { .. }
@@ -3176,7 +3141,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         }
                     }
                 }
-                // Legacy `Expression::Name` checks the state whenever the read
+                // Name checks the state whenever the read
                 // requires one or the symbol has mutable storage. The load
                 // reads the recorded uncoerced representation; emit_expression
                 // applies the coercion afterward.
@@ -3197,7 +3162,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "internal invariant: deferred expression reached lowered emission",
             )),
             LoweredExpressionKind::String(string) => {
-                // Stage 5.4 Step 3: the literal core is shared with legacy.
+                // Literal emission uses the common String builder.
                 self.backend
                     .build_string_literal(&string.value, expression.origin.span.clone())
                     .map(|value| value.as_any_value_enum())
@@ -3207,7 +3172,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     std::str::from_utf8(&string.bytes[..string.bytes.len() - 1]).map_err(|_| {
                         Diagnostic::new(expression.origin.span.clone(), "invalid C string payload")
                     })?;
-                // Stage 5.3 Step 5: shared with legacy `build_owned_c_string`.
+                // shared with build owned c string.
                 self.backend
                     .build_owned_c_string(text, expression.origin.span.clone())
             }
@@ -3220,7 +3185,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::RepeatedProduct(repeated) => {
                 self.emit_repeated_product(owner, expression, repeated, environment)
             }
-            // Legacy `compile_expression_uncoerced`'s `Satisfies` path is
+            // compile expression uncoerced's `Satisfies` path is
             // transparent: emit the operand and let this expression's own
             // header coercion apply in `emit_expression`.
             LoweredExpressionKind::Satisfies(satisfies) => {
@@ -3258,10 +3223,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.5 Step 4: one structural access read, mirroring legacy
-    /// `compile_expression_uncoerced`'s `Access` value path: a dereference
-    /// chain of `Ref` payload loads, then the representation, scalar,
-    /// product-element, or bounds-checked slice load.
+    /// Emits a structural access: load any Ref payload chain, then project the
+    /// representation, scalar, product element, or bounds-checked slice element.
     fn emit_access(
         &mut self,
         owner: EmissionOwner,
@@ -3284,7 +3247,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map(|value| value.as_any_value_enum())
                 }
             }
-            // Legacy returns a scalar access as-is, dereference chain included.
+            // The emitter returns a scalar access as-is, dereference chain included.
             crate::LoweredAccessKind::Scalar { .. } => Ok(base),
             crate::LoweredAccessKind::Product { index, dereference } => {
                 let value = if dereference.is_empty() {
@@ -3352,11 +3315,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.5 Step 4: one product construction. Replays `steps` in source
-    /// evaluation order (later writes to a slot override earlier ones, exactly
-    /// as legacy's designated/named-spread fill does), then assembles the
-    /// final `fields` layout through the shared `build_product_value`, whose
-    /// one-element collapse matches legacy `compile_product_expression`.
+    /// Replays product steps in source order; later writes replace earlier slot
+    /// values. Assembles the final field layout, collapsing one-element products.
     fn emit_product(
         &mut self,
         owner: EmissionOwner,
@@ -3468,7 +3428,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_any_value_enum())
     }
 
-    /// Stage 5.5 Step 4: `(value; count)`. Legacy evaluates the element once
+    /// `(value; count)`. The emitter evaluates the element once
     /// and replicates it across the fixed arity, or returns it directly for
     /// the collapsed (arity one or symbolic) representation.
     fn emit_repeated_product(
@@ -3506,10 +3466,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_any_value_enum())
     }
 
-    /// Stage 5.5 Step 9: one string template, mirroring legacy
-    /// `compile_string_template`: construct the formatter, write literal parts
-    /// through the shared literal core, call each interpolation's bound
-    /// `Display`/`Debug` method with the formatter storage, and finish.
+    /// Constructs a formatter, writes literal parts, invokes each interpolation's
+    /// bound Display or Debug method, then finishes the formatted String.
     fn emit_string_template(
         &mut self,
         owner: EmissionOwner,
@@ -3661,11 +3619,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .into()
     }
 
-    /// Stage 5.5 Step 8: one `loop`, mirroring legacy
-    /// `compile_loop_expression`. A body that finishes normally drops its
-    /// (discarded) result through the E2 hook and takes the back edge; breaks
-    /// contribute `loop.value` phi inputs; a loop no `break` reaches ends in
-    /// `unreachable`.
+    /// Emits a loop. Normal iteration drops its discarded result before the back
+    /// edge; breaks contribute value-phi inputs. An unreachable exit emits unreachable.
     fn emit_loop(
         &mut self,
         owner: EmissionOwner,
@@ -3707,8 +3662,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment.returned = false;
         let value = self.emit_block(owner, loop_.body, environment)?;
         if !environment.returned {
-            // Legacy `compile_loop_expression` drops a droppable body result
-            // before the back edge (O1: the `LoopBodyResult` use record).
+            // compile loop expression drops a droppable body result
+            // before the back edge (the `LoopBodyResult` use record).
             if loop_.drops_body_result {
                 let value = value_as_basic(value).ok_or_else(|| {
                     Diagnostic::new(span.clone(), "loop body result is not first-class")
@@ -3747,10 +3702,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_any_value_enum())
     }
 
-    /// Stage 5.5 Step 7: one `match` expression, mirroring legacy
-    /// `compile_match_expression` exactly: the subject is evaluated once, each
-    /// arm's pattern test runs against the recorded plan, a divergent arm
-    /// contributes no phi input, and the fall-through ends in `unreachable`.
+    /// Evaluates the subject once and emits each arm's recorded pattern test.
+    /// Divergent arms contribute no phi input; fall-through emits unreachable.
     fn emit_match(
         &mut self,
         owner: EmissionOwner,
@@ -3812,8 +3765,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "match arm result is not first-class",
                     )
                 })?;
-                // Legacy `compile_match_expression` drops the arm's pattern
-                // bindings and locals at the arm's normal exit (O3).
+                // compile match expression drops the arm's pattern
+                // bindings and locals at the arm's normal exit.
                 self.drop_owned_since(environment, owned_before, &arm.origin.span)?;
                 self.backend
                     .builder
@@ -3859,9 +3812,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_any_value_enum())
     }
 
-    /// One match arm's conditional test, mirroring legacy
-    /// `compile_match_pattern_branch` branch for branch and name for name.
-    /// Every decision comes from the Step 2 test plan; the emitter only
+    /// Emits one match arm's recorded conditional test.
+    /// Every decision comes from the lowered test plan; the emitter only
     /// builds the blocks, compares, and payload loads around them.
     #[allow(clippy::too_many_arguments)]
     fn emit_match_pattern_branch(
@@ -4185,8 +4137,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.5 Step 7: a short-circuiting `&&`/`||`, mirroring legacy
-    /// `compile_logical_expression` (the shared tag compare and phi builders).
+    /// Emits short-circuiting logical operators with Bool tag tests and a value phi.
     fn emit_logical(
         &mut self,
         owner: EmissionOwner,
@@ -4263,8 +4214,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let right_value = value_as_basic(right).ok_or_else(|| {
                 Diagnostic::new(span.clone(), "logical operand is not first-class")
             })?;
-            // Legacy `compile_logical_expression` drops the right operand's
-            // own bindings at the end of its block (O3).
+            // compile logical expression drops the right operand's
+            // own bindings at the end of its block.
             self.drop_owned_since(environment, owned_before, &span)?;
             self.backend
                 .builder
@@ -4288,10 +4239,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_any_value_enum())
     }
 
-    /// Stage 5.5 Step 7: `let pattern? = value`, mirroring legacy
-    /// `compile_propagating_binding`: test the success tag, return the failure
-    /// value (widened through the recorded plan or extracted as the residual
-    /// variant), then bind the success payload and any `at` bindings.
+    /// Tests a propagating binding's success tag and returns its failure through
+    /// the recorded residual coercion. Binds the success payload and any at bindings.
     fn emit_propagating_binding(
         &mut self,
         owner: EmissionOwner,
@@ -4361,7 +4310,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 &span,
             )?
         } else {
-            // E1: lowering records the residual alternative; the emitter
+            // lowering records the residual alternative; the emitter
             // never selects one by comparing types.
             let index = binding.propagation_residual.ok_or_else(|| {
                 Diagnostic::new(
@@ -4375,8 +4324,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         let failure_value = value_as_basic(failure_value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "propagated result is not first-class"))?;
-        // Legacy `compile_propagating_binding`'s failure path drops every
-        // owned binding before returning the residual value (O3).
+        // compile propagating binding's failure path drops every
+        // owned binding before returning the residual value.
         self.drop_all_owned(environment, &span)?;
         self.backend
             .builder
@@ -4428,12 +4377,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.3/5.4 Step 7: build one first-class callable value. A `Fresh`
-    /// environment is built from the closure plan's captures (legacy
-    /// `build_closure`), `Stored` loads the existing closure from the function
-    /// binding's local, cell, or module storage, `Current` reuses the
-    /// enclosing environment, and the `Constructor`/`External` adapters call
-    /// their declared artifact with a null environment.
+    /// Builds a first-class callable using its recorded environment route. Fresh
+    /// captures build an environment; Stored loads an existing closure; Current
+    /// reuses the enclosing environment. Adapters use a null environment.
     fn emit_callable_value(
         &mut self,
         owner: EmissionOwner,
@@ -4454,7 +4400,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ),
             )
         };
-        // Legacy `compile_symbol_value` runs the symbol's initialization check
+        // compile symbol value runs the symbol's initialization check
         // before producing the closure value.
         if callable.requires_initialization_check
             && let Some(symbol) = self.callable_symbol(callable)
@@ -4465,13 +4411,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .view
             .binding(owner, LoweredBindingSite::CallableValue(id));
         // Constructor and extern adapter values use the declared adapter
-        // artifact (legacy `ensure_constructor_adapter` and `closure_codes`);
+        // artifact (ensure constructor adapter and `closure_codes`);
         // both carry a null environment.
         if matches!(
             callable.adapter,
             LoweredCallableAdapter::Constructor | LoweredCallableAdapter::External
         ) {
-            // Legacy `compile_symbol_value` resolves a parameter pointer, a
+            // compile symbol value resolves a parameter pointer, a
             // local (including a captured closure value), or a binding cell
             // before it falls back to the adapter code: a thunk that captures
             // an extern value calls the captured closure, not a rebuilt one.
@@ -4548,8 +4494,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         environment,
                         &callable.origin.span,
                     )?;
-                    // Legacy installs the closure-environment finalizer exactly
-                    // when the recorded use exists; its body is 5.6.
+                    // The emitter installs the closure-environment finalizer exactly
+                    // when the recorded use exists.
                     if let Some(finalizer) = self.closure_environment_finalizer(owner, id) {
                         self.backend.set_gc_finalizer(pointer, finalizer)?;
                     }
@@ -4638,9 +4584,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing callable artifact declaration"))
     }
 
-    /// A `Stored` callable value is an existing closure: legacy
-    /// `compile_symbol_value` loads it from the function binding symbol's
-    /// local, binding cell, or module storage.
+    /// Loads an existing closure from the function symbol's local, cell, or global.
     fn load_stored_closure(
         &mut self,
         owner: EmissionOwner,
@@ -4668,7 +4612,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
             let cell_type = self.binding_cell_type(owner, symbol)?;
             if !callable.requires_initialization_check {
-                // Legacy's `compile_symbol_value` builds the state slot even
+                // The emitter's compile symbol value builds the state slot even
                 // when the read needs no check; the caller already emitted
                 // the check when one is required.
                 self.backend
@@ -4711,7 +4655,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// The declared finalizer function one artifact use site names, if the
     /// owner recorded that use. Lowering decides whether a finalizer is
-    /// installed; the emitter only reads the use (Contract 1).
+    /// installed; the emitter only reads the use.
     fn site_finalizer(
         &self,
         owner: EmissionOwner,
@@ -4727,9 +4671,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .copied()
     }
 
-    /// The capture environment of one closure plan, filled from the current
-    /// scope. Empty captures produce a null pointer (legacy
-    /// `build_capture_environment`).
+    /// Builds a closure plan's captures from the current scope. Empty captures
+    /// produce a null environment pointer.
     fn build_closure_environment_value(
         &mut self,
         owner: EmissionOwner,
@@ -4774,9 +4717,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .allocate_capture_environment(environment_type, environment_value, span.clone())
     }
 
-    /// One closure capture's stored value, mirroring legacy
-    /// `build_capture_environment`: a shared cell or borrowed capture stores a
-    /// pointer from the current scope; a by-value capture stores its value.
+    /// Reads a capture from the current scope. Shared cells and borrowed values
+    /// store pointers; by-value captures store the value itself.
     fn closure_capture_value(
         &mut self,
         owner: EmissionOwner,
@@ -4838,18 +4780,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
         };
         let native_extern = matches!(call.target, LoweredCallableTarget::ExternalFunction { .. });
-        // Stage 5.4 Step 4: legacy `compile_intrinsic` and the extern route
-        // evaluate arguments through `compile_arguments` (by value), never
+        // compile intrinsic and the extern route
+        // evaluate arguments through compile arguments (by value), never
         // through an ABI pass mode, so the lowered records' pass modes are
         // ignored there. (A variadic extern's extra parameter slots can even
-        // record an indirect mode for the variadic tail, which legacy never
+        // record an indirect mode for the variadic tail, which the emitter never
         // materializes.)
         let by_value_route =
             matches!(call.target, LoweredCallableTarget::Intrinsic { .. }) || native_extern;
-        // Stage 5.6 Step 7: a reactive intrinsic call names the operation it
+        // a reactive intrinsic call names the operation it
         // performs. The plain scope call emits through the intrinsic route
         // (its unit argument is evaluated with the other arguments below);
-        // every other operation evaluates its own operands in legacy order and
+        // every other operation evaluates its own operands in the emitter order and
         // is emitted before the generic argument loop.
         let reactive_call = if let Some(reactive) = call.reactive {
             let operation = self
@@ -4877,7 +4819,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if let Some(reactive) = reactive_call {
             return self.emit_reactive_call(owner, &call, reactive, environment);
         }
-        // Legacy checks the callee symbol's initialization before evaluating
+        // The emitter checks the callee symbol's initialization before evaluating
         // any argument.
         for symbol in &call.initialization_checks {
             self.check_symbol_initialization(owner, environment, *symbol, &call.origin.span)?;
@@ -4921,16 +4863,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
-        // Legacy `compile_call_expression`'s constructor branch compiles its
+        // compile call expression's constructor branch compiles its
         // single argument whole and never runs the flattened ABI argument
         // path, so a constructor's slot count is its record count.
         if matches!(call.target, LoweredCallableTarget::Constructor { .. }) {
             parameter_count = call.arguments.len();
         }
         let mut slots: Vec<Option<BasicMetadataValueEnum<'context>>> = vec![None; parameter_count];
-        // Hidden effect-row resource arguments, in row order. Legacy evaluates
+        // Hidden effect-row resource arguments, in row order. The emitter evaluates
         // its visible arguments first and appends the hidden ones, then passes
-        // `[environment, hidden..., visible...]` (`compile_resource_arguments`).
+        // `[environment, hidden..., visible...]` (compile resource arguments).
         let mut hidden: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
         // Mutation temporaries whose value needs drop after the call, in
         // evaluation order with their argument record index; `emit_call_cleanup`
@@ -4938,11 +4880,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut cleanups: Vec<(usize, PointerValue<'context>)> = Vec::new();
         let mut invoked = false;
         // A whole-product argument against a flattened multi-element parameter
-        // records no ABI slot; legacy `compile_arguments` unpacks the single
+        // records no ABI slot; compile arguments unpacks the single
         // struct after evaluating it. These values are placed at the end.
         let mut unplaced: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
         let mut callee_value = None;
-        // Legacy extracts `closure.code`/`closure.environment` after the
+        // The emitter extracts `closure.code`/`closure.environment` after the
         // visible arguments and before the hidden resources; the parts are
         // materialized lazily at the first resource step (or after the loop).
         let mut callee_parts: Option<(PointerValue<'context>, PointerValue<'context>)> = None;
@@ -5087,7 +5029,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
-        // Legacy `compile_arguments`' whole-product fallback: one argument
+        // compile arguments' whole-product fallback: one argument
         // value against a flattened multi-element parameter unpacks the
         // struct, and against a single slot it is that slot's value.
         if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
@@ -5114,10 +5056,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.ensure_callee_parts(&callee_value, &mut callee_parts)?;
         let mut values = hidden;
         values.extend(slots.into_iter().map(Option::unwrap));
-        // A C-string temporary is the first visible argument (legacy's
+        // A C-string temporary is the first visible argument (the emitter's
         // `scoped_c_string_temporary` check). The direct extern route passes
         // the CString value itself; a closure route passes a pointer to the
-        // borrowed CString slot (Stage 5.11 F1), so the temporary's value is
+        // borrowed CString slot , so the temporary's value is
         // loaded before it is released.
         let cleanup_c_string = if call.c_string_temporary {
             match values.first() {
@@ -5258,11 +5200,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(value)
     }
 
-    /// Stage 5.6 Step 3: the post-call cleanup hook. Legacy
-    /// `drop_mutation_temporaries` drops mutation temporaries in reverse
+    /// The post-call cleanup hook. The emitter
+    /// drop mutation temporaries drops mutation temporaries in reverse
     /// collection order and then releases a C-string temporary; each drop
     /// expands the glue named by its own `CallTemporary`, or `CStringTemporary`,
-    /// use record (O1).
+    /// use record.
     fn emit_call_cleanup(
         &self,
         owner: EmissionOwner,
@@ -5293,7 +5235,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `compile_call_expression`'s trait/structural branch: a direct
+    /// Compile call expression's trait/structural branch: a direct
     /// call with a null environment (`trait.call`).
     fn emit_structural_call(
         &mut self,
@@ -5323,7 +5265,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// A `ManagedRef` constructor: GC-allocate the payload, store it, and set
     /// the declared payload finalizer from the call's `RefConstruction`
-    /// artifact use (legacy `build_ref_value`; the finalizer body is 5.6).
+    /// artifact use.
     fn emit_managed_ref(
         &mut self,
         owner: EmissionOwner,
@@ -5375,7 +5317,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .copied()
     }
 
-    /// Legacy `check_symbol_initialization`: check the symbol's binding cell
+    /// Check the symbol's binding cell
     /// state when it has a cell, else the module global's state when it has
     /// one, and do nothing otherwise.
     fn check_symbol_initialization(
@@ -5407,8 +5349,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// One call argument's value: a place-backed pointer for the pointer pass
     /// modes, or the evaluated value materialized according to the recorded
-    /// pass mode. Intrinsic routes evaluate by value like legacy
-    /// `compile_intrinsic`.
+    /// pass mode. Intrinsic routes evaluate by value using the recorded layout
+    /// compile intrinsic.
     #[allow(clippy::too_many_arguments)]
     fn assemble_call_argument(
         &mut self,
@@ -5423,7 +5365,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
         let Some(expression) = expression else {
-            // An implicit thunk argument: legacy `compile_adapted_call_argument`
+            // An implicit thunk argument: compile adapted call argument
             // builds the thunk's closure over the current environment.
             let value =
                 self.build_thunk_closure(owner, call_id, record_index, environment, span)?;
@@ -5444,7 +5386,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         {
             match self.emit_place_pointer(owner, place, environment) {
                 Ok(pointer) => return Ok(pointer.into()),
-                // Legacy `compile_indirect_argument_pointer` silently falls
+                // compile indirect argument pointer silently falls
                 // back to a materialized copy when a possibly-place-rooted
                 // borrow is not actually addressable; the mutation path has no
                 // fallback. An indexed place stays a diagnostic.
@@ -5515,9 +5457,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .and_then(|record| record.body.as_ref())
             .ok_or_else(|| Diagnostic::new(span.clone(), "closure instance has no body"))?;
         let pointer = self.build_capture_environment_value(owner, body, environment, span)?;
-        // Legacy `build_closure` installs the environment finalizer exactly
-        // when lowering recorded the thunk argument's environment use (the
-        // finalizer body is 5.6).
+        // build closure installs the environment finalizer exactly
+        // when lowering recorded the thunk argument's environment use.
         if let Some(finalizer) = self.site_finalizer(
             owner,
             crate::ArtifactUseSite::ThunkArgumentEnvironment {
@@ -5532,11 +5473,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map(|closure| closure.into())
     }
 
-    /// The capture environment of one instance's body, filled from the current
-    /// scope. Empty captures produce a null pointer (legacy
-    /// `build_capture_environment`). The closure-environment finalizer is
-    /// 5.6's `GcFinalizer`; until then, a capture that legacy would finalize
-    /// is a diagnostic rather than a silently missing finalizer.
+    /// Builds an instance's capture environment from the current scope.
+    /// Empty captures produce a null pointer. Capture order, storage kinds,
+    /// and finalizer uses come from the lowered body and artifact plans.
     fn build_capture_environment_value(
         &mut self,
         owner: EmissionOwner,
@@ -5571,9 +5510,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .allocate_capture_environment(environment_type, environment_value, span.clone())
     }
 
-    /// One capture's stored value, mirroring legacy `build_capture_environment`:
-    /// a cell/initialization-state/derived/borrowed capture stores a pointer
-    /// from the current scope; every other capture stores its value.
+    /// Reads an instance capture. Cell, initialization-state, derived, and borrowed
+    /// captures store pointers; other captures store their values.
     fn capture_value(
         &mut self,
         owner: EmissionOwner,
@@ -5691,11 +5629,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.4 Step 4: the place pointer of a symbol-rooted place. Legacy
-    /// `compile_place_pointer`'s lookup order (parameter pointer, then binding
-    /// cell, then module global) with the recorded provider for a resource
-    /// place. Every other place kind is 5.5's and extends this function; there
-    /// is no second place emitter.
+    /// Emits a place pointer using recorded projections and resource providers.
+    /// Symbol lookup prefers parameter pointers, then cells, then module globals.
     fn emit_place_pointer(
         &mut self,
         owner: EmissionOwner,
@@ -5779,8 +5714,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         )
                     })
             }
-            // Stage 5.5 Step 5: a non-place base materialized so it can be
-            // mutated (legacy `compile_mutation_argument_pointer`).
+            // a non-place base materialized so it can be
+            // mutated (compile mutation argument pointer).
             crate::LoweredPlaceKind::Temporary { expression } => {
                 let value = self.emit_expression(owner, *expression, environment)?;
                 let value = value_as_basic(value).ok_or_else(|| {
@@ -5794,7 +5729,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     place.origin.span.clone(),
                 )
             }
-            // A `Ref` payload chain: legacy `ref_payload_pointer` leaves the
+            // A `Ref` payload chain: ref payload pointer leaves the
             // final payload address in place.
             crate::LoweredPlaceKind::Dereference {
                 reference,
@@ -5809,7 +5744,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     Diagnostic::new(place.origin.span.clone(), "missing base place")
                 })?;
                 if *slice {
-                    // Legacy evaluates the slice value, then loads its pointer
+                    // The emitter evaluates the slice value, then loads its pointer
                     // and length and bounds-checks the fixed index.
                     let value = match &base_place.kind {
                         crate::LoweredPlaceKind::Symbol { symbol }
@@ -5877,7 +5812,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     }
                     .map_err(compiler_diagnostic);
                 }
-                // Legacy checks a mutable symbol base's initialization before
+                // The emitter checks a mutable symbol base's initialization before
                 // projecting a field.
                 if let crate::LoweredPlaceKind::Symbol { symbol }
                 | crate::LoweredPlaceKind::CapturedCell { symbol } = &base_place.kind
@@ -5919,10 +5854,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.5 Step 5: one assignment item. An indexed target dispatches
-    /// through `MutateIndex`; every other target stores through its place
-    /// pointer, with the E2 replaced-value hook, the initialization-state
-    /// writeback, and the signal-notification diagnostic in legacy's order.
+    /// Emits an assignment. Indexed targets use MutateIndex; other targets drop
+    /// the replaced value, store through the place pointer, update initialization
+    /// state, and notify the recorded signal root.
     fn emit_assignment(
         &mut self,
         owner: EmissionOwner,
@@ -5946,9 +5880,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         let value = value_as_basic(value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "assigned value is not storable"))?;
-        // Legacy `compile_assignment` conditionally drops a binding cell's
+        // compile assignment conditionally drops a binding cell's
         // old value, or loads `assignment.old` from the place; the owner's
-        // `ReplacedValue` use record is the discriminant (O1).
+        // `ReplacedValue` use record is the discriminant.
         if assignment.drop_previous {
             let cell = self
                 .place_root_symbol(owner, assignment.target)
@@ -5968,7 +5902,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_store(pointer, value)
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        // Stage 5.11 (F2): a field projection never initializes its base; the
+        // a field projection never initializes its base; the
         // base is already initialized (or the projection's own check traps).
         // Its root symbol exists here for notification only.
         if let Some(symbol) = assignment.initialization_symbol
@@ -5999,7 +5933,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// The root symbol legacy `compile_place_pointer` returns for a place: a
+    /// The root symbol compile place pointer returns for a place: a
     /// symbol place (direct or captured cell) or a representation base;
     /// product elements, temporaries, dereferences, resources, and indexed
     /// targets return `None`.
@@ -6019,11 +5953,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Stage 5.5 Step 5: `base[index] = value`, mirroring legacy
-    /// `compile_mutate_index_assignment`: the `IndexedAssignment` binding names
-    /// the `MutateIndex` instance (or structural artifact), the base is a
-    /// place pointer or a materialized mutation temporary, and the call passes
-    /// the base, position, and replacement after the null environment.
+    /// Emits an indexed assignment through its bound MutateIndex callee. The
+    /// base uses a place pointer or mutation temporary; the call passes base,
+    /// position, and replacement after the null environment.
     fn emit_mutate_index_assignment(
         &mut self,
         owner: EmissionOwner,
@@ -6061,7 +5993,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ));
             }
         };
-        // Legacy compiles the base pointer first, then the position, then the
+        // The emitter compiles the base pointer first, then the position, then the
         // replacement.
         self.view.place(owner, *base).ok_or_else(|| {
             Diagnostic::new(span.clone(), "missing indexed assignment base place")
@@ -6095,7 +6027,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_direct_call(function, &arguments, "mutate_index.call")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        // Legacy `drop_mutation_temporaries` drops the materialized base when
+        // drop mutation temporaries drops the materialized base when
         // lowering recorded it.
         if assignment.drops_base_temporary {
             self.emit_drop_site(
@@ -6108,11 +6040,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.5 Step 5: one `base[index]` read through the `Index` binding.
-    /// The operand ABI mask decides a place pointer, a mutation temporary, or a
-    /// borrowed temporary; the call is `index.call` with the null environment
-    /// and the hidden resources first, exactly as legacy
-    /// `compile_index_expression`.
+    /// Emits an Index call. Recorded pass modes select a place pointer, mutation
+    /// temporary, or borrowed temporary. Hidden resources precede visible operands.
     fn emit_index(
         &mut self,
         owner: EmissionOwner,
@@ -6140,7 +6069,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .get(instance)
                 .copied()
                 .ok_or_else(|| unsupported("index instance declaration"))?,
-            // A structural `Index` method's body is Stage 5.7; the declared
+            // A structural `Index` method's body is emission; the declared
             // artifact is called like any other function.
             crate::LoweredBoundTarget::Artifact(ordinal) => self
                 .artifacts
@@ -6157,7 +6086,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Err(unsupported("index resources"));
         }
         let types = flattened_parameter_types(&method_type.parameter);
-        // Lowering records which operands pass by address (Contract 1); the
+        // Lowering records which operands pass by address; the
         // mutation mask is the checked method type's own fact.
         let mask = index.operands.indirect.clone();
         if mask.len() != types.len() {
@@ -6166,9 +6095,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mutation_mask =
             super::abi::mutation_parameter_mask(types.len(), &method_type.mutations);
         let mut values: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
-        // Mutation temporaries legacy `drop_mutation_temporaries` drops after
+        // Mutation temporaries drop mutation temporaries drops after
         // the call, in collection order; the owned `IndexTemporary` use record
-        // names each site's glue (O1).
+        // names each site's glue.
         let mut whole_temporary: Option<PointerValue<'context>> = None;
         let mut temporaries: Vec<(usize, PointerValue<'context>)> = Vec::new();
         if !mask.iter().any(|indirect| *indirect) {
@@ -6301,7 +6230,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| Diagnostic::new(span.clone(), "Index result is not first-class"))?;
-        // Legacy `drop_mutation_temporaries` drops the recorded operand
+        // drop mutation temporaries drops the recorded operand
         // temporaries after the call in reverse collection order.
         if index.operands.whole_drops_after_call
             && let Some(pointer) = whole_temporary
@@ -6330,9 +6259,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(result.as_any_value_enum())
     }
 
-    /// Materialize an indirect call's `closure.code`/`closure.environment`
-    /// parts once, at legacy's position (after the visible arguments, before
-    /// the hidden resources).
+    /// Extracts an indirect call's code and environment pointers once, after
+    /// visible argument evaluation and before hidden resources.
     fn ensure_callee_parts(
         &self,
         closure: &Option<inkwell::values::StructValue<'context>>,
@@ -6360,8 +6288,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.4 Step 5: one hidden effect-row resource argument, resolved
-    /// through the provider the use records (`compile_resource_arguments`).
+    /// One hidden effect-row resource argument, resolved
+    /// through the provider the use records (compile resource arguments).
     fn emit_hidden_resource_argument(
         &mut self,
         owner: EmissionOwner,
@@ -6384,7 +6312,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// The value one resource use passes or reads: a borrow pointer for a
     /// mutable or non-`Copy` requirement (which needs an indirect provider),
     /// else a direct value, loading `resource.copy` when the provider is
-    /// indirect. Legacy `compile_resource_arguments`' rule.
+    /// indirect. compile resource arguments' rule.
     fn bound_resource_value(
         &self,
         environment: &FunctionEnvironment<'context>,
@@ -6440,7 +6368,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(bound.value)
     }
 
-    /// Stage 5.4 Step 5: a `resource` read. Legacy loads `resource.borrow`
+    /// A `resource` read. The emitter loads `resource.borrow`
     /// through an indirect provider and takes the value directly otherwise.
     fn emit_resource_read(
         &mut self,
@@ -6486,11 +6414,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(bound.value)
     }
 
-    /// Stage 5.4 Step 5: a `with` provider and its body. Legacy evaluates the
+    /// A `with` provider and its body. The emitter evaluates the
     /// provider value, stores it in the source place (`Place`) or a
     /// `resource.provider` alloca (`Materialized`), binds it while the body
     /// runs, disposes a reactive scope and closes a `Tasks` scope on a normal
-    /// exit. Task scopes close only on the normal exit (K4).
+    /// exit. Task scopes close only on the normal exit.
     fn emit_with(
         &mut self,
         owner: EmissionOwner,
@@ -6589,8 +6517,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         result
     }
 
-    /// Legacy `close_task_scopes`: close every scope from `keep` on, in
-    /// reverse order. Stage 5.11 (M3) closes abandoned scopes on `return`,
+    /// Close every scope from `keep` on, in
+    /// reverse order. emission closes abandoned scopes on `return`,
     /// `break`, and `continue`, right after reactive disposal and before the
     /// owned drops; a `with Tasks` normal exit still closes its own scope.
     fn close_task_scopes(
@@ -6616,7 +6544,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `dispose_reactive_scopes`: dispose every scope from `keep` on, in
+    /// Dispose every scope from `keep` on, in
     /// reverse order.
     fn dispose_reactive_scopes(
         &self,
@@ -6636,7 +6564,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Legacy `compile_symbol_value`: a parameter pointer is reloaded on every
+    /// A parameter pointer is reloaded on every
     /// read (the binding's own load stays behind, unused), then a local, then
     /// a binding cell, then module storage.
     fn load_symbol_value(
@@ -6661,7 +6589,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(*value);
         }
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
-            // Legacy's binding-cell arm: force a stale derived read, build the
+            // The emitter's binding-cell arm: force a stale derived read, build the
             // state slot, run the shared check when the read needs one, track
             // a signal read, then load the value slot.
             self.force_derived_read(owner, environment, symbol, span)?;
@@ -6689,7 +6617,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .map(|value| value.as_any_value_enum())
                 .map_err(compiler_diagnostic);
         }
-        // Legacy `compile_symbol_value`'s `closure_codes` arm: an extern used
+        // compile symbol value's `closure_codes` arm: an extern used
         // as a first-class value is read as its adapter closure (with a null
         // environment).
         if let Some(code) = self.extern_adapters.get(&symbol).copied() {
@@ -6721,8 +6649,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// The checked `Bool` representation of a comparison result (legacy
-    /// `compile_bool`).
+    /// Builds the lowered Bool representation of a comparison result.
     fn build_intrinsic_bool(
         &self,
         condition: inkwell::values::IntValue<'context>,
@@ -6770,7 +6697,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "integer arithmetic operands must be integers",
                     ));
                 };
-                // Stage 5.3 Step 5: shared with legacy, names included.
+                // Use the common numeric conversion helper.
                 let value = self
                     .backend
                     .build_integer_binary(integer, operation, *left, *right)?;
@@ -6783,7 +6710,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "numeric conversion needs one argument",
                     ));
                 };
-                // Stage 5.4 Step 9: shared with legacy's conversion core.
+                // Use the common String conversion helper.
                 let argument = BasicValueEnum::try_from(*argument).map_err(|_| {
                     Diagnostic::new(span.clone(), "numeric conversion requires a numeric value")
                 })?;
@@ -6845,7 +6772,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "CString conversion requires a pointer",
                     ));
                 };
-                // Stage 5.3 Step 5: shared conversion core; the CString
+                // shared conversion core; the CString
                 // release expands the recorded `CStringConversion` glue.
                 let result = self
                     .backend
@@ -6865,7 +6792,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "String conversion requires a String value",
                     ));
                 };
-                // Stage 5.3 Step 5: shared with legacy.
+                // Use the common runtime helper.
                 Ok(self
                     .backend
                     .build_string_to_c_string(*string, span)?
@@ -6944,7 +6871,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "buffer.capacity.slot",
                 )?;
                 // The `BufferAllocation` use records the element finalizer
-                // legacy `ensure_buffer_finalizer` installs.
+                // ensure buffer finalizer installs.
                 if let Some(finalizer) = self
                     .artifact_use_function(owner, crate::ArtifactUseSite::BufferAllocation(call_id))
                 {
@@ -7115,7 +7042,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.emit_buffer_clone(owner, call, call_id, arguments, &span)
             }
             IntrinsicFunction::RefReplace => {
-                // Legacy `RefReplace`: read the old payload, store the
+                // read the old payload, store the
                 // replacement, return the old value (its drop is the
                 // surrounding site's recorded cleanup).
                 let [BasicMetadataValueEnum::PointerValue(reference), replacement] = arguments
@@ -7140,7 +7067,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(old.as_any_value_enum())
             }
             IntrinsicFunction::Drop => {
-                // Legacy evaluates the argument, drops it through the
+                // The emitter evaluates the argument, drops it through the
                 // recorded `DropIntrinsic` glue, and returns unit.
                 let Some(value) = arguments.first().copied() else {
                     return Err(Diagnostic::new(span, "Drop requires a value"));
@@ -7157,7 +7084,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(self.backend.unit_value())
             }
             IntrinsicFunction::ReactiveScope => {
-                // Legacy `compile_intrinsic_call`: the unit argument is
+                // the unit argument is
                 // evaluated by the call route; then create the ambient scope.
                 Ok(self
                     .backend
@@ -7215,7 +7142,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Legacy `compile_buffer_metadata`: the buffer handle's field 0
+    /// The buffer handle's field 0
     /// (`buffer.length`) or 1 (`buffer.capacity`), with the GEP and the load
     /// sharing one name.
     fn emit_buffer_metadata(
@@ -7244,7 +7171,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Legacy `compile_buffer_pop`: empty returns `None`, otherwise the last
+    /// Empty returns `None`, otherwise the last
     /// element moves out into `Some`, the length decrements, and the vacated
     /// slot is zeroed.
     fn emit_buffer_pop(
@@ -7264,7 +7191,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             ));
         };
         // Lowering records the `None`/`Some` alternatives per concrete
-        // instance (O1); the emitter never searches the sum for them.
+        // instance; the emitter never searches the sum for them.
         let crate::LoweredOptionAlternatives {
             none: none_index,
             some: some_index,
@@ -7420,7 +7347,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Legacy `compile_buffer_transfer`: alias and frozen traps, capacity
+    /// Alias and frozen traps, capacity
     /// check, element memcpy, then length updates.
     fn emit_buffer_transfer(
         &self,
@@ -7553,7 +7480,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(self.backend.unit_value())
     }
 
-    /// Legacy `compile_buffer_clone`: allocate a destination with the source's
+    /// Allocate a destination with the source's
     /// capacity, install the recorded destination finalizer, then call the
     /// recorded element `Clone` instance per live element.
     fn emit_buffer_clone(
@@ -7775,7 +7702,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 }
 
-/// The buffer element type legacy reads from an intrinsic call's argument: the
+/// The buffer element type from an intrinsic call's argument: the
 /// first element of a product argument, or the argument type itself.
 fn intrinsic_buffer_element(
     call: &crate::LoweredCall,
@@ -7800,7 +7727,7 @@ fn intrinsic_buffer_element(
     }
 }
 
-/// Stage 5.4 Step 4: store one assembled argument in its final slot, failing
+/// Store one assembled argument in its final slot, failing
 /// when the slot is out of range or already filled (an internal inconsistency
 /// in the lowered record).
 /// Whether a place-pointer failure is the invariant error for an indexed

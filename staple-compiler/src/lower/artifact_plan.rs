@@ -1,27 +1,10 @@
-//! Stage 4 generated-artifact plans.
+//! Typed plans for generated artifacts.
 //!
-//! Every generated artifact carries an owned, typed `LoweredArtifactPlan`
-//! recording the decisions the legacy backend makes while emitting it. Stage
-//! 4.1 defines one placeholder variant per artifact family together with the
-//! concrete inputs already available at request time; Stage 4.3 through 4.6
-//! fill each variant's remaining fields (selected callees, ordered layout
-//! facts, and cleanup facts) rather than adding an untyped fallback. The
-//! exhaustive matches on `family_name` force every new artifact family to
-//! declare its plan variant here.
-//!
-//! A plan built at request time (`ConstructorConstruction::Unexpanded`,
-//! `StructuralBody::Unexpanded`) is the minimal form: it carries every
-//! identity field `matches_key` rebuilds but no body decisions, because body
-//! building belongs to the family expander. Expansion replaces the marker
-//! with the owned plan; validation rejects a plan whose family expander ran
-//! but left the marker in place.
-//!
-//! Callees whose catalog ids do not exist yet during expansion are named by
-//! key (`PlannedInstance`/`PlannedArtifact`) with the id left empty. The
-//! closure engine binds them after the catalog reaches a fixed point.
-//!
-//! Target-specific LLVM layout stays in the backend; a plan records lowered
-//! identities and concrete checked values only.
+//! Each artifact family records concrete identities, selected callees, layout
+//! order, and cleanup decisions. Request-time markers carry identity only;
+//! family expansion fills their bodies, and validation rejects unexpanded plans.
+//! Callees are initially named by canonical key and bound to catalog ordinals
+//! after closure. Target-specific LLVM layout stays in codegen.
 
 use super::{
     ArenaId, FunctionInstanceId, LoweredArtifactDependencyKind, LoweredCallableAdapter,
@@ -39,28 +22,28 @@ use crate::{
 /// The owned plan of one generated artifact, one variant per artifact family.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoweredArtifactPlan {
-    /// A constructor value's callable adapter. Stage 4.3 adds the recursive
+    /// A constructor value's callable adapter. artifact planning adds the recursive
     /// construction class and the parameter-to-representation mapping.
     ConstructorAdapter(ConstructorAdapterPlan),
-    /// A compiler-generated structural method. Stage 4.3 adds the ordered
+    /// A compiler-generated structural method. artifact planning adds the ordered
     /// labels, element types, selected callees, and formatting edges.
     StructuralMethod(StructuralMethodPlan),
-    /// Drop glue for one concrete value type. Stage 4.4 adds the selected
+    /// Drop glue for one concrete value type. artifact planning adds the selected
     /// `Drop` method and the ordered representation cleanup steps.
     DropGlue(DropGluePlan),
-    /// A garbage-collector finalizer. Stage 4.4 adds the referenced drop glue.
+    /// A garbage-collector finalizer. artifact planning adds the referenced drop glue.
     GcFinalizer(GcFinalizerPlan),
-    /// A coroutine `resume`/`cleanup` pair. Stage 4.5 adds the frame layout
+    /// A coroutine `resume`/`cleanup` pair. artifact planning adds the frame layout
     /// inputs, cleanup drop glue, and thunk-environment finalizer.
     CoroutineCodes(CoroutineCodesPlan),
-    /// A reaction subscription runner. Stage 4.5 adds the callback route,
+    /// A reaction subscription runner. artifact planning adds the callback route,
     /// closure type, ordered resources, and payload slot order.
     ReactionRunner(ReactiveRunnerPlan),
-    /// An `until` predicate runner. Stage 4.5 adds the predicate closure type.
+    /// An `until` predicate runner. artifact planning adds the predicate closure type.
     UntilRunner(ReactiveRunnerPlan),
-    /// A derived binding runner. Stage 4.5 adds the evaluator call shape.
+    /// A derived binding runner. artifact planning adds the evaluator call shape.
     DerivedRunner(ReactiveRunnerPlan),
-    /// An extern closure adapter. Stage 4.6 records the eager
+    /// An extern closure adapter. artifact planning records the eager
     /// foreign-symbol declaration parity facts; the callable sites that use
     /// the adapter live on their owners' use records.
     ExternAdapter(ExternAdapterPlan),
@@ -270,7 +253,7 @@ impl LoweredArtifactPlan {
     /// the closure validator can match them one-to-one with artifact-owned
     /// edges. The runner and extern-adapter families call indirectly or
     /// directly through fixed symbols, so their schemas have no callee slots
-    /// and keep their Stage 4.2 request-based representation.
+    /// and keep their artifact planning request-based representation.
     pub(crate) fn supports_planned_callees(&self) -> bool {
         matches!(
             self,
@@ -283,7 +266,7 @@ impl LoweredArtifactPlan {
     }
 
     /// Whether expansion replaced the request-time marker for this family.
-    /// Families without a marker (the remaining Stage 4.1 placeholder) are
+    /// Families without a marker (the remaining artifact planning placeholder) are
     /// always expanded.
     pub(crate) fn is_expanded(&self) -> bool {
         match self {
@@ -977,7 +960,7 @@ pub(crate) struct SumAlternative {
 }
 
 /// The plan shape of one drop-glue body: the concrete value type and the
-/// ordered cleanup decision mirroring `compile_drop_value` exactly.
+/// ordered cleanup decision mirroring compile drop value exactly.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DropGluePlan {
     pub value_type: CheckedType,
@@ -985,7 +968,7 @@ pub(crate) struct DropGluePlan {
     pub body: DropGlueBody,
 }
 
-/// One drop-glue body, mirroring the legacy decision order.
+/// One drop-glue body, mirroring the emitter decision order.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DropGlueBody {
     /// Request-time only: the family expander replaces this marker.
@@ -1018,7 +1001,7 @@ pub(crate) enum DropGlueBody {
     Distinct { representation: PlannedArtifact },
 }
 
-/// The runtime release one opaque-type drop performs. Stage 4.6 turns these
+/// The runtime release one opaque-type drop performs. artifact planning turns these
 /// into `LoweredRuntimeRequirements`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuntimeRelease {
@@ -1324,15 +1307,15 @@ pub(crate) struct ExternAdapterPlan {
     pub declaration: Option<ExternDeclaration>,
 }
 
-/// The declaration parity facts of one extern adapter, recorded so Stage 5 can
-/// keep legacy's eager foreign-symbol declaration while emitting the adapter
+/// The declaration parity facts of one extern adapter, recorded so emission can
+/// keep the emitter's eager foreign-symbol declaration while emitting the adapter
 /// body only for a reachable artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExternDeclaration {
-    /// The C symbol's declared arity, which legacy embeds in the overloaded
+    /// The C symbol's declared arity, which the emitter embeds in the overloaded
     /// `name.arityN` spelling.
     pub arity: usize,
-    /// Legacy declares the foreign symbol and creates this adapter eagerly for
+    /// The emitter declares the foreign symbol and creates this adapter eagerly for
     /// every non-variadic extern binding, used or not. The artifact records
     /// which adapters a callable-value site actually reaches.
     pub eagerly_declared: bool,

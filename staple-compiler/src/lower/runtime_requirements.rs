@@ -1,11 +1,11 @@
-//! Stage 4.6: the per-program lowered runtime requirements.
+//! the per-program lowered runtime requirements.
 //!
 //! Fixed-named runtime symbols have no lowered bodies to plan, so they are not
 //! an artifact family. Instead every program carries an ordered, deduplicated
 //! set of the runtime surfaces its lowered operations need. The set is derived
 //! from the closed catalog: materialized instance bodies (including the
 //! eagerly materialized standard-library templates the backend always emits),
-//! module initializers, and expanded artifact plans. Stage 5 may keep
+//! module initializers, and expanded artifact plans. emission may keep
 //! installing the surfaces by name, but only when the requirement is present
 //! and with the same eager-root behavior.
 //!
@@ -14,7 +14,7 @@
 //! coroutine/scheduler/completion module, and the reactive module, plus the
 //! UTF-8 validator and the lazily declared libc symbols. `llvm.trap` stays
 //! backend-local: it is a pure LLVM intrinsic with no runtime installation and
-//! no lowered body, as the Stage 4.1 negative matrix records.
+//! no lowered body, as the artifact planning negative matrix records.
 
 use staple_syntax::Diagnostic;
 
@@ -42,15 +42,15 @@ pub(crate) enum RuntimeRequirement {
     ReactiveRuntime,
     /// The UTF-8 validator (`__staple_is_valid_utf8`).
     Utf8Validator,
-    /// libc `free` for C-string cleanup.
+    /// Libc `free` for C-string cleanup.
     CStringFree,
-    /// libc `memcmp` for string-literal pattern comparison.
+    /// Libc `memcmp` for string-literal pattern comparison.
     LiteralComparison,
-    /// libc `snprintf` for numeric-to-string conversion.
+    /// Libc `snprintf` for numeric-to-string conversion.
     NumericToString,
-    /// libc `strlen` for C-string conversion.
+    /// Libc `strlen` for C-string conversion.
     CStringLength,
-    /// libc `memchr` for interior-NUL checks.
+    /// Libc `memchr` for interior-NUL checks.
     InteriorNulCheck,
 }
 
@@ -92,7 +92,7 @@ impl RuntimeRequirement {
 
     #[cfg(test)]
     /// The requirement a fixed runtime symbol belongs to, when the symbol is
-    /// one of the recorded surfaces. Used by the legacy transition comparison.
+    /// one of the recorded surfaces. Used by the runtime requirement tests.
     pub(crate) fn for_runtime_symbol(name: &str) -> Option<RuntimeRequirement> {
         if name.starts_with("__staple_gc_") {
             return Some(RuntimeRequirement::GarbageCollector);
@@ -238,7 +238,7 @@ impl LoweredProgram {
 
     /// Test-only: the surfaces one owner's emitted function references, for
     /// per-function comparison where the program-wide set is masked by the
-    /// eagerly emitted standard library. Legacy inlines drop glue at each drop
+    /// eagerly emitted standard library. The emitter inlines drop glue at each drop
     /// site (nested product, sum, and distinct glue included), so the owner's
     /// drop-glue uses contribute their releases; finalizers and user `Drop`
     /// methods are separate functions and do not.
@@ -388,7 +388,7 @@ impl RequirementVisitor<'_> {
             .record(RuntimeRequirement::ReactiveRuntime);
     }
 
-    /// Whether binding `symbol` GC-allocates its cell. Legacy
+    /// Whether binding `symbol` GC-allocates its cell. The emitter
     /// `allocate_binding_cell` allocates through the collector exactly when
     /// the symbol is in `captured_cell_symbols`: some function captures it and
     /// it has mutable storage or is derived. `LoweredSymbol::captured_cell` is
@@ -406,7 +406,7 @@ impl RequirementVisitor<'_> {
     }
 
     /// Whether `symbol` is a frame binding of the coroutine body this owner
-    /// is; legacy pre-seeds those as frame cells before any block predeclares.
+    /// is; the emitter pre-seeds those as frame cells before any block predeclares.
     fn is_frame_binding(&self, symbol: SymbolId) -> bool {
         let OwnerArenas::Instance(body) = self.owner else {
             return false;
@@ -541,7 +541,7 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
     }
 
     fn string_literal_site(&mut self, _origin: &Origin) -> Result<(), Vec<Diagnostic>> {
-        // Legacy copies every string literal's bytes into GC-allocated data.
+        // The emitter copies every string literal's bytes into GC-allocated data.
         self.gc();
         Ok(())
     }

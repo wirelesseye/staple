@@ -1,4 +1,4 @@
-//! Stage 4.5: the coroutine-codes and reactive-runner artifact expanders and
+//! the coroutine-codes and reactive-runner artifact expanders and
 //! scanner.
 //!
 //! `expand_coroutine_codes` fills one `CoroutineCodes` plan from the body
@@ -16,12 +16,12 @@
 //! evaluator's signature and output type.
 //!
 //! The scanner walks one owner in lowered evaluation order through the shared
-//! Stage 4.4 owner walker. It requests one pair per `coro` creation
+//! artifact planning owner walker. It requests one pair per `coro` creation
 //! (`CoroCreation`), the environment finalizer a thunk callback installs
 //! (`ReactiveCallbackEnvironment`/`DerivedEvaluatorEnvironment`, gap 1), and
 //! one runner per reaction, `until`, and derived operation (`ReactiveRunner`).
 //! Instance owners take their thunk instances from their own bindings;
-//! initializer owners resolve with the Stage 3.3 recipe, and a key that was
+//! initializer owners resolve with the specialization recipe, and a key that was
 //! never interned is a diagnostic rather than a silent skip.
 
 use staple_syntax::Diagnostic;
@@ -116,7 +116,7 @@ pub(super) fn expand_coroutine_codes(
         .map(|capture| capture.value_type.clone())
         .collect::<Vec<_>>();
 
-    // Legacy gates the environment finalizer on non-empty captures, not on the
+    // The emitter gates the environment finalizer on non-empty captures, not on the
     // closure install gate, so a legitimately requested finalizer may drop
     // nothing.
     let capture_finalizer = if captures.is_empty() {
@@ -150,8 +150,8 @@ pub(super) fn expand_coroutine_codes(
     };
 
     // Frame-binding unwind drops follow the capture finalizer in plan order,
-    // which is frame cell order. Legacy iterates a `HashMap`, so plan order is
-    // the deterministic choice the transition test compares as a set.
+    // which is frame cell order. The emitter iterates a `HashMap`, so plan order is
+    // the deterministic choice the determinism test compares as a set.
     let mut frame_bindings = Vec::new();
     for symbol in &local.frame_bindings {
         let Some(value_type) = frame_binding_type(program, body, *symbol) else {
@@ -215,7 +215,7 @@ pub(super) fn expand_coroutine_codes(
 /// `coroutine_lower` collects frame bindings through call arguments, so a
 /// binding inside an implicit-thunk argument (a reaction, batch, or `until`
 /// block, a derived initializer, or a block argument) is a frame binding too:
-/// legacy lays out a frame cell for it and conditionally drops that
+/// the emitter lays out a frame cell for it and conditionally drops that
 /// never-initialized cell on the cancel unwind. The symbol is bound in the
 /// nested thunk's own instance, not in the coroutine body, so the search
 /// descends through the bound implicit-thunk instances, the same nesting
@@ -272,7 +272,7 @@ pub(super) enum ReactiveRunnerFamily {
     Derived,
 }
 
-/// Expands one reactive runner: the callback call shape the legacy runner
+/// Expands one reactive runner: the callback call shape the emitter runner
 /// embeds, read from the owner's lowered operation and callback records.
 pub(super) fn expand_reactive_runner(
     program: &LoweredProgram,
@@ -451,7 +451,7 @@ pub(super) fn expand_reactive_runner(
                 )]);
             };
             let evaluator_type = evaluator_body.signature().clone();
-            // The legacy proof rejects an evaluator that captures resources:
+            // The emitter proof rejects an evaluator that captures resources:
             // the runner passes only the environment to the indirect call.
             if !evaluator_type.effects.resources.is_empty() {
                 return Err(vec![Diagnostic::new(
@@ -529,7 +529,7 @@ fn operation_references(
     }
 }
 
-/// The body instance of an initializer-owned `coro` creation: the Stage 3.3
+/// The body instance of an initializer-owned `coro` creation: the specialization
 /// recipe with the plan's deferred effects. A key that was never interned is a
 /// diagnostic rather than a silent skip.
 fn initializer_body_instance(
@@ -569,7 +569,7 @@ fn initializer_body_instance(
 
 /// The thunk instance for one callback or evaluator. An instance owner already
 /// binds it at the operation site; an initializer owner has no binding table,
-/// so the thunk is resolved with the Stage 3.3 recipe, and a key that was
+/// so the thunk is resolved with the specialization recipe, and a key that was
 /// never interned is a diagnostic rather than a silent skip.
 fn resolve_thunk_instance(
     program: &LoweredProgram,
@@ -606,7 +606,7 @@ fn resolve_thunk_instance(
     Ok(FunctionInstanceId::from_index(ordinal.index()))
 }
 
-/// Validates the Stage 4.5 plans and creation uses:
+/// Validates the artifact planning plans and creation uses:
 ///
 /// - every expanded pair re-expands to itself from its body instance, so a
 ///   plan whose body is not a coroutine body thunk or whose frame facts
@@ -616,7 +616,10 @@ fn resolve_thunk_instance(
 ///   reactive operation kind is rejected;
 /// - every `CoroCreation` use names the same body instance its
 ///   `LoweredBindingSite::Coro` binding (or initializer recipe) resolves to.
-pub(super) fn check_stage_4_5(program: &LoweredProgram, diagnostics: &mut Vec<Diagnostic>) {
+pub(super) fn check_coroutine_artifacts(
+    program: &LoweredProgram,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     for (id, artifact) in program.artifacts.iter() {
         let Some(plan) = artifact.plan.clone() else {
             continue;
@@ -823,7 +826,7 @@ fn scan_owner(
     owner: OwnerArenas<'_>,
     site_owner: ArtifactSiteOwner,
 ) -> ScanResult {
-    let mut visitor = Stage45ScanVisitor {
+    let mut visitor = CoroutineScanVisitor {
         program,
         owner,
         site_owner,
@@ -836,17 +839,17 @@ fn scan_owner(
 /// The scanning visitor: every `coro` creation, installed callback
 /// environment, and reactive runner becomes a closure request with its exact
 /// use site.
-struct Stage45ScanVisitor<'a> {
+struct CoroutineScanVisitor<'a> {
     program: &'a LoweredProgram,
     owner: OwnerArenas<'a>,
     site_owner: ArtifactSiteOwner,
     requests: Vec<ClosureRequest>,
 }
 
-impl Stage45ScanVisitor<'_> {
+impl CoroutineScanVisitor<'_> {
     /// The pair's body instance. An instance owner already binds it at the
     /// creation site; an initializer owner has no binding table, so the thunk
-    /// is resolved with the Stage 3.3 recipe, and a key that was never
+    /// is resolved with the specialization recipe, and a key that was never
     /// interned is a diagnostic.
     fn body_instance(
         &self,
@@ -890,7 +893,7 @@ impl Stage45ScanVisitor<'_> {
     }
 
     /// Requests the closure-environment finalizer a thunk callback or evaluator
-    /// installs, gated exactly as the 4.4 closure scanner: some capture that
+    /// installs when the closure scanner finds some capture that
     /// neither requires initialization state nor is borrowed has a droppable
     /// concrete type.
     fn request_environment(
@@ -957,7 +960,7 @@ impl Stage45ScanVisitor<'_> {
         let Some(record) = self.owner.reactive_callback(self.program, callback) else {
             return Ok(());
         };
-        // An explicit callback's own closure construction carries its 4.4
+        // An explicit callback's own closure construction carries its
         // `ClosureEnvironment` use; only thunk callbacks install theirs here.
         let Some(thunk) = record.thunk else {
             return Ok(());
@@ -1071,7 +1074,7 @@ impl Stage45ScanVisitor<'_> {
     }
 }
 
-impl LoweredOwnerVisitor for Stage45ScanVisitor<'_> {
+impl LoweredOwnerVisitor for CoroutineScanVisitor<'_> {
     fn coro_creation(&mut self, id: LoweredCoroId, origin: &Origin) -> Result<(), Vec<Diagnostic>> {
         self.request_pair(id, origin)
     }
@@ -1281,7 +1284,7 @@ mod tests {
             .closure_stats
             .expect("the production closure records its stats");
         eprintln!(
-            "stage 4.5 {fixture}: {} rounds, growth {}",
+            "artifact {fixture}: {} rounds, growth {}",
             stats.rounds, stats.growth
         );
         assert!(
@@ -1585,7 +1588,7 @@ mod tests {
             "a non-`Copy` resource is indirect"
         );
 
-        // Every planned slot agrees with legacy's pass predicate on the
+        // Every planned slot agrees with the emitter's pass predicate on the
         // substituted type: `mutable || !is_copy_in_function(.., None)`.
         for (_, artifact) in program.artifacts.iter() {
             let Some(LoweredArtifactPlan::CoroutineCodes(plan)) = &artifact.plan else {
@@ -1595,10 +1598,10 @@ mod tests {
                 panic!("every requested pair is expanded");
             };
             for slot in &frame.resources {
-                let legacy = slot.resource.mutable
+                let checked_decision = slot.resource.mutable
                     || !module.is_copy_in_function(&slot.resource.value_type, None);
                 assert_eq!(
-                    slot.indirect, legacy,
+                    slot.indirect, checked_decision,
                     "the planned pass mode agrees with `is_copy_in_function` for `{}`",
                     slot.resource.value_type
                 );
@@ -1787,7 +1790,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Stage 4.5 reactive runners.
+    // artifact planning reactive runners.
     // ------------------------------------------------------------------
 
     /// The human-readable owner of one runner plan: the initializer or the

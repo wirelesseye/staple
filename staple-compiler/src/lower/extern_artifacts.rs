@@ -1,17 +1,17 @@
-//! Stage 4.6: the extern-adapter artifact expander and scanner.
+//! the extern-adapter artifact expander and scanner.
 //!
 //! `expand_extern_adapter` fills one `ExternAdapter` plan from the lowered
 //! foreign binding: the adapter's declared arity and the eager-declaration
-//! parity facts Stage 5 needs. The adapter body itself is a direct call to the
+//! parity facts emission needs. The adapter body itself is a direct call to the
 //! foreign symbol, so the plan names no lowered callee.
 //!
-//! The scanner walks one owner through the shared Stage 4.4 owner walker and
+//! The scanner walks one owner through the shared artifact planning owner walker and
 //! requests one adapter per non-variadic extern binding used as a first-class
-//! callable value (`ExternAdapterValue`). Legacy creates an adapter eagerly for
+//! callable value (`ExternAdapterValue`). The emitter creates an adapter eagerly for
 //! every non-variadic extern binding; the artifact records which adapters a
 //! callable-value site actually reaches, and the plan's declaration facts keep
-//! the eager foreign-symbol parity for Stage 5. A variadic extern used as a
-//! first-class value is rejected here with the legacy diagnostic, because the
+//! the eager foreign-symbol parity for emission. A variadic extern used as a
+//! first-class value is rejected here with the emitter diagnostic, because the
 //! adapter's direct call cannot forward a variadic argument list.
 
 use staple_syntax::{Diagnostic, Span};
@@ -28,7 +28,7 @@ use super::{
 use crate::CheckedType;
 use crate::specialization::{ArtifactRequestKey, CanonicalFunctionType, ExternAdapterKey};
 
-/// The variadic-value diagnostic, matching the legacy backend's wording so the
+/// The variadic-value diagnostic, matching the emitter backend's wording so the
 /// failure moves phases without changing meaning.
 const VARIADIC_VALUE_DIAGNOSTIC: &str =
     "variadic external functions cannot be used as first-class values";
@@ -104,7 +104,7 @@ fn adapter_indirect_parameters(
         .collect()
 }
 
-/// The adapter's declared arity, mirroring legacy's overloaded `name.arityN`
+/// The adapter's declared arity, mirroring the emitter's overloaded `name.arityN`
 /// spelling: a juxtaposed parameter product counts its elements, everything
 /// else is one parameter.
 fn declared_arity(plan: &ExternAdapterPlan) -> usize {
@@ -229,14 +229,14 @@ impl LoweredOwnerVisitor for ExternScanVisitor<'_> {
     }
 }
 
-/// Validates the Stage 4.6 extern-adapter plans and uses:
+/// Validates the artifact planning extern-adapter plans and uses:
 ///
 /// - every expanded adapter re-expands to itself from the lowered symbol, so a
 ///   plan whose symbol is not a matching external binding is rejected;
 /// - every `ExternAdapterValue` use names the adapter key its callable value
 ///   builds, so a use can never be bound to another extern or another
 ///   callable type.
-pub(super) fn check_stage_4_6(program: &LoweredProgram, diagnostics: &mut Vec<Diagnostic>) {
+pub(super) fn check_extern_artifacts(program: &LoweredProgram, diagnostics: &mut Vec<Diagnostic>) {
     for (id, artifact) in program.artifacts.iter() {
         let Some(LoweredArtifactPlan::ExternAdapter(plan)) = artifact.plan.clone() else {
             continue;

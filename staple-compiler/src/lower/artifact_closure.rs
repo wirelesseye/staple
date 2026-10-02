@@ -1,6 +1,6 @@
-//! Stage 4.2: the fixed-point generated-artifact closure engine.
+//! the fixed-point generated-artifact closure engine.
 //!
-//! Stage 3 builds the reachable source-function instance graph and materializes
+//! specialization builds the reachable source-function instance graph and materializes
 //! concrete bodies once. Generated artifacts (constructor adapters, structural
 //! methods, drop glue, finalizers, coroutine pairs, reactive runners, extern
 //! adapters) can request further artifacts and source-function instances, so
@@ -11,7 +11,7 @@
 //!    immediately;
 //! 2. expand every not-yet-expanded artifact in ordinal order, applying each
 //!    expansion's requests immediately and writing the finished plan;
-//! 3. when the round reserved at least one new instance, resume the Stage 3.3
+//! 3. when the round reserved at least one new instance, resume the specialization
 //!    worklist over exactly those instances and materialize their bodies; the
 //!    next round scans them and expands artifacts the worklist reserved;
 //! 4. stop when a round reserved nothing.
@@ -19,10 +19,9 @@
 //! Scanners and expanders read the graph read-only and return ordered requests;
 //! the engine detaches the graph and applies requests through the shared
 //! `GraphRecorder`, so exactly one place reserves ordinals and writes edges.
-//! With `ProductionHooks` (Stage 4.2) every scanner is empty and every expander
-//! returns the Stage 4.1 placeholder plan unchanged, so the loop performs one
-//! round and the Stage 3 catalog is preserved byte-for-byte. Stages 4.3-4.6
-//! replace the placeholder arms with real family scanners and expanders.
+//! Production hooks scan cleanup, coroutine/reactive, and extern uses in that
+//! order, and expand every generated family. Canonical keys deduplicate
+//! recursive requests; validation requires every production plan to be complete.
 
 use staple_syntax::{Diagnostic, Span};
 
@@ -45,7 +44,7 @@ const MAX_CLOSURE_ROUNDS: usize = 64;
 
 /// Defensive total-growth allowance, proportional to the number of function
 /// templates. Chosen far above the observed standard-library maxima; see the
-/// Stage 4.2 step notes for the recorded values.
+/// artifact planning step notes for the recorded values.
 const GROWTH_PER_TEMPLATE: usize = 64;
 const MIN_GROWTH_BUDGET: usize = 1_024;
 
@@ -81,10 +80,10 @@ pub(super) enum ClosureRequest {
     },
 }
 
-/// Sites in one owner body that use a generated artifact. Stage 4.2 defines no
-/// family variants; Stage 4.4 adds the ownership-cleanup sites (drops,
-/// finalizers, and buffer clones); Stage 4.5 adds `coro` creations, reactive
-/// callback/evaluator environments, and reactive runners; Stage 4.6 adds the
+/// Sites in one owner body that use a generated artifact. artifact planning defines no
+/// family variants; artifact planning adds the ownership-cleanup sites (drops,
+/// finalizers, and buffer clones); artifact planning adds `coro` creations, reactive
+/// callback/evaluator environments, and reactive runners; artifact planning adds the
 /// extern callable-value site. Every match on this enum must stay exhaustive,
 /// and every variant's ID must be interpreted in the owning body's own arenas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,9 +91,9 @@ pub(crate) enum ArtifactUseSite {
     /// A scripted test site identified by its position in the hook table.
     #[cfg(test)]
     Test(u32),
-    /// A discarded expression-statement result (`drop_result`).
+    /// A discarded expression-statement result (drop result).
     DiscardedResult(ItemId),
-    /// An assignment that drops the place's previous value (`drop_previous`).
+    /// An assignment that drops the place's previous value (drop previous).
     ReplacedValue(ItemId),
     /// A loop body's result dropped before the back edge (`drops_body_result`).
     LoopBodyResult(ExpressionId),
@@ -115,8 +114,8 @@ pub(crate) enum ArtifactUseSite {
     CellFinalizer(SymbolId),
     /// A closure environment's finalizer.
     ClosureEnvironment(LoweredCallableValueId),
-    /// An `Index` call's operand temporary dropped after the call (legacy
-    /// `drop_mutation_temporaries`): `operand` is the flattened parameter
+    /// An `Index` call's operand temporary dropped after the call (the emitter
+    /// drop mutation temporaries): `operand` is the flattened parameter
     /// index, or `None` for the whole-argument temporary.
     IndexTemporary {
         expression: ExpressionId,
@@ -125,9 +124,9 @@ pub(crate) enum ArtifactUseSite {
     /// An indexed (`MutateIndex`) assignment's materialized base temporary,
     /// dropped after the call.
     MutateIndexTemporary(ItemId),
-    /// An implicit thunk argument's closure environment finalizer. Legacy
+    /// An implicit thunk argument's closure environment finalizer. The emitter
     /// builds the thunk's closure over the current scope when it evaluates the
-    /// argument (`compile_adapted_call_argument` → `build_closure`), and
+    /// argument (compile adapted call argument → build closure), and
     /// installs the finalizer under the same gate as a fresh callable value.
     ThunkArgumentEnvironment {
         call: LoweredCallId,
@@ -175,7 +174,7 @@ pub(crate) struct LoweredArtifactUse {
 /// One scanner-requested source-function instance use recorded on its owner
 /// in scan order. The validator proves the owner's instance uses agree
 /// one-to-one with its closure-phase instance edges, so every such edge is
-/// tied to the exact site Stage 5 emits the reference from.
+/// tied to the exact site emission emits the reference from.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredInstanceUse {
     pub site: ArtifactUseSite,
@@ -209,22 +208,18 @@ pub(super) trait ArtifactFamilyHooks {
     /// Whether this hook set fills the owned body for `key`'s family.
     /// Validation only rejects a plan that still carries the request-time
     /// marker in a family whose expander is registered; a hook set or a
-    /// family that keeps the Stage 4.1 placeholder plan is exempt.
+    /// family that keeps the artifact planning placeholder plan is exempt.
     fn expands_body(&self, _key: &ArtifactRequestKey) -> bool {
         false
     }
 }
 
-/// The production hook set. Stages 4.3-4.6 register every family's scanner in
-/// the fixed 4.3 -> 4.4 -> 4.5 -> 4.6 order and every family's expander, so
-/// the closure loop closes the whole catalog.
+/// Production scanners and expanders for the complete artifact catalog.
 pub(super) struct ProductionHooks;
 
 impl ArtifactFamilyHooks for ProductionHooks {
     fn scan_initializer(&self, program: &LoweredProgram, initializer: InitializerId) -> ScanResult {
-        // Family scanners are composed in the fixed order 4.3 -> 4.4 -> 4.5 ->
-        // 4.6. Stage 4.4 owns the ownership-cleanup scanner; Stage 4.5 appends
-        // the coroutine and reactive sites.
+        // Preserve cleanup, coroutine/reactive, then extern discovery order.
         let mut requests = super::cleanup_artifacts::scan_initializer(program, initializer)?;
         requests.extend(super::coroutine_artifacts::scan_initializer(
             program,
@@ -280,10 +275,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 )]);
             }
         };
-        // Stage 4.3 registers the constructor-adapter expander here; the
-        // remaining families keep their placeholder plan until their own
-        // substage replaces its arm. The match is exhaustive so a new key
-        // family is never silently ignored.
+        // Exhaustive dispatch prevents a new artifact family from being ignored.
         match key {
             ArtifactRequestKey::ConstructorAdapter(_) => {
                 let LoweredArtifactPlan::ConstructorAdapter(plan) = plan else {
@@ -428,7 +420,7 @@ impl AppliedOwner {
     }
 }
 
-/// The total-growth allowance of one closure run, measured against the Stage 3
+/// The total-growth allowance of one closure run, measured against the specialization
 /// catalog it started from.
 struct GrowthBudget {
     baseline_instances: usize,
@@ -482,7 +474,7 @@ impl LoweredProgram {
         &mut self,
         hooks: &dyn ArtifactFamilyHooks,
     ) -> Vec<Diagnostic> {
-        // Initializer artifact storage is indexed by `InitializerId`. Stage 3
+        // Initializer artifact storage is indexed by `InitializerId`. specialization
         // initializer requests stay request-root-only; closure-phase scans make
         // their uses and edges explicit.
         self.initializer_artifact_uses = vec![Vec::new(); self.initializers.len()];
@@ -603,7 +595,7 @@ impl LoweredProgram {
                 if !diagnostics.is_empty() {
                     return diagnostics;
                 }
-                // Stage 5.1 (D4): the initializer binding tables need the same
+                // the initializer binding tables need the same
                 // closure fixed point, so they are built here, once, before
                 // names are assigned.
                 let diagnostics = self.bind_initializer_sites();
@@ -627,7 +619,7 @@ impl LoweredProgram {
                 return self.finish_closure();
             }
 
-            // The next round needs bodies: resume the Stage 3.3 traversal over
+            // The next round needs bodies: resume the specialization traversal over
             // exactly the newly interned instances, then materialize them.
             let parts = self.take_graph();
             let parts = match WorklistBuilder::resume(self, parts, new_instances) {
@@ -768,7 +760,7 @@ impl LoweredProgram {
                     match owner {
                         AppliedOwner::Initializer(initializer) => {
                             // Closure-phase initializer instance edges become
-                            // explicit; Stage 3 initializer instance requests
+                            // explicit; specialization initializer instance requests
                             // keep their request-root-only representation.
                             self.initializer_instances[initializer.index()].push(edge);
                         }
@@ -856,7 +848,7 @@ impl LoweredProgram {
                     }
                     if let AppliedOwner::Initializer(initializer) = owner {
                         // Initializer-owned artifact edges become explicit for
-                        // closure-requested artifacts. Stage 3 initializer
+                        // closure-requested artifacts. specialization initializer
                         // requests keep their request-root-only representation.
                         self.initializer_artifacts[initializer.index()].push(
                             LoweredArtifactDependency {
@@ -1113,7 +1105,7 @@ impl LoweredProgram {
     /// Validates the closed artifact catalog: expansion completeness, requester
     /// integrity, scanner use/edge agreement, acyclic request roots, and the
     /// fixed point itself. Runs after `close_artifact_catalog` and after the
-    /// Stage 3 validators.
+    /// specialization validators.
     pub(super) fn validate_artifact_closure(
         &self,
         hooks: &dyn ArtifactFamilyHooks,
@@ -1124,8 +1116,8 @@ impl LoweredProgram {
         self.check_use_edge_agreement(&mut diagnostics);
         self.check_planned_callees(hooks, &mut diagnostics);
         super::cleanup_artifacts::check_owned_bindings(self, &mut diagnostics);
-        super::coroutine_artifacts::check_stage_4_5(self, &mut diagnostics);
-        super::extern_artifacts::check_stage_4_6(self, &mut diagnostics);
+        super::coroutine_artifacts::check_coroutine_artifacts(self, &mut diagnostics);
+        super::extern_artifacts::check_extern_artifacts(self, &mut diagnostics);
         super::runtime_requirements::check_runtime_requirements(self, &mut diagnostics);
         self.check_request_root_acyclicity(&mut diagnostics);
         self.check_closure_fixed_point(hooks, &mut diagnostics);
@@ -1148,8 +1140,8 @@ impl LoweredProgram {
 
     /// Every request root must name an existing owner, and that owner must
     /// record the matching edge with the same kind and origin. Initializer
-    /// artifact edges are checked by use/edge agreement instead, because Stage
-    /// 3 initializer requests keep their request-root-only representation.
+    /// artifact edges are checked by use/edge agreement instead: initializer
+    /// instance requests are represented by request roots.
     fn check_requester_integrity(&self, diagnostics: &mut Vec<Diagnostic>) {
         for (id, instance) in self.instances.iter() {
             match &instance.request {
@@ -1335,9 +1327,7 @@ impl LoweredProgram {
                 continue;
             }
             if !plan.supports_planned_callees() {
-                // Stage 4.5-4.6 families still carry raw requests on the
-                // artifact; their plan schema gains callee slots when their
-                // own substage lands.
+                // Plans without callable slots use the artifact's recorded requests.
                 continue;
             }
             if !plan.is_expanded() {
@@ -1563,7 +1553,7 @@ impl LoweredProgram {
     }
 
     /// Every use site's ID must resolve inside the owning body's own arenas, so
-    /// a scanner cannot tie an edge to a site that Stage 5 could not emit from.
+    /// a scanner cannot tie an edge to a site that emission could not emit from.
     fn check_use_site(
         &self,
         owner: &str,
@@ -1668,7 +1658,7 @@ impl LoweredProgram {
                 // A module-scoped symbol without real module storage (a `let`
                 // inside a top-level `with`/block) is owned like a local; only
                 // an actual global, function binding, or extern is never
-                // owned. `has_global` mirrors legacy's storage map.
+                // owned. `has_global` mirrors the emitter's storage map.
                 let owned = self.symbols.get(symbol).is_some_and(|record| {
                     !matches!(
                         record.storage,
@@ -1746,7 +1736,7 @@ impl LoweredProgram {
     }
 
     /// Following `request` roots from any instance or artifact must terminate
-    /// at an initializer, an eager template, or a Stage 3 instance root.
+    /// at an initializer, an eager template, or a specialization instance root.
     /// Recursion is fine in edges but not in roots.
     fn check_request_root_acyclicity(&self, diagnostics: &mut Vec<Diagnostic>) {
         let limit = self.instances.len() + self.artifacts.len() + 1;
@@ -1973,7 +1963,7 @@ impl LoweredProgram {
     /// Whether the owner's use records bind `site` to exactly this instance
     /// and kind. Edge agreement alone cannot prove this: two sites requesting
     /// the same target with the same kind and origin share one edge shape, so
-    /// only the use record ties the reference to the site Stage 5 emits it
+    /// only the use record ties the reference to the site emission emits it
     /// from. Artifact owners carry no use records.
     fn owner_uses_instance_at(
         &self,
@@ -2253,8 +2243,8 @@ mod tests {
             .expect("test source should type check")
     }
 
-    /// The Stage 3 program: graph built and materialized, closure not run.
-    fn stage_three(source: &str) -> LoweredProgram {
+    /// The specialization program: graph built and materialized, closure not run.
+    fn lowered_fixture(source: &str) -> LoweredProgram {
         let module = checked_program(source);
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
@@ -2412,7 +2402,7 @@ mod tests {
 
     #[test]
     fn closure_chain_records_ordered_edges_roots_and_ordinals() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base = program.artifacts.len();
@@ -2498,7 +2488,7 @@ mod tests {
 
     #[test]
     fn closure_expansion_requests_an_instance_and_scans_it_next_round() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base_instances = program.instances.len();
@@ -2571,7 +2561,7 @@ mod tests {
 
     #[test]
     fn closure_instance_rescans_dedup_against_the_requesting_artifact() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base_instances = program.instances.len();
@@ -2637,7 +2627,7 @@ mod tests {
 
     #[test]
     fn closure_recursion_through_artifacts_dedups_and_records_back_edges() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base = program.artifacts.len();
@@ -2699,7 +2689,7 @@ mod tests {
             "let first: I32 = identity 1\n",
             "let second: U8 = identity (1 satisfies U8)\n",
         );
-        let mut program = stage_three(source);
+        let mut program = lowered_fixture(source);
         let first = identity_instance(&program, 0);
         let second = identity_instance(&program, 1);
         let origin = instance_origin(&program, first);
@@ -2767,7 +2757,7 @@ mod tests {
             "let first: I32 = identity 1\n",
             "let second: U8 = identity (1 satisfies U8)\n",
         );
-        let mut program = stage_three(source);
+        let mut program = lowered_fixture(source);
         let first = identity_instance(&program, 0);
         let second = identity_instance(&program, 1);
         let origin = instance_origin(&program, first);
@@ -2826,7 +2816,7 @@ mod tests {
     }
 
     #[test]
-    fn closure_never_renumbers_or_renames_stage_three_entries() {
+    fn closure_never_renumbers_or_renames_lowered_fixture_entries() {
         let source = concat!(
             "def identity: <T where Copy T> T -> T = value => value\n",
             "let first: I32 = identity 1\n",
@@ -2835,7 +2825,7 @@ mod tests {
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
         );
-        let baseline = stage_three(source);
+        let baseline = lowered_fixture(source);
         let baseline_instances = baseline
             .instances
             .iter()
@@ -2849,7 +2839,7 @@ mod tests {
         assert!(!baseline_instances.is_empty());
         assert!(!baseline_artifacts.is_empty());
 
-        let mut program = stage_three(source);
+        let mut program = lowered_fixture(source);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base = program.artifacts.len();
@@ -2974,7 +2964,7 @@ mod tests {
             "let second: U8 = identity (1 satisfies U8)\n",
         );
         let run = || {
-            let mut program = stage_three(source);
+            let mut program = lowered_fixture(source);
             let first = identity_instance(&program, 0);
             let second = identity_instance(&program, 1);
             let origin = instance_origin(&program, first);
@@ -3090,7 +3080,7 @@ mod tests {
 
     #[test]
     fn closure_non_convergence_hits_the_bound_with_a_requester_chain() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let baseline_instances = program.instances.len();
         let baseline_artifacts = program.artifacts.len();
@@ -3124,7 +3114,7 @@ mod tests {
             "def identity: <T where Copy T> T -> T = value => value\n",
             "let first: I32 = identity 1\n",
         );
-        let mut program = stage_three(source);
+        let mut program = lowered_fixture(source);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base = program.artifacts.len();
@@ -3270,7 +3260,7 @@ mod tests {
             "def identity: <T where Copy T> T -> T = value => value\n",
             "let first: I32 = identity 1\n",
         );
-        let mut program = stage_three(source);
+        let mut program = lowered_fixture(source);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let mut hooks = TestHooks::default();
@@ -3297,7 +3287,7 @@ mod tests {
     }
 
     #[test]
-    fn closure_stage_4_5_use_sites_outside_the_owner_arenas_are_diagnosed() {
+    fn closure_coroutine_use_sites_outside_the_owner_arenas_are_diagnosed() {
         let source = concat!(
             "def identity: <T where Copy T> T -> T = value => value\n",
             "let first: I32 = identity 1\n",
@@ -3327,7 +3317,7 @@ mod tests {
             ),
         ];
         for (value_type, site) in broken {
-            let mut program = stage_three(source);
+            let mut program = lowered_fixture(source);
             let seed = identity_instance(&program, 0);
             let origin = instance_origin(&program, seed);
             let mut hooks = TestHooks::default();
@@ -3349,7 +3339,7 @@ mod tests {
 
     #[test]
     fn closure_fixed_point_violation_is_diagnosed() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base = program.artifacts.len();
@@ -3387,7 +3377,7 @@ mod tests {
 
     #[test]
     fn closure_scan_and_expansion_requests_from_initializers_are_recorded() {
-        let mut program = stage_three("let value = 1\n");
+        let mut program = lowered_fixture("let value = 1\n");
         let initializer = InitializerId::from_index(0);
         let origin = program
             .initializers
@@ -3480,7 +3470,7 @@ mod tests {
 
     #[test]
     fn closure_artifact_only_growth_hits_the_budget_instead_of_hanging() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let baseline_instances = program.instances.len();
         let hooks = ArtifactOnlyGrowHooks {
@@ -3505,7 +3495,7 @@ mod tests {
 
     #[test]
     fn closure_scanner_instance_requests_record_their_use_sites() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let initializer_origin = program
@@ -3582,7 +3572,7 @@ mod tests {
 
     #[test]
     fn closure_scanner_instance_edges_without_a_use_site_are_diagnosed() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let resolved = resolve_root_instance(
@@ -3613,7 +3603,7 @@ mod tests {
 
     #[test]
     fn closure_expander_instance_requests_reject_use_sites() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base = program.artifacts.len();
@@ -3702,7 +3692,7 @@ mod tests {
 
     #[test]
     fn closure_binds_planned_callees_after_the_fixed_point() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base_instances = program.instances.len();
@@ -3805,7 +3795,7 @@ mod tests {
 
     #[test]
     fn closure_plans_with_uninterned_callees_are_diagnosed() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base_artifacts = program.artifacts.len();
@@ -3860,7 +3850,7 @@ mod tests {
 
     #[test]
     fn closure_edges_without_planned_callees_are_diagnosed() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let base_artifacts = program.artifacts.len();
@@ -3991,7 +3981,7 @@ mod tests {
 
     #[test]
     fn closure_fixed_point_detects_a_changed_plan() {
-        let mut program = stage_three(IDENTITY_FIXTURE);
+        let mut program = lowered_fixture(IDENTITY_FIXTURE);
         let seed = identity_instance(&program, 0);
         let origin = instance_origin(&program, seed);
         let first = LoweredArtifactPlan::DropGlue(DropGluePlan {
@@ -4021,7 +4011,7 @@ mod tests {
 
     #[test]
     fn closure_initializer_fixed_point_compares_edge_kinds() {
-        let mut program = stage_three("let value = 1\n");
+        let mut program = lowered_fixture("let value = 1\n");
         let origin = program
             .initializers
             .get(InitializerId::from_index(0))

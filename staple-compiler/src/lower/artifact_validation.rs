@@ -1,14 +1,8 @@
-//! Stage 4.7: closed-catalog validation.
+//! Validation of closed generated-artifact plans.
 //!
-//! Stages 4.2-4.6 already prove, inside `validate_specializations`,
-//! `validate_specialization_graph`, and `validate_artifact_closure`, that every
-//! artifact key rebuilds from its plan, keys and planned names are unique and
-//! non-empty, every edge and request root names an existing owner of the
-//! right family and kind, no `CompilerHelper` target survives, every planned
-//! callee is bound, and one more closure round reserves nothing (including,
-//! since Stage 4.7, that every re-scanned site is bound to its target at that
-//! exact site). This module adds the remaining closed-catalog rule: every type
-//! an artifact plan carries is fully concrete.
+//! Catalog closure checks key identity, concrete callees, dependency edges, and
+//! use agreement. This module checks body completeness and recursively recorded
+//! type facts before a lowered program can cross the emission boundary.
 
 use staple_syntax::Diagnostic;
 
@@ -16,7 +10,7 @@ use super::{ArenaId, LoweredProgram, PlanType};
 use crate::specialization::{CanonicalFunctionType, CanonicalType};
 
 impl LoweredProgram {
-    /// The closed-catalog checks Stage 4.7 adds on top of the Stage 4.2-4.6
+    /// The closed-catalog checks artifact planning adds on top of the artifact planning
     /// validators. Runs after `validate_artifact_closure`.
     pub(super) fn validate_closed_catalog(&self) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
@@ -243,8 +237,8 @@ mod tests {
         let body = instance.body.as_mut().expect("materialized body");
         // Point the first discard's use at an item that is not a discard: the
         // item exists (so the arena check passes) and the edge is unchanged
-        // (so edge agreement passes), but the site Stage 5 would emit the
-        // drop from is wrong. Only the Stage 4.7 exact-site check sees it.
+        // (so edge agreement passes), but the site emission would emit the
+        // drop from is wrong. Only the artifact planning exact-site check sees it.
         let discards = body
             .artifact_uses
             .iter()
@@ -274,7 +268,7 @@ mod tests {
         );
     }
 
-    /// Every catalog fact Stage 5 consumes, rendered in catalog order: planned
+    /// Every catalog fact emission consumes, rendered in catalog order: planned
     /// names, instances with their edges, uses, and owned bindings, artifacts
     /// with their request roots, edges, and plans, the initializers' uses,
     /// edges, and owned bindings, and the runtime requirement set.

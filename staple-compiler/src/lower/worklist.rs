@@ -1,4 +1,4 @@
-//! Stage 3.3: the deterministic specialization worklist.
+//! the deterministic specialization worklist.
 //!
 //! The worklist is the reachable function-instance graph for one lowered
 //! program. Roots are module initializer bodies in program initialization
@@ -11,7 +11,7 @@
 //! Every requested `InstanceKey` is interned in the `SpecializationCatalog`
 //! before the instance body is visited, so self-recursion and mutual recursion
 //! converge on the reserved ordinal instead of interning a second key. Bodies
-//! are materialized in Stage 3.4; this module records identity, root and
+//! are materialized in specialization; this module records identity, root and
 //! first-discovery order, typed dependency edges, and generated-artifact
 //! requests only.
 
@@ -47,7 +47,7 @@ use super::{
 pub(crate) struct LoweredFunctionInstance {
     /// The template declaration origin.
     pub origin: Origin,
-    /// The source function template this instance materializes in Stage 3.4.
+    /// The source function template this instance materializes in specialization.
     pub template: FunctionId,
     /// Position in `SpecializationCatalog`, equal to the arena ID index.
     pub ordinal: InstanceOrdinal,
@@ -56,7 +56,7 @@ pub(crate) struct LoweredFunctionInstance {
     /// How the instance was first requested. Roots precede discovered
     /// dependencies in the stable emission order.
     pub request: LoweredInstanceRequest,
-    /// The resolved environment Stage 3.4 reuses for body substitution.
+    /// The resolved environment specialization reuses for body substitution.
     pub environment: SubstitutionEnvironment,
     /// The template's relevant parameter set.
     pub relevant: RelevantParameters,
@@ -66,19 +66,19 @@ pub(crate) struct LoweredFunctionInstance {
     pub dependencies: Vec<LoweredInstanceDependency>,
     /// Generated-artifact references in traversal order.
     pub artifacts: Vec<LoweredArtifactDependency>,
-    /// The concrete Stage 3.4 body. `None` until materialization runs and for
+    /// The concrete specialization body. `None` until materialization runs and for
     /// instances whose template has no runtime body (externs, intrinsics).
     pub body: Option<super::instance_body::LoweredInstanceBody>,
-    /// Stage 5.3 (F2): whether legacy declares this instance on demand with
+    /// Whether the emitter declares this instance on demand with
     /// internal linkage, i.e. its template signature still contains a type
     /// parameter (the same condition `seed_eager_templates` uses to skip the
     /// eager declaration). An instance of a non-generic template keeps the
-    /// eager declaration's default linkage. This is deliberately not the D2
+    /// eager declaration's default linkage. This is deliberately not the
     /// declared-name condition: a generic template can have an empty relevant
     /// environment and still be emitted on demand.
     pub requires_internal_linkage: bool,
     /// Transient traversal state, like `LoweredProgram::loop_depth`: whether the
-    /// Stage 3.3/4.2 traversal has visited this instance. The worklist and the
+    /// specialization traversal has visited this instance. The worklist and the
     /// closure loop resume over the append-only arena, so an instance that is
     /// already traversed must never be traversed again. Not part of instance
     /// identity.
@@ -102,14 +102,14 @@ pub(crate) enum LoweredInstanceRequest {
         kind: LoweredInstanceDependencyKind,
         origin: Origin,
     },
-    /// First requested by a generated artifact's plan (Stage 4.2 closure).
+    /// First requested by a generated artifact's plan (artifact planning closure).
     Artifact {
         artifact: LoweredArtifactRequestId,
         kind: LoweredInstanceDependencyKind,
         origin: Origin,
     },
     /// First requested by a closure-phase scanner reading an owner body
-    /// (Stage 4.2). The owner is the materialized instance or module
+    /// (artifact planning). The owner is the materialized instance or module
     /// initializer whose scan requested the instance.
     Scan {
         owner: LoweredScanOwner,
@@ -193,9 +193,9 @@ pub(crate) struct LoweredInstanceDependency {
     pub instance: FunctionInstanceId,
     pub origin: Origin,
     pub kind: LoweredInstanceDependencyKind,
-    /// Whether the Stage 4.2 closure phase recorded this edge. Closure edges
+    /// Whether the artifact planning closure phase recorded this edge. Closure edges
     /// have no instance-body binding; they are checked against scanner use
-    /// records instead of the Stage 3.4 binding table.
+    /// records instead of the specialization binding table.
     pub closure_phase: bool,
 }
 
@@ -211,14 +211,14 @@ pub(crate) struct LoweredArtifactRequest {
     /// The requesting site.
     pub origin: Origin,
     pub request: LoweredArtifactRequestRoot,
-    /// The owned plan filling this artifact's generated body. Stage 4.2+ fills
+    /// The owned plan filling this artifact's generated body. artifact planning fills
     /// the variant that matches the artifact's key family.
     pub plan: Option<LoweredArtifactPlan>,
     /// Artifact-to-artifact edges in the order the plan requested them.
     pub artifacts: Vec<LoweredArtifactDependency>,
     /// Artifact-to-instance edges in the order the plan requested them.
     pub instances: Vec<LoweredInstanceDependency>,
-    /// Whether the Stage 4.2 closure engine expanded this artifact. Transient
+    /// Whether the artifact planning closure engine expanded this artifact. Transient
     /// closure state like `LoweredFunctionInstance::traversed`.
     pub expanded: bool,
 }
@@ -234,7 +234,7 @@ pub(crate) enum LoweredArtifactRequestRoot {
         kind: LoweredArtifactDependencyKind,
         origin: Origin,
     },
-    /// Another artifact's plan requested this one (Stage 4.2 closure).
+    /// Another artifact's plan requested this one (artifact planning closure).
     Artifact {
         artifact: LoweredArtifactRequestId,
         kind: LoweredArtifactDependencyKind,
@@ -339,8 +339,8 @@ pub(super) struct SpecializationParts {
     pub catalog: SpecializationCatalog,
 }
 
-/// The append-only interning and edge-recording state shared by the Stage 3.3
-/// worklist traversal and the Stage 4.2 closure loop. Exactly one recorder
+/// The append-only interning and edge-recording state shared by the specialization
+/// worklist traversal and the artifact planning closure loop. Exactly one recorder
 /// owns the graph at a time; between recording phases the graph persists on
 /// the program as `SpecializationParts`. Only this type reserves ordinals,
 /// creates instance/artifact records, and writes edges.
@@ -412,7 +412,7 @@ impl GraphRecorder {
         let id = FunctionInstanceId::from_index(ordinal.index());
         if id.index() >= self.instances.len() {
             let origin = function_origin(program, resolved.key.function());
-            // Stage 5.3 F2: the linkage legacy gives this instance. Legacy
+            // the linkage the emitter gives this instance. The emitter
             // declares a template eagerly only when its signature has no type
             // parameter; every other instance is created on demand with
             // internal linkage.
@@ -459,7 +459,7 @@ impl GraphRecorder {
         self.record_instance_edge_with_phase(owner, instance, origin, kind, false);
     }
 
-    /// Records a closure-phase instance edge, which the Stage 3.4 validator
+    /// Records a closure-phase instance edge, which the specialization validator
     /// must not expect in an instance body's binding table.
     pub(super) fn record_closure_instance_edge(
         &mut self,
@@ -517,7 +517,7 @@ impl GraphRecorder {
     }
 
     /// Reserves one closure-phase artifact request. Closure edges are checked
-    /// against scanner use records instead of the Stage 3.4 binding table.
+    /// against scanner use records instead of the specialization binding table.
     pub(super) fn request_closure_artifact(
         &mut self,
         key: ArtifactRequestKey,
@@ -638,7 +638,7 @@ pub(super) fn build(program: &LoweredProgram) -> Result<SpecializationParts, Vec
 }
 
 /// The record that requested an instance or artifact. Artifacts own requests
-/// once the Stage 4.2 closure loop expands their plans.
+/// once the artifact planning closure loop expands their plans.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum TraversalOwner {
     Initializer(InitializerId),
@@ -2002,7 +2002,7 @@ impl LoweredProgram {
         }
     }
 
-    /// Builds and installs the Stage 3.3 worklist. Every failure is a source
+    /// Builds and installs the specialization worklist. Every failure is a source
     /// diagnostic at the requesting site; a partially built graph is
     /// discarded.
     pub(super) fn build_specialization_worklist(&mut self) -> Vec<Diagnostic> {
@@ -2015,15 +2015,15 @@ impl LoweredProgram {
         }
     }
 
-    /// D2: the resolver that names non-generic instances. It computes the
+    /// The resolver that names non-generic instances. It computes the
     /// reserved symbol set once, so a naming pass stays linear.
     pub(crate) fn declared_name_resolver(&self) -> impl Fn(&InstanceKey) -> Option<String> + '_ {
         let reserved = self.reserved_symbol_names();
         move |key| self.declared_instance_name(key, &reserved)
     }
 
-    /// D2: the declared name of an instance of a non-generic template (empty
-    /// substitutions and evidence), exactly as the legacy backend emits it.
+    /// The declared name of an instance of a non-generic template (empty
+    /// substitutions and evidence), exactly as the emitter backend emits it.
     /// The resolver already mangled `LoweredFunction::name` (`__staple_m…`
     /// for the standard library and multi-module programs, the bare name for
     /// single-module code), so it is used verbatim. A name some symbol outside
@@ -2046,10 +2046,10 @@ impl LoweredProgram {
 
     /// Symbol names that exist in the emitted module before any catalog
     /// function is declared, so a declared name must not take them: every
-    /// function and global the runtime modules define or declare (legacy
+    /// function and global the runtime modules define or declare (the emitter
     /// installs them first, so a clashing source function is renamed, as a
     /// standard-library `write` method is by `reactive.ll`'s libc `write`),
-    /// every non-intrinsic extern symbol with legacy's overload arity suffix
+    /// every non-intrinsic extern symbol with the emitter's overload arity suffix
     /// (declared next), and the fixed helpers the backend declares by name
     /// (`main`, the UTF-8 validator, and the lazily declared libc and LLVM
     /// functions, which the backend looks up by name and must never resolve
@@ -2079,7 +2079,7 @@ impl LoweredProgram {
         reserved
     }
 
-    /// The planned emitted name of one interned source-function instance (D2):
+    /// The planned emitted name of one interned source-function instance:
     /// the name the worklist assigned from the planned-name vector, which
     /// `validate_specializations` proves agrees with a fresh computation.
     pub(crate) fn planned_name(&self, instance: FunctionInstanceId) -> Option<&str> {
@@ -2096,7 +2096,7 @@ impl LoweredProgram {
             .map(|record| record.name.as_str())
     }
 
-    /// Stage 5.3 (F3/D2): the two planned names of a coroutine pair, derived
+    /// Emission : the two planned names of a coroutine pair, derived
     /// from the pair artifact's planned name. `planned_names_with` includes
     /// both in its collision check (with every instance and artifact name), so
     /// the backend reads them instead of building unchecked names. `None` for
@@ -2348,7 +2348,7 @@ impl LoweredProgram {
     }
 }
 
-/// The LLVM name legacy gives one extern symbol: the declared name, with an
+/// The LLVM name the emitter gives one extern symbol: the declared name, with an
 /// `.arity{N}` suffix when the symbol is in an arity-overload set.
 fn external_symbol_name(symbol: &super::LoweredSymbol) -> String {
     if !symbol.overloaded {
@@ -2587,7 +2587,7 @@ mod tests {
     }
 
     #[test]
-    fn eager_roots_match_the_legacy_backend_set() {
+    fn eager_roots_match_the_eager_template_set() {
         let (module, program) = lower(concat!(
             "def plain: I32 -> I32 = value => value\n",
             "def unused: <T where Copy T> T -> T = value => value\n",
@@ -3058,7 +3058,7 @@ mod tests {
             );
             assert!(
                 artifact.artifacts.is_empty() && artifact.instances.is_empty(),
-                "Stage 4.1 artifacts carry no outgoing edges yet"
+                "artifact planning artifacts carry no outgoing edges yet"
             );
             families.insert(key.family_name());
         }
@@ -3323,7 +3323,7 @@ mod tests {
         let existing = program.instances.len();
 
         // Append a second concrete instance of the same template through the
-        // recorder and traverse it with `resume`, exactly as the Stage 4.2
+        // recorder and traverse it with `resume`, exactly as the artifact planning
         // closure loop will after an artifact requests a new instance.
         let function = function_id(&program, "identity");
         let template = program.functions.get(function).expect("identity").clone();

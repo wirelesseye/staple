@@ -1,6 +1,6 @@
-//! Stage 5.1: the backend read view over the lowered program.
+//! the backend read view over the lowered program.
 //!
-//! The emitter receives only lowered IR (Migration Contract 1), but the
+//! The emitter receives only lowered IR , but the
 //! lowering arenas are private to this module tree and mix two owner shapes:
 //! instance bodies own instance-local arenas, while module initializers index
 //! the program's template arenas. This module is the one read-only surface the
@@ -53,7 +53,7 @@ pub(crate) struct EmissionView<'a> {
 }
 
 impl LoweredProgram {
-    /// The Stage 5.1 backend read view. Read-only by construction: every
+    /// The emission backend read view. Read-only by construction: every
     /// accessor lends program data for the program's lifetime.
     pub(crate) fn emission_view(&self) -> EmissionView<'_> {
         EmissionView { program: self }
@@ -157,7 +157,7 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.pattern(self.program, id)
     }
 
-    /// Resolve an owner's place (Stage 5.4 Step 4's `emit_place_pointer`).
+    /// Resolve an owner's place (emission's `emit_place_pointer`).
     pub(crate) fn place(
         &self,
         owner: EmissionOwner,
@@ -166,7 +166,7 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.place(self.program, id)
     }
 
-    /// Resolve an owner's `with` (Stage 5.4 Step 5).
+    /// Resolve an owner's `with` .
     pub(crate) fn with(
         &self,
         owner: EmissionOwner,
@@ -192,7 +192,7 @@ impl<'a> EmissionView<'a> {
     }
 
     /// Resolve an owner's resource provider without exposing either arena
-    /// (Stage 5.3 F7 reads a body's `function_providers` through this).
+    /// (emission reads a body's `function_providers` through this).
     pub(crate) fn resource_provider(
         &self,
         owner: EmissionOwner,
@@ -235,7 +235,7 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.resource_use(self.program, id)
     }
 
-    /// Resolve an owner's await suspension record (Stage 5.8 Step 5).
+    /// Resolve an owner's await suspension record .
     pub(crate) fn await_record(
         &self,
         owner: EmissionOwner,
@@ -244,7 +244,7 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.await_record(self.program, id)
     }
 
-    /// Resolve an owner's reactive callback record (Stage 5.8 Step 7).
+    /// Resolve an owner's reactive callback record .
     pub(crate) fn reactive_callback(
         &self,
         owner: EmissionOwner,
@@ -304,20 +304,20 @@ impl<'a> EmissionView<'a> {
     }
 
     /// The catalog's concrete `Copy` decision: the shared layout/ABI layer's
-    /// `is_copy` predicate for fully substituted types (Stage 5.2).
+    /// `is_copy` predicate for fully substituted types .
     pub(crate) fn concrete_is_copy(&self, value_type: &crate::CheckedType) -> bool {
         self.program.concrete_is_copy(value_type)
     }
 
     #[cfg(test)]
     /// The catalog's concrete needs-drop decision: the shared predicate the
-    /// checker also uses (Stage 5.11 F5).
+    /// checker also uses .
     pub(crate) fn concrete_needs_drop(&self, value_type: &crate::CheckedType) -> bool {
         self.program.concrete_needs_drop(value_type)
     }
 
     /// The opaque runtime type identity of a fully substituted type, the same
-    /// selection `LoweredProgram::runtime_opaque_kind` makes (Stage 5.2 layout
+    /// selection `LoweredProgram::runtime_opaque_kind` makes (emission layout
     /// context).
     pub(crate) fn runtime_opaque_kind(
         &self,
@@ -331,7 +331,7 @@ impl<'a> EmissionView<'a> {
         &self.program.runtime_requirements
     }
 
-    /// The planned emitted name of one interned source-function instance (D2).
+    /// The planned emitted name of one interned source-function instance.
     pub(crate) fn planned_name(&self, instance: FunctionInstanceId) -> Option<&'a str> {
         self.program.planned_name(instance)
     }
@@ -341,7 +341,7 @@ impl<'a> EmissionView<'a> {
         self.program.planned_artifact_name(ordinal)
     }
 
-    /// The two planned names of a coroutine pair (Stage 5.3 F3): derived by the
+    /// The two planned names of a coroutine pair : derived by the
     /// catalog from the pair artifact's planned name, which collision-checks
     /// both against every other planned name.
     pub(crate) fn planned_coroutine_pair_names(
@@ -363,7 +363,7 @@ impl<'a> EmissionView<'a> {
             .map(|body| &body.bindings)
     }
 
-    /// The concrete dispatch bindings of one module initializer (D4).
+    /// The concrete dispatch bindings of one module initializer.
     pub(crate) fn initializer_bindings(
         &self,
         initializer: InitializerId,
@@ -555,8 +555,8 @@ impl<'a> EmissionView<'a> {
 /// a module initializer. Instance bodies own private arenas; initializer sites
 /// index the program's template arenas.
 ///
-/// Stage 4.4 defined this resolver for its scanner; Stage 5.1 promotes it to
-/// the shared read-only owner view the Stage 5 emitter and every scanner use.
+/// Artifact planning defined this resolver for its scanner; emission promotes it to
+/// the shared read-only owner view the emitter and every scanner use.
 #[derive(Clone, Copy)]
 pub(crate) enum OwnerArenas<'a> {
     Instance(&'a LoweredInstanceBody),
@@ -748,7 +748,7 @@ mod tests {
     }
 
     /// The read view resolves both owner shapes, exposes planned names, and
-    /// lends the Stage 5.1 binding tables without exposing an arena.
+    /// lends the emission binding tables without exposing an arena.
     #[test]
     fn emission_view_resolves_owners_and_tables() {
         let lowered = lower(concat!(

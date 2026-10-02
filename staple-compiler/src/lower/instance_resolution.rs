@@ -1,7 +1,7 @@
-//! Stage 3.2: relevant-parameter collection, substitution composition, and
+//! relevant-parameter collection, substitution composition, and
 //! declared trait-evidence resolution for one specialization request.
 //!
-//! This module walks the owned Stage 2 `LoweredProgram`; it never consults
+//! This module walks the owned lowering `LoweredProgram`; it never consults
 //! `TypedModule`, LLVM state, or debug-formatted keys. Each function template
 //! is scanned under its own `FunctionId`, so a nested body contributes through
 //! the record that constructs or invokes it, not as ordinary children.
@@ -138,7 +138,7 @@ pub(crate) const PARAMETER_RECORD_FAMILIES: &[&str] = &[
 pub(crate) enum SubstitutionSource {
     /// A value already concrete in the enclosing instance environment.
     EnclosingInstance,
-    /// A value recorded on the Stage 2 call or callable-value site recipe.
+    /// A value recorded on the lowering call or callable-value site recipe.
     Site,
     /// A value inferred from the complete checked callable type at the site.
     Inferred,
@@ -1019,7 +1019,7 @@ impl<'a> TraitSelectionContext<'a> {
         )
     }
 
-    /// Stage 5.11 (F5): whether a `Drop` implementation applies to a concrete
+    /// Whether a `Drop` implementation applies to a concrete
     /// type under the general matching rule.
     fn drop_applies(&self, value_type: &CheckedType) -> bool {
         drop_implementation_applies(
@@ -1495,7 +1495,7 @@ fn ambiguous_diagnostic(
 impl LoweredProgram {
     /// Resolves one evidence recipe against the concrete environment.
     ///
-    /// Explicit and structural selections already recorded by Stage 2 are
+    /// Explicit and structural selections already recorded by lowering are
     /// preserved and validated; a declared bound is matched against the owned
     /// implementation catalog in declaration order using the checker's
     /// unification, conditional-bound, negative-implementation, functional
@@ -1743,7 +1743,7 @@ impl LoweredProgram {
         concrete_type_needs_drop(self, value_type)
     }
 
-    /// Stage 5.11 (F5): whether a `Drop` implementation applies to a fully
+    /// Whether a `Drop` implementation applies to a fully
     /// substituted type under the general matching rule, using the owned
     /// catalogs and the same bound-discharge callback the checker uses.
     pub(crate) fn concrete_drop_implementation_applies(&self, value_type: &CheckedType) -> bool {
@@ -1753,7 +1753,7 @@ impl LoweredProgram {
     /// Completes one declared trait bound for a concrete instance: substitutes
     /// the instance environment, then fills functional-dependency or inferred
     /// positions from the owned catalogs exactly as the resolver does for a
-    /// `DeclaredBound` recipe. Stage 3.4 stores the completed bound as body
+    /// `DeclaredBound` recipe. specialization stores the completed bound as body
     /// metadata, so no placeholder survives into an emitted body.
     pub(crate) fn complete_declared_bound(
         &self,
@@ -1928,8 +1928,8 @@ fn substitute_concrete_arguments(
 }
 
 /// The complete result of resolving one specialization request: the concrete
-/// key, the concrete environment Stage 3.4 reuses for body substitution, the
-/// relevant parameter set, and the resolved evidence. Stage 3.3 alone interns
+/// key, the concrete environment specialization reuses for body substitution, the
+/// relevant parameter set, and the resolved evidence. specialization alone interns
 /// keys and decides reachability; this value carries no catalog position.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedInstanceRequest {
@@ -1951,8 +1951,8 @@ pub(crate) enum InstanceResolutionTarget<'a> {
     Current(&'a ResolvedInstanceRequest),
 }
 
-/// One Stage 3.2 resolver input: the target function, the requesting origin,
-/// the complete checked callable type at the site, the raw Stage 2 recipe, and
+/// One specialization resolver input: the target function, the requesting origin,
+/// the complete checked callable type at the site, the raw lowering recipe, and
 /// the enclosing-instance relationship.
 pub(crate) struct InstanceResolutionRequest<'a> {
     pub function: FunctionId,
@@ -1965,7 +1965,7 @@ pub(crate) struct InstanceResolutionRequest<'a> {
 
 impl LoweredProgram {
     /// Resolves one request end to end: composed environment, selected
-    /// evidence, concrete key, and the relevant environment for Stage 3.4.
+    /// evidence, concrete key, and the relevant environment for specialization.
     ///
     /// A `Current` target enforces the existing prohibition on polymorphic
     /// recursion: a recursive request whose normalized key differs from the
@@ -2055,7 +2055,7 @@ impl LoweredProgram {
 
 /// Builds the concrete key from the pruned relevant environment and resolved
 /// evidence. Every value and evidence argument is canonicalized with the
-/// Stage 3.1 concrete converters, which reject leftover declared parameters,
+/// specialization concrete converters, which reject leftover declared parameters,
 /// effect variables, and checker placeholders.
 fn build_instance_key(
     function: FunctionId,
@@ -2953,7 +2953,7 @@ impl LoweredProgram {
         Ok((environment, relevant))
     }
 
-    /// Stage 3.3: the substitution environment composed from the enclosing
+    /// The substitution environment composed from the enclosing
     /// instance and an evidence-only site's recipe (a trait call, index read,
     /// indexed assignment, or formatting interpolation).
     ///
@@ -4938,7 +4938,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_values_agree_with_legacy_specialization_inference() {
+    fn resolved_values_agree_with_checked_specialization_inference() {
         let (module, program) = lower(concat!(
             "type Phantom T = ctor ()\n",
             "def identity: <T where Copy T> T -> T = value => value\n",
@@ -4953,13 +4953,13 @@ mod tests {
             let template = module
                 .type_of_function(function)
                 .expect("checked template signature");
-            let mut legacy = HashMap::new();
+            let mut checked_decision = HashMap::new();
             let unifies = infer_type_parameters(
                 &CheckedType::Function(template.clone()),
                 &CheckedType::Function(call.function_type.clone()),
-                &mut legacy,
+                &mut checked_decision,
             );
-            assert!(unifies, "the legacy path infers `{name}` substitutions");
+            assert!(unifies, "the emitter path infers `{name}` substitutions");
             let (environment, _) = program
                 .resolve_substitutions(
                     function,
@@ -4969,13 +4969,16 @@ mod tests {
                     None,
                 )
                 .unwrap_or_else(|diagnostic| panic!("{name} should resolve: {diagnostic:?}"));
-            for (parameter, value_type) in legacy {
+            for (parameter, value_type) in checked_decision {
                 match effect_substitution_value(&value_type) {
                     Some(effects) => {
                         let resolved = environment.effect_value(parameter).unwrap_or_else(|| {
                             panic!("`{name}` should resolve effect parameter {parameter:?}")
                         });
-                        assert_eq!(resolved, effects, "`{name}` effect row agrees with legacy");
+                        assert_eq!(
+                            resolved, effects,
+                            "`{name}` effect row agrees with the emitter"
+                        );
                     }
                     None => {
                         let resolved = environment.type_value(parameter).unwrap_or_else(|| {
@@ -4983,7 +4986,7 @@ mod tests {
                         });
                         assert_eq!(
                             resolved, &value_type,
-                            "`{name}` type substitution agrees with legacy"
+                            "`{name}` type substitution agrees with the emitter"
                         );
                     }
                 }
@@ -4992,7 +4995,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_methods_agree_with_the_legacy_selector() {
+    fn resolved_methods_agree_with_the_checker_selector() {
         let (module, program) = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { def test_show = _ => True }\n",
@@ -5031,12 +5034,12 @@ mod tests {
             else {
                 panic!("expected an explicit selection for {name}");
             };
-            let legacy = module
+            let checked_decision = module
                 .trait_impl_method(*trait_id, arguments, *method)
-                .expect("the legacy selector agrees an implementation exists");
+                .expect("the emitter selector agrees an implementation exists");
             assert_eq!(
-                *function, legacy,
-                "the resolver agrees with the legacy selector for {name}"
+                *function, checked_decision,
+                "the resolver agrees with the emitter selector for {name}"
             );
         }
     }
