@@ -1744,13 +1744,6 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// Stage 5.6 Step 2: one finalizer function `void(ptr)` declaration.
-    pub(crate) fn add_finalizer_function(&self, name: &str) -> FunctionValue<'context> {
-        let pointer = self.context.ptr_type(AddressSpace::default());
-        let function_type = self.context.void_type().fn_type(&[pointer.into()], false);
-        self.llvm_module.add_function(name, function_type, None)
-    }
-
     /// Stage 5.6 Step 2: legacy finalizer bodies open with an `entry` block,
     /// position the builder there, and take the payload pointer parameter.
     /// Restores the caller's position with

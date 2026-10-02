@@ -182,38 +182,6 @@ impl<'program, 'context> Backend<'program, 'context> {
             })
             .collect()
     }
-
-    /// Builds a function type with the given return and parameter types,
-    /// defaulting a vector return to `void` (as the closure ABI does).
-    pub(crate) fn build_fn_type(
-        &self,
-        return_type: BasicTypeEnum<'context>,
-        parameters: &[inkwell::types::BasicMetadataTypeEnum<'context>],
-    ) -> inkwell::types::FunctionType<'context> {
-        match return_type {
-            BasicTypeEnum::ArrayType(value) => value.fn_type(parameters, false),
-            BasicTypeEnum::FloatType(value) => value.fn_type(parameters, false),
-            BasicTypeEnum::IntType(value) => value.fn_type(parameters, false),
-            BasicTypeEnum::PointerType(value) => value.fn_type(parameters, false),
-            BasicTypeEnum::StructType(value) => value.fn_type(parameters, false),
-            BasicTypeEnum::VectorType(_) | BasicTypeEnum::ScalableVectorType(_) => {
-                self.context.void_type().fn_type(parameters, false)
-            }
-        }
-    }
-}
-
-/// Legacy `compile_arguments(.., variadic)`'s acceptance rule: a call argument
-/// list matches its parameter list when it fills every slot, or (for a C
-/// variadic extern, whose extra arguments need no promotion because the
-/// backend passes them already at their C ABI width) supplies at least every fixed
-/// slot. Shared by both emitters (Stage 5.4 Step 2).
-pub(crate) fn variadic_argument_count_matches(
-    actual: usize,
-    expected: usize,
-    variadic: bool,
-) -> bool {
-    actual == expected || (variadic && actual >= expected)
 }
 
 pub(crate) fn mutation_parameter_mask(count: usize, mutations: &[CheckedMutation]) -> Vec<bool> {

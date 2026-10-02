@@ -3,9 +3,6 @@ name = "staple"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-lowered-emitter = ["staple-compiler/lowered-emitter"]
-
 [[bin]]
 name = "staple"
 path = "src/main.rs"

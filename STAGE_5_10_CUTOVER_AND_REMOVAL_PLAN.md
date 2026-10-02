@@ -34,6 +34,10 @@ The shared 74-entry `codegen/corpus.rs` now exposes `Corpus*` types and `codegen
 
 The legacy declaration census, alias/fallback mapping and specialization matcher are gone. `assert_catalog_census` and the concrete-type helper used by lowering assertions remain. The recorder module, legacy snapshot functions and every test instrumentation block in `ModuleEmitter` are removed; actual LLVM runtime use-list checks remain on lowered emission. The workspace check is warning-free; both remaining suites pass 1301 tests (one ignored helper skipped), all 86 four-run R1 paths match, and formatting/diff checks pass. Logs: `/private/tmp/staple-5-10-step4-{default,lowered,ir}.log`. The IR sweep invokes the unchanged comparison script on four disjoint chunks and verifies exactly 86 matching rows. Step 5 is next.
 
+### Step 5 — complete
+
+`ModuleEmitter`, its AST/checked-program emission state and helper functions, `Emitter`, `with_emitter`, and both `lowered-emitter` features are deleted. `CodeGenerator` directly invokes the only emitter. Four newly unused shared helpers (`add_finalizer_function`, `build_fn_type`, `coroutine_resource_bundle_type`, `variadic_argument_count_matches`) and unused imports are deleted. The `lowered/` directory remains: it groups emission away from the backend helper layers, and a rename would add no useful boundary change. No warning is suppressed. The only new warning is the checker query `drop_method_for`, retained for the explicitly deferred Stage 6 inventory because tests still call it. Codegen itself has no warnings. The single default suite passes 1301 tests (one ignored helper skipped); all 86 four-run R1 paths match; workspace check, formatting and diff checks pass. Logs: `/private/tmp/staple-5-10-step5-{default,ir}.log`. Step 6 is next.
+
 ### Step 2 — test verdicts (R2)
 
 The audit covers the original 31 entries (including the shared compiler assertion helper) and five additional tests found in source: **36 entries**. Verdicts are recorded before deletions. `convert (Step 3)` means the retained corpus harness is renamed and converted together with its shared definitions in Step 3.

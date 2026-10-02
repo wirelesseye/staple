@@ -14,7 +14,7 @@
 use inkwell::{AddressSpace, types::BasicType, types::BasicTypeEnum};
 
 use crate::lower::EmissionView;
-use crate::{CheckedEffectSet, CheckedProductType, CheckedType, FloatType, IntegerType, TypeId};
+use crate::{CheckedProductType, CheckedType, FloatType, IntegerType, TypeId};
 
 use super::{Backend, CodeGenerationResult, Diagnostic, Span};
 
@@ -431,24 +431,6 @@ impl<'program, 'context> Backend<'program, 'context> {
             ],
             false,
         )
-    }
-
-    /// A packed struct of a deferred effect row's resource values, GC-allocated
-    /// by whoever drives a coroutine frame and unpacked by its `resume`.
-    pub(crate) fn coroutine_resource_bundle_type(
-        &self,
-        deferred: &CheckedEffectSet,
-    ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let mut fields = Vec::new();
-        for resource in &deferred.resources {
-            if resource.mutable || !self.layout.is_copy(&resource.value_type) {
-                fields.push(ptr_type.into());
-            } else {
-                fields.push(self.compile_type(&resource.value_type)?);
-            }
-        }
-        Ok(self.context.struct_type(&fields, false))
     }
 
     /// `%UntilFrame` — a `%CoroHeader` (10 fields) plus, at indices 10..=16:

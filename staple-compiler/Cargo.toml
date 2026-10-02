@@ -3,8 +3,6 @@ name = "staple-compiler"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-lowered-emitter = []
 [dependencies]
 staple-project = { path = "../staple-project" }
 staple-syntax = { path = "../staple-syntax" }
