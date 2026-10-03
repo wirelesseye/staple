@@ -1145,11 +1145,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// Artifact planning's first claim: every constructor-value and structural-method
-    /// site in a materialized instance body is already bound to its artifact
-    /// by the specialization worklist and specialization binder, and every constructor
-    /// or structural artifact is a specialization request root. No scanner or
-    /// use-site variant is needed.
+    /// Constructor-value and structural-method sites need no scanner: every
+    /// such site in a materialized instance body is already bound to its
+    /// artifact by the specialization worklist and binder, and every
+    /// constructor or structural artifact is a specialization request root. No
+    /// use-site variant is needed either.
     #[test]
     fn constructor_and_structural_sites_need_no_structural_scanner() {
         let lowered = lower(concat!(
@@ -1474,9 +1474,9 @@ pub(crate) mod tests {
     // Callback and coroutine cleanup regressions.
     // ------------------------------------------------------------------
 
-    /// A reaction whose callback thunk captures a
-    /// droppable value gets a the emitter closure-environment finalizer, and the
-    /// reactive scanner requests the same plan at the reactive site.
+    /// A reaction whose callback thunk captures a droppable value gets a
+    /// closure-environment finalizer, and the reactive scanner requests the
+    /// same plan at the reactive site.
     #[test]
     fn reactive_callback_environment_finalizer_is_planned() {
         let source = concat!(
@@ -2198,7 +2198,7 @@ pub(crate) mod tests {
 
     /// Every naturally requested `DropGlue` plan agrees with the typed module:
     /// the key's type needs drop, a user-drop body is planned exactly when the
-    /// general drop-implementation predicate applies , and the
+    /// general drop-implementation predicate applies, and the
     /// checker and lowering `needs_drop`/`Copy` predicates agree on every
     /// concrete type the fixture's catalog reaches.
     fn assert_drop_glue_plans_agree(source: &str) -> (usize, crate::ClosureStats) {

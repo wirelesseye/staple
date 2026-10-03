@@ -1460,10 +1460,10 @@ impl TypedModule {
     }
 
     /// The bound-discharge callback of the general drop-implementation
-    /// predicate : a `Copy` bound asks the structural `Copy`
-    /// predicate, any other bound asks the obligation resolver. A concrete
-    /// substituted argument never carries a free function parameter, so the
-    /// empty bound list is correct here.
+    /// predicate: a `Copy` bound asks the structural `Copy` predicate, any
+    /// other bound asks the obligation resolver. A concrete substituted
+    /// argument never carries a free function parameter, so the empty bound
+    /// list is correct here.
     fn drop_bound_holds(&self, bound: &CheckedTraitBound) -> bool {
         if Some(bound.trait_id) == self.copy_trait {
             bound
@@ -1514,8 +1514,8 @@ impl TypedModule {
         )
     }
 
-    // emission moved layout's opaque-type selection to the lowered
-    // `LayoutContext`; only its agreement test still reads this accessor.
+    // Layout selects opaque types through the lowered `LayoutContext`; only its
+    // agreement test still reads this accessor.
     #[cfg(test)]
     pub(crate) fn is_io_type(&self, value_type: &CheckedType) -> bool {
         matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.io_type)
@@ -1529,8 +1529,8 @@ impl TypedModule {
         matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.coroutine_type)
     }
 
-    // emission moved layout's opaque-type selection to the lowered
-    // `LayoutContext`; only its agreement test still reads this accessor.
+    // Layout selects opaque types through the lowered `LayoutContext`; only its
+    // agreement test still reads this accessor.
     #[cfg(test)]
     pub(crate) fn is_task_type(&self, value_type: &CheckedType) -> bool {
         matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.task_type)
@@ -2713,10 +2713,10 @@ impl TypeChecker {
                 .iter()
                 .filter_map(|bound| self.resolve_trait_bound(module, bound))
                 .collect::<Vec<_>>();
-            // a `Drop` implementation's bounds may constrain
-            // only its own type parameters. A bound on any other type would
-            // make discharging it ask about a type that may contain the header
-            // itself, so the recursive matching predicate could not terminate.
+            // A `Drop` implementation's bounds may constrain only its own type
+            // parameters. A bound on any other type would make discharging it
+            // ask about a type that may contain the header itself, so the
+            // recursive matching predicate could not terminate.
             if Some(implementation.trait_id) == self.drop_trait
                 && bounds.iter().any(|bound| {
                     !bound.arguments.iter().all(|argument| {
@@ -11390,11 +11390,11 @@ impl TypeChecker {
         effects
     }
 
-    /// Resolves a mutable parameter marker against
-    /// the function's *source* parameter type. Named and positional targets
-    /// require a product parameter; resolution uses the source type (not the
-    /// checked one) because a single-element product collapses to its bare
-    /// element type, dropping the name, once normalized.
+    /// Resolves a mutable parameter marker against the function's *source*
+    /// parameter type. Named and positional targets require a product
+    /// parameter; resolution uses the source type (not the checked one) because
+    /// a single-element product collapses to its bare element type, dropping
+    /// the name, once normalized.
     fn resolve_mutation_target(
         &mut self,
         parameter: Option<&Type>,
@@ -15009,7 +15009,7 @@ fn checked_type_contains_cstring(value_type: &CheckedType) -> bool {
 }
 
 /// Whether a `Drop` implementation applies to `value_type` under the general
-/// implementation-matching rule : the implementation's header
+/// implementation-matching rule: the implementation's header
 /// unifies with the type and, for a concrete type, every conditional bound
 /// holds under that unification. `discharge` answers one already-substituted
 /// bound.

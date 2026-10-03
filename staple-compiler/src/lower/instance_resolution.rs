@@ -1,4 +1,4 @@
-//! relevant-parameter collection, substitution composition, and
+//! Relevant-parameter collection, substitution composition, and
 //! declared trait-evidence resolution for one specialization request.
 //!
 //! This module walks the owned lowering `LoweredProgram`; it never consults
@@ -6,6 +6,7 @@
 //! is scanned under its own `FunctionId`, so a nested body contributes through
 //! the record that constructs or invokes it, not as ordinary children.
 
+use super::internal_invariant;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -1358,9 +1359,9 @@ impl<'a> TraitSelectionContext<'a> {
                 .trait_implementations
                 .get(self.implementation_ids[index])
                 .ok_or_else(|| {
-                    Diagnostic::new(
+                    internal_invariant(
                         origin.span.clone(),
-                        "internal invariant violated: matched implementation is in the catalog",
+                        "matched implementation is in the catalog",
                     )
                 })?;
             let function = metadata
@@ -1748,9 +1749,9 @@ impl LoweredProgram {
         concrete_type_needs_drop(self, value_type)
     }
 
-    /// Whether a `Drop` implementation applies to a fully
-    /// substituted type under the general matching rule, using the owned
-    /// catalogs and the same bound-discharge callback the checker uses.
+    /// Whether a `Drop` implementation applies to a fully substituted type
+    /// under the general matching rule, using the owned catalogs and the same
+    /// bound-discharge callback the checker uses.
     pub(crate) fn concrete_drop_implementation_applies(&self, value_type: &CheckedType) -> bool {
         TraitSelectionContext::new(self, Vec::new()).drop_applies(value_type)
     }
@@ -1758,8 +1759,8 @@ impl LoweredProgram {
     /// Completes one declared trait bound for a concrete instance: substitutes
     /// the instance environment, then fills functional-dependency or inferred
     /// positions from the owned catalogs exactly as the resolver does for a
-    /// `DeclaredBound` recipe. specialization stores the completed bound as body
-    /// metadata, so no placeholder survives into an emitted body.
+    /// `DeclaredBound` recipe. Specialization stores the completed bound as
+    /// body metadata, so no placeholder survives into an emitted body.
     pub(crate) fn complete_declared_bound(
         &self,
         origin: &Origin,
@@ -1933,9 +1934,9 @@ fn substitute_concrete_arguments(
 }
 
 /// The complete result of resolving one specialization request: the concrete
-/// key, the concrete environment specialization reuses for body substitution, the
-/// relevant parameter set, and the resolved evidence. specialization alone interns
-/// keys and decides reachability; this value carries no catalog position.
+/// key, the concrete environment reused for body substitution, the relevant
+/// parameter set, and the resolved evidence. Only the worklist interns keys and
+/// decides reachability; this value carries no catalog position.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedInstanceRequest {
     pub key: InstanceKey,

@@ -150,8 +150,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// The ambient `Reactive` scope pointer one provider supplies, loaded
-    /// through its storage when the provider is indirect (the emitter's
-    /// compile reaction/compile until scope search, resolved by record).
+    /// through its storage when the provider is indirect. `reaction` and
+    /// `until` find their scope through the recorded provider rather than a
+    /// scope search.
     fn reactive_scope(
         &self,
         provider: Option<LoweredResourceProviderId>,
@@ -320,8 +321,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .collect()
     }
 
-    /// Closure, resources, ambient scope, payload
-    /// with recorded slot pass modes, runner, and `__staple_reaction_create`.
+    /// Closure, resources, ambient scope, payload with recorded slot pass
+    /// modes, runner, and `__staple_reaction_create`.
     fn emit_reaction(
         &mut self,
         owner: EmissionOwner,
@@ -549,9 +550,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Compile derived create. The evaluator
-    /// closure carries its recorded environment finalizer; the runner body is
-    /// emitted with the artifact.
+    /// Emit a derived signal's creation. The evaluator closure carries its
+    /// recorded environment finalizer; the runner body is emitted with the
+    /// artifact.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn emit_derived_create(
         &mut self,

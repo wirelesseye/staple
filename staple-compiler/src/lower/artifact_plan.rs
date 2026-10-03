@@ -959,7 +959,7 @@ pub(crate) struct SumAlternative {
 }
 
 /// The plan shape of one drop-glue body: the concrete value type and the
-/// ordered cleanup decision mirroring compile drop value exactly.
+/// ordered cleanup decision emission expands inline.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DropGluePlan {
     pub value_type: CheckedType,

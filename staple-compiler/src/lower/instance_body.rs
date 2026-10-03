@@ -142,9 +142,9 @@ pub(crate) enum OwnedStorage {
     Cell,
 }
 
-/// One owned binding record: the symbol the emitter backend registers with
-/// track symbol ownership or `allocate_binding_cell`, with its concrete
-/// type and the drop glue bound through the `OwnedBinding` use record.
+/// One owned binding record: the symbol emission registers as an owned value or
+/// a binding cell, with its concrete type and the drop glue bound through the
+/// `OwnedBinding` use record.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredOwnedBinding {
     pub symbol: SymbolId,
@@ -199,8 +199,8 @@ pub(crate) struct LoweredInstanceBody {
     /// order. The validator proves these agree one-to-one with the instance's
     /// closure-phase instance edges.
     pub instance_uses: Vec<LoweredInstanceUse>,
-    /// The symbols the emitter backend tracks for scope-exit cleanup, in
-    /// registration order (pattern traversal order).
+    /// The symbols emission tracks for scope-exit cleanup, in registration
+    /// order (pattern traversal order).
     pub owned_bindings: Vec<LoweredOwnedBinding>,
     // Instance-local arenas. IDs are meaningful only inside this body.
     pub(super) blocks: Arena<LoweredBlock, BlockId>,
@@ -957,8 +957,8 @@ impl<'a> BodyCloner<'a> {
                 // records it; only a plain assignment recomputes the fact.
                 assignment.drop_previous = assignment.mutate_index.is_none()
                     && self.program.concrete_needs_drop(&concrete_target);
-                // the materialized base temporary's drop,
-                // recomputed from the substituted base type.
+                // The materialized base temporary's drop, recomputed from the
+                // substituted base type.
                 assignment.drops_base_temporary = assignment.mutate_index.is_some()
                     && self
                         .body
@@ -1185,8 +1185,8 @@ impl<'a> BodyCloner<'a> {
                 index.base_place = index.base_place.map(|place| self.clone_place(place));
                 index.index_place = index.index_place.map(|place| self.clone_place(place));
                 index.evidence = self.evidence(&index.evidence);
-                // recompute the operand passing and cleanup
-                // facts from the substituted operand and method types.
+                // Recompute the operand passing and cleanup facts from the
+                // substituted operand and method types.
                 index.operands = match &index.method_type {
                     Some(method_type) => {
                         let operand_type = |id: ExpressionId| {
@@ -1238,9 +1238,9 @@ impl<'a> BodyCloner<'a> {
             .coercion
             .as_ref()
             .map(|coercion| self.coercion(coercion));
-        // recompute the coercion plan from the substituted types,
-        // like the other concrete-sensitive derived facts. A concrete pair
-        // unsupported by lowering produces a diagnostic rather than a missing plan.
+        // Recompute the coercion plan from the substituted types, like the
+        // other concrete-sensitive derived facts. A concrete pair unsupported
+        // by lowering produces a diagnostic rather than a missing plan.
         let coercion_plan = match &coercion {
             Some(coercion) => {
                 match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
@@ -3311,7 +3311,7 @@ impl<'a> BodyValidator<'a> {
             &CheckedType::Function(self.body.signature.clone()),
             "signature",
         );
-        // a concrete body header coercion needs its plan.
+        // A concrete body header coercion needs its plan.
         if let Some(coercion) = &self.body.body_coercion {
             self.check_concrete_type(&self.body.origin, &coercion.source, "body coercion source");
             self.check_concrete_type(&self.body.origin, &coercion.target, "body coercion target");
@@ -3551,9 +3551,8 @@ impl<'a> BodyValidator<'a> {
         if let Some(coercion) = &expression.coercion {
             self.check_concrete_type(&origin, &coercion.source, "coercion source");
             self.check_concrete_type(&origin, &coercion.target, "coercion target");
-            // a concrete coercion must carry the plan
-            // materialization recomputed, and it must agree with a fresh
-            // computation.
+            // A concrete coercion must carry the plan materialization
+            // recomputed, and it must agree with a fresh computation.
             match &expression.coercion_plan {
                 Some(plan) => {
                     match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
@@ -3753,10 +3752,10 @@ impl<'a> BodyValidator<'a> {
             &pattern.test.subject,
             "pattern subject type",
         );
-        // the concrete plan must equal a fresh computation, and
-        // every nested pattern must be connected to the subject this plan
-        // supplies. Placeholder-bearing subjects (coroutine thunk arguments)
-        // stay deferred.
+        // The concrete plan must equal a fresh computation, and every nested
+        // pattern must be connected to the subject this plan supplies.
+        // Placeholder-bearing subjects (coroutine thunk arguments) stay
+        // deferred.
         let unresolved = |value_type: &CheckedType| {
             super::instance_resolution::unresolved_type_problem(value_type).is_some()
         };
@@ -5838,9 +5837,9 @@ mod tests {
         }
     }
 
-    /// `Buffer.pop` records its `Option` alternatives per
-    /// concrete instance, and the instance validator rejects a corrupted
-    /// record, so the emitter never searches the sum itself.
+    /// `Buffer.pop` records its `Option` alternatives per concrete instance,
+    /// and the instance validator rejects a corrupted record, so the emitter
+    /// never searches the sum itself.
     #[test]
     fn buffer_pop_alternatives_are_recorded_and_revalidated() {
         let (_, mut program) = lower_with_worklist(concat!(

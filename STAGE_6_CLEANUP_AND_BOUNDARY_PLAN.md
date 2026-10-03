@@ -454,3 +454,25 @@ Files left for the user to delete:
 - `STAGE_5_LLVM_MIGRATION_BREAKDOWN.md`
 - `STAGE_6_CLEANUP_AND_BOUNDARY_PLAN.md`
 - `TYPED_LOWERING_PLAN.md`
+
+### Review fixes (complete)
+
+- **Comments.** The Step 3 rewrite had stripped tags, backticks, and the word
+  "legacy" without rewriting the sentences. About 80 comments still cited
+  deleted backend functions as plain words ("compile item", "drop mutation
+  temporaries drops…"), stage numbers had become wrong phase names ("Artifact
+  planning owned bindings…", "Emission concrete bindings…"), and the removals left
+  stray spaces before punctuation, lowercase sentence starts, and unreflowed
+  paragraphs. Each of the roughly 170 affected blocks now states the current rule,
+  wrapped to the surrounding width. Two merged doc comments were split back onto
+  their items, and `layout.rs` says Staple rather than Stanza.
+- **Invariant diagnostics.** One `internal_invariant(span, invariant)` helper in
+  `lower.rs` replaces the 56 pasted `Diagnostic::new(…, "internal invariant
+  violated: …")` blocks. Lowering sites with a call, callable-value, reactive, or
+  designated-element origin in scope now report that span instead of
+  `Span::Compiler`. The two expressions rustfmt had skipped are formatted.
+
+**Results:** 1301 tests pass (two ignored). The workspace and test builds are
+warning-free, and private rustdoc builds with warnings denied. All 96 paths
+are `same` against `9428582`. Formatting and whitespace checks pass, and all
+mechanical scans stay empty.

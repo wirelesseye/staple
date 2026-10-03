@@ -4,6 +4,7 @@
 //! registration, traps, unit values, and the byte helpers the UTF-8 validator
 //! uses. Nothing here consults checked-program queries.
 
+use crate::lower::internal_invariant;
 use inkwell::{
     AddressSpace,
     basic_block::BasicBlock,
@@ -25,9 +26,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .llvm_module
             .get_function("__staple_gc_register_root")
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: GC root registration runtime is linked before emission",
+                    "GC root registration runtime is linked before emission",
                 )
             })?;
         self.builder
@@ -712,7 +713,7 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     /// The capture-environment struct layout: one field per capture, in capture
     /// order. `fields` are the per-capture storage types (`capture_field_type`
-    /// in the lowered emitter, compile capture type).
+    /// in the lowered emitter).
     pub(crate) fn capture_environment_type(
         &self,
         fields: &[inkwell::types::BasicTypeEnum<'context>],
@@ -753,10 +754,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(pointer)
     }
 
-    /// Build a literal struct from the given
-    /// values (a single value is returned unchanged; the empty product is a
-    /// zero-sized struct only when the caller passes no values). Shared by the
-    /// constructor and product paths.
+    /// Build a literal struct from the given values (a single value is returned
+    /// unchanged; the empty product is a zero-sized struct only when the caller
+    /// passes no values). Shared by the constructor and product paths.
     pub(crate) fn build_product_value(
         &self,
         values: &[inkwell::values::BasicValueEnum<'context>],
@@ -967,8 +967,8 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 
     /// Loads the value reached by following `payloads` (outermost first),
-    /// loading the final payload as well. emission shares it with the
-    /// lowered `Ref` access and nominal pattern paths.
+    /// loading the final payload as well. The lowered `Ref` access and nominal
+    /// pattern paths share it.
     pub(crate) fn load_ref_payloads(
         &self,
         value: inkwell::values::AnyValueEnum<'context>,
@@ -1049,8 +1049,8 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// The alloca a sum coercion stores its result into,
-    /// with the tag/payload projection coerce sum value builds.
+    /// The alloca a sum coercion stores its result into, with its tag and
+    /// payload projections.
     pub(crate) fn begin_sum_storage(
         &self,
         sum: &crate::CheckedSumType,
@@ -1073,9 +1073,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .build_struct_gep(llvm_type, slot, 1, "sum.target.payload")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         let payload_type = llvm_type.get_field_type_at_index(1).ok_or_else(|| {
-            Diagnostic::new(
+            internal_invariant(
                 staple_syntax::Span::Compiler,
-                "internal invariant violated: sum layout has a payload field at index 1",
+                "sum layout has a payload field at index 1",
             )
         })?;
         let alignment = self.target_data.get_abi_alignment(&payload_type);
@@ -1166,9 +1166,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .build_struct_gep(sum_type, sum_slot, 1, "sum.extract.payload")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         let payload_type = sum_type.get_field_type_at_index(1).ok_or_else(|| {
-            Diagnostic::new(
+            internal_invariant(
                 staple_syntax::Span::Compiler,
-                "internal invariant violated: sum layout has a payload field at index 1",
+                "sum layout has a payload field at index 1",
             )
         })?;
         let alternative = sum.alternatives.get(index).ok_or_else(|| {
@@ -1252,9 +1252,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)?;
         let compare = self.context.append_basic_block(
             success.get_parent().ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: match block belongs to an LLVM function",
+                    "match block belongs to an LLVM function",
                 )
             })?,
             "match.string.compare",
@@ -1563,9 +1563,8 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// compile drop value's runtime releases (a
-    /// dropped `Scheduler`, `Wait`, `Resolver`, or `CompletionToken`). Both
-    /// emitters call it, so the call and its SSA shape are shared.
+    /// Emits the runtime release of a dropped `Scheduler`, `Wait`, `Resolver`,
+    /// or `CompletionToken`.
     pub(crate) fn build_runtime_release(
         &self,
         release: crate::RuntimeRelease,
@@ -1589,9 +1588,8 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
-    /// Dropping a `Coroutine` value calls the frame's
-    /// idempotent cleanup function through the header slot. Shared so both
-    /// emitters emit the same loads and indirect call.
+    /// Dropping a `Coroutine` value calls the frame's idempotent cleanup
+    /// function through the header slot.
     pub(crate) fn build_coroutine_frame_cleanup(
         &self,
         frame: PointerValue<'context>,
@@ -1620,10 +1618,10 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
-    /// compile conditional drop's branch, `drop`
-    /// block, and continue block. Returns `(drop.live, drop.done)` and leaves
-    /// the builder in the drop block with the live flag already cleared. The
-    /// caller expands the glue, then calls [`Self::end_conditional_drop`].
+    /// Opens a conditional drop: the live-flag branch, the `drop` block, and
+    /// the continue block. Returns `(drop.live, drop.done)` and leaves the
+    /// builder in the drop block with the live flag already cleared. The caller
+    /// expands the glue, then calls [`Self::end_conditional_drop`].
     pub(crate) fn begin_conditional_drop(
         &self,
         live: PointerValue<'context>,
@@ -1664,8 +1662,8 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// compile conditional cell drop's state test
-    /// and load. The caller expands the loaded value's glue, then calls
+    /// Opens a conditional cell drop: the cell's state test and value load. The
+    /// caller expands the loaded value's glue, then calls
     /// [`Self::end_conditional_cell_drop`].
     pub(crate) fn begin_conditional_cell_drop(
         &self,
@@ -1827,9 +1825,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .target_data
             .offset_of_element(&header, 3)
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: buffer header layout has a data pointer at field 3",
+                    "buffer header layout has a data pointer at field 3",
                 )
             })?;
         let stride = self.target_data.get_abi_size(&llvm_element);
@@ -1868,9 +1866,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .target_data
             .offset_of_element(&header, 3)
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: buffer header layout has a data pointer at field 3",
+                    "buffer header layout has a data pointer at field 3",
                 )
             })?;
         let stride = self.target_data.get_abi_size(&llvm_element);

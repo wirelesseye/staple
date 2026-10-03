@@ -1,10 +1,10 @@
-//! the backend read view over the lowered program.
+//! The backend read view over the lowered program.
 //!
-//! The emitter receives only lowered IR , but the
-//! lowering arenas are private to this module tree and mix two owner shapes:
-//! instance bodies own instance-local arenas, while module initializers index
-//! the program's template arenas. This module is the one read-only surface the
-//! backend may use:
+//! The emitter receives only lowered IR, but the lowering arenas are private
+//! to this module tree and mix two owner shapes: instance bodies own
+//! instance-local arenas, while module initializers index the program's
+//! template arenas. This module is the one read-only surface the backend may
+//! use:
 //!
 //! - [`EmissionView`] exposes catalog iteration, metadata, planned names,
 //!   binding tables, and the per-owner artifact uses, instance uses, and owned
@@ -166,7 +166,7 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.place(self.program, id)
     }
 
-    /// Resolve an owner's `with` .
+    /// Resolve an owner's `with`.
     pub(crate) fn with(
         &self,
         owner: EmissionOwner,
@@ -235,7 +235,7 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.resource_use(self.program, id)
     }
 
-    /// Resolve an owner's await suspension record .
+    /// Resolve an owner's await suspension record.
     pub(crate) fn await_record(
         &self,
         owner: EmissionOwner,
@@ -244,7 +244,7 @@ impl<'a> EmissionView<'a> {
         self.owner(owner)?.await_record(self.program, id)
     }
 
-    /// Resolve an owner's reactive callback record .
+    /// Resolve an owner's reactive callback record.
     pub(crate) fn reactive_callback(
         &self,
         owner: EmissionOwner,
@@ -304,14 +304,14 @@ impl<'a> EmissionView<'a> {
     }
 
     /// The catalog's concrete `Copy` decision: the shared layout/ABI layer's
-    /// `is_copy` predicate for fully substituted types .
+    /// `is_copy` predicate for fully substituted types.
     pub(crate) fn concrete_is_copy(&self, value_type: &crate::CheckedType) -> bool {
         self.program.concrete_is_copy(value_type)
     }
 
     #[cfg(test)]
     /// The catalog's concrete needs-drop decision: the shared predicate the
-    /// checker also uses .
+    /// checker also uses.
     pub(crate) fn concrete_needs_drop(&self, value_type: &crate::CheckedType) -> bool {
         self.program.concrete_needs_drop(value_type)
     }
@@ -341,7 +341,7 @@ impl<'a> EmissionView<'a> {
         self.program.planned_artifact_name(ordinal)
     }
 
-    /// The two planned names of a coroutine pair : derived by the
+    /// The two planned names of a coroutine pair, derived by the
     /// catalog from the pair artifact's planned name, which collision-checks
     /// both against every other planned name.
     pub(crate) fn planned_coroutine_pair_names(
@@ -555,8 +555,8 @@ impl<'a> EmissionView<'a> {
 /// a module initializer. Instance bodies own private arenas; initializer sites
 /// index the program's template arenas.
 ///
-/// Artifact planning defined this resolver for its scanner; emission promotes it to
-/// the shared read-only owner view the emitter and every scanner use.
+/// The cleanup scanners and the emitter share this resolver as the read-only
+/// owner view.
 #[derive(Clone, Copy)]
 pub(crate) enum OwnerArenas<'a> {
     Instance(&'a LoweredInstanceBody),

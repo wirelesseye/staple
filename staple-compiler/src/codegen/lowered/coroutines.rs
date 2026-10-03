@@ -300,10 +300,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Diagnostic::new(span.clone(), "coroutine result is not first-class")
             })?;
             self.drop_all_owned(&environment, span)?;
-            // a coroutine that completes normally drops its
-            // live frame bindings, in plan order, before the result is
-            // published. The recorded `unwind_drop` glue is the same type drop
-            // the cancel unwind uses; the cell state skips a moved-out or
+            // A coroutine that completes normally drops its live frame
+            // bindings, in plan order, before the result is published. The
+            // recorded `unwind_drop` glue is the same type drop the cancel
+            // unwind uses; the cell state skips a moved-out or
             // never-initialized binding, and the unwind and completion paths
             // are mutually exclusive.
             self.emit_frame_binding_drops(frame, layout.ty, frame_plan, span)?;
@@ -511,9 +511,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Register the frame as the record's
-    /// waiter, park, and on resume read `Completed payload | Cancelled` from
-    /// the record's state.
+    /// Register the frame as the record's waiter, park, and on resume read
+    /// `Completed payload | Cancelled` from the record's state.
     fn emit_external_await(
         &mut self,
         owner: EmissionOwner,

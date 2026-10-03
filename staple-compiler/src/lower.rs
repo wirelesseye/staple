@@ -557,10 +557,10 @@ pub(crate) struct LoweredExpression {
     pub kind: LoweredExpressionKind,
 }
 
-/// The checked emission plan for one expression coercion,
-/// computed during lowering with the checker's `select_sum_alternative` rule
-/// so emission never re-selects an alternative. Unsupported concrete
-/// source/target pairs produce lowering diagnostics.
+/// The checked emission plan for one expression coercion, computed during
+/// lowering with the checker's `select_sum_alternative` rule so emission never
+/// re-selects an alternative. Unsupported concrete source/target pairs produce
+/// lowering diagnostics.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoweredCoercionPlan {
     /// The representation is unchanged: `source == target`, a string literal
@@ -594,7 +594,7 @@ impl LoweredCoercionPlan {
     /// Computes a coercion plan from source to target. Unsupported concrete pairs
     /// produce a diagnostic; unresolved templates defer the plan to materialization.
     pub(crate) fn plan(source: &CheckedType, target: &CheckedType) -> Result<Self, String> {
-        // compile expression emits `unreachable` for a `Never` source
+        // Emission ends the block with `unreachable` for a `Never` source
         // before any coercion runs, so the plan is never executed.
         if source == &CheckedType::Never {
             return Ok(LoweredCoercionPlan::Identity);
@@ -1090,8 +1090,8 @@ pub(crate) struct LoweredOptionAlternatives {
 
 impl LoweredOptionAlternatives {
     /// The alternatives of `Buffer.pop`'s result when `target` is that
-    /// intrinsic, with compile buffer pop's rule (the `Distinct`
-    /// alternatives named `None` and `Some`); `None` for any other target.
+    /// intrinsic (the `Distinct` alternatives named `None` and `Some`); `None`
+    /// for any other target.
     pub(crate) fn for_call(
         target: &LoweredCallableTarget,
         result: &CheckedType,
@@ -1398,8 +1398,8 @@ pub(crate) struct LoweredAwait {
     pub outcome: Option<LoweredAwaitOutcome>,
 }
 
-/// The `Completed payload | Cancelled` injections of one external await,
-/// at compile external await's fixed positions (0 and 1).
+/// The `Completed payload | Cancelled` injections of one external await, at the
+/// result sum's fixed positions (0 and 1).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LoweredAwaitOutcome {
     pub completed: LoweredCoercionPlan,
@@ -1570,9 +1570,9 @@ pub(crate) struct LoweredIndex {
     pub base_place: Option<PlaceId>,
     /// The index operand's place when it has one.
     pub index_place: Option<PlaceId>,
-    /// How the `Index` call passes its operands and which
-    /// operand temporaries it drops afterwards, so the emitter never derives
-    /// a pass mode or a cleanup from the operand types.
+    /// How the `Index` call passes its operands and which operand temporaries
+    /// it drops afterwards, so the emitter never derives a pass mode or a
+    /// cleanup from the operand types.
     pub operands: LoweredIndexOperands,
     /// The single validated evidence recipe for the `Index` dispatch.
     pub evidence: TraitEvidence,
@@ -1935,9 +1935,9 @@ impl LoweredPatternTestPlan {
     }
 }
 
-/// The nominal identity a pattern test uses. compile match pattern branch
-/// selects each branch by asking the resolver for a builtin or singleton
-/// identity; lowering records the answer here.
+/// The nominal identity a pattern test uses. Lowering asks the resolver whether
+/// each nominal branch names a builtin or a singleton and records the answer
+/// here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoweredPatternIdentity {
     /// No identity test at this level: a structural pattern, a plain binding,
@@ -2177,7 +2177,7 @@ pub(crate) enum LoweredPatternKind {
     Wildcard,
     Binding {
         initialization_state_only: bool,
-        /// Source spelling retained for LLVM value names .
+        /// Source spelling retained for LLVM value names.
         name: String,
         /// The symbol this pattern binds. Absent for singleton patterns such
         /// as `True`, which name an existing value instead of binding one.
@@ -2314,14 +2314,13 @@ pub(crate) struct LoweredPatternBindingItem {
     /// Checked propagation metadata, present exactly for propagating
     /// bindings.
     pub propagation: Option<CheckedPropagation>,
-    /// The failure value's coercion plan when the propagated
-    /// result is itself a sum (compile propagating binding's
-    /// coerce sum value path). `None` when the source is returned unchanged
-    /// or extracted as a residual variant.
+    /// The failure value's coercion plan when the propagated result is itself a
+    /// sum. `None` when the source is returned unchanged or extracted as a
+    /// residual variant.
     pub propagation_plan: Option<LoweredCoercionPlan>,
-    /// The source alternative returned as the failure
-    /// value when the propagated result is a single, non-sum residual variant
-    /// (compile propagating binding's `extract_sum_alternative` path).
+    /// The source alternative returned as the failure value when the propagated
+    /// result is a single, non-sum residual variant (extracted with
+    /// `extract_sum_alternative`).
     pub propagation_residual: Option<usize>,
 }
 
@@ -2357,9 +2356,9 @@ pub(crate) struct LoweredAssignmentItem {
     pub initialization_symbol: Option<SymbolId>,
     /// Whether the place's previous value must be dropped before the store.
     pub drop_previous: bool,
-    /// An indexed (`MutateIndex`) assignment whose base has
-    /// no place materializes it into a temporary that the emitter
-    /// drop mutation temporaries drops after the call when it needs drop.
+    /// An indexed (`MutateIndex`) assignment whose base has no place
+    /// materializes it into a temporary, dropped after the call when it needs
+    /// drop.
     pub drops_base_temporary: bool,
     /// The signal write notification this assignment performs, when the place
     /// is rooted at a signal symbol.
@@ -2434,10 +2433,10 @@ pub(crate) struct LoweredFunction {
     pub body_origin: Origin,
     pub body_syntax: SyntaxId,
     pub body: Option<BlockId>,
-    /// The body block's own header facts. When the function
-    /// body lowers to `LoweredExpressionKind::Block`, the block expression's
-    /// coercion (and moved symbols) would otherwise be lost by unwrapping it
-    /// to its root block; compile expression applies them.
+    /// The body block's own header facts. When the function body lowers to
+    /// `LoweredExpressionKind::Block`, the block expression's coercion (and
+    /// moved symbols) would otherwise be lost by unwrapping it to its root
+    /// block; emission applies them to the body result.
     pub body_coercion: Option<CheckedCoercion>,
     pub body_coercion_plan: Option<LoweredCoercionPlan>,
     pub body_moved_symbols: Vec<SymbolId>,
@@ -2680,47 +2679,48 @@ pub(crate) struct LoweredProgram {
     coros: Arena<LoweredCoro, LoweredCoroId>,
     awaits: Arena<LoweredAwait, LoweredAwaitId>,
     initializers: Arena<LoweredInitializer, InitializerId>,
-    /// Specialization reachable function instances in first-discovery order; the
-    /// matching key of each instance is interned in `specializations` at the
-    /// instance's own ordinal.
+    /// The reachable function instances in first-discovery order; the matching
+    /// key of each instance is interned in `specializations` at the instance's
+    /// own ordinal.
     instances: Arena<LoweredFunctionInstance, FunctionInstanceId>,
     /// Constructor-adapter and structural-method requests in first-discovery
     /// order; the matching key is interned in `specializations`.
     artifacts: Arena<LoweredArtifactRequest, LoweredArtifactRequestId>,
-    /// Artifact planning closure artifact uses recorded on module initializers, indexed
-    /// by `InitializerId` in scan order. specialization initializer requests stay
-    /// request-root-only, so this starts empty and only closure-phase scanners
-    /// add entries.
+    /// Artifact uses recorded on module initializers by closure scanners,
+    /// indexed by `InitializerId` in scan order. Initializer requests from
+    /// specialization stay request-root-only, so this starts empty and only
+    /// closure-phase scanners add entries.
     initializer_artifact_uses: Vec<Vec<LoweredArtifactUse>>,
-    /// Artifact planning closure artifact edges owned by module initializers, indexed
-    /// by `InitializerId` in request order.
+    /// Artifact edges owned by module initializers, indexed by `InitializerId`
+    /// in request order.
     initializer_artifacts: Vec<Vec<LoweredArtifactDependency>>,
-    /// Artifact planning closure instance uses recorded on module initializers by
-    /// scanners, indexed by `InitializerId` in scan order.
+    /// Instance uses recorded on module initializers by closure scanners,
+    /// indexed by `InitializerId` in scan order.
     initializer_instance_uses: Vec<Vec<LoweredInstanceUse>>,
-    /// Artifact planning closure instance edges owned by module initializers, indexed
-    /// by `InitializerId` in request order. specialization initializer instance
-    /// requests stay request-root-only; only closure-phase scans add entries.
+    /// Instance edges owned by module initializers, indexed by `InitializerId`
+    /// in request order. Initializer instance requests from specialization stay
+    /// request-root-only; only closure-phase scans add entries.
     initializer_instances: Vec<Vec<LoweredInstanceDependency>>,
-    /// Artifact planning owned bindings of nested initializer block locals, indexed by
+    /// Owned bindings of nested initializer block locals, indexed by
     /// `InitializerId` in registration order. Module globals are never owned.
     initializer_owned_bindings: Vec<Vec<LoweredOwnedBinding>>,
-    /// Emission concrete bindings for every dispatch/construction site in
-    /// each module initializer, keyed by program-arena `LoweredBindingSite` and
-    /// indexed by `InitializerId`. Built at the closure fixed point; instance
-    /// bodies carry the same table per body.
+    /// Concrete bindings for every dispatch/construction site in each module
+    /// initializer, keyed by program-arena `LoweredBindingSite` and indexed by
+    /// `InitializerId`. Built at the closure fixed point; instance bodies carry
+    /// the same table per body.
     initializer_bindings: Vec<std::collections::BTreeMap<LoweredBindingSite, LoweredBoundTarget>>,
-    /// Emission resolved trait evidence for the initializer sites that
-    /// need it, indexed by `InitializerId`.
+    /// Resolved trait evidence for the initializer sites that need it, indexed
+    /// by `InitializerId`.
     initializer_evidence: Vec<std::collections::BTreeMap<LoweredBindingSite, TraitEvidence>>,
-    /// Append-only instance/artifact key catalog. specialization alone reserves
-    /// ordinals, before visiting a body, so recursion converges.
+    /// Append-only instance/artifact key catalog. Only the specialization
+    /// worklist reserves ordinals, before visiting a body, so recursion
+    /// converges.
     specializations: SpecializationCatalog,
     semantic_ids: LoweredSemanticIds,
     string_formatting: LoweredStringFormatting,
-    /// Artifact planning ordered, deduplicated runtime surfaces the closed catalog
-    /// needs. Recorded after the closure fixed point; emission installs each
-    /// surface only when present.
+    /// The ordered, deduplicated runtime surfaces the closed catalog needs.
+    /// Recorded after the closure fixed point; emission installs each surface
+    /// only when present.
     pub(crate) runtime_requirements: LoweredRuntimeRequirements,
     /// Transient lowering state: the number of currently enclosing loops,
     /// recorded on break/continue items and loop nodes so validation can tie
@@ -3505,20 +3505,19 @@ impl LoweredProgram {
         let body = self.lower_expression(module, owner, ExpressionContext::Primary, &function.body);
         self.active_resource_providers.truncate(provider_base);
         let body = body?;
-        // when the body lowers to a block expression, its
-        // header coercion and moved symbols would be lost by unwrapping it to
-        // its root block; they ride back to the caller with the root. A
-        // non-block body keeps its header on the wrapped result expression,
-        // where the emitter applies it.
+        // When the body lowers to a block expression, its header coercion and
+        // moved symbols would be lost by unwrapping it to its root block; they
+        // ride back to the caller with the root. A non-block body keeps its
+        // header on the wrapped result expression, where emission applies it.
         if let Some(LoweredExpressionKind::Block(block)) = self
             .expressions
             .get(body)
             .map(|expression| &expression.kind)
         {
             let expression = self.expressions.get(body).ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: body ID refers to an allocated expression",
+                    "body ID refers to an allocated expression",
                 )
             })?;
             return Ok((
@@ -3637,9 +3636,9 @@ impl LoweredProgram {
         Ok(Some(self.items.push(LoweredItem { origin, kind })))
     }
 
-    /// Bind pattern value's cell rule: a mutable (or
-    /// initialization-checked) symbol without module storage gets a binding
-    /// cell; a mutated parameter arrives as a caller-provided pointer instead.
+    /// The binding-cell rule: a mutable (or initialization-checked) symbol
+    /// without module storage gets a binding cell; a mutated parameter arrives
+    /// as a caller-provided pointer instead.
     fn symbol_requires_cell(&self, module: &TypedModule, symbol: SymbolId) -> bool {
         if module.is_mutated_parameter(symbol) {
             return false;
@@ -3718,7 +3717,7 @@ impl LoweredProgram {
                 "cannot lower a propagating binding without checked propagation metadata",
             ));
         }
-        // the failure path's sum coercion plan.
+        // The failure path's sum coercion plan.
         let propagation_plan = propagation.as_ref().and_then(|propagation| {
             (propagation.source != propagation.result
                 && matches!(propagation.result, CheckedType::Sum(_)))
@@ -4268,9 +4267,9 @@ impl LoweredProgram {
             ReactiveIntrinsicRoute::Until => {
                 let predicate = self.lower_reactive_callback(module, owner, call)?;
                 let predicate_record = self.reactive_callbacks.get(predicate).ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: the predicate callback was just recorded",
+                    internal_invariant(
+                        origin.span.clone(),
+                        "the predicate callback was just recorded",
                     )
                 })?;
                 // Pure apart from reading signals.
@@ -4350,8 +4349,8 @@ impl LoweredProgram {
         } else {
             LoweredProviderStorage::Materialized
         };
-        // Record the reused source place once, so emission never re-derives
-        // the place decision .
+        // Record the reused source place once, so emission never re-derives the
+        // place decision.
         let place = match storage {
             LoweredProviderStorage::Place => {
                 Some(self.lower_place(module, owner, context, &with.value)?)
@@ -4384,7 +4383,7 @@ impl LoweredProgram {
     }
 
     /// Whether code generation can reuse an existing pointer for a `with`
-    /// value. This follows compile place pointer, including resource places
+    /// value. This is emission's place-pointer rule, including resource places
     /// and transparent single-value wrappers, rather than the narrower
     /// symbol-root test used for call argument mutation.
     fn provider_value_has_place(&self, module: &TypedModule, value: &Expression) -> bool {
@@ -4420,16 +4419,16 @@ impl LoweredProgram {
         }
     }
 
-    /// The symbol whose initialization state an assignment writes back. Mirrors
-    /// code generation's place-pointer result: direct storage keeps its symbol,
-    /// slice and dereference places do not.
-    /// The root symbol of an assignment target's place: a direct symbol or
-    /// captured cell, or a representation/product projection of one. A
-    /// field write resolves to its base's root symbol for
-    /// notification, so a reaction over a signal product field re-runs. The
-    /// emitter never writes the base's initialization state for a field
-    /// projection; a projection only executes on an already-initialized base
-    /// (its own check traps otherwise).
+    /// The root symbol of an assignment target's place, whose initialization
+    /// state the assignment writes back: a direct symbol or captured cell, or a
+    /// representation/product projection of one. Slice and dereference places
+    /// have none.
+    ///
+    /// A field write resolves to its base's root symbol for notification, so a
+    /// reaction over a signal product field re-runs. The emitter never writes
+    /// the base's initialization state for a field projection; a projection
+    /// only executes on an already-initialized base (its own check traps
+    /// otherwise).
     fn place_root_symbol(&self, place: PlaceId) -> Option<SymbolId> {
         match &self.places.get(place)?.kind {
             LoweredPlaceKind::Symbol { symbol } | LoweredPlaceKind::CapturedCell { symbol } => {
@@ -4868,9 +4867,9 @@ impl LoweredProgram {
                 self.lower_resource_expression(module, owner, context, route, expression)?
             }
             ExpressionDisposition::Rejected => {
-                return Err(Diagnostic::new(
+                return Err(internal_invariant(
                     expression.syntax().span.clone(),
-                    "internal invariant violated: rejected expressions exit before dispatch",
+                    "rejected expressions exit before dispatch",
                 ));
             }
         };
@@ -5477,7 +5476,10 @@ impl LoweredProgram {
                     .iter()
                     .map(|step| match step {
                         LoweredProductStep::Positional { expression, .. } => Ok(*expression),
-                        _ => Err(Diagnostic::new(product.syntax.span.clone(), "internal invariant violated: fallback products contain only positional steps")),
+                        _ => Err(internal_invariant(
+                            product.syntax.span.clone(),
+                            "fallback products contain only positional steps",
+                        )),
                     })
                     .collect::<Result<Vec<_>, Diagnostic>>()?,
                 steps,
@@ -5551,9 +5553,9 @@ impl LoweredProgram {
             let expression = self.lower_expression(module, owner, context, &element.value)?;
             if element.designated {
                 let name = element.name.clone().ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: designators always have a name",
+                    internal_invariant(
+                        element.value.syntax().span.clone(),
+                        "designators always have a name",
                     )
                 })?;
                 let Some(slot) = final_type
@@ -6011,8 +6013,8 @@ impl LoweredProgram {
                 }
             }
         }
-        // record the operand places so emission can reuse
-        // them without re-deriving `expression_has_place_root`.
+        // Record the operand places so emission can reuse them without
+        // re-deriving `expression_has_place_root`.
         let base_place = if base_is_place {
             self.lower_place(module, owner, context, &index.value).ok()
         } else {
@@ -6381,15 +6383,15 @@ impl LoweredProgram {
             }
             CallableValueRoute::Constructor => {
                 let symbol = symbol.ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: constructor values are symbol-selected",
+                    internal_invariant(
+                        origin.span.clone(),
+                        "constructor values are symbol-selected",
                     )
                 })?;
                 let type_id = resolved.constructor_type(symbol).ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: selected constructor symbol has a registered type",
+                    internal_invariant(
+                        origin.span.clone(),
+                        "selected constructor symbol has a registered type",
                     )
                 })?;
                 let function_type = checked_function_type
@@ -6414,10 +6416,7 @@ impl LoweredProgram {
             }
             CallableValueRoute::External => {
                 let symbol = symbol.ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: extern values are symbol-selected",
-                    )
+                    internal_invariant(origin.span.clone(), "extern values are symbol-selected")
                 })?;
                 let function_type = checked_function_type
                     .or_else(|| symbol_function_type(module, symbol))
@@ -6437,15 +6436,12 @@ impl LoweredProgram {
             }
             CallableValueRoute::Intrinsic => {
                 let symbol = symbol.ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: intrinsic values are symbol-selected",
-                    )
+                    internal_invariant(origin.span.clone(), "intrinsic values are symbol-selected")
                 })?;
                 let intrinsic = resolved.intrinsic_function(symbol).ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: selected intrinsic symbol has a registered intrinsic",
+                    internal_invariant(
+                        origin.span.clone(),
+                        "selected intrinsic symbol has a registered intrinsic",
                     )
                 })?;
                 let function_type = checked_function_type
@@ -6866,15 +6862,15 @@ impl LoweredProgram {
         let (target, callee, function_type) = match route {
             CallRoute::GenericDirect => {
                 let symbol = symbol.ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: generic direct calls are symbol-selected",
+                    internal_invariant(
+                        origin.span.clone(),
+                        "generic direct calls are symbol-selected",
                     )
                 })?;
                 let function = module.function_for_symbol(symbol).ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: generic call symbol has a registered function",
+                    internal_invariant(
+                        origin.span.clone(),
+                        "generic call symbol has a registered function",
                     )
                 })?;
                 let function_type = checked_call_function_type(module, call, &origin)?;
@@ -6905,10 +6901,7 @@ impl LoweredProgram {
             }
             CallRoute::External => {
                 let symbol = symbol.ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: extern calls are symbol-selected",
-                    )
+                    internal_invariant(origin.span.clone(), "extern calls are symbol-selected")
                 })?;
                 let function_type = checked_call_function_type(module, call, &origin)?;
                 c_string_temporary = module
@@ -6923,15 +6916,12 @@ impl LoweredProgram {
             }
             CallRoute::Intrinsic => {
                 let symbol = symbol.ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: intrinsic calls are symbol-selected",
-                    )
+                    internal_invariant(origin.span.clone(), "intrinsic calls are symbol-selected")
                 })?;
                 let intrinsic = resolved.intrinsic_function(symbol).ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: selected intrinsic symbol has a registered intrinsic",
+                    internal_invariant(
+                        origin.span.clone(),
+                        "selected intrinsic symbol has a registered intrinsic",
                     )
                 })?;
                 let function_type = checked_call_function_type(module, call, &origin)?;
@@ -7000,15 +6990,12 @@ impl LoweredProgram {
             }
             CallRoute::Constructor => {
                 let symbol = symbol.ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: constructor calls are symbol-selected",
-                    )
+                    internal_invariant(origin.span.clone(), "constructor calls are symbol-selected")
                 })?;
                 let type_id = resolved.constructor_type(symbol).ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: selected constructor symbol has a registered type",
+                    internal_invariant(
+                        origin.span.clone(),
+                        "selected constructor symbol has a registered type",
                     )
                 })?;
                 let function_type = checked_call_function_type(module, call, &origin)?;
@@ -7099,9 +7086,9 @@ impl LoweredProgram {
                 (target, None, function_type)
             }
             _ => {
-                return Err(Diagnostic::new(
+                return Err(internal_invariant(
                     origin.span.clone(),
-                    "internal invariant violated: non-concrete call routes exit before concrete dispatch",
+                    "non-concrete call routes exit before concrete dispatch",
                 ));
             }
         };
@@ -7574,9 +7561,9 @@ impl LoweredProgram {
         for element in &product.elements {
             if element.designated {
                 let name = element.name.clone().ok_or_else(|| {
-                    Diagnostic::new(
-                        staple_syntax::Span::Compiler,
-                        "internal invariant violated: designated elements always have a name",
+                    internal_invariant(
+                        element.value.syntax().span.clone(),
+                        "designated elements always have a name",
                     )
                 })?;
                 let Some(slot) = final_type
@@ -10109,8 +10096,8 @@ impl LoweredProgram {
                         binding.value.index(),
                         self.expressions.contains(binding.value),
                     );
-                    // a propagation whose residual result is
-                    // a sum needs the failure coercion plan.
+                    // A propagation whose residual result is a sum needs the
+                    // failure coercion plan.
                     if let Some(propagation) = &binding.propagation {
                         let needs_plan = propagation.source != propagation.result
                             && matches!(propagation.result, CheckedType::Sum(_));
@@ -11489,10 +11476,10 @@ impl LoweredProgram {
         let Some(coercion) = &expression.coercion else {
             return;
         };
-        // a plan must exist once the coercion types are
-        // concrete, and it must equal a fresh computation from the recorded
-        // source and target. Templates whose types still contain declared
-        // parameters may leave it absent until materialization.
+        // A plan must exist once the coercion types are concrete, and it must
+        // equal a fresh computation from the recorded source and target.
+        // Templates whose types still contain declared parameters may leave it
+        // absent until materialization.
         match &expression.coercion_plan {
             Some(plan) => match LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
                 Ok(expected) if *plan == expected => {}
@@ -12422,6 +12409,13 @@ impl LoweredProgram {
 
 /// Checks that every present standard/runtime ID resolves to the matching
 /// catalog family and that resource selections agree with their type IDs.
+/// A diagnostic for a broken compiler invariant: a precondition an earlier
+/// phase or step establishes, which no source program can violate. Lowering and
+/// emission report it instead of panicking, naming the invariant.
+pub(crate) fn internal_invariant(span: Span, invariant: &str) -> Diagnostic {
+    Diagnostic::new(span, format!("internal invariant violated: {invariant}"))
+}
+
 fn validate_semantic_ids(
     ids: &LoweredSemanticIds,
     types: &Catalog<TypeId, LoweredTypeMetadata, LoweredTypeId>,

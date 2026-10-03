@@ -46,7 +46,7 @@ pub(super) fn expand_drop_glue(
     let value_type = plan.value_type.clone();
     if !program.concrete_needs_drop(&value_type) {
         // A `DropGlue` key is only ever requested for a type that needs drop;
-        // requesting one for a type the emitter would no-op means the requester's
+        // requesting one for a type whose drop is a no-op means the requester's
         // `needs_drop` predicate and this expander disagree.
         return Err(vec![Diagnostic::new(
             origin.span.clone(),
@@ -302,8 +302,9 @@ pub(super) trait LoweredOwnerVisitor {
         Ok(())
     }
 
-    /// One complete call with its owner-local ID. emission binds initializer
-    /// dispatch sites here; the default keeps every other visitor unchanged.
+    /// One complete call with its owner-local ID. The initializer binding-table
+    /// builder binds dispatch sites here; the default keeps every other visitor
+    /// unchanged.
     fn call_id_site(
         &mut self,
         _id: super::LoweredCallId,
@@ -922,8 +923,8 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredExpressionKind::Index(index) => {
                 self.walk_expression(index.base)?;
                 self.walk_expression(index.index)?;
-                // drop mutation temporaries drops the call's operand
-                // temporaries after the call, in reverse collection order.
+                // The call's operand temporaries are dropped after the call, in
+                // reverse collection order.
                 if let Some(method_type) = &index.method_type {
                     if index.operands.whole_drops_after_call {
                         self.visitor.drop_site(
@@ -1031,8 +1032,8 @@ impl<'a> LoweredWalker<'a> {
                         self.walk_expression(expression)?;
                     }
                     // A reactive intrinsic's callback thunk is the
-                    // `ReactiveCallbackEnvironment` site ; every
-                    // other implicit thunk argument builds its closure here.
+                    // `ReactiveCallbackEnvironment` site; every other implicit
+                    // thunk argument builds its closure here.
                     if let Some(thunk) =
                         arguments.get(*argument).and_then(|argument| argument.thunk)
                         && !matches!(target, super::LoweredCallableTarget::Intrinsic { .. })
@@ -1197,12 +1198,11 @@ impl<'a> LoweredWalker<'a> {
     }
 
     /// Requests the closure-environment finalizer of one implicit thunk
-    /// argument. The emitter builds the thunk's closure over the current scope when
-    /// the argument evaluates (compile adapted call argument →
-    /// build closure) and installs the finalizer under the same gate as a
-    /// fresh callable value: a non-empty environment with some capture that
-    /// neither requires initialization state nor is borrowed and needs drop.
-    /// The captures are the thunk instance's concrete captures.
+    /// argument. Emission builds the thunk's closure over the current scope
+    /// when the argument evaluates and installs the finalizer under the same
+    /// gate as a fresh callable value: a non-empty environment with some
+    /// capture that neither requires initialization state nor is borrowed and
+    /// needs drop. The captures are the thunk instance's concrete captures.
     fn thunk_argument_environment(
         &mut self,
         call: super::LoweredCallId,
@@ -1365,7 +1365,7 @@ impl<'a> LoweredWalker<'a> {
                     .map_err(|diagnostic| vec![diagnostic])?;
                 let Some(ordinal) = self.program.specializations.instance_ordinal(&resolved.key)
                 else {
-                    // specialization interns every initializer closure instance
+                    // Specialization interns every initializer closure instance
                     // before the closure runs, so a missing key is a bug, not
                     // an unrequested closure.
                     return Err(vec![Diagnostic::new(
@@ -1419,10 +1419,10 @@ impl<'a> LoweredWalker<'a> {
             .is_some_and(|record| record.mutable_storage || record.derived)
     }
 
-    /// Reports one bound symbol, mirroring bind pattern value and
-    /// compile item: a mutable or derived binding owns its cell (or gets a
-    /// captured-cell finalizer), every other binding owns its value unless it
-    /// is non-owning or arrives through a mutated-parameter pointer.
+    /// Reports one bound symbol, following emission's binding rule: a mutable
+    /// or derived binding owns its cell (or gets a captured-cell finalizer),
+    /// every other binding owns its value unless it is non-owning or arrives
+    /// through a mutated-parameter pointer.
     fn register_binding(
         &mut self,
         symbol: SymbolId,
@@ -1829,11 +1829,9 @@ fn drop_glue_body(
     }
 }
 
-/// Selects the user `Drop` method for a type and requests its instance, or
-/// returns `None` when the emitter would fall through to the opaque/structural
-/// branches.
-/// The selected user `Drop` method for one concrete type, or `None` when no
-/// implementation applies. emission selects through the ordinary trait
+/// Selects the user `Drop` method for one concrete type and requests its
+/// instance, or returns `None` when no implementation applies (the opaque and
+/// structural branches then decide the drop). Selection uses the ordinary trait
 /// resolver with the `DropMethod` edge kind, so a generic implementation is
 /// resolved with its substitutions and becomes a specialized instance.
 fn user_drop_method(
@@ -2309,10 +2307,10 @@ mod tests {
             DropGlueBody::RuntimeRelease(RuntimeRelease::CompletionTokenRelease)
         );
 
-        // the generic `impl<T where Copy T> Drop (Box T)`
-        // applies to `Box I32` (its bound discharges), so it selects a user
-        // drop; `Box CString` and `Box Handle` fail the `Copy` bound and keep
-        // the structural distinct branch. Two instantiations produce two keys.
+        // The generic `impl<T where Copy T> Drop (Box T)` applies to `Box I32`
+        // (its bound discharges), so it selects a user drop; `Box CString` and
+        // `Box Handle` fail the `Copy` bound and keep the structural distinct
+        // branch. Two instantiations produce two keys.
         assert_ne!(
             CanonicalType::concrete(&box_c_string, &Origin::compiler()).expect("concrete"),
             CanonicalType::concrete(&box_handle, &Origin::compiler()).expect("concrete")

@@ -4,6 +4,7 @@
 //! builds the UTF-8 validator. These helpers use LLVM types and recorded layouts;
 //! they do not query source syntax or checker state.
 
+use crate::lower::internal_invariant;
 use inkwell::{AddressSpace, memory_buffer::MemoryBuffer};
 
 use staple_syntax::Span;
@@ -188,18 +189,18 @@ impl<'program, 'context> Backend<'program, 'context> {
         let pointer = function
             .get_nth_param(0)
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: UTF-8 validator has a pointer parameter",
+                    "UTF-8 validator has a pointer parameter",
                 )
             })?
             .into_pointer_value();
         let length = function
             .get_nth_param(1)
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: UTF-8 validator has a length parameter",
+                    "UTF-8 validator has a length parameter",
                 )
             })?
             .into_int_value();

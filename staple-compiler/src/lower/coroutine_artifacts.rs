@@ -1,13 +1,12 @@
-//! the coroutine-codes and reactive-runner artifact expanders and
-//! scanner.
+//! The coroutine-codes and reactive-runner artifact expanders and scanner.
 //!
 //! `expand_coroutine_codes` fills one `CoroutineCodes` plan from the body
 //! thunk's **instance-local** plan and body, never from the template plan the
 //! `LoweredCoro` indexes and never from `TypedModule`: the frame result and
-//! await types, the resume-state count, the `Wait`/`until` cancellation
-//! states, the deferred-resource bundle with its pass modes, the ordered
-//! concrete captures, the frame-binding unwind drops, and the thunk's
-//! environment finalizer.
+//! await types, the resume-state count, the `Wait`/`until` cancellation states,
+//! the deferred-resource bundle with its pass modes, the ordered concrete
+//! captures, the frame-binding unwind drops, and the thunk's environment
+//! finalizer.
 //!
 //! `expand_reactive_runner` fills one `ReactionRunner`/`UntilRunner`/
 //! `DerivedRunner` plan from the owner's lowered operation and callback
@@ -16,13 +15,13 @@
 //! evaluator's signature and output type.
 //!
 //! The scanner walks one owner in lowered evaluation order through the shared
-//! owner walker. It requests one pair per `coro` creation
-//! (`CoroCreation`), the environment finalizer a thunk callback installs
-//! (`ReactiveCallbackEnvironment`/`DerivedEvaluatorEnvironment`, gap 1), and
-//! one runner per reaction, `until`, and derived operation (`ReactiveRunner`).
+//! owner walker. It requests one pair per `coro` creation (`CoroCreation`), the
+//! environment finalizer a thunk callback installs
+//! (`ReactiveCallbackEnvironment`/`DerivedEvaluatorEnvironment`), and one
+//! runner per reaction, `until`, and derived operation (`ReactiveRunner`).
 //! Instance owners take their thunk instances from their own bindings;
-//! initializer owners resolve with the specialization recipe, and a key that was
-//! never interned is a diagnostic rather than a silent skip.
+//! initializer owners resolve with the specialization recipe, and a key that
+//! was never interned is a diagnostic rather than a silent skip.
 
 use staple_syntax::Diagnostic;
 

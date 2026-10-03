@@ -412,10 +412,9 @@ impl GraphRecorder {
         let id = FunctionInstanceId::from_index(ordinal.index());
         if id.index() >= self.instances.len() {
             let origin = function_origin(program, resolved.key.function());
-            // the linkage the emitter gives this instance. The emitter
-            // declares a template eagerly only when its signature has no type
-            // parameter; every other instance is created on demand with
-            // internal linkage.
+            // The linkage emission gives this instance: a template whose
+            // signature has no type parameter keeps the default linkage; every
+            // other instance is declared with internal linkage.
             let requires_internal_linkage = program
                 .functions
                 .get(resolved.key.function())
@@ -2023,13 +2022,13 @@ impl LoweredProgram {
     }
 
     /// The declared name of an instance of a non-generic template (empty
-    /// substitutions and evidence), exactly as the emitter backend emits it.
-    /// The resolver already mangled `LoweredFunction::name` (`__staple_m…`
-    /// for the standard library and multi-module programs, the bare name for
-    /// single-module code), so it is used verbatim. A name some symbol outside
-    /// the catalog already owns (see [`Self::reserved_symbol_names`]) is not
-    /// available, and the instance falls back to its ordinal name. Generic
-    /// instances have no declared name and keep their ordinal name.
+    /// substitutions and evidence). The resolver already mangled
+    /// `LoweredFunction::name` (`__staple_m…` for the standard library and
+    /// multi-module programs, the bare name for single-module code), so it is
+    /// used verbatim. A name some symbol outside the catalog already owns (see
+    /// [`Self::reserved_symbol_names`]) is not available, and the instance
+    /// falls back to its ordinal name. Generic instances have no declared name
+    /// and keep their ordinal name.
     fn declared_instance_name(
         &self,
         key: &InstanceKey,
@@ -2096,11 +2095,11 @@ impl LoweredProgram {
             .map(|record| record.name.as_str())
     }
 
-    /// Emission : the two planned names of a coroutine pair, derived
-    /// from the pair artifact's planned name. `planned_names_with` includes
-    /// both in its collision check (with every instance and artifact name), so
-    /// the backend reads them instead of building unchecked names. `None` for
-    /// a non-coroutine artifact or an unreserved ordinal.
+    /// The two planned names of a coroutine pair, derived from the pair
+    /// artifact's planned name. `planned_names_with` includes both in its
+    /// collision check (with every instance and artifact name), so the backend
+    /// reads them instead of building unchecked names. `None` for a
+    /// non-coroutine artifact or an unreserved ordinal.
     pub(crate) fn planned_coroutine_pair_names(
         &self,
         ordinal: ArtifactOrdinal,

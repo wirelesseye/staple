@@ -589,8 +589,7 @@ impl ConstructorAdapterKey {
     }
 }
 
-/// The identity of a generated structural-method body. The emitter backend
-/// cached `(StructuralTraitMethod, Debug arguments)`: for the seven current
+/// The identity of a generated structural-method body. For the seven current
 /// methods the trait, method, and callable type are derivable from the
 /// structural kind plus completed arguments, but this key keeps them explicit
 /// so planning never depends on that derivability.
@@ -876,9 +875,9 @@ impl SpecializationCatalog {
                 return Err(SpecializationNameCollision { name });
             }
             // A coroutine pair is emitted as two functions, `{name}_resume` and
-            // `{name}_cleanup` . Both are planned names: reserve
-            // them here so they collide with any instance or artifact name and
-            // the backend can read them instead of building unchecked names.
+            // `{name}_cleanup`. Both are planned names: reserve them here so
+            // they collide with any instance or artifact name and the backend
+            // can read them instead of building unchecked names.
             if matches!(key, ArtifactRequestKey::CoroutineCodes(_)) {
                 for pair in [format!("{name}_resume"), format!("{name}_cleanup")] {
                     if !seen.insert(pair.clone()) {

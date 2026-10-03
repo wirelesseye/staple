@@ -1,9 +1,9 @@
 //! The fixed-point generated-artifact closure engine.
 //!
-//! specialization builds the reachable source-function instance graph and materializes
-//! concrete bodies once. Generated artifacts (constructor adapters, structural
-//! methods, drop glue, finalizers, coroutine pairs, reactive runners, extern
-//! adapters) can request further artifacts and source-function instances, so
+//! Specialization builds the reachable source-function instance graph and
+//! materializes concrete bodies once. Generated artifacts (constructor
+//! adapters, structural methods, drop glue, finalizers, coroutine pairs,
+//! reactive runners, extern adapters) can request further artifacts and source-function instances, so
 //! the catalog is closed by a round-based loop:
 //!
 //! 1. scan every not-yet-scanned initializer, then every not-yet-scanned
@@ -111,9 +111,9 @@ pub(crate) enum ArtifactUseSite {
     CellFinalizer(SymbolId),
     /// A closure environment's finalizer.
     ClosureEnvironment(LoweredCallableValueId),
-    /// An `Index` call's operand temporary dropped after the call (the emitter
-    /// drop mutation temporaries): `operand` is the flattened parameter
-    /// index, or `None` for the whole-argument temporary.
+    /// An `Index` call's operand temporary dropped after the call: `operand` is
+    /// the flattened parameter index, or `None` for the whole-argument
+    /// temporary.
     IndexTemporary {
         expression: ExpressionId,
         operand: Option<usize>,
@@ -121,10 +121,10 @@ pub(crate) enum ArtifactUseSite {
     /// An indexed (`MutateIndex`) assignment's materialized base temporary,
     /// dropped after the call.
     MutateIndexTemporary(ItemId),
-    /// An implicit thunk argument's closure environment finalizer. The emitter
+    /// An implicit thunk argument's closure environment finalizer. Emission
     /// builds the thunk's closure over the current scope when it evaluates the
-    /// argument (compile adapted call argument → build closure), and
-    /// installs the finalizer under the same gate as a fresh callable value.
+    /// argument, and installs the finalizer under the same gate as a fresh
+    /// callable value.
     ThunkArgumentEnvironment {
         call: LoweredCallId,
         argument: usize,
@@ -592,9 +592,9 @@ impl LoweredProgram {
                 if !diagnostics.is_empty() {
                     return diagnostics;
                 }
-                // the initializer binding tables need the same
-                // closure fixed point, so they are built here, once, before
-                // names are assigned.
+                // The initializer binding tables need the same closure fixed
+                // point, so they are built here, once, before names are
+                // assigned.
                 let diagnostics = self.bind_initializer_sites();
                 if !diagnostics.is_empty() {
                     return diagnostics;
@@ -844,9 +844,10 @@ impl LoweredProgram {
                         }
                     }
                     if let AppliedOwner::Initializer(initializer) = owner {
-                        // Initializer-owned artifact edges become explicit for
-                        // closure-requested artifacts. specialization initializer
-                        // requests keep their request-root-only representation.
+                        // Closure-requested artifacts get explicit
+                        // initializer-owned artifact edges. Initializer
+                        // requests from specialization keep their
+                        // request-root-only representation.
                         self.initializer_artifacts[initializer.index()].push(
                             LoweredArtifactDependency {
                                 artifact: ordinal,

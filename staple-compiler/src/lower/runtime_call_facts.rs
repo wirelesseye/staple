@@ -1,4 +1,4 @@
-//! intrinsic facts recorded before LLVM emission.
+//! Intrinsic facts recorded before LLVM emission.
 
 use super::{LoweredCallArgument, LoweredCallableTarget, LoweredSemanticIds};
 use crate::{CheckedFunctionType, CheckedType, IntrinsicFunction};

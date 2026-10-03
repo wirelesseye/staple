@@ -4,6 +4,7 @@ mod coroutines;
 mod reactive;
 mod structural;
 
+use crate::lower::internal_invariant;
 use std::collections::HashMap;
 
 use inkwell::{
@@ -60,10 +61,10 @@ struct FunctionEnvironment<'context> {
     coroutine: Option<coroutines::CoroutineContext<'context>>,
 }
 
-/// One registered owned binding. A `Value` owns its
-/// SSA local with an `i1` live flag; a `Cell` owns its binding cell and is
-/// dropped conditionally on the cell state. `glue` is the drop glue the
-/// owner's `OwnedBinding` use record names.
+/// One registered owned binding. A `Value` owns its SSA local with an `i1` live
+/// flag; a `Cell` owns its binding cell and is dropped conditionally on the
+/// cell state. `glue` is the drop glue the owner's `OwnedBinding` use record
+/// names.
 #[derive(Clone)]
 struct OwnedValue<'context> {
     storage: OwnedStorage,
@@ -73,9 +74,8 @@ struct OwnedValue<'context> {
 }
 
 impl<'context> FunctionEnvironment<'context> {
-    /// Match arms and
-    /// logical operands restore the caller's local bindings, including the
-    /// owned-binding registration order.
+    /// Match arms and logical operands restore the caller's local bindings,
+    /// including the owned-binding registration order.
     fn restore_local_state(&mut self, snapshot: &Self) {
         self.locals = snapshot.locals.clone();
         self.binding_cells = snapshot.binding_cells.clone();
@@ -98,8 +98,8 @@ enum DropSource<'context> {
     Cell(PointerValue<'context>),
 }
 
-/// One provider's bound resource value. emission reads these when it emits
-/// `LoweredResourceUse` reads and call `resource_bindings`.
+/// One provider's bound resource value. Emission resolves `LoweredResourceUse`
+/// reads and call `resource_bindings` against these entries.
 #[derive(Clone)]
 struct BoundResource<'context> {
     resource: CheckedResource,
@@ -124,7 +124,7 @@ struct LoopContext<'context> {
     reactive_before: usize,
     /// The task-scope depth at loop entry; `break` and `continue` close every
     /// scope opened since, right after the reactive disposal and before the
-    /// owned drops .
+    /// owned drops.
     tasks_before: usize,
     incoming: Vec<(BasicValueEnum<'context>, BasicBlock<'context>)>,
 }
@@ -135,13 +135,12 @@ pub(super) struct LoweredEmitter<'program, 'context> {
     instances: HashMap<FunctionInstanceId, FunctionValue<'context>>,
     artifacts: HashMap<ArtifactOrdinal, Vec<FunctionValue<'context>>>,
     externs: HashMap<SymbolId, FunctionValue<'context>>,
-    /// The declared adapter of each extern symbol used as a first-class value
-    /// (closure codes). A capture or name read of an extern value
-    /// builds this closure instead of looking up local storage.
+    /// The declared adapter of each extern symbol used as a first-class value.
+    /// A capture or name read of an extern value builds this closure instead of
+    /// looking up local storage.
     extern_adapters: HashMap<SymbolId, FunctionValue<'context>>,
     /// The declared binding symbol of each function template. A `Stored`
-    /// callable value loads its closure from that symbol's storage, mirroring
-    /// compile symbol value.
+    /// callable value loads its closure from that symbol's storage.
     function_symbols: HashMap<crate::FunctionId, SymbolId>,
     storage: HashMap<SymbolId, GlobalValue<'context>>,
     initialization_states: HashMap<SymbolId, GlobalValue<'context>>,
@@ -244,10 +243,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .chain(self.artifacts.values().flatten())
         {
             let name = function.get_name().to_str().map_err(|_| {
-                Diagnostic::new(
-                    staple_syntax::Span::Compiler,
-                    "internal invariant violated: planned names are UTF-8",
-                )
+                internal_invariant(staple_syntax::Span::Compiler, "planned names are UTF-8")
             })?;
             types.insert(
                 name.to_owned(),
@@ -259,10 +255,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         for function in self.initializers.values() {
             let name = function.get_name().to_str().map_err(|_| {
-                Diagnostic::new(
-                    staple_syntax::Span::Compiler,
-                    "internal invariant violated: initializer names are UTF-8",
-                )
+                internal_invariant(staple_syntax::Span::Compiler, "initializer names are UTF-8")
             })?;
             types.insert(
                 name.to_owned(),
@@ -276,12 +269,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     fn declare_instances(&mut self) -> CodeGenerationResult<()> {
-        // Linkage rule per family: an instance whose
-        // template signature still has a type parameter is declared on demand
-        // by ensure function specialization with `Internal` linkage
-        // (the recorded lowering fact); an instance of a non-generic template
-        // keeps the eager declaration's default (external) linkage. Names
-        // always come from the catalog, never from the backend.
+        // Linkage is the recorded lowering fact: an instance of a template
+        // whose signature has a type parameter is declared with `Internal`
+        // linkage, and an instance of a non-generic template keeps the default
+        // (external) linkage. Names always come from the catalog.
         for (id, instance) in self.view.instances() {
             let Some(signature) = self.view.instance_signature(id) else {
                 continue;
@@ -424,13 +415,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     fn declare_artifacts(&mut self) -> CodeGenerationResult<()> {
-        // Linkage rule per family: constructor adapters,
-        // extern adapters, runners, and the coroutine `resume`/`cleanup` pair
-        // are `Internal`; structural methods and GC finalizers keep the
-        // default (external) linkage; drop glue emits no function.
-        // Coroutine pair names come from the catalog, where
-        // `planned_names_with` collision-checks them with every other planned
-        // name. The remaining names are the artifact's planned name.
+        // Linkage rule per family: constructor adapters, extern adapters,
+        // runners, and the coroutine `resume`/`cleanup` pair are `Internal`;
+        // structural methods and GC finalizers keep the default (external)
+        // linkage; drop glue emits no function. Coroutine pair names come from
+        // the catalog, where `planned_names_with` collision-checks them with
+        // every other planned name. The remaining names are the artifact's
+        // planned name.
         let pointer = self.backend.context.ptr_type(AddressSpace::default());
         for (_, artifact) in self.view.artifacts() {
             let plan = artifact.plan.as_ref().ok_or_else(|| {
@@ -671,8 +662,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Expand one `DropGlueBody` inline at its site,
-    /// recursing through each nested planned glue. No function is emitted.
+    /// Expand one `DropGlueBody` inline at its site, recursing through each
+    /// nested planned glue. No function is emitted.
     fn emit_drop_glue(
         &self,
         value: BasicValueEnum<'context>,
@@ -903,9 +894,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "function result is not a first-class value",
                 )
             })?;
-            // after the body expression's own
-            // scope drops, drop every remaining owned binding (the
-            // parameters) before returning.
+            // After the body expression's own scope drops, drop every remaining
+            // owned binding (the parameters) before returning.
             self.drop_all_owned(&environment, &body.origin.span)?;
             self.backend
                 .builder
@@ -983,10 +973,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .instance(instance)
             .and_then(|record| record.body.as_ref())
             .ok_or_else(|| {
-                Diagnostic::new(
-                    staple_syntax::Span::Compiler,
-                    "internal invariant violated: emitted instance has a body",
-                )
+                internal_invariant(staple_syntax::Span::Compiler, "emitted instance has a body")
             })?;
         let parameters = function.get_params();
         let environment_pointer = parameters
@@ -998,11 +985,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .into_pointer_value();
         environment.closure_environment = Some(environment_pointer);
 
-        // bind the concrete effect-row resources from the body's
+        // Bind the concrete effect-row resources from the body's
         // `function_providers`, in row order, keeping each provider's
-        // indirect/borrowed fact. Emission resolves `LoweredResourceUse` reads and
-        // call `resource_bindings` against these entries. The emitter binds the
-        // same list from the checked effect row (bind function parameters).
+        // indirect/borrowed fact. Emission resolves `LoweredResourceUse` reads
+        // and call `resource_bindings` against these entries.
         let resource_count = body.signature.effects.resources.len();
         if body.function_providers.len() != resource_count {
             return Err(Diagnostic::new(
@@ -1045,9 +1031,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let logical_types = flattened_parameter_types(&body.signature.parameter);
         let indirect_mask = self.backend.indirect_parameter_mask(&body.signature);
         let whole = body.signature.mutations.contains(&CheckedMutation::Whole);
-        // load every indirect parameter
-        // through its pointer (or the single whole-mutation pointer) and keep
-        // every one as a mutable pointer for compile place pointer.
+        // Load every indirect parameter through its pointer (or the single
+        // whole-mutation pointer), and keep each pointer so place emission can
+        // address the parameter.
         let mut values: Vec<BasicValueEnum<'context>> = Vec::new();
         let mut mutable_pointers: Vec<(usize, PointerValue<'context>)> = Vec::new();
         if whole {
@@ -1098,9 +1084,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         )
     }
 
-    /// Every indirect parameter
-    /// pointer replaces any capture cell for its top-level symbol, with a
-    /// whole mutation projecting each product field.
+    /// Every indirect parameter pointer replaces any capture cell for its
+    /// top-level symbol, with a whole mutation projecting each product field.
     fn bind_mutable_parameter_pointers(
         &self,
         owner: EmissionOwner,
@@ -1151,10 +1136,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// A top-level non-product parameter
-    /// pattern binds the flattened values rebuilt into one product value, a
-    /// one-element product collapses, and a product element binds its own
-    /// flattened slot directly.
+    /// A top-level non-product parameter pattern binds the flattened values
+    /// rebuilt into one product value, a one-element product collapses, and a
+    /// product element binds its own flattened slot directly.
     fn bind_top_level_pattern(
         &mut self,
         owner: EmissionOwner,
@@ -1290,8 +1274,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// Whether a pointer-kind capture's pointer is borrowed parameter storage
-    /// (a mutated or borrowed parameter) rather than a binding cell. Mirrors
-    /// bind environment captures.
+    /// (a mutated or borrowed parameter) rather than a binding cell.
     fn capture_is_parameter_pointer(&self, capture: &LoweredInstanceCapture) -> bool {
         capture.capture.borrowed
             || self
@@ -1316,8 +1299,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// Write a symbol's
-    /// initialization state when it has one, and do nothing otherwise.
+    /// Write a symbol's initialization state when it has one, and do nothing
+    /// otherwise.
     fn store_initialization_state(&self, symbol: SymbolId, state: u64) -> CodeGenerationResult<()> {
         if let Some(slot) = self.initialization_states.get(&symbol) {
             self.backend
@@ -1356,8 +1339,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })?;
         let value_type = self.backend.compile_type(&value_type)?;
         let mut fields = vec![value_type, self.backend.context.i8_type().into()];
-        // a signal or derived cell carries
-        // a metadata pointer in field 2.
+        // A signal or derived cell carries a metadata pointer in field 2.
         if self
             .view
             .symbol(symbol)
@@ -1387,8 +1369,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(cell);
         }
         let cell_type = self.binding_cell_type(owner, symbol)?;
-        // a cell is GC-allocated exactly when
-        // some function captures it.
+        // A cell is GC-allocated exactly when some function captures it.
         let captured = self
             .view
             .symbol(symbol)
@@ -1416,8 +1397,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_store(state, self.backend.context.i8_type().const_zero())
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        // a signal cell creates its signal
-        // before the value is evaluated and stores it in the metadata field.
+        // A signal cell creates its signal before the value is evaluated and
+        // stores it in the metadata field.
         if self.view.symbol(symbol).is_some_and(|record| record.signal) {
             let metadata_slot = self
                 .backend
@@ -1560,9 +1541,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Emit the conditional drop of every owned
-    /// binding registered since `start`, in reverse registration order, and
-    /// remove them from the environment.
+    /// Emit the conditional drop of every owned binding registered since
+    /// `start`, in reverse registration order, and remove them from the
+    /// environment.
     fn drop_owned_since(
         &self,
         environment: &mut FunctionEnvironment<'context>,
@@ -1604,8 +1585,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment.owned_order.truncate(cleanup_start);
     }
 
-    /// One owned binding's conditional drop: the live-flag
-    /// skeleton around a value, or the cell-state skeleton around a cell.
+    /// One owned binding's conditional drop: the live-flag skeleton around a
+    /// value, or the cell-state skeleton around a cell.
     fn emit_owned_binding_drop(
         &self,
         environment: &FunctionEnvironment<'context>,
@@ -1761,11 +1742,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// One artifact family that is a call shim. A
-    /// constructor adapter rebuilds its product (or GC-allocates the managed
-    /// reference and sets the planned payload finalizer); an extern adapter
-    /// forwards the closure parameters to the foreign symbol. Every other
-    /// family has no body to emit here.
+    /// One artifact family that is a call shim. A constructor adapter rebuilds
+    /// its product (or GC-allocates the managed reference and sets the planned
+    /// payload finalizer); an extern adapter forwards the closure parameters to
+    /// the foreign symbol. Every other family has no body to emit here.
     fn emit_artifact_body(&mut self, ordinal: ArtifactOrdinal) -> CodeGenerationResult<()> {
         let Some(artifact) = self.view.artifact(ordinal) else {
             return Ok(());
@@ -2172,9 +2152,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .llvm_module
             .get_function("__staple_gc_set_stack_bottom")
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: GC stack initializer runtime is linked before entry emission",
+                    "GC stack initializer runtime is linked before entry emission",
                 )
             })?;
         self.backend
@@ -2277,8 +2257,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let block = self.view.block(owner, id).ok_or_else(|| {
             Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered block")
         })?;
-        // every binding the block introduces is owned
-        // until the block's normal exit.
+        // Every binding the block introduces is owned until the block's normal
+        // exit.
         let owned_before = environment.owned_order.len();
         let span = block.origin.span.clone();
         let items = block.items.clone();
@@ -2329,11 +2309,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if binding.compile_time_only {
                     return Ok(());
                 }
-                // The storage-only part of
-                // a generic binding records state 1 then 2 and evaluates
-                // nothing; a valued binding records state 1, evaluates,
-                // stores a module global when the symbol owns one (a nested
-                // local stays in the environment), then records state 2.
+                // The storage-only part of a generic binding records state 1
+                // then 2 and evaluates nothing; a valued binding records state
+                // 1, evaluates, stores a module global when the symbol owns one
+                // (a nested local stays in the environment), then records state
+                // 2.
                 if binding.generic {
                     if let Some(symbol) = binding.symbol {
                         self.store_local_initialization_state(
@@ -2360,8 +2340,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 if let Some(symbol) = binding.symbol {
                     if binding.cell {
-                        // compile item allocates the cell before the
-                        // state-1 store and the value evaluation.
+                        // The cell is allocated before the state-1 store and
+                        // the value evaluation.
                         self.allocate_binding_cell(owner, environment, symbol, &item.origin.span)?;
                     }
                     self.store_local_initialization_state(
@@ -2428,9 +2408,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value = self.emit_expression(owner, value_id, environment)?;
                 if let Some(symbol) = binding.symbol {
                     // A module-level signal creates and records its signal
-                    // between the value evaluation and the global store
-                    // (compile top level item); a local signal cell
-                    // already created it at allocation.
+                    // between the value evaluation and the global store; a
+                    // local signal cell already created it at allocation.
                     if binding.signal
                         && !environment.binding_cells.contains_key(&symbol)
                         && let Some(metadata) = self.signal_metadata.get(&symbol).copied()
@@ -2477,9 +2456,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredItemKind::Expression(statement) => {
-                // compile item evaluates the statement, then drops
-                // its result when one was recorded (the `DiscardedResult`
-                // use record is the discriminant).
+                // Evaluate the statement, then drop its result when one was
+                // recorded (the `DiscardedResult` use record is the
+                // discriminant).
                 let value = self.emit_expression(owner, statement.expression, environment)?;
                 if !environment.returned {
                     let value =
@@ -2502,9 +2481,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Ok(());
                 }
                 let value = value_as_basic(value).ok_or_else(|| unimplemented("return value"))?;
-                // compile item's return: dispose every reactive
-                // scope, close every task scope, then drop every owned binding
-                // before leaving the function .
+                // `return` disposes every reactive scope, closes every task
+                // scope, then drops every owned binding before leaving the
+                // function.
                 self.dispose_reactive_scopes(environment, 0, &item_span)?;
                 self.close_task_scopes(environment, 0)?;
                 self.drop_all_owned(environment, &item_span)?;
@@ -2516,8 +2495,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(())
             }
             LoweredItemKind::PatternBinding(binding) => {
-                // compile item's pattern-binding order: state 1,
-                // evaluate, bind, module-global stores, state 2.
+                // Pattern-binding order: state 1, evaluate, bind, module-global
+                // stores, state 2.
                 self.store_pattern_initialization_state(owner, binding.pattern, 1)?;
                 let value = self.emit_expression(owner, binding.value, environment)?;
                 if environment.returned {
@@ -2553,9 +2532,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     })?
                 } else {
                     value_as_basic(self.backend.unit_value()).ok_or_else(|| {
-                        Diagnostic::new(
+                        internal_invariant(
                             staple_syntax::Span::Compiler,
-                            "internal invariant violated: Unit has an LLVM basic-value representation",
+                            "Unit has an LLVM basic-value representation",
                         )
                     })?
                 };
@@ -2575,9 +2554,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 else {
                     return Err(unimplemented("break target"));
                 };
-                // compile item's break disposes the reactive scopes,
-                // closes the task scopes, and drops every binding owned since
-                // the loop's marks .
+                // `break` disposes the reactive scopes, closes the task scopes,
+                // and drops every binding owned since the loop's marks.
                 self.dispose_reactive_scopes(environment, reactive_before, &item_span)?;
                 self.close_task_scopes(environment, tasks_before)?;
                 self.drop_owned_since(environment, owned_before, &item_span)?;
@@ -2586,9 +2564,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_unconditional_branch(exit)
                     .map_err(compiler_diagnostic)?;
                 let predecessor = self.backend.builder.get_insert_block().ok_or_else(|| {
-                    Diagnostic::new(
+                    internal_invariant(
                         staple_syntax::Span::Compiler,
-                        "internal invariant violated: break emission has a current LLVM block",
+                        "break emission has a current LLVM block",
                     )
                 })?;
                 environment
@@ -2597,9 +2575,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .rev()
                     .find(|context| context.depth == break_item.loop_depth)
                     .ok_or_else(|| {
-                        Diagnostic::new(
+                        internal_invariant(
                             staple_syntax::Span::Compiler,
-                            "internal invariant violated: break depth names an active loop context",
+                            "break depth names an active loop context",
                         )
                     })?
                     .incoming
@@ -2624,9 +2602,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 else {
                     return Err(unimplemented("continue target"));
                 };
-                // compile item's continue disposes the reactive
-                // scopes, closes the task scopes, and drops every binding
-                // owned since the loop's marks .
+                // `continue` disposes the reactive scopes, closes the task
+                // scopes, and drops every binding owned since the loop's marks.
                 self.dispose_reactive_scopes(environment, reactive_before, &item_span)?;
                 self.close_task_scopes(environment, tasks_before)?;
                 self.drop_owned_since(environment, owned_before, &item_span)?;
@@ -2665,8 +2642,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let span = pattern.origin.span.clone();
         match &pattern.kind {
             LoweredPatternKind::Wildcard => {
-                // bind pattern value drops the discarded subject when
-                // lowering recorded a `WildcardDiscard` use.
+                // A wildcard pattern drops the discarded subject when lowering
+                // recorded a `WildcardDiscard` use.
                 let value = value_as_basic(value).ok_or_else(|| unsupported("wildcard cleanup"))?;
                 self.emit_drop_site(
                     owner,
@@ -2716,9 +2693,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             },
             LoweredPatternKind::Nominal { argument, .. } => {
-                // bind pattern value's nominal arm only loads the
-                // payload for a `Ref` pattern; every other nominal form binds
-                // its argument transparently.
+                // A nominal pattern loads the payload only for a `Ref` pattern;
+                // every other nominal form binds its argument transparently.
                 let value = if pattern.test.identity == crate::LoweredPatternIdentity::Ref {
                     let payload = self
                         .view
@@ -2784,9 +2760,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.register_owned_binding(owner, environment, symbol, span)
     }
 
-    /// After a module-level pattern binding
-    /// has bound its symbols, write each symbol's local value into its module
-    /// global.
+    /// After a module-level pattern binding has bound its symbols, write each
+    /// symbol's local value into its module global.
     fn store_pattern_globals(
         &mut self,
         owner: EmissionOwner,
@@ -2888,16 +2863,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })?
             .clone();
         let value = self.emit_expression_value(owner, id, &expression, environment)?;
-        // a diverged body releases moved
-        // ownership and returns without coercing.
+        // A diverged body releases moved ownership and returns without
+        // coercing.
         if environment.returned {
             self.release_moved_ownership(owner, environment, &expression)?;
             return Ok(value);
         }
-        // compile expression's divergence handling: an expression of
-        // type `Never` (or one coerced from `Never`) ends the block. Order
-        // The `unreachable` instruction precedes the moved-
-        // ownership release.
+        // An expression of type `Never` (or one coerced from `Never`) ends the
+        // block. The `unreachable` instruction precedes the moved-ownership
+        // release.
         let diverges = expression.value_type == CheckedType::Never
             || expression
                 .coercion
@@ -2912,8 +2886,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.release_moved_ownership(owner, environment, &expression)?;
             return Ok(value);
         }
-        // apply the recorded coercion plan. Lowering already
-        // selected the alternatives, so emission never re-selects one.
+        // Apply the recorded coercion plan. Lowering already selected the
+        // alternatives, so emission never re-selects one.
         let value = match (&expression.coercion, &expression.coercion_plan) {
             (Some(coercion), Some(plan)) => self.emit_coercion(
                 value,
@@ -2952,12 +2926,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_store(live, self.backend.context.bool_type().const_zero())
                     .map_err(compiler_diagnostic)?;
             }
-            // The emitter clears the binding cell's state only for a symbol with
-            // mutable storage (`has_mutable_storage`); a coroutine frame cell
-            // for an ordinary `let` was not cleared because the emitter never
-            // dropped it. emission drops live frame cells at
-            // completion, so a moved-out frame binding's state is cleared too;
-            // otherwise the completion or cancel drop would double-drop it.
+            // Clear the binding cell's state for a symbol with mutable storage
+            // and for a coroutine frame binding. Completion drops live frame
+            // cells, so a moved-out frame binding must read as uninitialized;
+            // otherwise the completion or cancel drop would drop it twice.
             let frame_binding = environment
                 .coroutine
                 .as_ref()
@@ -3130,8 +3102,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .into()),
             LoweredExpressionKind::Block(block) => self.emit_block(owner, *block, environment),
             LoweredExpressionKind::Name(name) => {
-                // compile expression uncoerced's `Name` path returns
-                // the unit value for a singleton before any storage read.
+                // A singleton name produces the unit value before any storage
+                // read.
                 if name.singleton.is_some() {
                     return Ok(self.backend.unit_value());
                 }
@@ -3146,9 +3118,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                 )
                             })?;
                     match operation.kind {
-                        // A signal or derived read tracks through
-                        // `load_symbol_value`, exactly using the recorded layout's
-                        // compile symbol value.
+                        // A signal or derived read tracks its dependency
+                        // through `load_symbol_value`, using the recorded
+                        // layout.
                         LoweredReactiveOperationKind::SignalRead { .. }
                         | LoweredReactiveOperationKind::DerivedRead { .. } => {}
                         LoweredReactiveOperationKind::SignalCreate { .. }
@@ -3166,10 +3138,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         }
                     }
                 }
-                // Name checks the state whenever the read
-                // requires one or the symbol has mutable storage. The load
-                // reads the recorded uncoerced representation; emit_expression
-                // applies the coercion afterward.
+                // A name read checks the state whenever the read requires one
+                // or the symbol has mutable storage. The load reads the
+                // recorded uncoerced representation; `emit_expression` applies
+                // the coercion afterward.
                 self.load_symbol_value(
                     owner,
                     name.symbol,
@@ -3197,7 +3169,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     std::str::from_utf8(&string.bytes[..string.bytes.len() - 1]).map_err(|_| {
                         Diagnostic::new(expression.origin.span.clone(), "invalid C string payload")
                     })?;
-                // shared with build owned c string.
                 self.backend
                     .build_owned_c_string(text, expression.origin.span.clone())
             }
@@ -3210,9 +3181,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::RepeatedProduct(repeated) => {
                 self.emit_repeated_product(owner, expression, repeated, environment)
             }
-            // compile expression uncoerced's `Satisfies` path is
-            // transparent: emit the operand and let this expression's own
-            // header coercion apply in `emit_expression`.
+            // `satisfies` is transparent: emit the operand and let this
+            // expression's own header coercion apply in `emit_expression`.
             LoweredExpressionKind::Satisfies(satisfies) => {
                 self.emit_expression(owner, satisfies.value, environment)
             }
@@ -3433,9 +3403,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     }
                 }
                 (None, None) => {
-                    return Err(Diagnostic::new(
+                    return Err(internal_invariant(
                         span.clone(),
-                        "internal invariant violated: product steps always place or spread",
+                        "product steps always place or spread",
                     ));
                 }
             }
@@ -3692,8 +3662,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment.returned = false;
         let value = self.emit_block(owner, loop_.body, environment)?;
         if !environment.returned {
-            // compile loop expression drops a droppable body result
-            // before the back edge (the `LoopBodyResult` use record).
+            // A droppable body result is dropped before the back edge (the
+            // `LoopBodyResult` use record).
             if loop_.drops_body_result {
                 let value = value_as_basic(value).ok_or_else(|| {
                     Diagnostic::new(span.clone(), "loop body result is not first-class")
@@ -3712,9 +3682,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .map_err(compiler_diagnostic)?;
         }
         let context = environment.loops.pop().ok_or_else(|| {
-            Diagnostic::new(
+            internal_invariant(
                 staple_syntax::Span::Compiler,
-                "internal invariant violated: loop context remains active until its body is emitted",
+                "loop context remains active until its body is emitted",
             )
         })?;
         self.backend.builder.position_at_end(exit);
@@ -3797,17 +3767,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "match arm result is not first-class",
                     )
                 })?;
-                // compile match expression drops the arm's pattern
-                // bindings and locals at the arm's normal exit.
+                // The arm's pattern bindings and locals are dropped at the
+                // arm's normal exit.
                 self.drop_owned_since(environment, owned_before, &arm.origin.span)?;
                 self.backend
                     .builder
                     .build_unconditional_branch(merge_block)
                     .map_err(compiler_diagnostic)?;
                 let predecessor = self.backend.builder.get_insert_block().ok_or_else(|| {
-                    Diagnostic::new(
+                    internal_invariant(
                         staple_syntax::Span::Compiler,
-                        "internal invariant violated: continuing match arm has a current LLVM block",
+                        "continuing match arm has a current LLVM block",
                     )
                 })?;
                 incoming.push((value, predecessor));
@@ -3927,9 +3897,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
                     let selected = self.backend.context.append_basic_block(
                         success.get_parent().ok_or_else(|| {
-                            Diagnostic::new(
+                            internal_invariant(
                                 staple_syntax::Span::Compiler,
-                                "internal invariant violated: match block belongs to an LLVM function",
+                                "match block belongs to an LLVM function",
                             )
                         })?,
                         "match.typed.selected",
@@ -3989,9 +3959,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
                     let selected = self.backend.context.append_basic_block(
                         success.get_parent().ok_or_else(|| {
-                            Diagnostic::new(
+                            internal_invariant(
                                 staple_syntax::Span::Compiler,
-                                "internal invariant violated: match block belongs to an LLVM function",
+                                "match block belongs to an LLVM function",
                             )
                         })?,
                         "match.string.selected",
@@ -4062,9 +4032,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     } else {
                         self.backend.context.append_basic_block(
                             success.get_parent().ok_or_else(|| {
-                                Diagnostic::new(
+                                internal_invariant(
                                     staple_syntax::Span::Compiler,
-                                    "internal invariant violated: match block belongs to an LLVM function",
+                                    "match block belongs to an LLVM function",
                                 )
                             })?,
                             "match.pattern",
@@ -4131,9 +4101,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let tag = self.backend.build_sum_tag(sum_value, "match.tag")?;
                     let selected = self.backend.context.append_basic_block(
                         success.get_parent().ok_or_else(|| {
-                            Diagnostic::new(
+                            internal_invariant(
                                 staple_syntax::Span::Compiler,
-                                "internal invariant violated: match block belongs to an LLVM function",
+                                "match block belongs to an LLVM function",
                             )
                         })?,
                         "match.selected",
@@ -4267,17 +4237,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let right_value = value_as_basic(right).ok_or_else(|| {
                 Diagnostic::new(span.clone(), "logical operand is not first-class")
             })?;
-            // compile logical expression drops the right operand's
-            // own bindings at the end of its block.
+            // The right operand's own bindings are dropped at the end of its
+            // block.
             self.drop_owned_since(environment, owned_before, &span)?;
             self.backend
                 .builder
                 .build_unconditional_branch(merge_block)
                 .map_err(compiler_diagnostic)?;
             let predecessor = self.backend.builder.get_insert_block().ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: continuing logical operand has a current LLVM block",
+                    "continuing logical operand has a current LLVM block",
                 )
             })?;
             incoming.push((right_value, predecessor));
@@ -4364,8 +4334,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 &span,
             )?
         } else {
-            // lowering records the residual alternative; the emitter
-            // never selects one by comparing types.
+            // Lowering records the residual alternative; emission never selects
+            // one by comparing types.
             let index = binding.propagation_residual.ok_or_else(|| {
                 Diagnostic::new(
                     span.clone(),
@@ -4378,8 +4348,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         let failure_value = value_as_basic(failure_value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "propagated result is not first-class"))?;
-        // compile propagating binding's failure path drops every
-        // owned binding before returning the residual value.
+        // The failure path drops every owned binding before returning the
+        // residual value.
         self.drop_all_owned(environment, &span)?;
         self.backend
             .builder
@@ -4454,8 +4424,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ),
             )
         };
-        // compile symbol value runs the symbol's initialization check
-        // before producing the closure value.
+        // Run the symbol's initialization check before producing the closure
+        // value.
         if callable.requires_initialization_check
             && let Some(symbol) = self.callable_symbol(callable)
         {
@@ -4465,16 +4435,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .view
             .binding(owner, LoweredBindingSite::CallableValue(id));
         // Constructor and extern adapter values use the declared adapter
-        // artifact (ensure constructor adapter and `closure_codes`);
-        // both carry a null environment.
+        // artifact; both carry a null environment.
         if matches!(
             callable.adapter,
             LoweredCallableAdapter::Constructor | LoweredCallableAdapter::External
         ) {
-            // compile symbol value resolves a parameter pointer, a
-            // local (including a captured closure value), or a binding cell
-            // before it falls back to the adapter code: a thunk that captures
-            // an extern value calls the captured closure, not a rebuilt one.
+            // A parameter pointer, a local (including a captured closure
+            // value), or a binding cell takes precedence over the adapter code:
+            // a thunk that captures an extern value calls the captured closure,
+            // not a rebuilt one.
             if let Some(symbol) = self.callable_symbol(callable)
                 && (environment.parameter_pointers.contains_key(&symbol)
                     || environment.locals.contains_key(&symbol)
@@ -4666,8 +4635,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
             let cell_type = self.binding_cell_type(owner, symbol)?;
             if !callable.requires_initialization_check {
-                // The emitter's compile symbol value builds the state slot even
-                // when the read needs no check; the caller already emitted
+                // The state-slot address is computed even when this read needs
+                // no check (the result is unused); the caller already emitted
                 // the check when one is required.
                 self.backend
                     .builder
@@ -4834,19 +4803,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
         };
         let native_extern = matches!(call.target, LoweredCallableTarget::ExternalFunction { .. });
-        // compile intrinsic and the extern route
-        // evaluate arguments through compile arguments (by value), never
-        // through an ABI pass mode, so the lowered records' pass modes are
-        // ignored there. (A variadic extern's extra parameter slots can even
-        // record an indirect mode for the variadic tail, which the emitter never
-        // materializes.)
+        // Intrinsic and native extern calls evaluate their arguments by value,
+        // never through an ABI pass mode, so the lowered records' pass modes
+        // are ignored there. (A variadic extern's extra parameter slots can
+        // even record an indirect mode for the variadic tail, which is never
+        // materialized.)
         let by_value_route =
             matches!(call.target, LoweredCallableTarget::Intrinsic { .. }) || native_extern;
-        // a reactive intrinsic call names the operation it
-        // performs. The plain scope call emits through the intrinsic route
-        // (its unit argument is evaluated with the other arguments below);
-        // every other operation evaluates its own operands in the emitter order and
-        // is emitted before the generic argument loop.
+        // A reactive intrinsic call names the operation it performs. The plain
+        // scope call emits through the intrinsic route (its unit argument is
+        // evaluated with the other arguments below); every other operation
+        // evaluates its own operands and is emitted before the generic argument
+        // loop.
         let reactive_call = if let Some(reactive) = call.reactive {
             let operation = self
                 .view
@@ -4917,16 +4885,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
-        // compile call expression's constructor branch compiles its
-        // single argument whole and never runs the flattened ABI argument
-        // path, so a constructor's slot count is its record count.
+        // A constructor call evaluates its single argument whole and never runs
+        // the flattened ABI argument path, so a constructor's slot count is its
+        // record count.
         if matches!(call.target, LoweredCallableTarget::Constructor { .. }) {
             parameter_count = call.arguments.len();
         }
         let mut slots: Vec<Option<BasicMetadataValueEnum<'context>>> = vec![None; parameter_count];
-        // Hidden effect-row resource arguments, in row order. The emitter evaluates
-        // its visible arguments first and appends the hidden ones, then passes
-        // `[environment, hidden..., visible...]` (compile resource arguments).
+        // Hidden effect-row resource arguments, in row order. Visible arguments
+        // are evaluated first and the hidden ones appended; the call passes
+        // `[environment, hidden..., visible...]`.
         let mut hidden: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
         // Mutation temporaries whose value needs drop after the call, in
         // evaluation order with their argument record index; `emit_call_cleanup`
@@ -4934,8 +4902,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut cleanups: Vec<(usize, PointerValue<'context>)> = Vec::new();
         let mut invoked = false;
         // A whole-product argument against a flattened multi-element parameter
-        // records no ABI slot; compile arguments unpacks the single
-        // struct after evaluating it. These values are placed at the end.
+        // records no ABI slot; the single struct is unpacked after evaluation.
+        // These values are placed at the end.
         let mut unplaced: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
         let mut callee_value = None;
         // The emitter extracts `closure.code`/`closure.environment` after the
@@ -5083,9 +5051,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
-        // compile arguments' whole-product fallback: one argument
-        // value against a flattened multi-element parameter unpacks the
-        // struct, and against a single slot it is that slot's value.
+        // Whole-product fallback: one argument value against a flattened
+        // multi-element parameter unpacks the struct, and against a single slot
+        // it is that slot's value.
         if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
             let value = unplaced[0];
             if parameter_count == 1 {
@@ -5110,10 +5078,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.ensure_callee_parts(&callee_value, &mut callee_parts)?;
         let mut values = hidden;
         values.extend(slots.into_iter().map(Option::unwrap));
-        // A C-string temporary is the first visible argument (the emitter's
-        // `scoped_c_string_temporary` check). The direct extern route passes
-        // the CString value itself; a closure route passes a pointer to the
-        // borrowed CString slot , so the temporary's value is
+        // A C-string temporary is the first visible argument. The direct extern
+        // route passes the CString value itself; a closure route passes a
+        // pointer to the borrowed CString slot, so the temporary's value is
         // loaded before it is released.
         let cleanup_c_string = if call.c_string_temporary {
             match values.first() {
@@ -5254,10 +5221,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(value)
     }
 
-    /// The post-call cleanup hook. The emitter
-    /// drop mutation temporaries drops mutation temporaries in reverse
-    /// collection order and then releases a C-string temporary; each drop
-    /// expands the glue named by its own `CallTemporary`, or `CStringTemporary`,
+    /// The post-call cleanup hook. Mutation temporaries are dropped in reverse
+    /// collection order, then a C-string temporary is released; each drop
+    /// expands the glue named by its own `CallTemporary` or `CStringTemporary`
     /// use record.
     fn emit_call_cleanup(
         &self,
@@ -5371,9 +5337,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .copied()
     }
 
-    /// Check the symbol's binding cell
-    /// state when it has a cell, else the module global's state when it has
-    /// one, and do nothing otherwise.
+    /// Check the symbol's binding cell state when it has a cell, else the
+    /// module global's state when it has one, and do nothing otherwise.
     fn check_symbol_initialization(
         &self,
         owner: EmissionOwner,
@@ -5403,8 +5368,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// One call argument's value: a place-backed pointer for the pointer pass
     /// modes, or the evaluated value materialized according to the recorded
-    /// pass mode. Intrinsic routes evaluate by value using the recorded layout
-    /// compile intrinsic.
+    /// pass mode. Intrinsic routes evaluate by value using the recorded layout.
     #[allow(clippy::too_many_arguments)]
     fn assemble_call_argument(
         &mut self,
@@ -5419,8 +5383,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
         let Some(expression) = expression else {
-            // An implicit thunk argument: compile adapted call argument
-            // builds the thunk's closure over the current environment.
+            // An implicit thunk argument builds the thunk's closure over the
+            // current environment.
             let value =
                 self.build_thunk_closure(owner, call_id, record_index, environment, span)?;
             return self.pass_computed_argument(
@@ -5440,10 +5404,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         {
             match self.emit_place_pointer(owner, place, environment) {
                 Ok(pointer) => return Ok(pointer.into()),
-                // compile indirect argument pointer silently falls
-                // back to a materialized copy when a possibly-place-rooted
-                // borrow is not actually addressable; the mutation path has no
-                // fallback. An indexed place stays a diagnostic.
+                // A borrowed argument falls back to a materialized copy when
+                // its possibly place-rooted operand is not actually
+                // addressable; the mutation path has no fallback. An indexed
+                // place stays a diagnostic.
                 Err(error) => {
                     if record.pass_mode != LoweredArgumentPassMode::BorrowedPointer
                         || is_indexed_place_error(&error)
@@ -5457,9 +5421,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if environment.returned {
             return Ok(value_as_basic(self.backend.unit_value())
                 .ok_or_else(|| {
-                    Diagnostic::new(
+                    internal_invariant(
                         staple_syntax::Span::Compiler,
-                        "internal invariant violated: Unit has an LLVM basic-value representation",
+                        "Unit has an LLVM basic-value representation",
                     )
                 })?
                 .into());
@@ -5516,8 +5480,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .and_then(|record| record.body.as_ref())
             .ok_or_else(|| Diagnostic::new(span.clone(), "closure instance has no body"))?;
         let pointer = self.build_capture_environment_value(owner, body, environment, span)?;
-        // build closure installs the environment finalizer exactly
-        // when lowering recorded the thunk argument's environment use.
+        // The closure installs its environment finalizer exactly when lowering
+        // recorded the thunk argument's environment use.
         if let Some(finalizer) = self.site_finalizer(
             owner,
             crate::ArtifactUseSite::ThunkArgumentEnvironment {
@@ -5773,8 +5737,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         )
                     })
             }
-            // a non-place base materialized so it can be
-            // mutated (compile mutation argument pointer).
+            // A non-place base is materialized so it can be mutated.
             crate::LoweredPlaceKind::Temporary { expression } => {
                 let value = self.emit_expression(owner, *expression, environment)?;
                 let value = value_as_basic(value).ok_or_else(|| {
@@ -5939,9 +5902,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         let value = value_as_basic(value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "assigned value is not storable"))?;
-        // compile assignment conditionally drops a binding cell's
-        // old value, or loads `assignment.old` from the place; the owner's
-        // `ReplacedValue` use record is the discriminant.
+        // Assignment conditionally drops a binding cell's old value, or loads
+        // `assignment.old` from the place; the owner's `ReplacedValue` use
+        // record is the discriminant.
         if assignment.drop_previous {
             let cell = self
                 .place_root_symbol(owner, assignment.target)
@@ -5961,9 +5924,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_store(pointer, value)
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        // a field projection never initializes its base; the
-        // base is already initialized (or the projection's own check traps).
-        // Its root symbol exists here for notification only.
+        // A field projection never initializes its base; the base is already
+        // initialized (or the projection's own check traps). Its root symbol
+        // exists here for notification only.
         if let Some(symbol) = assignment.initialization_symbol
             && !matches!(place.kind, crate::LoweredPlaceKind::ProductElement { .. })
         {
@@ -5992,10 +5955,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// The root symbol compile place pointer returns for a place: a
-    /// symbol place (direct or captured cell) or a representation base;
-    /// product elements, temporaries, dereferences, resources, and indexed
-    /// targets return `None`.
+    /// The root symbol of a place, as place emission resolves it: a symbol
+    /// place (direct or captured cell) or a representation base; product
+    /// elements, temporaries, dereferences, resources, and indexed targets
+    /// return `None`.
     fn place_root_symbol(&self, owner: EmissionOwner, id: crate::PlaceId) -> Option<SymbolId> {
         let place = self.view.place(owner, id)?;
         match &place.kind {
@@ -6025,9 +5988,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<()> {
         let span = place.origin.span.clone();
         let crate::LoweredPlaceKind::Indexed { base, index } = &place.kind else {
-            return Err(Diagnostic::new(
+            return Err(internal_invariant(
                 span,
-                "internal invariant violated: indexed assignment dispatch requires an indexed place",
+                "indexed assignment dispatch requires an indexed place",
             ));
         };
         let binding = self
@@ -6089,8 +6052,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_direct_call(function, &arguments, "mutate_index.call")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        // drop mutation temporaries drops the materialized base when
-        // lowering recorded it.
+        // The materialized base is dropped after the call when lowering
+        // recorded it.
         if assignment.drops_base_temporary {
             self.emit_drop_site(
                 owner,
@@ -6157,9 +6120,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mutation_mask =
             super::abi::mutation_parameter_mask(types.len(), &method_type.mutations);
         let mut values: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
-        // Mutation temporaries drop mutation temporaries drops after
-        // the call, in collection order; the owned `IndexTemporary` use record
-        // names each site's glue.
+        // Mutation temporaries are dropped after the call, in collection order;
+        // the owned `IndexTemporary` use record names each site's glue.
         let mut whole_temporary: Option<PointerValue<'context>> = None;
         let mut temporaries: Vec<(usize, PointerValue<'context>)> = Vec::new();
         if !mask.iter().any(|indirect| *indirect) {
@@ -6292,8 +6254,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| Diagnostic::new(span.clone(), "Index result is not first-class"))?;
-        // drop mutation temporaries drops the recorded operand
-        // temporaries after the call in reverse collection order.
+        // The recorded operand temporaries are dropped after the call in
+        // reverse collection order.
         if index.operands.whole_drops_after_call
             && let Some(pointer) = whole_temporary
         {
@@ -6350,8 +6312,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// One hidden effect-row resource argument, resolved
-    /// through the provider the use records (compile resource arguments).
+    /// One hidden effect-row resource argument, resolved through the provider
+    /// the use records.
     fn emit_hidden_resource_argument(
         &mut self,
         owner: EmissionOwner,
@@ -6374,7 +6336,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// The value one resource use passes or reads: a borrow pointer for a
     /// mutable or non-`Copy` requirement (which needs an indirect provider),
     /// else a direct value, loading `resource.copy` when the provider is
-    /// indirect. compile resource arguments' rule.
+    /// indirect.
     fn bound_resource_value(
         &self,
         environment: &FunctionEnvironment<'context>,
@@ -6579,10 +6541,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         result
     }
 
-    /// Close every scope from `keep` on, in
-    /// reverse order. emission closes abandoned scopes on `return`,
-    /// `break`, and `continue`, right after reactive disposal and before the
-    /// owned drops; a `with Tasks` normal exit still closes its own scope.
+    /// Close every scope from `keep` on, in reverse order. `return`, `break`,
+    /// and `continue` close abandoned scopes right after reactive disposal and
+    /// before the owned drops; a `with Tasks` normal exit still closes its own
+    /// scope.
     fn close_task_scopes(
         &self,
         environment: &FunctionEnvironment<'context>,
@@ -6626,9 +6588,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// A parameter pointer is reloaded on every
-    /// read (the binding's own load stays behind, unused), then a local, then
-    /// a binding cell, then module storage.
+    /// A parameter pointer is reloaded on every read (the binding's own load
+    /// stays behind, unused), then a local, then a binding cell, then module
+    /// storage.
     fn load_symbol_value(
         &mut self,
         owner: EmissionOwner,
@@ -6679,9 +6641,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .map(|value| value.as_any_value_enum())
                 .map_err(compiler_diagnostic);
         }
-        // compile symbol value's `closure_codes` arm: an extern used
-        // as a first-class value is read as its adapter closure (with a null
-        // environment).
+        // An extern used as a first-class value is read as its adapter closure
+        // (with a null environment).
         if let Some(code) = self.extern_adapters.get(&symbol).copied() {
             let environment_pointer = self
                 .backend
@@ -6834,8 +6795,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "CString conversion requires a pointer",
                     ));
                 };
-                // shared conversion core; the CString
-                // release expands the recorded `CStringConversion` glue.
+                // The shared conversion core; the CString release expands the
+                // recorded `CStringConversion` glue.
                 let result = self
                     .backend
                     .build_string_from_c_string(*source, span.clone())?;
@@ -6932,8 +6893,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     *capacity,
                     "buffer.capacity.slot",
                 )?;
-                // The `BufferAllocation` use records the element finalizer
-                // ensure buffer finalizer installs.
+                // The `BufferAllocation` use records the element finalizer the
+                // buffer installs.
                 if let Some(finalizer) = self
                     .artifact_use_function(owner, crate::ArtifactUseSite::BufferAllocation(call_id))
                 {
@@ -7104,9 +7065,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.emit_buffer_clone(owner, call, call_id, arguments, &span)
             }
             IntrinsicFunction::RefReplace => {
-                // read the old payload, store the
-                // replacement, return the old value (its drop is the
-                // surrounding site's recorded cleanup).
+                // Read the old payload, store the replacement, and return the
+                // old value (its drop is the surrounding site's recorded
+                // cleanup).
                 let [BasicMetadataValueEnum::PointerValue(reference), replacement] = arguments
                 else {
                     return Err(Diagnostic::new(
@@ -7146,8 +7107,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(self.backend.unit_value())
             }
             IntrinsicFunction::ReactiveScope => {
-                // the unit argument is
-                // evaluated by the call route; then create the ambient scope.
+                // The unit argument is evaluated by the call route; then create
+                // the ambient scope.
                 Ok(self
                     .backend
                     .build_reactive_runtime_call(
@@ -7204,9 +7165,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    /// The buffer handle's field 0
-    /// (`buffer.length`) or 1 (`buffer.capacity`), with the GEP and the load
-    /// sharing one name.
+    /// The buffer handle's field 0 (`buffer.length`) or 1 (`buffer.capacity`),
+    /// with the GEP and the load sharing one name.
     fn emit_buffer_metadata(
         &self,
         call: &crate::LoweredCall,
@@ -7233,9 +7193,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    /// Empty returns `None`, otherwise the last
-    /// element moves out into `Some`, the length decrements, and the vacated
-    /// slot is zeroed.
+    /// Empty returns `None`; otherwise the last element moves out into `Some`,
+    /// the length decrements, and the vacated slot is zeroed.
     fn emit_buffer_pop(
         &self,
         call: &crate::LoweredCall,
@@ -7327,9 +7286,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_struct_gep(option_type, result_slot, 1, "buffer.pop.payload")
             .map_err(compiler_diagnostic)?;
         let payload_type = option_type.get_field_type_at_index(1).ok_or_else(|| {
-            Diagnostic::new(
+            internal_invariant(
                 staple_syntax::Span::Compiler,
-                "internal invariant violated: Option layout has a payload field at index 1",
+                "Option layout has a payload field at index 1",
             )
         })?;
         let storage = super::layout::SumStorage {
@@ -7545,9 +7504,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(self.backend.unit_value())
     }
 
-    /// Allocate a destination with the source's
-    /// capacity, install the recorded destination finalizer, then call the
-    /// recorded element `Clone` instance per live element.
+    /// Allocate a destination with the source's capacity, install the recorded
+    /// destination finalizer, then call the recorded element `Clone` instance
+    /// per live element.
     fn emit_buffer_clone(
         &self,
         owner: EmissionOwner,
@@ -7792,12 +7751,9 @@ fn intrinsic_buffer_element(
     }
 }
 
-/// Store one assembled argument in its final slot, failing
-/// when the slot is out of range or already filled (an internal inconsistency
-/// in the lowered record).
-/// Whether a place-pointer failure is the invariant error for an indexed
-/// place: indexed targets dispatch through `MutateIndex` and never have an
-/// address, so a borrowed argument must not silently materialize a copy.
+/// Whether a place-pointer failure is the invariant error for an indexed place:
+/// indexed targets dispatch through `MutateIndex` and never have an address, so
+/// a borrowed argument must not silently materialize a copy.
 fn is_indexed_place_error(diagnostic: &Diagnostic) -> bool {
     diagnostic.message
         == "lowered emitter: internal invariant violated: indexed place is missing or malformed"
@@ -7835,6 +7791,9 @@ fn struct_operand<'context>(
     }
 }
 
+/// Store one assembled argument in its final slot, failing when the slot is out
+/// of range or already filled (an internal inconsistency in the lowered
+/// record).
 fn place_argument_slot<'context>(
     slots: &mut [Option<BasicMetadataValueEnum<'context>>],
     slot: usize,

@@ -55,7 +55,7 @@ pub(crate) fn assert_catalog_census(
     }
     for (_, artifact) in program.artifacts.iter() {
         match artifact.plan.as_ref() {
-            // drop glue is inlined at its use sites.
+            // Drop glue is inlined at its use sites.
             Some(LoweredArtifactPlan::DropGlue(_)) | None => {}
             Some(LoweredArtifactPlan::CoroutineCodes(_)) => {
                 let (resume, cleanup) = program

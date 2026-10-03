@@ -1,6 +1,6 @@
-//! the backend-local LLVM layout layer.
+//! The backend-local LLVM layout layer.
 //!
-//! Everything here decides the machine representation of a concrete Stanza
+//! Everything here decides the machine representation of a concrete Staple
 //! type without consulting the checker: integer, float, product, sum, closure,
 //! slice, buffer-header, coroutine-frame, task-record, and completion-record
 //! layouts, plus the fixed field indices of the runtime records these types

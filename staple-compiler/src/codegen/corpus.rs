@@ -388,9 +388,8 @@ static CORPUS: [CorpusProgram; 84] = [
     ),
     expect_stdout(
         must_run(
-            // calls, callable values, closures, resources, and intrinsics.
-            // Each entry names the functions its `emits` list must fully emit;
-            // emission flipped every one of them to `MustRun`.
+            // Calls, callable values, closures, resources, and intrinsics. Each
+            // entry names the functions its `emits` list must fully emit.
             emits(
                 inline(
                     "calls_generic",
@@ -876,7 +875,7 @@ static CORPUS: [CorpusProgram; 84] = [
         )),
         "",
     ),
-    // ownership cleanup, finalizers, and buffers.
+    // Ownership cleanup, finalizers, and buffers.
     must_run(expect_stdout(
         emits(
             inline(
@@ -1179,7 +1178,7 @@ static CORPUS: [CorpusProgram; 84] = [
         )),
         "",
     ),
-    // every structural body, formatting delegates, and cleanup.
+    // Every structural body, formatting delegates, and cleanup.
     must_run(expect_stdout(
         emits(
             inline(
@@ -1289,8 +1288,8 @@ replace_owned (Tag (c_string "old"), Tag (c_string "second"))
         ),
         "old\nsecond\nreplacement\n",
     )),
-    // runtime coverage for a droppable element replaced
-    // through a reference and for the structural bounds traps.
+    // Runtime coverage for a droppable element replaced through a reference and
+    // for the structural bounds traps.
     must_run(expect_stdout(
         emits(
             inline(
@@ -1514,10 +1513,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             inline(
                 "coroutine_parked_cancellation",
                 concat!(
-                    // cancel coroutines parked on an
-                    // unresolved `Wait` (the unwind abandons the record) and
-                    // on an `until` child (the unwind runs the child's
-                    // cleanup); neither body resumes.
+                    // Cancel coroutines parked on an unresolved `Wait` (the
+                    // unwind abandons the record) and on an `until` child (the
+                    // unwind runs the child's cleanup); neither body resumes.
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
                     "let signal flag = 0\n",
@@ -1839,9 +1837,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "effectful\n1 2 3 4\n(5, 6)\n7\n()\n",
     )),
-    // every route that reaches an extern callable value
-    // receives closure-shaped parameters, so the adapter loads a borrowed
-    // `CString` before the native call; the caller releases the temporary.
+    // Every route that reaches an extern callable value receives closure-shaped
+    // parameters, so the adapter loads a borrowed `CString` before the native
+    // call; the caller releases the temporary.
     must_run(expect_stdout(
         emits(
             inline(
@@ -1881,10 +1879,10 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "callback\nvalue\nclosure\nthunk\ntemporary\n",
     )),
-    // a field write resolves to its base's signal for
-    // notification, so a reaction over a signal product field re-runs. A field
-    // projection never writes initialization state; the base is already
-    // initialized when the projection executes.
+    // A field write resolves to its base's signal for notification, so a
+    // reaction over a signal product field re-runs. A field projection never
+    // writes initialization state; the base is already initialized when the
+    // projection executes.
     must_run(expect_stdout(
         emits(
             inline(
@@ -1916,10 +1914,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "seen 0\nseen 5\nseen 7\nnested 0\nnested 4\ncaptured 9\n",
     )),
-    // an early exit closes every task scope opened since its
-    // target, right after reactive disposal and before owned drops. A `break`
-    // out of the loop abandons the inner scope, cancelling its child before
-    // its next resume.
+    // An early exit closes every task scope opened since its target, right
+    // after reactive disposal and before owned drops. A `break` out of the loop
+    // abandons the inner scope, cancelling its child before its next resume.
     must_run(expect_stdout(
         emits(
             inline(
@@ -2031,11 +2028,11 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "task start\nreturned 1\ndone\n",
     )),
-    // a coroutine that completes normally drops its live
-    // frame bindings in plan order, before the result is published. The cell
-    // state skips a moved-out or never-initialized binding, a cancelled
-    // coroutine still drops exactly once through the unwind, and a
-    // child-awaited coroutine drops its own frame bindings on completion.
+    // A coroutine that completes normally drops its live frame bindings in plan
+    // order, before the result is published. The cell state skips a moved-out
+    // or never-initialized binding, a cancelled coroutine still drops exactly
+    // once through the unwind, and a child-awaited coroutine drops its own
+    // frame bindings on completion.
     must_run(expect_stdout(
         emits(
             inline(
@@ -2105,11 +2102,10 @@ let value = at (Ref (1, 2), (5 satisfies USize))
         ),
         "complete\nmoved\ncancel\nparent\nchild\ndone\n",
     )),
-    // a generic `Drop` implementation applies by header
-    // unification plus bound discharge. The conditional `Copy T` bound holds
-    // for `Box I32`/`Box (I32, I32)` (user drop runs) and fails for
-    // `Box CString` (no user drop; the `CString` is still freed), including
-    // nested products and sums.
+    // A generic `Drop` implementation applies by header unification plus bound
+    // discharge. The conditional `Copy T` bound holds for `Box I32`/`Box (I32,
+    // I32)` (user drop runs) and fails for `Box CString` (no user drop; the
+    // `CString` is still freed), including nested products and sums.
     must_run(expect_stdout(
         emits(
             inline(

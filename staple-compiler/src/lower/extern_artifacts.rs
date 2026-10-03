@@ -21,8 +21,7 @@ use super::{
 use crate::CheckedType;
 use crate::specialization::{ArtifactRequestKey, CanonicalFunctionType, ExternAdapterKey};
 
-/// The variadic-value diagnostic, matching the emitter backend's wording so the
-/// failure moves phases without changing meaning.
+/// The diagnostic for using a variadic extern function as a first-class value.
 const VARIADIC_VALUE_DIAGNOSTIC: &str =
     "variadic external functions cannot be used as first-class values";
 

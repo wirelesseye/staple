@@ -4,6 +4,7 @@
 //! callees, and return ordered closure requests. Concrete types and catalog
 //! identities are recorded here; LLVM layout belongs to codegen.
 
+use super::internal_invariant;
 use std::collections::HashMap;
 
 use staple_syntax::{Diagnostic, Span};
@@ -347,9 +348,9 @@ pub(super) fn select_concrete_trait_method_with_kind(
             })
         }
         TraitEvidence::DeclaredBound { .. } => {
-            return Err(Diagnostic::new(
+            return Err(internal_invariant(
                 origin.span.clone(),
-                "internal invariant violated: trait evidence was resolved before artifact selection",
+                "trait evidence was resolved before artifact selection",
             ));
         }
     }
@@ -696,7 +697,12 @@ fn structural_index_body(
     } else {
         let element = product
             .homogeneous_element()
-            .ok_or_else(|| Diagnostic::new(origin.span.clone(), "internal invariant violated: homogeneous product was checked before index expansion"))?
+            .ok_or_else(|| {
+                internal_invariant(
+                    origin.span.clone(),
+                    "homogeneous product was checked before index expansion",
+                )
+            })?
             .clone();
         Ok(StructuralBody::IndexLoad {
             element,

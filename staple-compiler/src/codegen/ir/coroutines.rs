@@ -7,6 +7,7 @@
 use super::super::layout::*;
 use super::super::{Backend, CodeGenerationResult, Diagnostic, Span, compiler_diagnostic};
 use super::value_as_basic;
+use crate::lower::internal_invariant;
 use inkwell::{
     AddressSpace,
     basic_block::BasicBlock,
@@ -96,9 +97,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         let frame = function
             .get_first_param()
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: coroutine resume signature has a frame parameter",
+                    "coroutine resume signature has a frame parameter",
                 )
             })?
             .into_pointer_value();
@@ -294,9 +295,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         let frame = function
             .get_first_param()
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: coroutine cleanup signature has a frame parameter",
+                    "coroutine cleanup signature has a frame parameter",
                 )
             })?
             .into_pointer_value();
@@ -362,9 +363,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .llvm_module
             .get_function("__staple_gc_unregister_root")
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: GC root unregistration runtime is linked before cleanup emission",
+                    "GC root unregistration runtime is linked before cleanup emission",
                 )
             })?;
         self.build_runtime_call(unregister, &[frame.into()], "")?;
@@ -540,9 +541,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         let payload = runner
             .get_first_param()
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: reactive runner has a payload parameter",
+                    "reactive runner has a payload parameter",
                 )
             })?
             .into_pointer_value();
@@ -644,9 +645,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         let payload_argument = runner
             .get_first_param()
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: reactive runner has a payload parameter",
+                    "reactive runner has a payload parameter",
                 )
             })?
             .into_pointer_value();
@@ -710,9 +711,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         let payload_argument = runner
             .get_first_param()
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: reactive runner has a payload parameter",
+                    "reactive runner has a payload parameter",
                 )
             })?
             .into_pointer_value();
@@ -830,9 +831,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .llvm_module
             .get_function("__staple_coro_drive")
             .ok_or_else(|| {
-                Diagnostic::new(
+                internal_invariant(
                     staple_syntax::Span::Compiler,
-                    "internal invariant violated: coroutine driver runtime is linked before emission",
+                    "coroutine driver runtime is linked before emission",
                 )
             })?;
         let status = self
@@ -1027,7 +1028,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     }
 }
 
-/// Which external record an `await` parks on (compile external await).
+/// Which external record an `await` parks on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExternalAwaitKind {
     Task,
@@ -1102,9 +1103,9 @@ impl<'program, 'context> Backend<'program, 'context> {
                     .context
                     .append_basic_block(function, "await.sched.join");
                 let entry_block = self.builder.get_insert_block().ok_or_else(|| {
-                    Diagnostic::new(
+                    internal_invariant(
                         staple_syntax::Span::Compiler,
-                        "internal invariant violated: await emission has a current LLVM block",
+                        "await emission has a current LLVM block",
                     )
                 })?;
                 self.builder
