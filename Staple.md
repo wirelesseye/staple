@@ -1406,7 +1406,7 @@ fixed product whose elements are all `Copy`; `Output` is the duplicate-free sum
 of its element types. Thus indexing `(I32, String, I32)` produces
 `I32 | String`, while indexing `(I32; N)` produces `I32`. The standard library
 implements `Index (Slice T) USize T` when `T` is `Copy`, backed by
-`Slice.get_ref`, so a `Slice T` is indexed like a fixed product of `T`. Known
+`Slice.get_ref_unchecked`, so a `Slice T` is indexed like a fixed product of `T`. Known
 bad fixed-product indices are rejected and dynamic out-of-bounds indices trap.
 
 A `Ref T` is transparent for indexing, the same way it is for field access:
@@ -1426,7 +1426,7 @@ target[index] = replacement
 
 The compiler derives `MutateIndex` for non-empty arrays, by
 value. The standard library implements `MutateIndex (Slice T) USize T` for
-every `T`, backed by `Slice.get_ref` and `Ref.replace`. The mutable `Target`
+every `T`, backed by `Slice.get_ref_unchecked` and `Ref.replace`. The mutable `Target`
 parameter passes by address either way (see the "Mutable parameters" subsection
 under "Functions"), so a by-value target's root binding must be declared
 `mut` just as a `Ref` target's must. These structural implementations cannot
@@ -3269,7 +3269,9 @@ singleton `Ref T` (a `(T; 1)`, normalized to `T`) becomes a length-1 slice, and
 an empty `Ref ()` becomes a length-0 slice, requiring an expected `Slice` type to
 infer its element type. Literal and variable indexing
 perform runtime bounds checks.
-`Slice.get_ref: <T> [Slice T, USize] -> Ref T` borrows an element by position,
+`Slice.get_ref: <T> [Slice T, USize] -> Option (Ref T)` returns a reference
+to an element, or `None` when out of bounds.
+`Slice.get_ref_unchecked: <T> [Slice T, USize] -> Ref T` borrows an element by position,
 trapping when out of bounds; it is the primitive behind the standard library's
 `Index`/`MutateIndex` implementations for slices. Where `Copy T`, the standard
 library also implements `IntoIterator`/`Iterator` for `Slice T` through
@@ -3291,8 +3293,10 @@ preserving the original capacity.
 `Buffer.push` appends while spare capacity remains, and `Buffer.pop` moves the
 last initialized element into an `Option T`. Both require a mutable buffer
 argument. Pushing to a full buffer traps; growth belongs in higher-level
-containers such as `List`. `Buffer.get_ref` returns a managed reference to an
-initialized element and traps for an out-of-bounds index. Pushing does not
+containers such as `List`. `Buffer.get_ref` returns an `Option (Ref T)`
+containing a managed reference to an initialized element, or `None` for an
+out-of-bounds index. `Buffer.get_ref_unchecked` returns the reference directly
+and traps for an out-of-bounds index. Pushing does not
 relocate storage, but popping invalidates references to the removed slot.
 
 `Buffer.freeze` consumes the buffer and returns a zero-copy `Slice T` over its

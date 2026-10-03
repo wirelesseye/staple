@@ -39,8 +39,17 @@ companion<T> Buffer T {
     /// Removes and returns the last element, or `None` if empty; traps if frozen.
     pub def pop: mut Buffer T -> Option T = mut buffer => __buffer_pop buffer
 
+    /// Borrows an element by position, or `None` if out of bounds.
+    pub def get_ref: [Buffer T, USize] -> Option (Ref T) = [buffer, position] => {
+        if (position < Buffer.length buffer) {
+            Some (Buffer.get_ref_unchecked buffer position)
+        } else {
+            None
+        }
+    }
+
     /// Borrows an initialised element by position, trapping if out of bounds.
-    pub def get_ref: [Buffer T, USize] -> Ref T = [buffer, position] => __buffer_get (buffer, position)
+    pub def get_ref_unchecked: [Buffer T, USize] -> Ref T = [buffer, position] => __buffer_get (buffer, position)
 
     /// Seals the buffer against mutation and returns a zero-copy slice of its contents.
     pub def freeze: move Buffer T -> Slice T = move buffer => __buffer_freeze buffer

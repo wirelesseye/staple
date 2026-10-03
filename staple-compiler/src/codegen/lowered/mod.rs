@@ -6942,11 +6942,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 else {
                     return Err(Diagnostic::new(
                         span,
-                        "Buffer.get_ref requires a buffer and USize index",
+                        "Buffer.get_ref_unchecked requires a buffer and USize index",
                     ));
                 };
                 let CheckedType::Ref(element) = result_type else {
-                    return Err(Diagnostic::new(span, "invalid Buffer.get_ref result"));
+                    return Err(Diagnostic::new(
+                        span,
+                        "invalid Buffer.get_ref_unchecked result",
+                    ));
                 };
                 let llvm_element = self.backend.compile_type(element)?;
                 let header = self.backend.buffer_header_type(llvm_element);

@@ -4843,10 +4843,12 @@ fn buffer_intrinsics_type_check_and_compile() {
         "let capacity: USize = Buffer.capacity values\n",
         "Buffer.push values 10\n",
         "Buffer.push values 20\n",
-        "let first: Ref I32 = Buffer.get_ref values (USize :: 0)\n",
+        "let first: Ref I32 = Buffer.get_ref_unchecked values (USize :: 0)\n",
+        "let safe_first: Option (Ref I32) = Buffer.get_ref values (USize :: 0)\n",
         "let popped: Option I32 = Buffer.pop values\n",
         "let frozen: Slice I32 = Buffer.freeze values\n",
         "let frozen_length: USize = Slice.length frozen\n",
+        "let safe_frozen: Option (Ref I32) = Slice.get_ref frozen (USize :: 0)\n",
         "()\n",
         "}\n",
     ));
@@ -12788,7 +12790,7 @@ fn fixed_references_do_not_convert_to_slices_implicitly() {
     type_check(concat!(
         "use std.slice.Slice\n",
         "let fixed: Ref (I32; 3) = Ref (1, 2, 3)\n",
-        "let first: Ref I32 = Slice.get_ref (Slice.from_ref fixed) 0\n",
+        "let first: Ref I32 = Slice.get_ref_unchecked (Slice.from_ref fixed) 0\n",
         "let count: USize = Slice.length (Slice.from_ref fixed)\n",
     ));
 }
