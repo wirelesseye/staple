@@ -5264,6 +5264,37 @@ fn c_string_is_an_imported_primitive_macro() {
 }
 
 #[test]
+fn a_c_string_temporary_passed_to_a_borrowing_callback_is_freed() {
+    let module = type_check(concat!(
+        "use std.cinterop.*\n",
+        "extern \"c\" { strlen: CString -> USize }\n",
+        "def apply: (CString -> USize) -> USize = f => f (c_string \"x\")\n",
+        "def apply_move: ((move CString) -> USize) -> USize = f => f (c_string \"y\")\n",
+        "def borrow: CString -> USize = value => strlen value\n",
+        "def consume: move CString -> USize = move value => strlen value\n",
+        "let first = apply borrow\n",
+        "let second = apply_move consume\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("callback calls should lower");
+    let borrowed = function_definition(&llvm, "apply");
+    let call = borrowed
+        .find("%closure.call")
+        .expect("apply calls its callback");
+    assert!(
+        borrowed[call..].contains("@free"),
+        "the caller frees a temporary its callback only borrows:\n{borrowed}"
+    );
+    let moved = function_definition(&llvm, "apply_move");
+    assert!(
+        !moved.contains("@free"),
+        "a `move` callback owns the temporary:\n{moved}"
+    );
+}
+
+#[test]
 fn a_block_tail_c_string_is_moved_out_instead_of_freed() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
@@ -10504,6 +10535,45 @@ fn exposes_copy_but_rejects_explicit_implementations() {
             .message
             .contains("`Copy` is implemented structurally")
     }));
+}
+
+#[test]
+fn c_string_to_string_consumes_its_argument() {
+    type_check(concat!(
+        "use std.cinterop.*\n",
+        "def convert = () => { let text = c_string \"x\"; CString.to_string text }\n",
+        "def temporary = () => CString.to_string (c_string \"y\")\n",
+    ));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.*\n",
+            "def twice = () => {\n",
+            "  let text = c_string \"x\"\n",
+            "  let first = CString.to_string text\n",
+            "  CString.to_string text\n",
+            "}\n",
+        )))
+        .expect_err_diagnostics("a converted CString is moved");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("use of moved value")),
+        "{diagnostics:?}"
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.*\n",
+            "def borrowed: CString -> String = text => CString.to_string text\n",
+        )))
+        .expect_err_diagnostics("a borrowed CString cannot be converted");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("cannot move out of a borrowed value")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]

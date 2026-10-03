@@ -99,8 +99,6 @@ pub(crate) enum ArtifactUseSite {
         call: LoweredCallId,
         argument: usize,
     },
-    /// An extern call's C-string temporary drop.
-    CStringTemporary(LoweredCallId),
     /// A wildcard pattern discarding a droppable value.
     WildcardDiscard(PatternId),
     /// An owned binding's scope-exit drop; also the owned-binding record. The
@@ -208,6 +206,14 @@ pub(super) trait ArtifactFamilyHooks {
     /// test hook that declares no body expansion is exempt.
     fn expands_body(&self, _key: &ArtifactRequestKey) -> bool {
         false
+    }
+
+    /// Whether this hook set's scanners record cleanup uses. Owned bindings
+    /// bind their drop glue through those uses, so they are collected only for
+    /// a hook set that scans cleanup; scripted engine tests that report other
+    /// requests opt out.
+    fn scans_cleanup(&self) -> bool {
+        true
     }
 }
 
@@ -584,9 +590,11 @@ impl LoweredProgram {
                 if !diagnostics.is_empty() {
                     return diagnostics;
                 }
-                let diagnostics = super::cleanup_artifacts::collect_owned_bindings(self);
-                if !diagnostics.is_empty() {
-                    return diagnostics;
+                if hooks.scans_cleanup() {
+                    let diagnostics = super::cleanup_artifacts::collect_owned_bindings(self);
+                    if !diagnostics.is_empty() {
+                        return diagnostics;
+                    }
                 }
                 let diagnostics = self.record_runtime_requirements();
                 if !diagnostics.is_empty() {
@@ -1621,11 +1629,6 @@ impl LoweredProgram {
                     report("call", id.index());
                 }
             }
-            ArtifactUseSite::CStringTemporary(id) => {
-                if !call(id) {
-                    report("call", id.index());
-                }
-            }
             ArtifactUseSite::IndexTemporary { expression: id, .. } => {
                 if !expression(id) {
                     report("expression", id.index());
@@ -2173,6 +2176,10 @@ mod tests {
     }
 
     impl ArtifactFamilyHooks for TestHooks {
+        fn scans_cleanup(&self) -> bool {
+            false
+        }
+
         fn scan_initializer(
             &self,
             _program: &LoweredProgram,
@@ -3005,6 +3012,10 @@ mod tests {
     }
 
     impl ArtifactFamilyHooks for GrowHooks {
+        fn scans_cleanup(&self) -> bool {
+            false
+        }
+
         fn scan_initializer(
             &self,
             _program: &LoweredProgram,
@@ -3420,6 +3431,10 @@ mod tests {
     }
 
     impl ArtifactFamilyHooks for ArtifactOnlyGrowHooks {
+        fn scans_cleanup(&self) -> bool {
+            false
+        }
+
         fn scan_initializer(
             &self,
             _program: &LoweredProgram,
@@ -3935,6 +3950,10 @@ mod tests {
     }
 
     impl ArtifactFamilyHooks for PlanChangingHooks {
+        fn scans_cleanup(&self) -> bool {
+            false
+        }
+
         fn scan_initializer(
             &self,
             _program: &LoweredProgram,

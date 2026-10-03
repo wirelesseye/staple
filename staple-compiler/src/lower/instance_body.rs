@@ -1782,9 +1782,19 @@ impl<'a> BodyCloner<'a> {
                 super::LoweredArgumentPassMode::Value
             };
             argument.temporary = (mutation || indirect) && argument.place.is_none();
-            argument.drops_after_call =
-                mutation && argument.place.is_none() && self.program.concrete_needs_drop(&expected);
         }
+        super::mark_call_temporary_drops(
+            &call.target,
+            &call.function_type,
+            &mut call.arguments,
+            |id| {
+                self.body
+                    .expressions
+                    .get(id)
+                    .map(|expression| expression.value_type.clone())
+            },
+            |value_type| self.program.concrete_needs_drop(value_type),
+        );
         // A generic whole-product borrow records one shared operand with
         // one record per ABI slot. Once every concrete slot passes by value,
         // evaluate that operand once and explicitly unpack all final slots.
@@ -3120,7 +3130,6 @@ impl<'a> BodyCloner<'a> {
             result_type: CheckedType::Error,
             substitutions: CallSubstitutions::default(),
             evidence: None,
-            c_string_temporary: false,
             reactive: None,
             buffer_pop: None,
             runtime: Default::default(),

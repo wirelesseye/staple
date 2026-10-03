@@ -140,7 +140,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 84] = [
+static CORPUS: [CorpusProgram; 85] = [
     expect_stdout(must_run(inline("empty", "", "core")), ""),
     expect_stdout(
         must_run(inline(
@@ -1646,8 +1646,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                 concat!(
                     "use std.cinterop.(CString, c_string)\n",
                     "use std.io.(IO, println)\n",
+                    "extern \"c\" { strlen: CString -> USize }\n",
                     "let signal base = 0\n",
-                    "def render: (CString, I32) -> String = (text, extra) => CString.to_string text\n",
+                    "def render: (CString, I32) -> String = (text, extra) => \"${strlen text}+${extra}\"\n",
                     "def make: move CString ->{state.read, IO} String = move text => {\n",
                     "  let derived = render (text, base)\n",
                     "  println \"derived ${derived}\"\n",
@@ -1661,7 +1662,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ),
             &["render", "make"],
         ),
-        "derived len\nvalue len\n",
+        "derived 3+3\nvalue 3+3\n",
     )),
     // generic: the cancel unwind drops the frame bindings in plan order
     // (`first` then `second`); emission fixed the completed-coroutine
@@ -2254,6 +2255,66 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             &["quiet", "outer", "wide"],
         ),
         "awaited 5\nblock_on 3\n",
+    )),
+    // A temporary passed to a borrowed parameter is owned by the call site and
+    // dropped right after the call, on every route; a `move` parameter's
+    // callee drops it instead. A borrowed named binding and the elements of a
+    // spread named product stay with their owner until scope exit.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "borrowed_temporaries_drop_after_call",
+                concat!(
+                    "use std.cinterop.(CString, c_string)\n",
+                    "extern \"c\" { puts: CString -> I32 }\n",
+                    "type Tag = ctor CString\n",
+                    "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
+                    "trait Measure T { measure: T -> I32 }\n",
+                    "impl Measure Tag { def measure = tag => 1 }\n",
+                    "def borrow: Tag -> I32 = tag => 1\n",
+                    "def take: move Tag -> I32 = move tag => 2\n",
+                    "def pair: (Tag, I32) -> I32 = (tag, count) => count\n",
+                    "def both: (Tag, Tag) -> I32 = (first, second) => 2\n",
+                    "def apply: (Tag -> I32) -> I32 = f => f (Tag (c_string \"drop indirect borrowed\"))\n",
+                    "def apply_move: ((move Tag) -> I32) -> I32 = f => f (Tag (c_string \"drop indirect moved\"))\n",
+                    "def run: () -> () = () => {\n",
+                    "    puts (c_string \"direct borrowed\");\n",
+                    "    borrow (Tag (c_string \"drop direct borrowed\"));\n",
+                    "    puts (c_string \"direct moved\");\n",
+                    "    take (Tag (c_string \"drop direct moved\"));\n",
+                    "    puts (c_string \"indirect borrowed\");\n",
+                    "    apply borrow;\n",
+                    "    puts (c_string \"indirect moved\");\n",
+                    "    apply_move take;\n",
+                    "    puts (c_string \"trait borrowed\");\n",
+                    "    Measure.measure (Tag (c_string \"drop trait borrowed\"));\n",
+                    "    puts (c_string \"product element\");\n",
+                    "    pair (Tag (c_string \"drop product element\"), 3);\n",
+                    "    puts (c_string \"named binding\");\n",
+                    "    let named = Tag (c_string \"drop named at scope exit\")\n",
+                    "    borrow named;\n",
+                    "    let spread = (Tag (c_string \"drop spread second\"), Tag (c_string \"drop spread first\"))\n",
+                    "    both (...spread);\n",
+                    "    puts (c_string \"extern C string\");\n",
+                    "    puts (c_string \"printed by puts\");\n",
+                    "    puts (c_string \"end of scope\");\n",
+                    "    ()\n",
+                    "}\n",
+                    "let _ = run ()\n",
+                ),
+                "ownership",
+            ),
+            &[
+                "run",
+                "apply",
+                "apply_move",
+                "borrow",
+                "take",
+                "pair",
+                "both",
+            ],
+        ),
+        "direct borrowed\ndrop direct borrowed\ndirect moved\ndrop direct moved\nindirect borrowed\ndrop indirect borrowed\nindirect moved\ndrop indirect moved\ntrait borrowed\ndrop trait borrowed\nproduct element\ndrop product element\nnamed binding\nextern C string\nprinted by puts\nend of scope\ndrop spread first\ndrop spread second\ndrop named at scope exit\n",
     )),
 ];
 

@@ -1063,13 +1063,6 @@ pub(crate) struct LoweredCall {
     pub substitutions: CallSubstitutions,
     /// Trait evidence for trait-dispatched calls.
     pub evidence: Option<TraitEvidence>,
-    /// The call owns a `CString` temporary (an argument that is not a named
-    /// binding) and must release it after the call. Set for a direct extern
-    /// call, and for a closure call whose callee is a statically known extern
-    /// binding that borrows the argument. Any other callable leaves the
-    /// temporary unreleased; see the known leak documented at the indirect
-    /// call site in `lower_call`.
-    pub c_string_temporary: bool,
     /// The reactive operation this intrinsic call performs (`reactive_scope`,
     /// `reaction`, `batch`, `until`, `snapshot`).
     pub reactive: Option<LoweredReactiveOperationId>,
@@ -6857,7 +6850,6 @@ impl LoweredProgram {
         let symbol = module.symbol_for(callee_syntax);
         let mut substitutions = CallSubstitutions::default();
         let mut initialization_checks = Vec::new();
-        let mut c_string_temporary = false;
         let mut evidence = None;
         let (target, callee, function_type) = match route {
             CallRoute::GenericDirect => {
@@ -6904,10 +6896,6 @@ impl LoweredProgram {
                     internal_invariant(origin.span.clone(), "extern calls are symbol-selected")
                 })?;
                 let function_type = checked_call_function_type(module, call, &origin)?;
-                c_string_temporary = module
-                    .type_of_expression(call.argument.syntax().id)
-                    .is_some_and(|value_type| *value_type == CheckedType::CString)
-                    && module.symbol_for(call.argument.syntax().id).is_none();
                 (
                     LoweredCallableTarget::ExternalFunction { symbol },
                     None,
@@ -6949,39 +6937,6 @@ impl LoweredProgram {
                             )
                         })?,
                 };
-                // A closure call to a statically known extern binding that
-                // borrows a `CString` temporary releases it after the call,
-                // exactly like the direct extern route; a `move` parameter
-                // takes ownership instead, and the callee's own drop releases
-                // it.
-                //
-                // KNOWN LEAK: through any other callable (a callback
-                // parameter, a stored closure) the temporary is never freed.
-                // Freeing it unconditionally would be wrong, because some
-                // callables consume their `CString` argument even though the
-                // parameter is not marked `move`: `CString.to_string` releases
-                // it, so `apply CString.to_string` with a caller-side free
-                // would double-free. The fix is to record, per callable type,
-                // whether its `CString` parameter consumes or borrows the
-                // value (a `move` marker, or a releasing conversion such as
-                // `to_string`), and release the temporary here only when it
-                // borrows. Reproduce with
-                // `def apply: (CString -> I32) -> I32 = f => f (c_string "x")`
-                // called with a non-extern closure: the C string is never freed.
-                c_string_temporary = module
-                    .symbol_for(callee_syntax)
-                    .is_some_and(|symbol| resolved.is_external_symbol(symbol))
-                    && module
-                        .type_of_expression(call.argument.syntax().id)
-                        .is_some_and(|value_type| *value_type == CheckedType::CString)
-                    && module.symbol_for(call.argument.syntax().id).is_none()
-                    && !mutation_slot_mask(
-                        flattened_parameter_types(&function_type.parameter).len(),
-                        &function_type.moves,
-                    )
-                    .first()
-                    .copied()
-                    .unwrap_or(false);
                 (
                     LoweredCallableTarget::IndirectClosure { callee },
                     Some(callee),
@@ -7137,6 +7092,18 @@ impl LoweredProgram {
             &self.semantic_ids,
         )
         .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
+        let mut arguments = arguments;
+        mark_call_temporary_drops(
+            &target,
+            &function_type,
+            &mut arguments,
+            |id| {
+                self.expressions
+                    .get(id)
+                    .map(|expression| expression.value_type.clone())
+            },
+            |value_type| module.type_needs_drop(value_type),
+        );
         let call_id = self.calls.push(LoweredCall {
             origin,
             target,
@@ -7149,7 +7116,6 @@ impl LoweredProgram {
             result_type: function_type.result.as_ref().clone(),
             substitutions,
             evidence,
-            c_string_temporary,
             reactive,
             buffer_pop,
             runtime,
@@ -7268,6 +7234,18 @@ impl LoweredProgram {
             &self.semantic_ids,
         )
         .map_err(|message| Diagnostic::new(origin.span.clone(), message))?;
+        let mut arguments = arguments;
+        mark_call_temporary_drops(
+            &target,
+            &function_type,
+            &mut arguments,
+            |id| {
+                self.expressions
+                    .get(id)
+                    .map(|expression| expression.value_type.clone())
+            },
+            |value_type| module.type_needs_drop(value_type),
+        );
         let call_id = self.calls.push(LoweredCall {
             origin,
             target,
@@ -7280,7 +7258,6 @@ impl LoweredProgram {
             result_type: function_type.result.as_ref().clone(),
             substitutions: CallSubstitutions::default(),
             evidence: None,
-            c_string_temporary: false,
             reactive,
             buffer_pop,
             runtime,
@@ -7402,9 +7379,7 @@ impl LoweredProgram {
                         expected: expected.clone(),
                         place,
                         temporary: (mutation || indirect_slot) && place.is_none(),
-                        drops_after_call: mutation
-                            && place.is_none()
-                            && module.type_needs_drop(&expected),
+                        drops_after_call: false,
                     }
                 })
                 .collect();
@@ -7796,8 +7771,6 @@ impl LoweredProgram {
             LoweredArgumentPassMode::Value
         };
         let temporary = (mutation || indirect) && placement.place.is_none();
-        let drops_after_call =
-            mutation && placement.place.is_none() && module.type_needs_drop(expected);
         Ok(LoweredCallArgument {
             expression: placement.expression,
             thunk: placement.thunk,
@@ -7806,7 +7779,8 @@ impl LoweredProgram {
             expected: expected.clone(),
             place: placement.place,
             temporary,
-            drops_after_call,
+            // Decided for the whole call by `mark_call_temporary_drops`.
+            drops_after_call: false,
         })
     }
 
@@ -12414,6 +12388,77 @@ impl LoweredProgram {
 /// emission report it instead of panicking, naming the invariant.
 pub(crate) fn internal_invariant(span: Span, invariant: &str) -> Diagnostic {
     Diagnostic::new(span, format!("internal invariant violated: {invariant}"))
+}
+
+/// Decides which arguments of one call are temporaries the caller drops after
+/// the call. An argument with no source place that is not an implicit thunk is
+/// owned by the call site. When its parameter is mutated, or borrowed (neither
+/// `move` nor `mut`), the callee does not take ownership, so the caller drops
+/// it once the call returns. A `move` parameter takes ownership instead.
+///
+/// Intrinsic and constructor targets consume or copy their arguments
+/// themselves and never get caller drops. A borrowed slot must also have its
+/// own ABI slot and its own operand: product-spread and whole-product slots
+/// share one operand, which this rule leaves to its owner.
+pub(crate) fn mark_call_temporary_drops(
+    target: &LoweredCallableTarget,
+    function_type: &CheckedFunctionType,
+    arguments: &mut [LoweredCallArgument],
+    operand_type: impl Fn(ExpressionId) -> Option<CheckedType>,
+    needs_drop: impl Fn(&CheckedType) -> bool,
+) {
+    let caller_drops = !matches!(
+        target,
+        LoweredCallableTarget::Intrinsic { .. } | LoweredCallableTarget::Constructor { .. }
+    );
+    let whole_mutation = function_type.mutations.contains(&CheckedMutation::Whole);
+    let whole_move = function_type.moves.contains(&CheckedMutation::Whole);
+    let mut operand_uses = HashMap::<ExpressionId, usize>::new();
+    for expression in arguments.iter().filter_map(|argument| argument.expression) {
+        *operand_uses.entry(expression).or_default() += 1;
+    }
+    for argument in arguments.iter_mut() {
+        let element = |slot: usize| CheckedMutation::Element(slot);
+        let mutation = whole_mutation
+            || argument
+                .slot
+                .is_some_and(|slot| function_type.mutations.contains(&element(slot)));
+        let moved = whole_move
+            || argument
+                .slot
+                .is_some_and(|slot| function_type.moves.contains(&element(slot)));
+        let own_operand = argument.slot.is_some()
+            && argument
+                .expression
+                .is_some_and(|expression| operand_uses.get(&expression) == Some(&1));
+        let borrowed = !mutation && !moved && own_operand;
+        argument.drops_after_call = caller_drops
+            && argument.place.is_none()
+            && argument.thunk.is_none()
+            && (mutation || borrowed)
+            && needs_drop(&call_temporary_drop_type(
+                &argument.expected,
+                argument.expression.and_then(&operand_type).as_ref(),
+            ));
+    }
+}
+
+/// The type a call temporary is dropped as: its parameter type, except that a
+/// `CString` passed where `CPointer CChar` is expected is the same pointer seen
+/// without ownership, so the temporary is still dropped as the owned
+/// `CString`.
+pub(crate) fn call_temporary_drop_type(
+    expected: &CheckedType,
+    operand: Option<&CheckedType>,
+) -> CheckedType {
+    match (expected, operand) {
+        (CheckedType::CPointer { pointee }, Some(CheckedType::CString))
+            if **pointee == CheckedType::CChar =>
+        {
+            CheckedType::CString
+        }
+        _ => expected.clone(),
+    }
 }
 
 fn validate_semantic_ids(
@@ -17242,7 +17287,9 @@ mod tests {
         assert!(calls.iter().any(|call| matches!(
             call.target,
             LoweredCallableTarget::ExternalFunction { .. }
-        ) && call.c_string_temporary));
+        ) && call.arguments.iter().any(|argument| {
+            argument.drops_after_call && argument.expected == CheckedType::CString
+        })));
         assert!(
             calls
                 .iter()
@@ -17482,6 +17529,82 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_temporaries_drop_after_the_call() {
+        let module = checked_program(concat!(
+            "use std.cinterop.(CString, c_string)\n",
+            "use std.io.print\n",
+            "extern \"c\" { strlen: CString -> USize }\n",
+            "def borrow: CString -> USize = value => strlen value\n",
+            "def consume: move CString -> USize = move value => strlen value\n",
+            "def apply: (CString -> USize) -> USize = f => f (c_string \"borrowed\")\n",
+            "def apply_move: ((move CString) -> USize) -> USize = f => f (c_string \"moved\")\n",
+            "let a = apply borrow\n",
+            "let b = apply_move consume\n",
+            "let c = strlen (CString.from_string \"extern\")\n",
+            "print \"variadic\"\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        // A callback's borrowed `CString` temporary is dropped by the caller;
+        // a `move` parameter's callee owns it.
+        let callbacks = program
+            .calls
+            .iter()
+            .map(|(_, call)| call)
+            .filter(|call| {
+                matches!(call.target, LoweredCallableTarget::IndirectClosure { .. })
+                    && *call.function_type.parameter == CheckedType::CString
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 2, "both callback calls lower");
+        for call in callbacks {
+            assert_eq!(
+                call.arguments[0].drops_after_call,
+                call.function_type.moves.is_empty(),
+                "only a borrowed callback parameter leaves the temporary to the caller"
+            );
+        }
+
+        // Native externs borrow every argument, including variadic slots and
+        // a `CString` viewed as `CPointer CChar` (`print`'s `printf`).
+        let externs = program
+            .calls
+            .iter()
+            .map(|(_, call)| call)
+            .filter(|call| matches!(call.target, LoweredCallableTarget::ExternalFunction { .. }))
+            .filter(|call| {
+                call.arguments.iter().any(|argument| {
+                    argument.expression.is_some_and(|expression| {
+                        program
+                            .expressions
+                            .get(expression)
+                            .is_some_and(|expression| {
+                                matches!(expression.kind, LoweredExpressionKind::Call(_))
+                                    || expression.value_type == CheckedType::CString
+                            })
+                    }) && argument.place.is_none()
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            externs.iter().any(|call| call.arguments.len() == 2
+                && call
+                    .arguments
+                    .iter()
+                    .all(|argument| argument.drops_after_call)),
+            "printf frees its format and its converted argument"
+        );
+        assert!(
+            externs.iter().any(|call| call.arguments.len() == 1
+                && call.arguments[0].drops_after_call
+                && call.arguments[0].expected == CheckedType::CString),
+            "strlen frees its converted temporary"
+        );
+    }
+
+    #[test]
     fn call_facts_agree_with_checked_function_types() {
         let module = checked_program(call_fixture());
         let mut program = LoweredProgram::default();
@@ -17503,8 +17626,15 @@ mod tests {
             );
             assert_eq!(call.result_type, *call.function_type.result);
             assert!(
-                !call.c_string_temporary
-                    || matches!(call.target, LoweredCallableTarget::ExternalFunction { .. })
+                !matches!(
+                    call.target,
+                    LoweredCallableTarget::Intrinsic { .. }
+                        | LoweredCallableTarget::Constructor { .. }
+                ) || call
+                    .arguments
+                    .iter()
+                    .all(|argument| !argument.drops_after_call),
+                "intrinsics and constructors own their arguments"
             );
             for symbol in &call.initialization_checks {
                 assert!(program.symbols.get(*symbol).is_some());

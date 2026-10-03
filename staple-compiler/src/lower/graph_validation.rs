@@ -1961,7 +1961,7 @@ pub(crate) mod tests {
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
                 "extern \"c\" { inspect: CString -> I32 }\n",
-                "def convert: CString -> String = value => CString.to_string value\n",
+                "def convert: move CString -> String = move value => CString.to_string value\n",
                 "def render: String -> CString = value => CString.from_string value\n",
                 "def classify: String -> I32 = value => match value { \"a\" => 1, _ => 0 }\n",
                 "def owned: () -> CString = () => c_string \"owned\"\n",

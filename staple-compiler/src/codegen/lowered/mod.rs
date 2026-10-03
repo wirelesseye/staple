@@ -4896,10 +4896,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // are evaluated first and the hidden ones appended; the call passes
         // `[environment, hidden..., visible...]`.
         let mut hidden: Vec<BasicMetadataValueEnum<'context>> = Vec::new();
-        // Mutation temporaries whose value needs drop after the call, in
+        // Call temporaries whose value needs drop after the call, in
         // evaluation order with their argument record index; `emit_call_cleanup`
         // drops them in reverse.
-        let mut cleanups: Vec<(usize, PointerValue<'context>)> = Vec::new();
+        let mut cleanups: Vec<(usize, DropSource<'context>)> = Vec::new();
         let mut invoked = false;
         // A whole-product argument against a flattened multi-element parameter
         // records no ABI slot; the single struct is unpacked after evaluation.
@@ -5078,31 +5078,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.ensure_callee_parts(&callee_value, &mut callee_parts)?;
         let mut values = hidden;
         values.extend(slots.into_iter().map(Option::unwrap));
-        // A C-string temporary is the first visible argument. The direct extern
-        // route passes the CString value itself; a closure route passes a
-        // pointer to the borrowed CString slot, so the temporary's value is
-        // loaded before it is released.
-        let cleanup_c_string = if call.c_string_temporary {
-            match values.first() {
-                Some(BasicMetadataValueEnum::PointerValue(pointer)) if native_extern => {
-                    Some(*pointer)
-                }
-                Some(BasicMetadataValueEnum::PointerValue(pointer)) => Some(
-                    self.backend
-                        .builder
-                        .build_load(
-                            self.backend.compile_type(&CheckedType::CString)?,
-                            *pointer,
-                            "c_string.temporary",
-                        )
-                        .map_err(compiler_diagnostic)?
-                        .into_pointer_value(),
-                ),
-                _ => None,
-            }
-        } else {
-            None
-        };
         let binding = self
             .view
             .binding(owner, LoweredBindingSite::Call(id))
@@ -5217,38 +5192,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         };
         let value = result?;
-        self.emit_call_cleanup(owner, id, &cleanups, cleanup_c_string, &call.origin.span)?;
+        self.emit_call_cleanup(owner, id, cleanups, &call.origin.span)?;
         Ok(value)
     }
 
-    /// The post-call cleanup hook. Mutation temporaries are dropped in reverse
-    /// collection order, then a C-string temporary is released; each drop
-    /// expands the glue named by its own `CallTemporary` or `CStringTemporary`
-    /// use record.
+    /// The post-call cleanup hook. Call temporaries are dropped in reverse
+    /// collection order; each drop expands the glue named by its own
+    /// `CallTemporary` use record.
     fn emit_call_cleanup(
         &self,
         owner: EmissionOwner,
         call_id: LoweredCallId,
-        temporaries: &[(usize, PointerValue<'context>)],
-        c_string: Option<PointerValue<'context>>,
+        temporaries: Vec<(usize, DropSource<'context>)>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
-        for (argument, pointer) in temporaries.iter().rev() {
+        for (argument, source) in temporaries.into_iter().rev() {
             self.emit_drop_site(
                 owner,
                 crate::ArtifactUseSite::CallTemporary {
                     call: call_id,
-                    argument: *argument,
+                    argument,
                 },
-                DropSource::Temporary(*pointer),
-                span,
-            )?;
-        }
-        if let Some(pointer) = c_string {
-            self.emit_drop_site(
-                owner,
-                crate::ArtifactUseSite::CStringTemporary(call_id),
-                DropSource::Value(pointer.into()),
+                source,
                 span,
             )?;
         }
@@ -5379,7 +5344,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         expression: Option<ExpressionId>,
         by_value_route: bool,
         environment: &mut FunctionEnvironment<'context>,
-        cleanups: &mut Vec<(usize, PointerValue<'context>)>,
+        cleanups: &mut Vec<(usize, DropSource<'context>)>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
         let Some(expression) = expression else {
@@ -5579,37 +5544,30 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         record_index: usize,
         value: BasicValueEnum<'context>,
         by_value_route: bool,
-        cleanups: &mut Vec<(usize, PointerValue<'context>)>,
+        cleanups: &mut Vec<(usize, DropSource<'context>)>,
     ) -> CodeGenerationResult<BasicMetadataValueEnum<'context>> {
         if by_value_route || record.pass_mode == LoweredArgumentPassMode::Value {
+            // A native extern borrows its arguments as call-scoped views.
+            if record.drops_after_call {
+                cleanups.push((record_index, DropSource::Value(value)));
+            }
             return Ok(value.into());
         }
         let llvm_type = self.backend.compile_type(&record.expected)?;
-        match record.pass_mode {
-            LoweredArgumentPassMode::Value => Ok(value.into()),
-            LoweredArgumentPassMode::BorrowedPointer
-            | LoweredArgumentPassMode::MaterializedTemporary => Ok(self
-                .backend
-                .build_argument_temporary(
-                    value,
-                    llvm_type,
-                    "borrow.temporary",
-                    staple_syntax::Span::Compiler,
-                )?
-                .into()),
-            LoweredArgumentPassMode::MutablePlace => {
-                let pointer = self.backend.build_argument_temporary(
-                    value,
-                    llvm_type,
-                    "mutation.temporary",
-                    staple_syntax::Span::Compiler,
-                )?;
-                if record.drops_after_call {
-                    cleanups.push((record_index, pointer));
-                }
-                Ok(pointer.into())
-            }
+        let name = match record.pass_mode {
+            LoweredArgumentPassMode::MutablePlace => "mutation.temporary",
+            _ => "borrow.temporary",
+        };
+        let pointer = self.backend.build_argument_temporary(
+            value,
+            llvm_type,
+            name,
+            staple_syntax::Span::Compiler,
+        )?;
+        if record.drops_after_call {
+            cleanups.push((record_index, DropSource::Temporary(pointer)));
         }
+        Ok(pointer.into())
     }
 
     /// One spread step: evaluate the operand once and extract each mapped
@@ -5623,7 +5581,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         mappings: &[(usize, usize)],
         by_value_route: bool,
         environment: &mut FunctionEnvironment<'context>,
-        cleanups: &mut Vec<(usize, PointerValue<'context>)>,
+        cleanups: &mut Vec<(usize, DropSource<'context>)>,
         slots: &mut [Option<BasicMetadataValueEnum<'context>>],
     ) -> CodeGenerationResult<()> {
         let value = self.emit_expression(owner, expression, environment)?;

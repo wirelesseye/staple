@@ -3574,7 +3574,7 @@ impl TypeChecker {
                         default: None,
                         parameter: Box::new(CheckedType::CString),
                         mutations: Vec::new(),
-                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
+                        moves: vec![CheckedMutation::Whole],                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::String),
                     })
                 }

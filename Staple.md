@@ -2004,6 +2004,14 @@ close_file handle
 handle // error: use of moved value
 ```
 
+A temporary argument is a value that belongs to no binding, such as a call
+result or a constructor application. When it is passed to a borrowed
+parameter, the call site owns it and drops it as soon as the call returns; when
+it is passed to a `move` parameter, the callee owns it. A named binding passed
+to a borrowed parameter, including a product spread into borrowed parameters,
+stays owned by its binding. The rule is the same for direct calls, closure
+calls, trait methods, and C functions.
+
 `move` uses the same syntax and placement rules as `mut`: it may prefix a
 whole parameter type or binding, or a direct positional or named element of a
 top-level product parameter, and a `move` marker on a parameter binding
@@ -3309,8 +3317,9 @@ pointers.
 `free`. It is compatible with `CPointer CChar`, but an arbitrary
 `CPointer CChar` is not assumed to be NUL terminated. Passing a `CString` to a
 C function creates a call-scoped view rather than transferring ownership, and
-C declarations may not return `CString`. `CString.to_string` consumes its
-argument, validates and copies UTF-8 into a `String`, then frees it;
+C declarations may not return `CString`. `CString.to_string` takes its argument
+as `move CString`: it validates and copies UTF-8 into a `String`, then frees the
+C string, so the argument cannot be used afterward;
 `CString.from_string` allocates an owned copy, appends a terminator, and traps on
 an interior NUL byte. Invalid UTF-8 also traps.
 

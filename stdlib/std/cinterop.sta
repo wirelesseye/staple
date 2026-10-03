@@ -25,13 +25,13 @@ impl !Copy CString {}
 pub macro c_string: Expr -> Expr
 
 extern "staple-intrinsic" {
-    __string_from_c_string: CString -> String
+    __string_from_c_string: move CString -> String
     __string_to_c_string: String -> CString
 }
 
 companion CString {
-    /// Converts a C string to a Staple string.
-    pub def to_string: CString -> String = value => __string_from_c_string value
+    /// Converts a C string to a Staple string, consuming and freeing it.
+    pub def to_string: move CString -> String = move value => __string_from_c_string value
     /// Converts a Staple string to a C string.
     pub def from_string: String -> CString = value => __string_to_c_string value
 }

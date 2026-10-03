@@ -1011,7 +1011,6 @@ impl<'a> LoweredWalker<'a> {
         let steps = call.steps.clone();
         let arguments = call.arguments.clone();
         let result_type = call.result_type.clone();
-        let c_string_temporary = call.c_string_temporary;
         if let Some(callee) = call.callee {
             self.walk_expression(callee)?;
         }
@@ -1174,22 +1173,19 @@ impl<'a> LoweredWalker<'a> {
         if let Some(operation) = call.reactive {
             self.visitor.reactive_operation(operation, &origin)?;
         }
-        if c_string_temporary {
-            self.visitor.drop_site(
-                ArtifactUseSite::CStringTemporary(id),
-                &CheckedType::CString,
-                &origin,
-            )?;
-        }
-        // The emitter drops mutation temporaries in reverse collection order.
+        // The emitter drops call temporaries in reverse collection order.
         for (index, argument) in arguments.iter().enumerate().rev() {
             if argument.drops_after_call {
+                let operand = argument
+                    .expression
+                    .and_then(|expression| self.owner.expression(self.program, expression))
+                    .map(|expression| &expression.value_type);
                 self.visitor.drop_site(
                     ArtifactUseSite::CallTemporary {
                         call: id,
                         argument: index,
                     },
-                    &argument.expected,
+                    &super::call_temporary_drop_type(&argument.expected, operand),
                     &origin,
                 )?;
             }
@@ -3148,7 +3144,7 @@ mod tests {
         "}\n",
         "def closure_env: move CString -> (() -> I32) = move value => () => inspect value\n",
         "def make_ref: () -> Ref CString = () => Ref (c_string \"x\")\n",
-        "def convert: CString -> String = value => CString.to_string value\n",
+        "def convert: move CString -> String = move value => CString.to_string value\n",
         "def nested: (I32) -> I32 = value => {\n",
         "  let outer = c_string \"a\"\n",
         "  when { value > 0 => { let inner = c_string \"b\"; inspect inner }, else => inspect outer }\n",
@@ -3199,8 +3195,8 @@ mod tests {
             "a loop body result drop site"
         );
         assert!(
-            has(|site| matches!(site, ArtifactUseSite::CStringTemporary(_))),
-            "an extern C-string temporary drop site"
+            has(|site| matches!(site, ArtifactUseSite::CallTemporary { .. })),
+            "a borrowed C-string temporary drop site"
         );
         assert!(
             has(|site| matches!(site, ArtifactUseSite::WildcardDiscard(_))),
