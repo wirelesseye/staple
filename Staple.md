@@ -2011,7 +2011,7 @@ after the call:
 ```staple
 type File = wrap I32
 impl Drop File {
-    drop = File descriptor => close descriptor
+    cleanup = File descriptor => close descriptor
 }
 
 def describe: File -> String = file => "file $file"
@@ -3371,19 +3371,19 @@ explicit `impl Copy` is rejected. A custom `Drop` implementation makes its
 wrapper target move-only regardless of its representation. A wrapper target
 can also be opted out of `Copy` directly, without a `Drop` implementation, with
 a negative `impl !Copy T {}` declaration; this only affects assignment and
-moves, not destruction, so the type still needs no `drop` member and is not
+moves, not destruction, so the type still needs no `cleanup` member and is not
 finalized on collection.
 
 ```staple
 trait Copy T {}
 
 trait Drop T {
-    drop: T -> ()
+    cleanup: T -> ()
 }
 
 type File = wrap I32
 impl Drop File {
-    drop = File descriptor => close descriptor
+    cleanup = File descriptor => close descriptor
 }
 
 type Handle = wrap I32
@@ -3404,7 +3404,7 @@ such a value is a move error even if some instantiation would qualify.
 ```staple
 type Box T = wrap (T)
 impl<T where Copy T> Drop (Box T) {
-    drop = Box value => ()
+    cleanup = Box value => ()
 }
 
 // `Box I32` has the custom destructor above; `Box CString` does not (its
@@ -3440,11 +3440,14 @@ impl Clone Handle {
 
 Owned locals and parameters are dropped in reverse lexical order on normal
 scope exit, explicit `return`, and propagation. `drop value` consumes and
-destroys a value early. A destructor may inspect copied fields and make scoped
-C calls, but may not move out of its value; after the custom destructor returns,
-the representation's owned fields are dropped automatically. Partial field
-moves through `.name` or `.index` are rejected; destructure the whole owned
-value instead.
+destroys a value early; it is an ordinary function whose moved parameter is
+dropped on return. The compiler calls `Drop.cleanup` itself, so referencing it
+directly — as a call or a value — is rejected, since the value would be
+destroyed again on its normal drop. A destructor may inspect copied fields and
+make scoped C calls, but may not move out of its value; after the custom
+destructor returns, the representation's owned fields are dropped
+automatically. Partial field moves through `.name` or `.index` are rejected;
+destructure the whole owned value instead.
 
 A global binding may hold a move-only value, but the value can only ever be
 borrowed — shared or `mut` — from top-level statements or from any function;

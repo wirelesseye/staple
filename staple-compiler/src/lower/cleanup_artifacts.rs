@@ -1068,15 +1068,6 @@ impl<'a> LoweredWalker<'a> {
                 }
             }
             super::LoweredCallableTarget::Intrinsic { intrinsic, .. } => match intrinsic {
-                IntrinsicFunction::Drop => {
-                    if let Some(argument) = arguments.first() {
-                        self.visitor.drop_site(
-                            ArtifactUseSite::DropIntrinsic(id),
-                            &argument.expected,
-                            &origin,
-                        )?;
-                    }
-                }
                 IntrinsicFunction::StringFromCString => {
                     self.visitor.drop_site(
                         ArtifactUseSite::CStringConversion(id),
@@ -2065,12 +2056,12 @@ mod tests {
         "use std.cinterop.(CString, c_string)\n",
         "use std.coroutine.*\n",
         "type Resource = wrap I32\n",
-        "impl Drop Resource { drop = Resource value => () }\n",
+        "impl Drop Resource { cleanup = Resource value => () }\n",
         "type Handle = wrap CString\n",
-        "impl Drop Handle { drop = Handle value => () }\n",
+        "impl Drop Handle { cleanup = Handle value => () }\n",
         "type Wrapped = wrap CString\n",
         "type Box T = wrap (T)\n",
-        "impl<T where Copy T> Drop (Box T) { drop = Box value => () }\n",
+        "impl<T where Copy T> Drop (Box T) { cleanup = Box value => () }\n",
         "type Chain = wrap ((CString) | (Ref Chain))\n",
         "def expose_resource: Resource -> I32 = value => 0\n",
         "def expose_handle: Handle -> I32 = value => 0\n",
@@ -2390,7 +2381,7 @@ mod tests {
     fn drop_glue_converges_and_reports_closure_stats() {
         let source = concat!(
             "type Resource = wrap I32\n",
-            "impl Drop Resource { drop = Resource value => () }\n",
+            "impl Drop Resource { cleanup = Resource value => () }\n",
             "def mutate_resource: move (Resource, Resource) -> (Resource, Resource) = move pair => {\n",
             "  let mut copy = pair\n",
             "  copy[0] = Resource 3\n",
@@ -3021,7 +3012,7 @@ mod tests {
         "use std.clone.Clone\n",
         "use std.cinterop.(CString, c_string)\n",
         "type Owned = wrap I32\n",
-        "impl Drop Owned { drop = Owned value => () }\n",
+        "impl Drop Owned { cleanup = Owned value => () }\n",
         "impl Clone Owned { clone = Owned value => Owned value }\n",
         "def clone_copy: (Buffer I32) -> Buffer I32 = buffer => Clone.clone buffer\n",
         "def clone_owned: (Buffer Owned) -> Buffer Owned = buffer => Clone.clone buffer\n",

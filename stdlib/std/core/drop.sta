@@ -2,13 +2,10 @@ pub mod
 
 /// Marks types with custom cleanup behavior.
 pub trait Drop T {
-    /// Cleans up a value before it is discarded.
-    drop: T -> ()
-}
-
-extern "staple-intrinsic" {
-    __drop: <T> move T -> ()
+    /// Cleans up a value before it is discarded. The compiler calls this
+    /// automatically; call `drop` to discard a value early.
+    cleanup: T -> ()
 }
 
 /// Consumes a value and runs its cleanup behavior when applicable.
-pub def drop: <T> move T -> () = move value => __drop value
+pub def drop: <T> move T -> () = move value => ()

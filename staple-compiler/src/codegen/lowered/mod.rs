@@ -7047,23 +7047,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 Ok(old.as_any_value_enum())
             }
-            IntrinsicFunction::Drop => {
-                // The emitter evaluates the argument, drops it through the
-                // recorded `DropIntrinsic` glue, and returns unit.
-                let Some(value) = arguments.first().copied() else {
-                    return Err(Diagnostic::new(span, "Drop requires a value"));
-                };
-                let value = BasicValueEnum::try_from(value).map_err(|_| {
-                    Diagnostic::new(span.clone(), "Drop argument is not first-class")
-                })?;
-                self.emit_drop_site(
-                    owner,
-                    crate::ArtifactUseSite::DropIntrinsic(call_id),
-                    DropSource::Value(value),
-                    &span,
-                )?;
-                Ok(self.backend.unit_value())
-            }
             IntrinsicFunction::ReactiveScope => {
                 // The unit argument is evaluated by the call route; then create
                 // the ambient scope.

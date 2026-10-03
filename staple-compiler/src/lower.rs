@@ -12886,8 +12886,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::BufferFreeze
         | Intrinsic::BufferTransfer
         | Intrinsic::BufferClone
-        | Intrinsic::RefReplace
-        | Intrinsic::Drop => None,
+        | Intrinsic::RefReplace => None,
     }
 }
 
@@ -16864,7 +16863,6 @@ mod tests {
         coroutine_routes.dedup();
         assert_eq!(coroutine_routes.len(), Coro::ALL.len());
 
-        assert!(intrinsic_route(I::Drop).is_none());
         assert!(intrinsic_route(I::StringAdd).is_none());
     }
 
@@ -19368,7 +19366,7 @@ mod tests {
     fn blocks_preserve_nested_results_divergence_and_drop_facts() {
         let module = checked_program(concat!(
             "type Handle = wrap I32\n",
-            "impl Drop Handle { drop = Handle value => () }\n",
+            "impl Drop Handle { cleanup = Handle value => () }\n",
             "def nested = () => {\n",
             "  let outer: I32 = { let inner: I32 = 1; inner + 2 }\n",
             "  outer\n",
@@ -19526,7 +19524,7 @@ mod tests {
     fn loops_record_drop_facts_depth_and_owned_exits() {
         let module = checked_program(concat!(
             "type Handle = wrap I32\n",
-            "impl Drop Handle { drop = Handle value => () }\n",
+            "impl Drop Handle { cleanup = Handle value => () }\n",
             "def select: Bool -> I32 = condition => loop {\n",
             "  match condition { True() => { break 9 }, False() => { continue } }\n",
             "}\n",
@@ -21469,7 +21467,7 @@ mod tests {
         let module = checked_program(concat!(
             "type A = wrap (value: I32)\n",
             "type Handle = wrap I32\n",
-            "impl Drop Handle { drop = Handle value => () }\n",
+            "impl Drop Handle { cleanup = Handle value => () }\n",
             "def mutable_provider: () -> () = () => {\n",
             "  let mut value = A (value: 1)\n",
             "  with mut A = value { () }\n",
@@ -22383,7 +22381,7 @@ mod tests {
             "mutable = 2\n",
             "count = 1\n",
             "type Handle = wrap I32\n",
-            "impl Drop Handle { drop = Handle value => () }\n",
+            "impl Drop Handle { cleanup = Handle value => () }\n",
             "def discard = () => {\n",
             "  let owned: Handle = Handle 1\n",
             "  owned\n",

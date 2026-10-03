@@ -129,8 +129,6 @@ pub(crate) enum ArtifactUseSite {
     },
     /// A managed `Ref` allocation's payload finalizer.
     RefConstruction(LoweredCallId),
-    /// The `Drop` intrinsic's argument drop.
-    DropIntrinsic(LoweredCallId),
     /// A C-string conversion dropping its source `CString`.
     CStringConversion(LoweredCallId),
     /// A completion intrinsic dropping an orphaned handle.
@@ -1678,11 +1676,6 @@ impl LoweredProgram {
                 }
             }
             ArtifactUseSite::RefConstruction(id) => {
-                if !call(id) {
-                    report("call", id.index());
-                }
-            }
-            ArtifactUseSite::DropIntrinsic(id) => {
                 if !call(id) {
                     report("call", id.index());
                 }

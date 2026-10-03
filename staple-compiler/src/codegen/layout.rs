@@ -575,7 +575,7 @@ mod tests {
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
                 "type Box T = wrap (T)\n",
-                "impl<T where Copy T> Drop (Box T) { drop = Box value => () }\n",
+                "impl<T where Copy T> Drop (Box T) { cleanup = Box value => () }\n",
                 "def take_i32: Box I32 -> I32 = value => 1\n",
                 "def take_cstring: Box CString -> I32 = value => 1\n",
                 "def take_nested: Box (Box I32) -> I32 = value => 1\n",

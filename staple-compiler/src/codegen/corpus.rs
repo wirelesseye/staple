@@ -244,7 +244,7 @@ static CORPUS: [CorpusProgram; 89] = [
                 "type Point = wrap (I32, I32)\n",
                 "let make: () -> ((I32, I32) -> Point) = () => Point\n",
                 "type Resource = wrap I32\n",
-                "impl Drop Resource { drop = Resource value => () }\n",
+                "impl Drop Resource { cleanup = Resource value => () }\n",
                 "let make_resource: () -> (Resource -> Ref Resource) = () => Ref\n",
                 "def ref_maker: <T where Copy T> () -> (T -> Ref T) = () => Ref\n",
                 "let maker_i32: I32 -> Ref I32 = ref_maker ()\n",
@@ -336,7 +336,7 @@ static CORPUS: [CorpusProgram; 89] = [
             "let pair = (1, 2)\n",
             "let shown = \"${pair:?}\"\n",
             "type Resource = wrap I32\n",
-            "impl Drop Resource { drop = Resource value => () }\n",
+            "impl Drop Resource { cleanup = Resource value => () }\n",
             "let reference: Ref Resource = Ref (Resource 1)\n",
             "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",
             "def counter: () -> I32 = () => {\n",
@@ -593,7 +593,7 @@ static CORPUS: [CorpusProgram; 89] = [
                 concat!(
                     "type Point = wrap (I32, I32)\n",
                     "type Resource = wrap I32\n",
-                    "impl Drop Resource { drop = Resource value => () }\n",
+                    "impl Drop Resource { cleanup = Resource value => () }\n",
                     "def make: I32 -> Point = x => Point (x, x)\n",
                     "def call_make: I32 -> Point = x => make x\n",
                     // A managed `Ref` construction inside a function, so the
@@ -953,7 +953,7 @@ static CORPUS: [CorpusProgram; 89] = [
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = wrap CString\n",
-                    "impl Drop Tag { drop = Tag text => { puts text; () } }\n",
+                    "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
                     "\n",
                     "def scoped: () -> () = () => {\n",
                     "    let a = Tag (c_string \"scope\")\n",
@@ -967,7 +967,7 @@ static CORPUS: [CorpusProgram; 89] = [
                     "\n",
                     "type Ok = wrap I32\n",
                     "type Bad = wrap CString\n",
-                    "impl Drop Bad { drop = Bad text => { puts text; () } }\n",
+                    "impl Drop Bad { cleanup = Bad text => { puts text; () } }\n",
                     "def fails: () -> Ok | Bad = () => Bad (c_string \"failure\")\n",
                     "def propagated: () -> Ok | Bad = () => {\n",
                     "    let c = Tag (c_string \"propagate\")\n",
@@ -1056,7 +1056,7 @@ static CORPUS: [CorpusProgram; 89] = [
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Handle = wrap CString\n",
-                    "impl Drop Handle { drop = Handle text => { puts text; () } }\n",
+                    "impl Drop Handle { cleanup = Handle text => { puts text; () } }\n",
                     "type Wrapper = wrap Handle\n",
                     "type Left = wrap (CString, I32)\n",
                     "type Right = wrap (I32, I32)\n",
@@ -1103,7 +1103,7 @@ static CORPUS: [CorpusProgram; 89] = [
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Payload = wrap CString\n",
-                    "impl Drop Payload { drop = Payload value => () }\n",
+                    "impl Drop Payload { cleanup = Payload value => () }\n",
                     "\n",
                     "def make_ref: () -> Ref Payload = () => Ref (Payload (c_string \"ref\"))\n",
                     "\n",
@@ -1134,7 +1134,7 @@ static CORPUS: [CorpusProgram; 89] = [
                     "use std.slice.Slice\n",
                     "use std.cinterop.(CString, c_string)\n",
                     "type Tag = wrap CString\n",
-                    "impl Drop Tag { drop = Tag text => () }\n",
+                    "impl Drop Tag { cleanup = Tag text => () }\n",
                     "impl Clone Tag { clone = Tag text => Tag (c_string \"clone\") }\n",
                     "\n",
                     "def basics: () -> USize = () => {\n",
@@ -1343,7 +1343,7 @@ walk_uniform (3, 4)
                 r#"use std.cinterop.(CString, c_string)
 extern "c" { puts: CString -> I32 }
 type Tag = wrap CString
-impl Drop Tag { drop = Tag text => { puts text; () } }
+impl Drop Tag { cleanup = Tag text => { puts text; () } }
 def replace_owned: move (Tag, Tag) -> () = move pair => {
     let mut own = pair
     own[0] = Tag (c_string "replacement")
@@ -1366,7 +1366,7 @@ replace_owned (Tag (c_string "old"), Tag (c_string "second"))
                 r#"use std.cinterop.(CString, c_string)
 extern "c" { puts: CString -> I32 }
 type Tag = wrap CString
-impl Drop Tag { drop = Tag text => { puts text; () } }
+impl Drop Tag { cleanup = Tag text => { puts text; () } }
 def ref_mutate: move (Ref (Tag, Tag)) -> () = move reference => {
     let mut own = reference
     own[0] = Tag (c_string "ref replacement")
@@ -1747,7 +1747,7 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = wrap CString\n",
-                    "impl Drop Tag { drop = Tag text => { puts text; () } }\n",
+                    "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
                     "def tag: move CString -> Tag = move text => Tag text\n",
                     "def with_tags: () -> Coroutine{Tasks, IO} () = () => coro {\n",
                     "  let first = tag (c_string \"first\")\n",
@@ -2113,7 +2113,7 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = wrap CString\n",
-                    "impl Drop Tag { drop = Tag text => { puts text; () } }\n",
+                    "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
                     "def tag: move CString -> Tag = move text => Tag text\n",
                     "def completes: () -> Coroutine{} () = () => coro {\n",
                     "    let kept = tag (c_string \"complete\")\n",
@@ -2185,7 +2185,7 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Box T = wrap (T)\n",
-                    "impl<T where Copy T> Drop (Box T) { drop = Box value => { puts (c_string \"copy box\"); () } }\n",
+                    "impl<T where Copy T> Drop (Box T) { cleanup = Box value => { puts (c_string \"copy box\"); () } }\n",
                     "def run_i32: () -> () = () => { let b = Box 2; () }\n",
                     "def run_product: () -> () = () => { let b = Box (1, 2); () }\n",
                     "def run_cstring: () -> () = () => { let b = Box (c_string \"free me\"); () }\n",
@@ -2231,7 +2231,7 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Wrapper T = wrap (T)\n",
-                    "impl<T> Drop (Wrapper T) { drop = Wrapper value => { puts (c_string \"wrapper\"); () } }\n",
+                    "impl<T> Drop (Wrapper T) { cleanup = Wrapper value => { puts (c_string \"wrapper\"); () } }\n",
                     "def wrap: <T> move T -> Wrapper T = move value => Wrapper value\n",
                     "def run_i32: () -> () = () => { let w = wrap 1; () }\n",
                     "def run_cstring: () -> () = () => { let w = wrap (c_string \"x\"); () }\n",
@@ -2260,9 +2260,9 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "    ()\n",
                     "}\n",
                     "type Inner = wrap CString\n",
-                    "impl Drop Inner { drop = Inner text => { puts text; () } }\n",
+                    "impl Drop Inner { cleanup = Inner text => { puts text; () } }\n",
                     "type Outer T = wrap (T)\n",
-                    "impl<T> Drop (Outer T) { drop = Outer value => { puts (c_string \"outer\"); () } }\n",
+                    "impl<T> Drop (Outer T) { cleanup = Outer value => { puts (c_string \"outer\"); () } }\n",
                     "def outer: <T> move T -> Outer T = move value => Outer value\n",
                     "def owned_parameter: () -> () = () => {\n",
                     "    let value = outer (Inner (c_string \"inner\"))\n",
@@ -2338,7 +2338,7 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = wrap CString\n",
-                    "impl Drop Tag { drop = Tag text => { puts text; () } }\n",
+                    "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
                     "trait Measure T { measure: T -> I32 }\n",
                     "impl Measure Tag { measure = tag => 1 }\n",
                     "def borrow: Tag -> I32 = tag => 1\n",
@@ -2410,7 +2410,7 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "use std.buffer.Buffer\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = wrap CString\n",
-                    "impl Drop Tag { drop = Tag text => { puts text; () } }\n",
+                    "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
                     "def from_array: () -> Ref Tag = () => {\n",
                     "    let values: Slice Tag = Ref (Tag (c_string \"drop array first\"), Tag (c_string \"drop array second\"), Tag (c_string \"drop array third\"))\n",
                     "    Slice.get_ref values 2\n",

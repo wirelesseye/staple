@@ -308,7 +308,6 @@ pub enum IntrinsicFunction {
     BufferTransfer,
     BufferClone,
     RefReplace,
-    Drop,
     ReactiveScope,
     Reaction,
     Batch,
@@ -1163,8 +1162,6 @@ pub struct NameResolver {
     builtin_types: HashMap<TypeId, BuiltinType>,
     recursive_constructions: HashMap<TypeId, RecursiveConstruction>,
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
-    /// `std.core.drop.drop`, which may share its name with `Drop.drop`.
-    standard_drop: Option<SymbolId>,
     primitive_macros: HashMap<MacroId, PrimitiveMacro>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     macro_declarations: HashMap<MacroId, SyntaxId>,
@@ -1818,7 +1815,6 @@ impl NameResolver {
             ("std.buffer", "__buffer_transfer", IntrinsicFunction::BufferTransfer),
             ("std.buffer", "__buffer_clone", IntrinsicFunction::BufferClone),
             ("std.slice", "__slice_get_ref", IntrinsicFunction::SliceGetRef),
-            ("std.core.drop", "__drop", IntrinsicFunction::Drop),
             ("std.core.reference", "__ref_replace", IntrinsicFunction::RefReplace),
             ("std.core.reactive", "__reactive_scope", IntrinsicFunction::ReactiveScope),
             // Call-site-sensitive intrinsics are public API themselves; the
@@ -1893,9 +1889,6 @@ impl NameResolver {
                 .flatten();
             if in_stdlib {
                 loaded.insert(module_name.clone());
-                if module_name == "std.core.drop" && source_module.parent.is_none() {
-                    self.standard_drop = self.module_values[source_module.id.0].get("drop").copied();
-                }
             }
             for item in &source_module.syntax.items {
                 let Item::ExternBlock(block) = item else {
@@ -4695,9 +4688,8 @@ impl NameResolver {
                     self.symbols.insert(name.syntax.id, symbol);
                     self.record_capture(symbol);
                 }
-                (Some(symbol), methods)
+                (Some(_), methods)
                     if !methods.is_empty()
-                        && self.standard_drop != Some(symbol)
                         && !methods.iter().all(|method| {
                             self.trait_method_traits
                                 .get(method)

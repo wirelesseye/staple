@@ -4162,7 +4162,7 @@ mod tests {
                 "extern \"c\" { exit: I32 -> () }\n",
                 "type Resource = wrap I32\n",
                 "impl Drop Resource {\n",
-                "  drop = Resource value => exit value\n",
+                "  cleanup = Resource value => exit value\n",
                 "}\n",
                 "def exercise = () => {\n",
                 "  let first = Resource 1\n",

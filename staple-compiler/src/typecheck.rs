@@ -2493,10 +2493,10 @@ impl TypeChecker {
                     && drop.declaration.type_parameters.len() == 1
                     && drop.parameters.len() == 1
                     && drop.declaration.members.len() == 1
-                    && drop.declaration.members[0].name == "drop" => {}
+                    && drop.declaration.members[0].name == "cleanup" => {}
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
-                "standard library must declare public trait `Drop` with one `drop` member",
+                "standard library must declare public trait `Drop` with one `cleanup` member",
             )),
         }
         match self.default_trait.and_then(|id| module.traits().get(&id)) {
@@ -3837,17 +3837,6 @@ impl TypeChecker {
                                 && function.mutations == [CheckedMutation::Element(0)]
                         }
                         _ => false,
-                    })
-                    .unwrap_or(CheckedType::Error),
-                crate::IntrinsicFunction::Drop => self
-                    .symbol_types
-                    .get(symbol)
-                    .cloned()
-                    .filter(|value_type| {
-                        matches!(value_type,
-                            CheckedType::Function(function)
-                                if contains_type_parameter(&function.parameter)
-                                    && *function.result == CheckedType::empty_product())
                     })
                     .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::ReactiveScope
@@ -6920,6 +6909,8 @@ impl TypeChecker {
         expression: &Expression,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
+        // The call chain's root callee, or the expression itself.
+        let mut referenced = expression;
         if let Expression::Call(call) = expression {
             let mut callee = call.callee.as_ref();
             loop {
@@ -6929,6 +6920,21 @@ impl TypeChecker {
                 };
                 callee = call.callee.as_ref();
             }
+            referenced = callee;
+        }
+        // `Drop.cleanup` only borrows its value, so calling it directly would
+        // run the destructor again when the value is dropped normally.
+        let methods = module.trait_methods_for_expression(referenced.syntax().id);
+        if !methods.is_empty()
+            && let Some(drop) = self.drop_trait.and_then(|id| module.traits().get(&id))
+            && methods.iter().all(|method| drop.methods.contains(method))
+        {
+            self.diagnostics.push(Diagnostic::new(
+                referenced.syntax().span.clone(),
+                "`Drop.cleanup` runs automatically and cannot be referenced directly; \
+                 use `drop value` to discard a value early",
+            ));
+            return CheckedType::Error;
         }
         if let Some(symbol) = module.symbol_for(expression.syntax().id)
             && module.intrinsic_function(symbol).is_some()
@@ -15164,7 +15170,6 @@ fn expression_reads_reactive(
                         | crate::IntrinsicFunction::Spawn
                         | crate::IntrinsicFunction::Reaction
                         | crate::IntrinsicFunction::Batch
-                        | crate::IntrinsicFunction::Drop
                 )
             ) {
                 return false;

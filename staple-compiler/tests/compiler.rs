@@ -3007,7 +3007,7 @@ fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Resource = wrap I32\n",
-            "impl Drop Resource { drop = Resource value => () }\n",
+            "impl Drop Resource { cleanup = Resource value => () }\n",
             "def invalid = (value: Ref Resource) => { let Ref (mut inner) = value; inner }\n",
         )))
         .expect_err_diagnostics("move-only Ref borrows cannot become mutable locals");
@@ -10679,8 +10679,8 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Box T = wrap (T)\n",
-            "impl<T> Drop (Box T) { drop = Box value => () }\n",
-            "impl Drop (Box I32) { drop = Box value => () }\n",
+            "impl<T> Drop (Box T) { cleanup = Box value => () }\n",
+            "impl Drop (Box I32) { cleanup = Box value => () }\n",
         )))
         .expect_err_diagnostics("overlapping Drop implementations are rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -10693,7 +10693,7 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Box T = wrap (T)\n",
-            "impl<T where Copy (Box T)> Drop (Box T) { drop = Box value => () }\n",
+            "impl<T where Copy (Box T)> Drop (Box T) { cleanup = Box value => () }\n",
         )))
         .expect_err_diagnostics("a bound on the header type is rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -10707,7 +10707,7 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Box T = wrap (T)\n",
-            "impl<T> Drop (Box T) { drop = Box value => () }\n",
+            "impl<T> Drop (Box T) { cleanup = Box value => () }\n",
             "def dup: <T> Box T -> (Box T, Box T) = value => (value, value)\n",
         )))
         .expect_err_diagnostics("a generically droppable type is move-only");
@@ -10722,7 +10722,7 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
 fn lowers_custom_drop_and_gc_finalizer_glue() {
     let module = type_check(concat!(
         "type Resource = wrap I32\n",
-        "impl Drop Resource { drop = Resource value => () }\n",
+        "impl Drop Resource { cleanup = Resource value => () }\n",
         "def release = () => { let resource = Resource 7; drop resource }\n",
         "def managed = () => Ref (Resource 9)\n",
     ));
@@ -10854,7 +10854,7 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
 fn lowers_path_sensitive_drop_flags() {
     let module = type_check(concat!(
         "type Resource = wrap I32\n",
-        "impl Drop Resource { drop = Resource value => () }\n",
+        "impl Drop Resource { cleanup = Resource value => () }\n",
         "def conditional = (flag: Bool, move resource: Resource) => match flag {\n",
         "  True() => { drop resource; () },\n",
         "  False() => (),\n",
@@ -11270,7 +11270,7 @@ fn checks_reachability_correctly_after_a_top_level_loop_with_break() {
 fn checks_ownership_across_loop_exits_and_back_edges() {
     let module = type_check(concat!(
         "type Resource = wrap I32\n",
-        "impl Drop Resource { drop = Resource _ => () }\n",
+        "impl Drop Resource { cleanup = Resource _ => () }\n",
         "def choose: Bool -> Resource = condition => loop {\n",
         "  let value = Resource 1\n",
         "  match condition {\n",
@@ -11289,7 +11289,7 @@ fn checks_ownership_across_loop_exits_and_back_edges() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Resource = wrap I32\n",
-            "impl Drop Resource { drop = Resource _ => () }\n",
+            "impl Drop Resource { cleanup = Resource _ => () }\n",
             "def invalid = (move value: Resource) => loop {\n",
             "  let consumed = value\n",
             "  continue\n",
@@ -11513,7 +11513,7 @@ fn every_copy_type_gets_a_blanket_clone_implementation() {
 fn a_non_copy_type_can_implement_clone_manually() {
     let module = type_check(concat!(
         "type Resource = wrap I32\n",
-        "impl Drop Resource { drop = Resource value => () }\n",
+        "impl Drop Resource { cleanup = Resource value => () }\n",
         "impl Clone Resource { clone = Resource value => Resource value }\n",
         "def duplicate: Resource -> Resource = resource => Clone.clone resource\n",
     ));
@@ -12659,10 +12659,10 @@ fn intrinsic_registration_checks_names_and_loaded_modules() {
             "unknown Staple intrinsic `__unknown`",
         ),
         (
-            "std/core/drop.sta",
-            "extern \"staple-intrinsic\" {\n    __drop: <T> move T -> ()\n}\n",
+            "std/core/reference.sta",
+            "    __ref_replace: <T> [mut Ref T, move T] -> T\n",
             "",
-            "standard library `std.core.drop` does not declare intrinsic `__drop`",
+            "standard library `std.core.reference` does not declare intrinsic `__ref_replace`",
         ),
         (
             "std/coroutine.sta",
@@ -12724,12 +12724,11 @@ fn wrapped_intrinsics_are_registered_once() {
 #[test]
 fn generic_intrinsic_trait_bounds_are_checked_at_calls() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let path = root.join("stdlib/std/core/drop.sta");
+    let path = root.join("stdlib/std/core/reactive.sta");
     let source = std::fs::read_to_string(&path)
         .unwrap()
-        .replace("__drop: <T>", "__drop: <T where Eq T>")
-        .replace("move value => __drop value", "move value => ()")
-        + "\n__drop (() => ())\n";
+        .replace("snapshot: <T>", "snapshot: <T where Eq T>")
+        + "\nlet _ = snapshot (() => ())\n";
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source_at(&path, &source)
@@ -12746,4 +12745,32 @@ fn generic_intrinsic_trait_bounds_are_checked_at_calls() {
             .any(|diagnostic| diagnostic.message.contains("trait bound is not satisfied")),
         "{diagnostics:?}"
     );
+}
+
+#[test]
+fn drop_cleanup_cannot_be_referenced_directly() {
+    let prelude = concat!(
+        "type Resource = wrap I32\n",
+        "impl Drop Resource { cleanup = Resource value => () }\n",
+    );
+    for usage in [
+        "def go = () => { let a = Resource 1; Drop.cleanup a }\n",
+        "def go = () => { let a = Resource 1; cleanup a }\n",
+        "def go = () => { let a = Resource 1; Drop.cleanup (a) }\n",
+        "let release: Resource -> () = Drop.cleanup\n",
+    ] {
+        let source = format!("{prelude}{usage}");
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&source))
+            .expect_err_diagnostics("direct cleanup must be rejected");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .starts_with("`Drop.cleanup` runs automatically")),
+            "{usage}: {diagnostics:?}"
+        );
+    }
+    type_check(&format!(
+        "{prelude}def go = () => {{ let a = Resource 1; drop a }}\n"
+    ));
 }

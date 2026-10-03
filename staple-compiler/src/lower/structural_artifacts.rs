@@ -1039,7 +1039,7 @@ mod tests {
     fn managed_ref_constructor_plans_a_finalizer_exactly_when_drop_is_needed() {
         let (module, lowered) = lower(concat!(
             "type Resource = wrap I32\n",
-            "impl Drop Resource { drop = Resource value => () }\n",
+            "impl Drop Resource { cleanup = Resource value => () }\n",
             "let make: () -> (Resource -> Ref Resource) = () => Ref\n",
             "let make_copy: () -> (I32 -> Ref I32) = () => Ref\n",
         ));
@@ -1266,7 +1266,7 @@ mod tests {
     fn mutate_index_records_drop_previous_exactly_when_drop_is_needed() {
         let (module, lowered) = lower(concat!(
             "type Resource = wrap I32\n",
-            "impl Drop Resource { drop = Resource value => () }\n",
+            "impl Drop Resource { cleanup = Resource value => () }\n",
             "def mutate_copy: (I32, I32) -> (I32, I32) = pair => {\n",
             "  let mut copy = pair\n",
             "  copy[0] = 3\n",
@@ -1750,7 +1750,7 @@ mod tests {
     fn closure_rounds_and_growth_stay_bounded() {
         let (_, lowered) = lower(concat!(
             "type Resource = wrap I32\n",
-            "impl Drop Resource { drop = Resource value => () }\n",
+            "impl Drop Resource { cleanup = Resource value => () }\n",
             "type Held T = wrap (T)\n",
             "impl<T where Debug T> Debug (Held T) { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
             "def index_pair: <T where Copy T> ((T, T), USize) -> T = (pair, position) => pair[position]\n",
