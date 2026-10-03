@@ -826,7 +826,9 @@ pub def format = (value: I32) => value
 pub type Number = alias I32
 ```
 
-`pub extern` exports every binding declared by that external block.
+`pub extern` exports every binding declared by that external block. A binding
+inside a private extern block may use `pub` or `pub(package)` to expose that
+binding individually, allowing private helpers and public intrinsics in one block.
 
 Every reachable module's top-level statements execute exactly once. Dependencies
 are initialized before modules which use them. Mutually recursive groups are
@@ -1631,9 +1633,12 @@ itself contain an uninstantiated generic scheme. Compile-time parameters must
 be declared explicitly; unannotated definitions are not generalized. Each
 reachable concrete use is monomorphized, unused instantiations produce no code,
 and recursive calls must retain the current specialization. A top-level
-generic `let` and `extern` declarations are not supported, since nothing ever
-supplies concrete type arguments for them the way a call site does for a
-`def`. A local `let` inside a generic `def`'s body may mention that def's own
+generic `let` declarations are not supported. Generic `extern` bindings are
+allowed only for the reserved `"staple-intrinsic"` ABI; ordinary external ABIs
+cannot declare compile-time parameters. Intrinsic calls infer concrete type and
+effect arguments at the call site. An `extern` block may appear inside a
+companion, where its bindings inherit the companion’s parameters and bounds.
+Intrinsics must be called directly and cannot be used as values. A local `let` inside a generic `def`'s body may mention that def's own
 compile-time parameters, since it is specialized along with the rest of the
 body at each concrete use:
 

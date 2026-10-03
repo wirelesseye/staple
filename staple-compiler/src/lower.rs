@@ -6558,28 +6558,17 @@ impl LoweredProgram {
                 let symbol = symbol.ok_or_else(|| {
                     internal_invariant(origin.span.clone(), "intrinsic values are symbol-selected")
                 })?;
-                let intrinsic = resolved.intrinsic_function(symbol).ok_or_else(|| {
-                    internal_invariant(
-                        origin.span.clone(),
-                        "selected intrinsic symbol has a registered intrinsic",
-                    )
-                })?;
-                let function_type = checked_function_type
-                    .or_else(|| symbol_function_type(module, symbol))
-                    .ok_or_else(|| {
-                        Diagnostic::new(
-                            origin.span.clone(),
-                            "intrinsic value has no checked function type",
-                        )
-                    })?;
-                (
-                    LoweredCallableTarget::Intrinsic { symbol, intrinsic },
-                    function_type,
-                    LoweredCallableAdapter::None,
-                    None,
-                    None,
-                )
+                let name = &self
+                    .symbols
+                    .get(symbol)
+                    .expect("intrinsic symbol is catalogued")
+                    .name;
+                return Err(Diagnostic::new(
+                    origin.span.clone(),
+                    format!("intrinsic `{name}` cannot be used as a value; call it directly"),
+                ));
             }
+
             CallableValueRoute::GenericFunction
             | CallableValueRoute::DeclaredFunction
             | CallableValueRoute::AnonymousFunction => {
@@ -7040,6 +7029,9 @@ impl LoweredProgram {
                     )
                 })?;
                 let function_type = checked_call_function_type(module, call, &origin)?;
+                if let Some(template) = symbol_function_type(module, symbol) {
+                    substitutions = call_substitutions(&template, &function_type);
+                }
                 (
                     LoweredCallableTarget::Intrinsic { symbol, intrinsic },
                     None,
@@ -7385,7 +7377,10 @@ impl LoweredProgram {
             initialization_checks: Vec::new(),
             steps,
             result_type: function_type.result.as_ref().clone(),
-            substitutions: CallSubstitutions::default(),
+            substitutions: symbol
+                .and_then(|symbol| symbol_function_type(module, symbol))
+                .map(|template| call_substitutions(&template, &function_type))
+                .unwrap_or_default(),
             evidence: None,
             reactive,
             buffer_pop,
@@ -7872,6 +7867,24 @@ impl LoweredProgram {
                 place: None,
             });
         }
+        // `f (value)` parses as a single-element product; when the parentheses
+        // do not change the type, borrow `value`'s place rather than
+        // materializing (and later dropping) a temporary copy of it.
+        let expression = match expression {
+            Expression::Product(product)
+                if let [element] = product.elements.as_slice()
+                    && element.name.is_none()
+                    && !element.spread
+                    && !element.named_spread
+                    && expression_has_place_root(module.resolved(), &element.value)
+                    && module.type_of_expression(product.syntax.id).is_some()
+                    && module.type_of_expression(product.syntax.id)
+                        == module.type_of_expression(element.value.syntax().id) =>
+            {
+                &element.value
+            }
+            _ => expression,
+        };
         let expression_id = self.lower_expression(module, owner, context, expression)?;
         let place = if expression_has_place_root(module.resolved(), expression) {
             self.lower_place(module, owner, context, expression).ok()
@@ -17889,8 +17902,9 @@ mod tests {
         });
         assert_eq!(chains.len(), 2, "the fixture has two multi-layer chains");
 
-        let mut indirect_chain = None;
-        let mut intrinsic_chain = None;
+        // Both chains call closures: `Ref.replace` is an ordinary wrapper
+        // over its intrinsic, so it is called like any other `def`.
+        let mut indirect_chains = Vec::new();
         for chain in &chains {
             let lowered = program
                 .calls
@@ -17898,15 +17912,8 @@ mod tests {
                 .find(|(_, call)| call.origin.syntax == chain.syntax.id)
                 .map(|(_, call)| call)
                 .expect("the outer chain call");
-            match lowered.target {
-                LoweredCallableTarget::IndirectClosure { .. } => {
-                    indirect_chain = Some((chain, lowered))
-                }
-                LoweredCallableTarget::Intrinsic {
-                    intrinsic: crate::IntrinsicFunction::RefReplace,
-                    ..
-                } => intrinsic_chain = Some(lowered),
-                _ => {}
+            if let LoweredCallableTarget::IndirectClosure { .. } = lowered.target {
+                indirect_chains.push(lowered);
             }
             let Expression::Call(inner) = chain.callee.as_ref() else {
                 panic!("a completed juxtaposed chain has a call callee");
@@ -17921,34 +17928,28 @@ mod tests {
             );
         }
 
-        let (chain, lowered) = indirect_chain.expect("the indirect juxtaposed chain");
-        assert!(matches!(chain.callee.as_ref(), Expression::Call(_)));
-        assert!(lowered.callee.is_some());
-        assert_eq!(lowered.arguments.len(), 2);
-        assert!(matches!(
-            lowered.steps.first(),
-            Some(LoweredCallStep::Callee { .. })
-        ));
-        assert!(matches!(
-            lowered.steps.get(1),
-            Some(LoweredCallStep::ProductElement { slot: 0, .. })
-        ));
-        assert!(matches!(
-            lowered.steps.get(2),
-            Some(LoweredCallStep::ProductElement { slot: 1, .. })
-        ));
-
-        let replace_call = intrinsic_chain.expect("the juxtaposed intrinsic call");
-        assert!(replace_call.callee.is_none());
-        assert_eq!(replace_call.arguments.len(), 2);
-        assert_eq!(
-            replace_call.arguments[0].pass_mode,
-            LoweredArgumentPassMode::MutablePlace
+        assert_eq!(indirect_chains.len(), 2, "both chains call closures");
+        for lowered in &indirect_chains {
+            assert!(lowered.callee.is_some());
+            assert_eq!(lowered.arguments.len(), 2);
+            assert!(matches!(
+                lowered.steps.first(),
+                Some(LoweredCallStep::Callee { .. })
+            ));
+            assert!(matches!(
+                lowered.steps.get(1),
+                Some(LoweredCallStep::ProductElement { slot: 0, .. })
+            ));
+            assert!(matches!(
+                lowered.steps.get(2),
+                Some(LoweredCallStep::ProductElement { slot: 1, .. })
+            ));
+        }
+        assert!(
+            indirect_chains.iter().any(|lowered| lowered.arguments[0].pass_mode
+                == LoweredArgumentPassMode::MutablePlace),
+            "`Ref.replace` mutates its reference in place"
         );
-        assert!(matches!(
-            replace_call.steps.first(),
-            Some(LoweredCallStep::ProductElement { slot: 0, .. })
-        ));
     }
 
     #[test]

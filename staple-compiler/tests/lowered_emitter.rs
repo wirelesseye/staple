@@ -83,3 +83,17 @@ fn strict_emission_of_a_mixed_program_has_no_placeholder_bodies() {
     .expect("the mixed program emits strictly");
     assert!(!llvm.contains("stub.trap"), "no body is a trap placeholder");
 }
+
+/// Function-like intrinsics sit behind ordinary `def` wrappers, so their
+/// public API remains usable as first-class values.
+#[test]
+fn wrapped_intrinsic_apis_are_first_class_values() {
+    compile(concat!(
+        "let release: move I32 -> () = drop\n",
+        "let released = release 1\n",
+        "let replace: [mut Ref I32, move I32] -> I32 = Ref.replace\n",
+        "let mut reference = Ref 1\n",
+        "let previous = replace reference 2\n",
+    ))
+    .unwrap();
+}

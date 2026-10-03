@@ -919,6 +919,10 @@ impl ResolvedModule {
         self.program.modules().iter().any(|source| {
             source.syntax.items.iter().any(|item| match item {
                 Item::Binding(value) => self.symbol_for(value.syntax.id) == Some(symbol),
+                Item::ExternBlock(block) => block
+                    .bindings
+                    .iter()
+                    .any(|binding| self.symbol_for(binding.syntax.id) == Some(symbol)),
                 Item::PatternBinding(value) => pattern_contains(self, &value.pattern, symbol),
                 _ => false,
             })
@@ -986,7 +990,13 @@ fn unknown_item_message(
 fn item_uses_package_visibility(item: &Item) -> bool {
     let is_package = |visibility| visibility == Visibility::Package;
     match item {
-        Item::ExternBlock(item) => is_package(item.visibility),
+        Item::ExternBlock(item) => {
+            is_package(item.visibility)
+                || item
+                    .bindings
+                    .iter()
+                    .any(|binding| is_package(binding.visibility))
+        }
         Item::TypeDeclaration(item) => {
             is_package(item.visibility) || is_package(item.representation_visibility())
         }
@@ -1153,6 +1163,8 @@ pub struct NameResolver {
     builtin_types: HashMap<TypeId, BuiltinType>,
     recursive_constructions: HashMap<TypeId, RecursiveConstruction>,
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
+    /// `std.core.drop.drop`, which may share its name with `Drop.drop`.
+    standard_drop: Option<SymbolId>,
     primitive_macros: HashMap<MacroId, PrimitiveMacro>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     macro_declarations: HashMap<MacroId, SyntaxId>,
@@ -1777,17 +1789,114 @@ impl NameResolver {
             IntrinsicFunction::StringToCString,
         ));
         expected.push(("__string_add".to_owned(), IntrinsicFunction::StringAdd));
-        let mut found = HashMap::new();
+        // A declaration is identified by its owning module, companion, and name.
+        let mut declarations: Vec<(String, Option<&str>, String, IntrinsicFunction)> = expected
+            .into_iter()
+            .map(|(name, intrinsic)| {
+                let module = match intrinsic {
+                    IntrinsicFunction::StringFromCString | IntrinsicFunction::StringToCString => {
+                        "std.cinterop"
+                    }
+                    IntrinsicFunction::StringAdd => "std.string",
+                    _ => "std.core.number",
+                };
+                (module.to_owned(), None, name, intrinsic)
+            })
+            .collect();
+        for (module, name, intrinsic) in [
+            (
+                "std.buffer",
+                "__buffer_with_capacity",
+                IntrinsicFunction::BufferWithCapacity,
+            ),
+            ("std.buffer", "__buffer_length", IntrinsicFunction::BufferLength),
+            ("std.buffer", "__buffer_capacity", IntrinsicFunction::BufferCapacity),
+            ("std.buffer", "__buffer_push", IntrinsicFunction::BufferPush),
+            ("std.buffer", "__buffer_pop", IntrinsicFunction::BufferPop),
+            ("std.buffer", "__buffer_get", IntrinsicFunction::BufferGet),
+            ("std.buffer", "__buffer_freeze", IntrinsicFunction::BufferFreeze),
+            ("std.buffer", "__buffer_transfer", IntrinsicFunction::BufferTransfer),
+            ("std.buffer", "__buffer_clone", IntrinsicFunction::BufferClone),
+            ("std.slice", "__slice_get_ref", IntrinsicFunction::SliceGetRef),
+            ("std.core.drop", "__drop", IntrinsicFunction::Drop),
+            ("std.core.reference", "__ref_replace", IntrinsicFunction::RefReplace),
+            ("std.core.reactive", "__reactive_scope", IntrinsicFunction::ReactiveScope),
+            // Call-site-sensitive intrinsics are public API themselves; the
+            // rest sit behind ordinary `def` wrappers so they stay first-class.
+            ("std.core.reactive", "reaction", IntrinsicFunction::Reaction),
+            ("std.core.reactive", "batch", IntrinsicFunction::Batch),
+            ("std.core.reactive", "snapshot", IntrinsicFunction::Snapshot),
+            ("std.coroutine", "block_on", IntrinsicFunction::CoroutineBlockOn),
+            ("std.coroutine", "spawn", IntrinsicFunction::Spawn),
+            ("std.coroutine", "yield_now", IntrinsicFunction::YieldNow),
+            ("std.coroutine", "until", IntrinsicFunction::Until),
+            ("std.coroutine", "__scheduler", IntrinsicFunction::SchedulerCreate),
+            ("std.coroutine", "__task_scope", IntrinsicFunction::TaskScope),
+            ("std.coroutine", "__pump", IntrinsicFunction::Pump),
+            ("std.coroutine", "__completion", IntrinsicFunction::Completion),
+            (
+                "std.coroutine",
+                "__completion_with_cancel",
+                IntrinsicFunction::CompletionWithCancel,
+            ),
+            ("std.coroutine", "__completion_token", IntrinsicFunction::CompletionToken),
+            ("std.coroutine", "__task_is_finished", IntrinsicFunction::TaskIsFinished),
+            ("std.coroutine", "__task_cancel", IntrinsicFunction::TaskCancel),
+            ("std.coroutine", "__resolver_complete", IntrinsicFunction::ResolverComplete),
+            ("std.coroutine", "__resolver_cancel", IntrinsicFunction::ResolverCancel),
+            (
+                "std.coroutine",
+                "__completion_token_resolve",
+                IntrinsicFunction::CompletionTokenResolve,
+            ),
+            (
+                "std.coroutine",
+                "__completion_token_cancel",
+                IntrinsicFunction::CompletionTokenCancel,
+            ),
+        ] {
+            declarations.push((module.to_owned(), None, name.to_owned(), intrinsic));
+        }
+        declarations.push((
+            "std.slice".to_owned(),
+            Some("Slice"),
+            "length".to_owned(),
+            IntrinsicFunction::SliceLength,
+        ));
         let standard_library_directory = program
             .module(core)
             .path
             .parent()
             .expect("std.core has a parent directory");
-        for source_module in program
-            .modules()
-            .iter()
-            .filter(|module| module.path.starts_with(standard_library_directory))
-        {
+        let mut found = HashSet::new();
+        let mut loaded = HashSet::new();
+        for source_module in program.modules() {
+            let in_stdlib = source_module.path.starts_with(standard_library_directory);
+            let mut owner = source_module;
+            while let Some(parent) = owner.parent {
+                owner = program.module(parent);
+            }
+            let module_name = owner
+                .path
+                .strip_prefix(standard_library_directory)
+                .ok()
+                .map(|path| {
+                    format!(
+                        "std.{}",
+                        path.with_extension("").to_string_lossy().replace('/', ".")
+                    )
+                })
+                .unwrap_or_default();
+            let companion = source_module
+                .companion
+                .then(|| source_module.name.as_deref())
+                .flatten();
+            if in_stdlib {
+                loaded.insert(module_name.clone());
+                if module_name == "std.core.drop" && source_module.parent.is_none() {
+                    self.standard_drop = self.module_values[source_module.id.0].get("drop").copied();
+                }
+            }
             for item in &source_module.syntax.items {
                 let Item::ExternBlock(block) = item else {
                     continue;
@@ -1795,12 +1904,25 @@ impl NameResolver {
                 if block.abi != "\"staple-intrinsic\"" {
                     continue;
                 }
+                if !in_stdlib {
+                    self.diagnostics.push(Diagnostic::new(
+                        block.syntax.span.clone(),
+                        "the `staple-intrinsic` ABI is reserved for the standard library",
+                    ));
+                    continue;
+                }
                 for binding in &block.bindings {
-                    if let Some((_, intrinsic)) =
-                        expected.iter().find(|(name, _)| *name == binding.name)
+                    if let Some((index, (_, _, _, intrinsic))) = declarations
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (module, namespace, name, _))| {
+                            *module == module_name
+                                && *namespace == companion
+                                && *name == binding.name
+                        })
                         && let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied()
                     {
-                        found.insert(binding.name.clone(), symbol);
+                        found.insert(index);
                         self.intrinsic_functions.insert(symbol, *intrinsic);
                     } else {
                         self.diagnostics.push(Diagnostic::new(
@@ -1811,153 +1933,14 @@ impl NameResolver {
                 }
             }
         }
-        if let Some(symbol) = self.interfaces[core.0].values.get("drop").copied() {
-            self.intrinsic_functions
-                .insert(symbol, IntrinsicFunction::Drop);
-        }
-        if let Some(symbol) = self.interfaces[core.0]
-            .namespaces
-            .get("Ref")
-            .and_then(|companion| self.interfaces[companion.0].values.get("replace"))
-            .copied()
-        {
-            self.intrinsic_functions
-                .insert(symbol, IntrinsicFunction::RefReplace);
-        }
-        let slice_module = program
-            .modules()
-            .iter()
-            .find(|module| module.path.ends_with("std/slice.sta"))
-            .map(|module| module.id);
-        if let Some(symbol) = slice_module.and_then(|slice| {
-            self.interfaces[slice.0]
-                .namespaces
-                .get("Slice")
-                .and_then(|companion| self.interfaces[companion.0].values.get("length"))
-                .copied()
-        }) {
-            self.intrinsic_functions
-                .insert(symbol, IntrinsicFunction::SliceLength);
-        }
-        for (name, _) in expected {
-            if !found.contains_key(&name) {
+        for (index, (module, companion, name, _)) in declarations.iter().enumerate() {
+            if loaded.contains(module) && !found.contains(&index) {
+                let name = companion
+                    .map_or_else(|| name.clone(), |companion| format!("{companion}.{name}"));
                 self.diagnostics.push(Diagnostic::new(
                     Span::Compiler,
-                    format!("standard library `std.core` does not declare intrinsic `{name}`"),
+                    format!("standard library `{module}` does not declare intrinsic `{name}`"),
                 ));
-            }
-        }
-        for (name, intrinsic) in [
-            (
-                "__buffer_with_capacity",
-                IntrinsicFunction::BufferWithCapacity,
-            ),
-            ("__buffer_length", IntrinsicFunction::BufferLength),
-            ("__buffer_capacity", IntrinsicFunction::BufferCapacity),
-            ("__buffer_push", IntrinsicFunction::BufferPush),
-            ("__buffer_pop", IntrinsicFunction::BufferPop),
-            ("__buffer_get", IntrinsicFunction::BufferGet),
-            ("__buffer_freeze", IntrinsicFunction::BufferFreeze),
-            ("__buffer_transfer", IntrinsicFunction::BufferTransfer),
-            ("__buffer_clone", IntrinsicFunction::BufferClone),
-            ("__slice_get_ref", IntrinsicFunction::SliceGetRef),
-            ("__reactive_scope", IntrinsicFunction::ReactiveScope),
-            ("reaction", IntrinsicFunction::Reaction),
-            ("batch", IntrinsicFunction::Batch),
-            ("snapshot", IntrinsicFunction::Snapshot),
-        ] {
-            let symbol = program
-                .modules()
-                .iter()
-                .filter(|module| module.path.starts_with(standard_library_directory))
-                .find_map(|module| self.module_values[module.id.0].get(name).copied());
-            if let Some(symbol) = symbol {
-                self.intrinsic_functions.insert(symbol, intrinsic);
-            } else {
-                self.diagnostics.push(Diagnostic::new(
-                    Span::Compiler,
-                    format!("standard library `std.core` does not declare intrinsic `{name}`"),
-                ));
-            }
-        }
-        // These live in the on-demand `std.coroutine` module, so they are
-        // wired only when it is actually loaded.
-        for (name, intrinsic) in [
-            ("block_on", IntrinsicFunction::CoroutineBlockOn),
-            ("scheduler", IntrinsicFunction::SchedulerCreate),
-            ("task_scope", IntrinsicFunction::TaskScope),
-            ("spawn", IntrinsicFunction::Spawn),
-            ("pump", IntrinsicFunction::Pump),
-            ("yield_now", IntrinsicFunction::YieldNow),
-            ("completion", IntrinsicFunction::Completion),
-            (
-                "completion_with_cancel",
-                IntrinsicFunction::CompletionWithCancel,
-            ),
-            ("completion_token", IntrinsicFunction::CompletionToken),
-            ("until", IntrinsicFunction::Until),
-        ] {
-            if let Some(symbol) = program
-                .modules()
-                .iter()
-                .filter(|module| module.path.starts_with(standard_library_directory))
-                .find_map(|module| self.module_values[module.id.0].get(name).copied())
-            {
-                self.intrinsic_functions.insert(symbol, intrinsic);
-            }
-        }
-        // `Task.is_finished` / `Task.cancel` and `Resolver.complete` /
-        // `Resolver.cancel` are companion methods, so they are keyed under their
-        // type's namespace rather than the module's value scope.
-        for (namespace, methods) in [
-            (
-                "Task",
-                [
-                    ("is_finished", IntrinsicFunction::TaskIsFinished),
-                    ("cancel", IntrinsicFunction::TaskCancel),
-                ],
-            ),
-            (
-                "Resolver",
-                [
-                    ("complete", IntrinsicFunction::ResolverComplete),
-                    ("cancel", IntrinsicFunction::ResolverCancel),
-                ],
-            ),
-            (
-                "CompletionToken",
-                [
-                    ("resolve", IntrinsicFunction::CompletionTokenResolve),
-                    ("cancel", IntrinsicFunction::CompletionTokenCancel),
-                ],
-            ),
-        ] {
-            let Some(companion) = self
-                .interfaces
-                .iter()
-                .find_map(|interface| interface.namespaces.get(namespace).copied())
-            else {
-                continue;
-            };
-            for (name, intrinsic) in methods {
-                if let Some(symbol) = self.interfaces[companion.0].values.get(name).copied() {
-                    self.intrinsic_functions.insert(symbol, intrinsic);
-                }
-            }
-        }
-        for source_module in program.modules() {
-            if source_module.path.starts_with(standard_library_directory) {
-                continue;
-            }
-            for item in &source_module.syntax.items {
-                if let Item::ExternBlock(block) = item
-                    && block.abi == "\"staple-intrinsic\""
-                {
-                    self.diagnostics.push(Diagnostic::new(
-                        block.syntax.span.clone(),
-                        "the `staple-intrinsic` ABI is reserved for the standard library",
-                    ));
-                }
             }
         }
     }
@@ -2256,12 +2239,17 @@ impl NameResolver {
                             let symbol = self.allocate_symbol(binding);
                             self.module_values[source_module.id.0]
                                 .insert(binding.name.clone(), symbol);
-                            if block.visibility != Visibility::Private {
+                            let visibility = if binding.visibility == Visibility::Private {
+                                block.visibility
+                            } else {
+                                binding.visibility
+                            };
+                            if visibility != Visibility::Private {
                                 self.insert_visible_value(
                                     source_module.id,
                                     &binding.name,
                                     symbol,
-                                    block.visibility,
+                                    visibility,
                                     binding.syntax.span.clone(),
                                 );
                             }
@@ -3437,9 +3425,7 @@ impl NameResolver {
             | Item::Submodule(_) => {}
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
-                    if let Some(annotation) = &binding.annotation {
-                        self.resolve_type(annotation);
-                    }
+                    self.resolve_binding(binding);
                 }
             }
             Item::TypeDeclaration(declaration) => {
@@ -4711,8 +4697,7 @@ impl NameResolver {
                 }
                 (Some(symbol), methods)
                     if !methods.is_empty()
-                        && self.intrinsic_functions.get(&symbol)
-                            != Some(&IntrinsicFunction::Drop)
+                        && self.standard_drop != Some(symbol)
                         && !methods.iter().all(|method| {
                             self.trait_method_traits
                                 .get(method)

@@ -2908,3 +2908,78 @@ fn unspaced_comparisons_are_not_type_arguments() {
     let text = format!("{program:?}");
     assert!(!text.contains("TypeAscription"), "{text}");
 }
+
+#[test]
+fn generic_extern_bindings_and_companions_round_trip() {
+    let source = concat!(
+        "pub extern \"staple-intrinsic\" {\n",
+        "  identity: <T> T -> T\n",
+        "  clone: <T where Clone T> T -> T\n",
+        "  run: <effect E> (() ->{E} ()) ->{E} ()\n",
+        "}\n",
+        "companion<T where Clone T> Box T {\n",
+        "  pub extern \"staple-intrinsic\" { first: Box T -> T; second: <U> (Box T, U) -> T }\n",
+        "}\n",
+    );
+    let module = parse(source).expect("generic extern bindings parse");
+    let Item::ExternBlock(block) = &module.items[0] else {
+        panic!("extern block")
+    };
+    assert_eq!(block.bindings[0].type_parameters.len(), 1);
+    assert_eq!(block.bindings[1].trait_bounds.len(), 1);
+    assert!(matches!(
+        block.bindings[2].type_parameters[0],
+        staple_syntax::TypeParameterPattern::Effect(_)
+    ));
+    let Item::Submodule(companion) = &module.items[1] else {
+        panic!("companion")
+    };
+    let Item::ExternBlock(members) = &companion.module.items[0] else {
+        panic!("extern members")
+    };
+    assert_eq!(members.bindings[0].type_parameters.len(), 1);
+    assert_eq!(members.bindings[1].type_parameters.len(), 2);
+    assert_eq!(members.bindings[0].trait_bounds.len(), 1);
+    assert_ne!(
+        members.bindings[0].trait_bounds[0].syntax.id,
+        members.bindings[1].trait_bounds[0].syntax.id
+    );
+    assert!(
+        members
+            .bindings
+            .iter()
+            .all(|binding| binding.companion_target.is_some())
+    );
+    let formatted = staple_syntax::format_source(source).expect("format generic externs");
+    assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
+    let reparsed = parse(&formatted).unwrap();
+    let Item::ExternBlock(block) = &reparsed.items[0] else {
+        panic!("extern block")
+    };
+    assert_eq!(block.bindings[1].trait_bounds.len(), 1);
+    assert!(parse("extern \"c\" { identity: <T> T -> T }\n").is_ok());
+}
+
+#[test]
+fn extern_bindings_can_export_individual_members() {
+    let source = "extern \"staple-intrinsic\" { private: () -> (); pub public: () -> (); pub(package) package_value: () -> () }\n";
+    let module = parse(source).unwrap();
+    let Item::ExternBlock(block) = &module.items[0] else {
+        panic!("extern block")
+    };
+    assert_eq!(block.visibility, staple_syntax::Visibility::Private);
+    assert_eq!(
+        block.bindings[0].visibility,
+        staple_syntax::Visibility::Private
+    );
+    assert_eq!(
+        block.bindings[1].visibility,
+        staple_syntax::Visibility::Public
+    );
+    assert_eq!(
+        block.bindings[2].visibility,
+        staple_syntax::Visibility::Package
+    );
+    let formatted = staple_syntax::format_source(source).unwrap();
+    assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
+}

@@ -2058,6 +2058,7 @@ impl TypedModule {
 
 #[derive(Default)]
 pub struct TypeChecker {
+    direct_callee_syntax: HashSet<SyntaxId>,
     expression_types: HashMap<SyntaxId, CheckedType>,
     product_default_plans: HashMap<SyntaxId, CheckedProductDefaultPlan>,
     curried_default_plans: HashMap<SyntaxId, CheckedCurriedDefaultPlan>,
@@ -2078,6 +2079,7 @@ pub struct TypeChecker {
     resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     function_subtype_bounds: HashMap<FunctionId, Vec<CheckedSubtypeBound>>,
+    intrinsic_bounds: HashMap<SymbolId, (Vec<CheckedTraitBound>, Vec<CheckedSubtypeBound>)>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
     trait_functional_dependencies: HashMap<TraitId, Vec<CheckedFunctionalDependency>>,
@@ -3605,6 +3607,21 @@ impl TypeChecker {
         let value_type = self.resolve_source_type(module, annotation);
         if let Some(symbol) = module.symbol_for(binding.syntax.id) {
             self.symbol_types.insert(symbol, value_type);
+            if module.intrinsic_function(symbol).is_some() {
+                let bounds = binding
+                    .trait_bounds
+                    .iter()
+                    .filter_map(|bound| self.resolve_trait_bound(module, bound))
+                    .collect::<Vec<_>>();
+                let bounds = self.expand_trait_bounds(bounds);
+                let subtype_bounds = binding
+                    .subtype_bounds
+                    .iter()
+                    .filter_map(|bound| self.resolve_subtype_bound(module, bound))
+                    .collect();
+                self.intrinsic_bounds
+                    .insert(symbol, (bounds, subtype_bounds));
+            }
             if let Some(id) = source_type_id(module, annotation) {
                 self.symbol_companion_types.insert(symbol, id);
             }
@@ -5894,7 +5911,7 @@ impl TypeChecker {
         match item {
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
-                    if !binding.type_parameters.is_empty() {
+                    if !binding.type_parameters.is_empty() && block.abi != "\"staple-intrinsic\"" {
                         self.diagnostics.push(Diagnostic::new(
                             binding.syntax.span.clone(),
                             "external bindings cannot have compile-time parameters",
@@ -6503,6 +6520,7 @@ impl TypeChecker {
             ));
         }
         if !binding.type_parameters.is_empty()
+            && binding.kind != staple_syntax::BindingKind::Extern
             && !matches!(binding.value, Some(Expression::Function(_)))
         {
             self.diagnostics.push(Diagnostic::new(
@@ -6902,6 +6920,36 @@ impl TypeChecker {
         expression: &Expression,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
+        if let Expression::Call(call) = expression {
+            let mut callee = call.callee.as_ref();
+            loop {
+                self.direct_callee_syntax.insert(callee.syntax().id);
+                let Expression::Call(call) = callee else {
+                    break;
+                };
+                callee = call.callee.as_ref();
+            }
+        }
+        if let Some(symbol) = module.symbol_for(expression.syntax().id)
+            && module.intrinsic_function(symbol).is_some()
+            && !self.direct_callee_syntax.contains(&expression.syntax().id)
+        {
+            let name = match expression {
+                Expression::Name(name) => Some(name.name.as_str()),
+                Expression::Access(access) => match &access.accessor {
+                    Accessor::Name(name) | Accessor::Method(name) => Some(name.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(name) = name {
+                self.diagnostics.push(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    format!("intrinsic `{name}` cannot be used as a value; call it directly"),
+                ));
+                return CheckedType::Error;
+            }
+        }
         // `Inferred` carries no information (it's the wildcard `erase_type_parameters`
         // substitutes for a still-generic subtype, and also what a source-level `_`
         // annotation resolves to), so treat it exactly like "no expected type" rather
@@ -7477,6 +7525,11 @@ impl TypeChecker {
                             argument.syntax().span.clone(),
                         );
                     }
+                    self.check_intrinsic_bounds(
+                        module.symbol_for(root_syntax),
+                        &CheckedType::Function(function.clone()),
+                        call.syntax.span.clone(),
+                    );
                     self.expression_types
                         .insert(root_syntax, CheckedType::Function(function.clone()));
                     self.juxtaposed_call_plans.insert(
@@ -7559,6 +7612,11 @@ impl TypeChecker {
                             selector.syntax.span.clone(),
                         );
                     }
+                    self.check_intrinsic_bounds(
+                        Some(symbol),
+                        &callee_type,
+                        selector.syntax.span.clone(),
+                    );
                     self.expression_types
                         .insert(selector.syntax.id, callee_type.clone());
                     let result = match callee_type {
@@ -8675,6 +8733,11 @@ impl TypeChecker {
                             call.callee.syntax().span.clone(),
                         );
                     }
+                    self.check_intrinsic_bounds(
+                        module.symbol_for(call.callee.syntax().id),
+                        &callee_type,
+                        call.callee.syntax().span.clone(),
+                    );
                     self.expression_types
                         .insert(call.callee.syntax().id, callee_type.clone());
                     match callee_type {
@@ -11055,6 +11118,35 @@ impl TypeChecker {
             .get(&function_id)
             .cloned()
             .unwrap_or_default();
+        self.check_instantiated_bounds(bounds, subtype_bounds, template, instantiated, span);
+    }
+
+    fn check_intrinsic_bounds(
+        &mut self,
+        symbol: Option<SymbolId>,
+        instantiated: &CheckedType,
+        span: Span,
+    ) {
+        let Some(symbol) = symbol else {
+            return;
+        };
+        let Some((bounds, subtype_bounds)) = self.intrinsic_bounds.get(&symbol).cloned() else {
+            return;
+        };
+        let Some(template) = self.symbol_types.get(&symbol).cloned() else {
+            return;
+        };
+        self.check_instantiated_bounds(bounds, subtype_bounds, &template, instantiated, span);
+    }
+
+    fn check_instantiated_bounds(
+        &mut self,
+        bounds: Vec<CheckedTraitBound>,
+        subtype_bounds: Vec<CheckedSubtypeBound>,
+        template: &CheckedType,
+        instantiated: &CheckedType,
+        span: Span,
+    ) {
         if bounds.is_empty() && subtype_bounds.is_empty() {
             return;
         }
@@ -15060,6 +15152,23 @@ fn expression_reads_reactive(
                 || expression_reads_reactive(module, &value.value, derived)
         }
         Expression::Call(value) => {
+            // Deferred computations do not make their handles derived, and
+            // the unit results of effectful intrinsics carry no dependency on
+            // their arguments. Placeholder bodies used to encode these facts.
+            if matches!(
+                module
+                    .symbol_for(value.callee.syntax().id)
+                    .and_then(|symbol| module.intrinsic_function(symbol)),
+                Some(
+                    crate::IntrinsicFunction::Until
+                        | crate::IntrinsicFunction::Spawn
+                        | crate::IntrinsicFunction::Reaction
+                        | crate::IntrinsicFunction::Batch
+                        | crate::IntrinsicFunction::Drop
+                )
+            ) {
+                return false;
+            }
             let argument_flows = module
                 .symbol_for(value.callee.syntax().id)
                 .and_then(|symbol| module.function_for_symbol(symbol))

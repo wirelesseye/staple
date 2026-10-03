@@ -1272,7 +1272,14 @@ impl ExternalScan<'_> {
             Item::Binding(binding) => self.binding(binding.visibility, binding),
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
-                    self.binding(block.visibility, binding);
+                    self.binding(
+                        if binding.visibility == Visibility::Private {
+                            block.visibility
+                        } else {
+                            binding.visibility
+                        },
+                        binding,
+                    );
                 }
             }
             _ => {}

@@ -1043,8 +1043,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .backend
                     .build_runtime_call(pump, &[scheduler.into(), limit.into()], "pump")?
                     .try_as_basic_value()
-                    .unwrap_basic();
-                Ok(result.as_any_value_enum())
+                    .unwrap_basic()
+                    .into_struct_value();
+                // The runtime returns a C struct; Staple products are packed.
+                let product_type = self.backend.context.struct_type(
+                    &[self.backend.size_type.into(), self.backend.size_type.into()],
+                    true,
+                );
+                let mut value = product_type.const_zero();
+                for (index, name) in [(0, "pump.executed"), (1, "pump.ready")] {
+                    let count = self
+                        .backend
+                        .builder
+                        .build_extract_value(result, index, name)
+                        .map_err(compiler_diagnostic)?;
+                    value = self
+                        .backend
+                        .builder
+                        .build_insert_value(value, count, index, name)
+                        .map_err(compiler_diagnostic)?
+                        .into_struct_value();
+                }
+                Ok(value.as_any_value_enum())
             }
             IntrinsicFunction::TaskIsFinished => {
                 let [BasicMetadataValueEnum::PointerValue(record)] = arguments else {

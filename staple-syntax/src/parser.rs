@@ -736,7 +736,12 @@ impl Grammar {
             return Err(self.error("expected `}` after companion items"));
         }
         for item in &mut items {
-            if let Item::Binding(binding) = item {
+            let bindings: Vec<&mut Binding> = match item {
+                Item::Binding(binding) => vec![binding],
+                Item::ExternBlock(block) => block.bindings.iter_mut().collect(),
+                _ => Vec::new(),
+            };
+            for binding in bindings {
                 // Re-parse the companion's own `<...>` clause fresh for each
                 // member, rather than `.clone()`ing the one parsed above. A
                 // plain clone would give every member's spliced parameters
@@ -1509,8 +1514,15 @@ impl Grammar {
             }
             let binding_start = self.position;
             let docs = self.parse_member_docs(binding_start)?;
+            let binding_visibility = if self.eat(TokenKind::Pub) {
+                self.parse_visibility_after_pub()?.0
+            } else {
+                Visibility::Private
+            };
             let name = self.parse_binding_name()?;
             self.expect(TokenKind::Colon, "expected `:` after external binding name")?;
+            let (type_parameters, trait_bounds, subtype_bounds) =
+                self.parse_bracketed_generics()?;
             let previous = self.newline_terminates_type;
             self.newline_terminates_type = true;
             let annotation = self.parse_type();
@@ -1519,14 +1531,14 @@ impl Grammar {
             bindings.push(Binding {
                 syntax: self.syntax(binding_start),
                 docs,
-                visibility: Visibility::Private,
+                visibility: binding_visibility,
                 kind: BindingKind::Extern,
                 mutable: false,
                 signal: false,
                 name,
-                type_parameters: Vec::new(),
-                trait_bounds: Vec::new(),
-                subtype_bounds: Vec::new(),
+                type_parameters,
+                trait_bounds,
+                subtype_bounds,
                 annotation: Some(annotation),
                 companion_target: None,
                 value: None,

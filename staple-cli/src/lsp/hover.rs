@@ -2091,6 +2091,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wrapped_intrinsic_hover_shows_the_public_def() {
+        let source = "let mut reference = Ref 1\nlet previous = Ref.replace reference 2\n";
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        let path = std::env::temp_dir().join("staple-hover-wrapped-intrinsic.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(&root)
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let start = source.find("replace").unwrap();
+        let hovers = entries(&module, &typed);
+        let hover = hovers
+            .iter()
+            .find(|entry| entry.range.contains(&start) && entry.signature.contains("replace:"))
+            .unwrap_or_else(|| panic!("intrinsic hover: {hovers:?}"));
+        assert!(
+            hover.signature.starts_with("def replace: "),
+            "{hover:?}"
+        );
+        assert!(
+            hover
+                .documentation
+                .iter()
+                .any(|doc| doc.contains("returns the old value"))
+        );
+        let definitions = crate::lsp::definition::entries(&module, typed.resolved(), Some(&typed));
+        let definition = definitions
+            .iter()
+            .find(|entry| entry.range.start == start)
+            .expect("intrinsic definition");
+        assert!(definition.targets.iter().any(|target| {
+            target.path.ends_with("std/core/reference.sta")
+                && std::fs::read_to_string(&target.path).unwrap()[target.selection_range.clone()]
+                    == *"replace"
+        }));
+        let semantics = crate::lsp::semantic::entries(
+            source,
+            Some(&module),
+            Some(typed.resolved()),
+            Some(&typed),
+        );
+        assert!(semantics.iter().any(
+            |entry| entry.start == start && entry.token_type == crate::lsp::semantic::FUNCTION
+        ));
+    }
+
+    #[test]
     fn package_hover_uses_configured_name_and_root_docs() {
         let root =
             std::env::temp_dir().join(format!("staple-hover-package-root-{}", std::process::id()));
@@ -2802,7 +2854,7 @@ mod tests {
             ("test", "def test: () ->{state.read, IO, Reactive} ()", None),
             (
                 "reaction",
-                "def reaction: <effect E> (() ->{E} ()) ->{E, Reactive} ()",
+                "<extern> reaction: <effect E> (() ->{E} ()) ->{E, Reactive} ()",
                 Some("reaction: (() ->{state.read, IO} ()) ->{state.read, IO, Reactive} ()"),
             ),
         ] {

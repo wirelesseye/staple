@@ -7,16 +7,18 @@ use std.core.sized.sized_opaque
 pub type Reactive = opaque
 impl !Copy Reactive {}
 
-def __reactive_scope: () -> Reactive = () => __reactive_scope ()
-
 /// Creates a resource that owns reactions until its `with` block exits.
 pub def reactive_scope: () -> Reactive = () => __reactive_scope ()
 
-/// Runs a callback immediately and again whenever one of its signal reads changes.
-pub def reaction: <effect E> (() ->{E} ()) ->{Reactive, E} () = callback => ()
+extern "staple-intrinsic" {
+    __reactive_scope: () -> Reactive
 
-/// Runs a callback immediately while deferring reactions until the outermost batch exits.
-pub def batch: <effect E> (() ->{E} ()) ->{E} () = callback => ()
+    /// Runs a callback immediately and again whenever one of its signal reads changes.
+    pub reaction: <effect E> (() ->{E} ()) ->{Reactive, E} ()
 
-/// Reads an expression eagerly without retaining or recording reactive dependencies.
-pub def snapshot: <T> move T -> T = move value => value
+    /// Runs a callback immediately while deferring reactions until the outermost batch exits.
+    pub batch: <effect E> (() ->{E} ()) ->{E} ()
+
+    /// Reads an expression eagerly without retaining or recording reactive dependencies.
+    pub snapshot: <T> move T -> T
+}

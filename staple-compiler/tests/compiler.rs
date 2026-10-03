@@ -12599,3 +12599,151 @@ fn recursive_constructor_stdlib_contract_and_validation() {
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
+
+#[test]
+fn intrinsic_values_require_a_direct_call() {
+    for source in [
+        "let read = snapshot\n",
+        "let read: I32 -> I32 = snapshot\n",
+        "use std.coroutine.spawn\nlet start = spawn\n",
+        "let length: std.slice.Slice I32 -> USize = std.slice.Slice.length\n",
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("intrinsic values must fail before codegen");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("cannot be used as a value; call it directly")),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn generic_c_extern_bindings_are_rejected() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("extern \"c\" { identity: <T> T -> T }\n"))
+        .expect_err_diagnostics("C extern generics are unsupported");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.message
+            == "external bindings cannot have compile-time parameters")
+    );
+}
+
+#[test]
+fn reserved_intrinsic_abi_is_rejected_in_nested_user_modules() {
+    for source in [
+        "extern \"staple-intrinsic\" { drop: <T> move T -> () }\n",
+        "mod nested { extern \"staple-intrinsic\" { drop: <T> move T -> () } }\n",
+        "type Box T = wrap T\ncompanion<T> Box T { extern \"staple-intrinsic\" { replace: Box T -> T } }\n",
+    ] {
+        let diagnostics =
+            resolve_result(source).expect_err_diagnostics("intrinsic ABI is reserved");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.message
+                == "the `staple-intrinsic` ABI is reserved for the standard library"),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn intrinsic_registration_checks_names_and_loaded_modules() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for (relative, before, after, expected) in [
+        (
+            "std/buffer.sta",
+            "__buffer_length: <T>",
+            "__unknown: <T>",
+            "unknown Staple intrinsic `__unknown`",
+        ),
+        (
+            "std/core/drop.sta",
+            "extern \"staple-intrinsic\" {\n    __drop: <T> move T -> ()\n}\n",
+            "",
+            "standard library `std.core.drop` does not declare intrinsic `__drop`",
+        ),
+        (
+            "std/coroutine.sta",
+            "    spawn: <T, effect E> Coroutine{E} T ->{Tasks, E} Task T",
+            "",
+            "standard library `std.coroutine` does not declare intrinsic `spawn`",
+        ),
+    ] {
+        let path = root.join("stdlib").join(relative);
+        let source = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace(before, after);
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source_at(&path, &source)
+            .expect("stdlib overlay should load");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err_diagnostics("invalid intrinsic declaration should fail");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected),
+            "{diagnostics:?}"
+        );
+    }
+    let resolved = resolve("let value = 1\n");
+    assert!(
+        !resolved
+            .program()
+            .modules()
+            .iter()
+            .any(|module| module.path.ends_with("std/coroutine.sta"))
+    );
+}
+
+#[test]
+fn wrapped_intrinsics_are_registered_once() {
+    use staple_compiler::IntrinsicFunction;
+    let resolved = resolve("use std.coroutine\n");
+    let intrinsics = resolved.intrinsic_functions();
+    for expected in [
+        IntrinsicFunction::TaskCancel,
+        IntrinsicFunction::ResolverCancel,
+        IntrinsicFunction::CompletionTokenCancel,
+        IntrinsicFunction::RefReplace,
+        IntrinsicFunction::SliceLength,
+    ] {
+        assert_eq!(
+            intrinsics
+                .values()
+                .filter(|intrinsic| **intrinsic == expected)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn generic_intrinsic_trait_bounds_are_checked_at_calls() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let path = root.join("stdlib/std/core/drop.sta");
+    let source = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("__drop: <T>", "__drop: <T where Eq T>")
+        .replace("move value => __drop value", "move value => ()")
+        + "\n__drop (() => ())\n";
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source_at(&path, &source)
+        .expect("generic intrinsic overlay should load");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .expect("generic bound should resolve");
+    let diagnostics = TypeChecker::new()
+        .check(resolved)
+        .expect_err_diagnostics("intrinsic bounds must be enforced");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("trait bound is not satisfied")),
+        "{diagnostics:?}"
+    );
+}

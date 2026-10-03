@@ -100,13 +100,6 @@ impl<'a> OwnershipChecker<'a> {
         checker.check_top_level();
 
         for function in module.functions() {
-            if function
-                .binding_syntax
-                .and_then(|syntax| module.symbol_for(syntax))
-                .is_some_and(|symbol| module.resolved().intrinsic_function(symbol).is_some())
-            {
-                continue;
-            }
             checker.check_function(function);
         }
         for function in module.implicit_thunks() {

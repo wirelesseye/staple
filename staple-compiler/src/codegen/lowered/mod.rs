@@ -4504,7 +4504,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 return self.emit_expression(owner, *callee, environment);
             }
             LoweredCallableTarget::Intrinsic { .. } => {
-                return Err(unsupported("intrinsic callable value"));
+                return Err(internal_invariant(
+                    callable.origin.span.clone(),
+                    "intrinsics cannot be callable values",
+                ));
             }
         };
         let pointer = match &callable.closure {

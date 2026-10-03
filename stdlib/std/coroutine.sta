@@ -2,7 +2,6 @@ pub mod
 
 use std.core.sized.sized_opaque
 
-use std.process.panic
 use std.core.reactive.Reactive
 
 /// A lazily-constructed, suspendable computation.
@@ -30,18 +29,82 @@ pub type Completed T = pub wrap T
 /// produced a value.
 pub type Cancelled = pub wrap ()
 
-/// Runs a coroutine to completion on the current thread and yields its result,
-/// incorporating its deferred effects.
-///
-/// This is a provisional driver for the coroutine language surface: it accepts
-/// only coroutines that complete without a real suspension point (nested
-/// `await` of other coroutines is fine). Task scheduling, `spawn`, and bounded
-/// pumping arrive with the scheduler, which replaces this function.
-///
-/// The body is never evaluated — the compiler lowers a `block_on` call
-/// directly — but a generic `def` still requires one.
-pub def block_on: <T, effect E> Coroutine{E} T ->{E} T =
-    _ => panic "block_on is a compiler intrinsic"
+pub extern "staple-intrinsic" {
+    /// Runs a coroutine to completion on the current thread and yields its result,
+    /// incorporating its deferred effects.
+    ///
+    /// This is a provisional driver for the coroutine language surface: it accepts
+    /// only coroutines that complete without a real suspension point (nested
+    /// `await` of other coroutines is fine). Task scheduling, `spawn`, and bounded
+    /// pumping arrive with the scheduler, which replaces this function.
+    block_on: <T, effect E> Coroutine{E} T ->{E} T
+
+    /// Consumes a coroutine, schedules it under the current `Tasks` scope, and
+    /// returns a handle to its eventual result. Requires the coroutine's own
+    /// effects `E` at the spawn site so its resources are captured now.
+    spawn: <T, effect E> Coroutine{E} T ->{Tasks, E} Task T
+
+    /// A coroutine that suspends the awaiting task once, deferring the rest of its
+    /// body to a later `pump`.
+    yield_now: () -> Coroutine{Tasks} ()
+
+    /// Suspends the current task until `predicate` first observes `True`. The
+    /// predicate may only read signals (no writes, effects, or suspension); it is
+    /// evaluated synchronously once when the coroutine runs, then again on each
+    /// change to a signal it read, refreshing its dependencies. The first `True`
+    /// latches, unsubscribes, and resumes the task. Cancelling the task while it is
+    /// parked here tears the subscription down.
+    until: (() ->{state.read} Bool) -> Coroutine{Reactive} ()
+}
+
+extern "staple-intrinsic" {
+    __scheduler: () -> Scheduler
+    __task_scope: Scheduler -> Tasks
+    __pump: (Scheduler, USize) -> (executed: USize, ready: USize)
+    __completion: <T> Scheduler -> (wait: Wait T, resolver: Resolver T)
+    __completion_with_cancel: <T> (Scheduler, () -> ()) -> (wait: Wait T, resolver: Resolver T)
+    __completion_token: Scheduler -> (wait: Wait (), token: CompletionToken)
+    __task_is_finished: <T> Task T -> Bool
+    __task_cancel: <T> Task T -> ()
+    __resolver_complete: <T> [Resolver T, T] -> ()
+    __resolver_cancel: <T> Resolver T -> ()
+    __completion_token_resolve: CompletionToken -> ()
+    __completion_token_cancel: CompletionToken -> ()
+}
+
+/// Creates a scheduler. Destroying it closes its scopes and cancels their
+/// tasks.
+pub def scheduler: () -> Scheduler = () => __scheduler ()
+
+/// Creates a `Tasks` scope bound to `sched`.
+pub def task_scope: Scheduler -> Tasks = sched => __task_scope sched
+
+/// Runs a bounded snapshot of the scheduler's ready coroutines. Tasks that
+/// suspend, or are spawned during the pump, become eligible for a later pump.
+/// Returns the number of resumes performed and the number still ready.
+pub def pump: (Scheduler, USize) -> (executed: USize, ready: USize) =
+    (sched, budget) => __pump (sched, budget)
+
+/// Creates a one-shot completion bound to `scheduler`: a `Wait T` to `await`
+/// and a `Resolver T` to fulfil it. The wait may only be `await`ed from a task
+/// on the same scheduler. Completing before the `await` registers still
+/// delivers the value.
+pub def completion: <T> Scheduler -> (wait: Wait T, resolver: Resolver T) =
+    sched => __completion sched
+
+/// Like `completion`, but with an owned cancellation callback. `on_cancel` runs
+/// exactly once if the consumer abandons the wait before it resolves — the
+/// `Wait` is dropped unconsumed, or a task parked on it is cancelled. A
+/// successful `complete` or `cancel` releases the callback without running it.
+/// Libraries use it to unregister a timer or external subscription. The
+/// callback may not suspend.
+pub def completion_with_cancel: <T> (Scheduler, () -> ()) -> (wait: Wait T, resolver: Resolver T) =
+    (sched, on_cancel) => __completion_with_cancel (sched, on_cancel)
+
+/// Creates a unit-valued completion bound to `scheduler` and returns the `Wait`
+/// to `await` plus an opaque `CompletionToken` for a host to resolve.
+pub def completion_token: Scheduler -> (wait: Wait (), token: CompletionToken) =
+    sched => __completion_token sched
 
 /// An explicitly driven owner of coroutine ready queues. No coroutine runs
 /// until a `pump`. Multiple schedulers coexist on the one runtime thread.
@@ -56,45 +119,16 @@ impl !Copy Scheduler {}
 pub type Tasks = opaque
 impl !Copy Tasks {}
 
-// Every function below is lowered directly by the compiler; the bodies exist
-// only to satisfy "a declared binding needs an initializer".
-
-/// Creates a scheduler. Destroying it closes its scopes and cancels their
-/// tasks.
-pub def scheduler: () -> Scheduler = () => panic "scheduler is a compiler intrinsic"
-
-/// Creates a `Tasks` scope bound to `sched`.
-pub def task_scope: Scheduler -> Tasks = _ => panic "task_scope is a compiler intrinsic"
-
-/// Consumes a coroutine, schedules it under the current `Tasks` scope, and
-/// returns a handle to its eventual result. Requires the coroutine's own
-/// effects `E` at the spawn site so its resources are captured now.
-pub def spawn: <T, effect E> Coroutine{E} T ->{Tasks, E} Task T =
-    _ => panic "spawn is a compiler intrinsic"
-
-/// Runs a bounded snapshot of the scheduler's ready coroutines. Tasks that
-/// suspend, or are spawned during the pump, become eligible for a later pump.
-/// Returns the number of resumes performed and the number still ready.
-pub def pump: (Scheduler, USize) -> (executed: USize, ready: USize) =
-    _ => panic "pump is a compiler intrinsic"
-
-/// A coroutine that suspends the awaiting task once, deferring the rest of its
-/// body to a later `pump`.
-pub def yield_now: () -> Coroutine{Tasks} () =
-    () => panic "yield_now is a compiler intrinsic"
-
 companion Task {
     /// Reports whether the task has finished (completed or cancelled), without
     /// consuming its result.
-    pub def is_finished: <T> Task T -> Bool =
-        _ => panic "Task.is_finished is a compiler intrinsic"
+    pub def is_finished: <T> Task T -> Bool = task => __task_is_finished task
 
     /// Requests cancellation of the task. Idempotent, and a no-op once the task
     /// has finished. A running task unwinds at its next `await` / `yield_now` /
     /// return boundary rather than delivering a value to its body; a not-yet
     /// started task never runs its body. Borrows the handle.
-    pub def cancel: <T> Task T -> () =
-        _ => panic "Task.cancel is a compiler intrinsic"
+    pub def cancel: <T> Task T -> () = task => __task_cancel task
 }
 
 /// A one-shot wait that a task `await`s and anything can resolve. Affine:
@@ -109,22 +143,6 @@ impl<T> !Copy (Wait T) {}
 pub type Resolver T = opaque
 impl<T> !Copy (Resolver T) {}
 
-/// Creates a one-shot completion bound to `scheduler`: a `Wait T` to `await`
-/// and a `Resolver T` to fulfil it. The wait may only be `await`ed from a task
-/// on the same scheduler. Completing before the `await` registers still
-/// delivers the value.
-pub def completion: <T> Scheduler -> (wait: Wait T, resolver: Resolver T) =
-    _ => panic "completion is a compiler intrinsic"
-
-/// Like `completion`, but with an owned cancellation callback. `on_cancel` runs
-/// exactly once if the consumer abandons the wait before it resolves — the
-/// `Wait` is dropped unconsumed, or a task parked on it is cancelled. A
-/// successful `complete` or `cancel` releases the callback without running it.
-/// Libraries use it to unregister a timer or external subscription. The
-/// callback may not suspend.
-pub def completion_with_cancel: <T> (Scheduler, () -> ()) -> (wait: Wait T, resolver: Resolver T) =
-    _ => panic "completion_with_cancel is a compiler intrinsic"
-
 /// An opaque, C-compatible one-shot wakeup handle for a unit-valued completion.
 /// A host holds it across the FFI boundary and calls one of the C entry points
 /// `__staple_completion_token_resolve` / `_cancel` / `_release` on it; dropping
@@ -133,40 +151,22 @@ pub def completion_with_cancel: <T> (Scheduler, () -> ()) -> (wait: Wait T, reso
 pub type CompletionToken = opaque
 impl !Copy CompletionToken {}
 
-/// Creates a unit-valued completion bound to `scheduler` and returns the `Wait`
-/// to `await` plus an opaque `CompletionToken` for a host to resolve.
-pub def completion_token: Scheduler -> (wait: Wait (), token: CompletionToken) =
-    _ => panic "completion_token is a compiler intrinsic"
-
 companion CompletionToken {
     /// Resolves the completion with `()`, waking a parked waiter. Consumes the
     /// token. The C entry point is `__staple_completion_token_resolve`.
-    pub def resolve: CompletionToken -> () =
-        _ => panic "CompletionToken.resolve is a compiler intrinsic"
+    pub def resolve: CompletionToken -> () = token => __completion_token_resolve token
 
     /// Cancels the completion, waking a parked waiter with `Cancelled`.
     /// Consumes the token. The C entry point is `__staple_completion_token_cancel`.
-    pub def cancel: CompletionToken -> () =
-        _ => panic "CompletionToken.cancel is a compiler intrinsic"
+    pub def cancel: CompletionToken -> () = token => __completion_token_cancel token
 }
-
-/// Suspends the current task until `predicate` first observes `True`. The
-/// predicate may only read signals (no writes, effects, or suspension); it is
-/// evaluated synchronously once when the coroutine runs, then again on each
-/// change to a signal it read, refreshing its dependencies. The first `True`
-/// latches, unsubscribes, and resumes the task. Cancelling the task while it is
-/// parked here tears the subscription down.
-pub def until: (() ->{state.read} Bool) -> Coroutine{Reactive} () =
-    _ => panic "until is a compiler intrinsic"
 
 companion Resolver {
     /// Consumes the resolver and the value, records completion, and wakes a
     /// registered waiter. If the waiter has already gone the value is dropped.
-    pub def complete: <T> [Resolver T, T] -> () =
-        [_, _] => panic "Resolver.complete is a compiler intrinsic"
+    pub def complete: <T> [Resolver T, T] -> () = [resolver, value] => __resolver_complete resolver value
 
     /// Consumes the resolver and cancels the operation: a registered waiter is
     /// woken with `Cancelled`.
-    pub def cancel: <T> Resolver T -> () =
-        _ => panic "Resolver.cancel is a compiler intrinsic"
+    pub def cancel: <T> Resolver T -> () = resolver => __resolver_cancel resolver
 }

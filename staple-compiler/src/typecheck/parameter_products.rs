@@ -84,6 +84,39 @@ impl TypeChecker {
                     });
             }
         }
+        // Intrinsics have no function body, but their generic signatures
+        // participate in the same parameter-product capability analysis.
+        for source in module.program().modules() {
+            for item in &source.syntax.items {
+                let Item::ExternBlock(block) = item else {
+                    continue;
+                };
+                for binding in &block.bindings {
+                    for parameter in self.declared_type_parameters(module, &binding.type_parameters)
+                    {
+                        let uses = signatures.entry(parameter).or_default();
+                        if let Some(target) = &binding.companion_target {
+                            uses.push((target.clone(), false));
+                        }
+                        if let Some(annotation) = &binding.annotation {
+                            uses.push((annotation.clone(), false));
+                        }
+                        for bound in &binding.trait_bounds {
+                            uses.extend(bound.arguments.iter().cloned().map(|ty| (ty, false)));
+                        }
+                        for bound in &binding.subtype_bounds {
+                            if let Some(id) = module.type_parameter_for(bound.syntax.id) {
+                                forced_values.insert(id);
+                            }
+                            uses.push((Type::Named(bound.parameter.clone()), false));
+                            uses.push((bound.supertype.clone(), false));
+                        }
+                        self.parameter_product_owners
+                            .insert(parameter, binding.name.clone());
+                    }
+                }
+            }
+        }
         for implementation in module.trait_implementations() {
             for parameter in &implementation.parameters {
                 let uses = signatures.entry(*parameter).or_default();

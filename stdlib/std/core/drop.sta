@@ -6,5 +6,9 @@ pub trait Drop T {
     drop: T -> ()
 }
 
+extern "staple-intrinsic" {
+    __drop: <T> move T -> ()
+}
+
 /// Consumes a value and runs its cleanup behavior when applicable.
-pub def drop: <T> move T -> () = move value => ()
+pub def drop: <T> move T -> () = move value => __drop value
