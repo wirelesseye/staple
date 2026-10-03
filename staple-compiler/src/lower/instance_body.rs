@@ -1786,6 +1786,7 @@ impl<'a> BodyCloner<'a> {
         super::mark_call_temporary_drops(
             &call.target,
             &call.function_type,
+            &call.steps,
             &mut call.arguments,
             |id| {
                 self.body
@@ -1830,6 +1831,9 @@ impl<'a> BodyCloner<'a> {
                         mappings: (0..call.arguments.len())
                             .map(|slot| super::LoweredSpreadMapping { source: slot, slot })
                             .collect(),
+                        // Every slot passes by value, so no element is a
+                        // borrowed temporary.
+                        owned_operand: false,
                     };
                 }
             }
@@ -2059,19 +2063,23 @@ impl<'a> BodyCloner<'a> {
                     argument,
                     expression,
                     mappings,
+                    owned_operand,
                 } => LoweredCallStep::ProductSpread {
                     argument,
                     expression: self.clone_expression(expression),
                     mappings,
+                    owned_operand,
                 },
                 LoweredCallStep::NamedProductSpread {
                     argument,
                     expression,
                     mappings,
+                    owned_operand,
                 } => LoweredCallStep::NamedProductSpread {
                     argument,
                     expression: self.clone_expression(expression),
                     mappings,
+                    owned_operand,
                 },
                 LoweredCallStep::Default {
                     argument,

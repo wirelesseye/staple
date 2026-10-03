@@ -2008,9 +2008,11 @@ A temporary argument is a value that belongs to no binding, such as a call
 result or a constructor application. When it is passed to a borrowed
 parameter, the call site owns it and drops it as soon as the call returns; when
 it is passed to a `move` parameter, the callee owns it. A named binding passed
-to a borrowed parameter, including a product spread into borrowed parameters,
-stays owned by its binding. The rule is the same for direct calls, closure
-calls, trait methods, and C functions.
+to a borrowed parameter, including a named product spread into borrowed
+parameters, stays owned by its binding. Spreading a temporary product applies
+the rule to each element: elements in borrowed parameters are dropped after the
+call, and elements in `move` parameters belong to the callee. The rule is the
+same for direct calls, closure calls, trait methods, and C functions.
 
 `move` uses the same syntax and placement rules as `mut`: it may prefix a
 whole parameter type or binding, or a direct positional or named element of a

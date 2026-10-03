@@ -1017,12 +1017,18 @@ pub(crate) enum LoweredCallStep {
         argument: usize,
         expression: ExpressionId,
         mappings: Vec<LoweredSpreadMapping>,
+        /// The operand is a temporary owned by the call: its elements in
+        /// borrowed slots are dropped after the call, and its elements in `move`
+        /// slots belong to the callee. A named operand keeps its elements.
+        owned_operand: bool,
     },
     /// Expand a named spread into an argument's final slots.
     NamedProductSpread {
         argument: usize,
         expression: ExpressionId,
         mappings: Vec<LoweredNamedSpreadMapping>,
+        /// See [`LoweredCallStep::ProductSpread::owned_operand`].
+        owned_operand: bool,
     },
     /// Evaluate a contextual default for one argument slot.
     Default {
@@ -7096,6 +7102,7 @@ impl LoweredProgram {
         mark_call_temporary_drops(
             &target,
             &function_type,
+            &steps,
             &mut arguments,
             |id| {
                 self.expressions
@@ -7238,6 +7245,7 @@ impl LoweredProgram {
         mark_call_temporary_drops(
             &target,
             &function_type,
+            &steps,
             &mut arguments,
             |id| {
                 self.expressions
@@ -7559,6 +7567,7 @@ impl LoweredProgram {
             }
             if element.spread {
                 let expression = self.lower_expression(module, owner, context, &element.value)?;
+                let owned_operand = !expression_has_place_root(module.resolved(), &element.value);
                 let Some(CheckedType::Product(operand)) =
                     module.type_of_expression(element.value.syntax().id)
                 else {
@@ -7597,6 +7606,7 @@ impl LoweredProgram {
                             argument: first.slot,
                             expression,
                             mappings,
+                            owned_operand,
                         });
                     }
                 } else {
@@ -7622,6 +7632,7 @@ impl LoweredProgram {
                             argument: first.slot,
                             expression,
                             mappings,
+                            owned_operand,
                         });
                     }
                 }
@@ -12398,11 +12409,13 @@ pub(crate) fn internal_invariant(span: Span, invariant: &str) -> Diagnostic {
 ///
 /// Intrinsic and constructor targets consume or copy their arguments
 /// themselves and never get caller drops. A borrowed slot must also have its
-/// own ABI slot and its own operand: product-spread and whole-product slots
-/// share one operand, which this rule leaves to its owner.
+/// own ABI slot. Spread slots share their operand: when that operand is a
+/// temporary the call owns, each element in a borrowed slot is its own
+/// temporary; a named operand keeps its elements.
 pub(crate) fn mark_call_temporary_drops(
     target: &LoweredCallableTarget,
     function_type: &CheckedFunctionType,
+    steps: &[LoweredCallStep],
     arguments: &mut [LoweredCallArgument],
     operand_type: impl Fn(ExpressionId) -> Option<CheckedType>,
     needs_drop: impl Fn(&CheckedType) -> bool,
@@ -12417,6 +12430,22 @@ pub(crate) fn mark_call_temporary_drops(
     for expression in arguments.iter().filter_map(|argument| argument.expression) {
         *operand_uses.entry(expression).or_default() += 1;
     }
+    let owned_spreads = steps
+        .iter()
+        .filter_map(|step| match step {
+            LoweredCallStep::ProductSpread {
+                expression,
+                owned_operand: true,
+                ..
+            }
+            | LoweredCallStep::NamedProductSpread {
+                expression,
+                owned_operand: true,
+                ..
+            } => Some(*expression),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
     for argument in arguments.iter_mut() {
         let element = |slot: usize| CheckedMutation::Element(slot);
         let mutation = whole_mutation
@@ -12428,9 +12457,9 @@ pub(crate) fn mark_call_temporary_drops(
                 .slot
                 .is_some_and(|slot| function_type.moves.contains(&element(slot)));
         let own_operand = argument.slot.is_some()
-            && argument
-                .expression
-                .is_some_and(|expression| operand_uses.get(&expression) == Some(&1));
+            && argument.expression.is_some_and(|expression| {
+                operand_uses.get(&expression) == Some(&1) || owned_spreads.contains(&expression)
+            });
         let borrowed = !mutation && !moved && own_operand;
         argument.drops_after_call = caller_drops
             && argument.place.is_none()
@@ -17526,6 +17555,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn spread_temporaries_drop_their_borrowed_elements() {
+        let module = checked_program(concat!(
+            "use std.cinterop.(CString, c_string)\n",
+            "def both: (CString, CString) -> I32 = (first, second) => 2\n",
+            "def mixed: (move CString, CString) -> I32 = (move first, second) => 2\n",
+            "def make: () -> (CString, CString) = () => (c_string \"a\", c_string \"b\")\n",
+            "def run: () -> () = () => {\n",
+            "  both (...make ());\n",
+            "  mixed (...make ());\n",
+            "  let kept = make ()\n",
+            "  both (...kept);\n",
+            "  ()\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let mut seen = Vec::new();
+        for (_, call) in program.calls.iter() {
+            let Some(owned) = call.steps.iter().find_map(|step| match step {
+                LoweredCallStep::ProductSpread { owned_operand, .. } => Some(*owned_operand),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let drops = call
+                .arguments
+                .iter()
+                .map(|argument| argument.drops_after_call)
+                .collect::<Vec<_>>();
+            seen.push((owned, call.function_type.moves.is_empty(), drops));
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                // A named operand keeps its elements.
+                (false, true, vec![false, false]),
+                // The callee owns the moved element; the caller drops the other.
+                (true, false, vec![false, true]),
+                (true, true, vec![true, true]),
+            ]
+        );
     }
 
     #[test]

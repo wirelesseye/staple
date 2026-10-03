@@ -2259,7 +2259,8 @@ let value = at (Ref (1, 2), (5 satisfies USize))
     // A temporary passed to a borrowed parameter is owned by the call site and
     // dropped right after the call, on every route; a `move` parameter's
     // callee drops it instead. A borrowed named binding and the elements of a
-    // spread named product stay with their owner until scope exit.
+    // spread named product stay with their owner until scope exit, while the
+    // borrowed elements of a spread temporary are dropped after the call.
     must_run(expect_stdout(
         emits(
             inline(
@@ -2277,6 +2278,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "def both: (Tag, Tag) -> I32 = (first, second) => 2\n",
                     "def apply: (Tag -> I32) -> I32 = f => f (Tag (c_string \"drop indirect borrowed\"))\n",
                     "def apply_move: ((move Tag) -> I32) -> I32 = f => f (Tag (c_string \"drop indirect moved\"))\n",
+                    "def mixed: (move Tag, Tag) -> I32 = (move first, second) => 2\n",
+                    "def generic: <T> (T, T) -> I32 = (left, right) => 2\n",
+                    "def make: () -> (Tag, Tag) = () => (Tag (c_string \"drop spread left\"), Tag (c_string \"drop spread right\"))\n",
                     "def run: () -> () = () => {\n",
                     "    puts (c_string \"direct borrowed\");\n",
                     "    borrow (Tag (c_string \"drop direct borrowed\"));\n",
@@ -2295,6 +2299,12 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "    borrow named;\n",
                     "    let spread = (Tag (c_string \"drop spread second\"), Tag (c_string \"drop spread first\"))\n",
                     "    both (...spread);\n",
+                    "    puts (c_string \"spread temporary\");\n",
+                    "    both (...make ());\n",
+                    "    puts (c_string \"spread temporary mixed\");\n",
+                    "    mixed (...make ());\n",
+                    "    puts (c_string \"spread temporary generic\");\n",
+                    "    generic (...make ());\n",
                     "    puts (c_string \"extern C string\");\n",
                     "    puts (c_string \"printed by puts\");\n",
                     "    puts (c_string \"end of scope\");\n",
@@ -2312,9 +2322,11 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                 "take",
                 "pair",
                 "both",
+                "mixed",
+                "make",
             ],
         ),
-        "direct borrowed\ndrop direct borrowed\ndirect moved\ndrop direct moved\nindirect borrowed\ndrop indirect borrowed\nindirect moved\ndrop indirect moved\ntrait borrowed\ndrop trait borrowed\nproduct element\ndrop product element\nnamed binding\nextern C string\nprinted by puts\nend of scope\ndrop spread first\ndrop spread second\ndrop named at scope exit\n",
+        "direct borrowed\ndrop direct borrowed\ndirect moved\ndrop direct moved\nindirect borrowed\ndrop indirect borrowed\nindirect moved\ndrop indirect moved\ntrait borrowed\ndrop trait borrowed\nproduct element\ndrop product element\nnamed binding\nspread temporary\ndrop spread right\ndrop spread left\nspread temporary mixed\ndrop spread left\ndrop spread right\nspread temporary generic\ndrop spread right\ndrop spread left\nextern C string\nprinted by puts\nend of scope\ndrop spread first\ndrop spread second\ndrop named at scope exit\n",
     )),
 ];
 
