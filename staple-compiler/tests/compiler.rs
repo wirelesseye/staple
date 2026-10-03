@@ -3187,7 +3187,7 @@ fn delegates_indexing_through_refs_to_the_payload() {
         "def keyed_at: (Ref Keyed, String) -> I32 = (entry, key) => entry[key]\n",
         "def nested_at: (Ref (Ref (I32; 3)), USize) -> I32 = (values, position) => values[position]\n",
         "def fixed_at: (Ref (I32; 3), USize) -> I32 = (values, position) => values[position]\n",
-        "def generic_at: <T where Index T USize I32> (Ref T, USize) -> I32 = (values, position) => values[position]\n",
+        "def generic_at: <T where Index T USize> (Ref T, USize) -> Index.Output T USize = (values, position) => values[position]\n",
         "let list = List.of (1, 2, 3)\n",
         "let value: I32 = generic_at (Ref (Clone.clone list), 0)\n",
         "let operation: (Ref (List I32), USize) -> I32 = Index.index\n",
@@ -9442,14 +9442,69 @@ fn rejects_invalid_associated_type_uses_and_conflicting_impls() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Iterator Iter { type Item; next: Iter -> Item }\n",
-            "def invalid: <Iter, Item where Iterator Iter Item, Iterator Iter String> Iter -> Iter = value => value\n",
+            "def invalid: <Iter, Item where Iterator Iter Item> Iter -> Iter = value => value\n",
         )))
-        .expect_err_diagnostics("active bounds must respect associated types");
+        .expect_err_diagnostics("bounds cannot name associated types positionally");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("trait bounds conflict with an associated type")
+            .contains("expects 1 compile-time argument, found 2")
     }));
+}
+
+#[test]
+fn resolves_associated_type_projections() {
+    let module = type_check(concat!(
+        "trait Container T { type Element; first: T -> Element }\n",
+        "impl Container I32 { type Element = String; first = value => \"first\" }\n",
+        "let concrete: Container.Element I32 = \"text\"\n",
+        "def generic_first: <T where Container T> T -> Container.Element T = value => Container.first value\n",
+        "let from_generic: String = generic_first 1\n",
+                "let range_item: Iterator.Item (Range I32) = 5\n",
+        "def next_item: <Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter) = move iter => Iterator.next iter\n",
+        "let step: IterStep (Range I32, I32) = next_item (0 .. 3)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("associated type projections should compile");
+}
+
+#[test]
+fn rejects_invalid_associated_type_projections() {
+    for (source, expected) in [
+        (
+            concat!(
+                "trait Container T { type Element; first: T -> Element }\n",
+                "def unbounded: <T> T -> Container.Element T = value => value\n",
+            ),
+            "requires a matching `where` bound",
+        ),
+        (
+            concat!(
+                "trait Container T { type Element; first: T -> Element }\n",
+                "let missing: Container.Element I32 = 1\n",
+            ),
+            "no `Container` implementation is available",
+        ),
+        (
+            concat!(
+                "trait Lookup T K { type Value; lookup: (T, K) -> Value }\n",
+                "let wrong: Lookup.Value I32 = 1\n",
+            ),
+            "expects 2 compile-time arguments, found 1",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("invalid projection must not type-check");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "missing `{expected}` in {diagnostics:?}"
+        );
+    }
 }
 
 #[test]

@@ -407,6 +407,7 @@ pub struct ResolvedModule {
     trait_methods: HashMap<TraitMethodId, staple_syntax::TraitMember>,
     trait_method_traits: HashMap<TraitMethodId, TraitId>,
     trait_references: HashMap<SyntaxId, TraitId>,
+    associated_type_references: HashMap<SyntaxId, (TraitId, usize)>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
     standard_traits: HashMap<String, TraitId>,
@@ -850,6 +851,11 @@ impl ResolvedModule {
         self.trait_method_traits.get(&id).copied()
     }
 
+    /// The trait and associated-type index named by a `Trait.Name` projection.
+    pub fn associated_type_for(&self, syntax: SyntaxId) -> Option<(TraitId, usize)> {
+        self.associated_type_references.get(&syntax).copied()
+    }
+
     pub fn trait_for(&self, syntax: SyntaxId) -> Option<TraitId> {
         self.trait_references.get(&syntax).copied()
     }
@@ -1191,6 +1197,7 @@ pub struct NameResolver {
     trait_member_ids: HashMap<(TraitId, String), TraitMethodId>,
     trait_modules: HashMap<TraitId, ModuleId>,
     trait_references: HashMap<SyntaxId, TraitId>,
+    associated_type_references: HashMap<SyntaxId, (TraitId, usize)>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
@@ -1556,6 +1563,7 @@ impl NameResolver {
             trait_method_traits: self.trait_method_traits,
             trait_modules: self.trait_modules,
             trait_references: self.trait_references,
+            associated_type_references: self.associated_type_references,
             trait_method_references: self.trait_method_references,
             trait_implementations: self.trait_implementations,
             standard_traits,
@@ -4851,6 +4859,13 @@ impl NameResolver {
                 };
                 if let Some(id) = resolved {
                     self.named_types.insert(named.syntax.id, id);
+                } else if let Some(reference) = named
+                    .namespace
+                    .as_deref()
+                    .and_then(|namespace| self.lookup_associated_type(namespace, &named.name))
+                {
+                    self.associated_type_references
+                        .insert(named.syntax.id, reference);
                 } else if strict && named.name != "int" {
                     let message =
                         unknown_item_message("type", &named.name, &self.private_glob_types);
@@ -4913,6 +4928,35 @@ impl NameResolver {
             }
             Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) => {}
         }
+    }
+
+    /// Resolves `Trait.Name` (optionally module-qualified) to an associated
+    /// type of a visible trait.
+    fn lookup_associated_type(&self, namespace: &str, name: &str) -> Option<(TraitId, usize)> {
+        let trait_id = match namespace.rsplit_once('.') {
+            Some((module, trait_name)) => self
+                .lookup_namespace(module)
+                .and_then(|module| self.qualified_interface(module).traits.get(trait_name))
+                .copied(),
+            None => self.declared_traits[self.current_module.0]
+                .get(namespace)
+                .copied()
+                .or_else(|| {
+                    self.imported_traits
+                        .iter()
+                        .rev()
+                        .find_map(|frame| frame.get(namespace).copied())
+                })
+                .or_else(|| self.prelude_traits.get(namespace).copied()),
+        }?;
+        let index = self
+            .traits
+            .get(&trait_id)?
+            .declaration
+            .associated_types
+            .iter()
+            .position(|associated| associated.name == name)?;
+        Some((trait_id, index))
     }
 
     fn resolve_trait_name(&mut self, name: &staple_syntax::NamedType) -> Option<TraitId> {

@@ -2056,6 +2056,23 @@ impl TypedModule {
     }
 }
 
+/// Type parameters ids at or above this value are synthesized for `Trait.Name`
+/// projections and never collide with resolver-allocated ids.
+const PROJECTION_PARAMETER_BASE: usize = 1 << 40;
+
+/// A synthesized type parameter standing for `Trait.Name arguments` where the
+/// arguments mention type parameters. The matching declared bound
+/// `Trait arguments` is later rewritten to carry it as the associated type.
+struct ProjectionParameter {
+    trait_id: TraitId,
+    associated: usize,
+    arguments: Vec<CheckedType>,
+    id: TypeParameterId,
+    name: String,
+    span: Span,
+    linked: bool,
+}
+
 #[derive(Default)]
 pub struct TypeChecker {
     direct_callee_syntax: HashSet<SyntaxId>,
@@ -2150,6 +2167,7 @@ pub struct TypeChecker {
     /// under-applied constructor is expected and its arguments are recovered
     /// from context rather than written out.
     permit_partial_type_constructor: bool,
+    projection_parameters: Vec<ProjectionParameter>,
     return_contexts: Vec<CheckedType>,
     return_contributions: Vec<Vec<ReturnContribution>>,
     pending_propagations: Vec<Vec<(SyntaxId, CheckedType, usize, Span)>>,
@@ -3187,13 +3205,7 @@ impl TypeChecker {
         } else {
             source_arguments
         };
-        // Bounds may also name associated types positionally after the
-        // explicit parameters (`Iterator Iter Item`), constraining them.
-        let max_arity = if allow_inference {
-            resolved_trait.declaration.type_parameters.len()
-        } else {
-            expected_arity
-        };
+        let max_arity = expected_arity;
         if source_arguments.len() > max_arity {
             self.diagnostics.push(Diagnostic::new(
                 span,
@@ -3337,13 +3349,178 @@ impl TypeChecker {
         Some((arguments, substitutions))
     }
 
+    /// Fills still-open associated-type positions of a declared bound with the
+    /// parameters synthesized for matching `Trait.Name` projections.
+    fn link_projection_parameters(
+        &mut self,
+        module: &ResolvedModule,
+        trait_id: TraitId,
+        arguments: &mut [CheckedType],
+    ) {
+        let declaration = &module.traits()[&trait_id].declaration;
+        let explicit = declaration
+            .type_parameters
+            .len()
+            .saturating_sub(declaration.associated_types.len());
+        if arguments.len() <= explicit {
+            return;
+        }
+        let (known, hidden) = arguments.split_at_mut(explicit);
+        let known = canonical_projection_arguments(known);
+        for (index, slot) in hidden.iter_mut().enumerate() {
+            if *slot != CheckedType::Inferred {
+                continue;
+            }
+            if let Some(projection) = self.projection_parameters.iter_mut().find(|projection| {
+                projection.trait_id == trait_id
+                    && projection.associated == index
+                    && projection.arguments == known
+            }) {
+                projection.linked = true;
+                *slot = CheckedType::Parameter {
+                    id: projection.id,
+                    name: projection.name.clone(),
+                    sized: true,
+                    parameter_product_capable: false,
+                };
+            }
+        }
+    }
+
+    fn report_unlinked_projections(&mut self) {
+        for projection in &mut self.projection_parameters {
+            if !projection.linked {
+                projection.linked = true;
+                self.diagnostics.push(Diagnostic::new(
+                    projection.span.clone(),
+                    format!(
+                        "`{}` of a generic type requires a matching `where` bound",
+                        projection.name
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// Resolves the projection `Trait.Name arguments` (`Iterator.Item Iter`).
+    /// Concrete arguments normalize through the implementation; arguments
+    /// that mention type parameters become a synthesized parameter tied to the
+    /// declared bound `Trait arguments`.
+    fn resolve_projection(
+        &mut self,
+        module: &ResolvedModule,
+        trait_id: TraitId,
+        associated: usize,
+        sources: &[&Type],
+        span: Span,
+    ) -> CheckedType {
+        let declaration = module.traits()[&trait_id].declaration.clone();
+        let associated_name = declaration.associated_types[associated].name.clone();
+        let qualified = format!("{}.{associated_name}", declaration.name);
+        let explicit = declaration
+            .type_parameters
+            .len()
+            .saturating_sub(declaration.associated_types.len());
+        let rejoined;
+        let rejoined_refs;
+        let sources: &[&Type] = if explicit == 1 && sources.len() > 1 {
+            let mut application = sources[0].clone();
+            for argument in &sources[1..] {
+                application = Type::Application(staple_syntax::TypeApplication {
+                    syntax: application.syntax().clone(),
+                    callee: Box::new(application),
+                    argument: Box::new((*argument).clone()),
+                });
+            }
+            rejoined = application;
+            rejoined_refs = [&rejoined];
+            &rejoined_refs
+        } else {
+            sources
+        };
+        if sources.len() != explicit {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!(
+                    "associated type `{qualified}` expects {explicit} compile-time argument{}, found {}",
+                    if explicit == 1 { "" } else { "s" },
+                    sources.len()
+                ),
+            ));
+            return CheckedType::Error;
+        }
+        let arguments = sources
+            .iter()
+            .map(|source| self.resolve_source_type_inner(module, source))
+            .collect::<Vec<_>>();
+        if arguments.contains(&CheckedType::Error) {
+            return CheckedType::Error;
+        }
+        let mut full = arguments.clone();
+        full.extend(std::iter::repeat_n(
+            CheckedType::Inferred,
+            declaration.associated_types.len(),
+        ));
+        if !arguments.iter().any(contains_inferred_type)
+            && let Some(completed) = self.resolve_trait_obligation(trait_id, &full)
+            && let Some(value) = completed.get(explicit + associated)
+            && !contains_inferred_type(value)
+        {
+            return value.clone();
+        }
+        if arguments.iter().any(contains_type_parameter) {
+            let arguments = canonical_projection_arguments(&arguments);
+            if let Some(existing) = self.projection_parameters.iter().find(|projection| {
+                projection.trait_id == trait_id
+                    && projection.associated == associated
+                    && projection.arguments == arguments
+            }) {
+                return CheckedType::Parameter {
+                    id: existing.id,
+                    name: existing.name.clone(),
+                    sized: true,
+                    parameter_product_capable: false,
+                };
+            }
+            let id = TypeParameterId(PROJECTION_PARAMETER_BASE + self.projection_parameters.len());
+            self.projection_parameters.push(ProjectionParameter {
+                trait_id,
+                associated,
+                arguments,
+                id,
+                name: qualified.clone(),
+                span,
+                linked: false,
+            });
+            return CheckedType::Parameter {
+                id,
+                name: qualified,
+                sized: true,
+                parameter_product_capable: false,
+            };
+        }
+        let rendered = arguments
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.diagnostics.push(Diagnostic::new(
+            span,
+            format!(
+                "no `{}` implementation is available for `{rendered}` to project `{associated_name}`",
+                declaration.name
+            ),
+        ));
+        CheckedType::Error
+    }
+
     fn resolve_trait_bound(
         &mut self,
         module: &ResolvedModule,
         bound: &staple_syntax::TraitBound,
     ) -> Option<CheckedTraitBound> {
         let trait_id = module.trait_for(bound.syntax.id)?;
-        let (arguments, _) = self.resolve_trait_arguments(
+        let (mut arguments, _) = self.resolve_trait_arguments(
             module,
             trait_id,
             &bound.arguments,
@@ -3351,6 +3528,7 @@ impl TypeChecker {
             bound.syntax.span.clone(),
             true,
         )?;
+        self.link_projection_parameters(module, trait_id, &mut arguments);
         Some(CheckedTraitBound {
             trait_id,
             arguments,
@@ -4203,6 +4381,7 @@ impl TypeChecker {
                     .insert(function.id, subtype_bounds);
             }
         }
+        self.report_unlinked_projections();
     }
 
     fn inherit_and_validate_generic_function_bounds(&mut self, module: &ResolvedModule) {
@@ -11703,6 +11882,28 @@ impl TypeChecker {
                     }
                 }
             }
+            Type::Named(named) if module.associated_type_for(named.syntax.id).is_some() => {
+                let (trait_id, associated) = module.associated_type_for(named.syntax.id).unwrap();
+                self.resolve_projection(
+                    module,
+                    trait_id,
+                    associated,
+                    &[],
+                    named.syntax.span.clone(),
+                )
+            }
+            Type::Application(application)
+                if projection_head(module, source_type).is_some() =>
+            {
+                let (trait_id, associated, sources) = projection_head(module, source_type).unwrap();
+                self.resolve_projection(
+                    module,
+                    trait_id,
+                    associated,
+                    &sources,
+                    application.syntax.span.clone(),
+                )
+            }
             Type::Named(named) => {
                 if let Some(id) = module.type_parameter_for(named.syntax.id) {
                     if module.is_effect_parameter(id) {
@@ -16503,4 +16704,48 @@ mod opaque_sizedness_tests {
             );
         }
     }
+}
+
+/// Splits an application spine headed by a `Trait.Name` projection into the
+/// trait, associated-type index and argument sources.
+fn projection_head<'a>(
+    module: &ResolvedModule,
+    source_type: &'a Type,
+) -> Option<(TraitId, usize, Vec<&'a Type>)> {
+    let mut arguments = Vec::new();
+    let mut current = source_type;
+    while let Type::Application(application) = current {
+        arguments.push(application.argument.as_ref());
+        current = application.callee.as_ref();
+    }
+    let Type::Named(named) = current else {
+        return None;
+    };
+    let (trait_id, associated) = module.associated_type_for(named.syntax.id)?;
+    arguments.reverse();
+    Some((trait_id, associated, arguments))
+}
+
+/// Erases the incidental flags and names of type parameters so projection
+/// arguments resolved in different contexts compare equal.
+fn canonical_projection_arguments(arguments: &[CheckedType]) -> Vec<CheckedType> {
+    let substitutions = arguments
+        .iter()
+        .flat_map(type_parameter_ids)
+        .map(|id| {
+            (
+                id,
+                CheckedType::Parameter {
+                    id,
+                    name: String::new(),
+                    sized: true,
+                    parameter_product_capable: false,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    arguments
+        .iter()
+        .map(|argument| substitute_type(argument.clone(), &substitutions))
+        .collect()
 }

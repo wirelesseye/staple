@@ -2177,9 +2177,18 @@ Inside the trait body, an associated type is in scope by its bare name, as
 `Item` and `Output` are above. An associated type may carry its own `where`
 clause; those bounds become prerequisites of the trait, as in
 `type Iter where Iterator Iter`. Trait parameters are written in the header
-only, so `Iterator Iter` is the complete bound for an iterator type. A bound
-(but not an `impl` header) may append associated types positionally to constrain
-them, as in `Iterator Iter Item`, or use `_` to leave one open.
+only, so `Iterator Iter` is the complete bound for an iterator type.
+
+An associated type is named from outside the trait with the projection
+`Trait.Name arguments`, where the arguments are the trait's explicit
+parameters. A projection of concrete types normalizes through the matching
+implementation, so `Iterator.Item (Range I32)` is `I32`. A projection of generic
+types requires a matching bound in the same `where` clause:
+
+```staple
+def next_item: <Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter) =
+    move iter => Iterator.next iter
+```
 
 An implementation binds every associated type exactly once with
 `type Name = Type`:

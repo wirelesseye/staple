@@ -9682,6 +9682,16 @@ pub(crate) fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
 
 fn type_contains_syntax(ty: &Type) -> bool {
     match ty {
+        // `Trait.Item` is an associated-type projection, not the syntax type.
+        Type::Named(named)
+            if named
+                .namespace
+                .as_deref()
+                .and_then(|namespace| namespace.rsplit('.').next())
+                .is_some_and(|segment| segment.starts_with(char::is_uppercase)) =>
+        {
+            false
+        }
         Type::Named(named) => matches!(
             named.name.as_str(),
             "Syntax"
