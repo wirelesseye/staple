@@ -5553,10 +5553,12 @@ impl LoweredProgram {
         // product (`()` or a pair). Lower it as that element in a one-element
         // shape, which emission collapses to the value itself, rather than
         // reading the element's own product type as this product's layout.
+        // A one-element product completed by field defaults is a real product.
         if let [element] = product.elements.as_slice()
             && !element.spread
             && !element.designated
             && !element.named_spread
+            && module.product_default_plan(product.syntax.id).is_none()
         {
             let expression = self.lower_expression(module, owner, context, &element.value)?;
             let value_type = self
@@ -5584,7 +5586,12 @@ impl LoweredProgram {
         let plan = module.product_default_plan(product.syntax.id).cloned();
         let final_type = match &plan {
             Some(plan) => Some(plan.final_type.clone()),
-            None => match &checked {
+            // A product built for a `from` type has that type's product
+            // representation as its shape.
+            None => match checked
+                .as_ref()
+                .map(|checked| implicit_wrapper_representation(checked).unwrap_or(checked))
+            {
                 Some(CheckedType::Product(product_type)) if !product_type.variadic => {
                     Some(product_type.clone())
                 }
@@ -7658,6 +7665,14 @@ impl LoweredProgram {
         context: ExpressionContext,
         argument: &Expression,
     ) -> Result<Option<(Vec<CallArgumentPlacement>, Vec<LoweredCallStep>)>, Diagnostic> {
+        // A product introduced into a `from` parameter is one value: it is
+        // built (with its field defaults) as an ordinary product expression.
+        if module
+            .type_of_expression(argument.syntax().id)
+            .is_some_and(|value_type| implicit_wrapper_representation(value_type).is_some())
+        {
+            return Ok(None);
+        }
         let plan = module.product_default_plan(argument.syntax().id).cloned();
         let Expression::Product(product) = argument else {
             // A non-product argument checked against a defaulted product
@@ -17874,21 +17889,21 @@ mod tests {
         concat!(
             "use std.core.reference.(Ref)\n",
             "let pair_add: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
-            "def defaulted: (String, x: I32 = 0, y: I32 = 0) -> I32 = (value, x, y) => x + y\n",
+            "type Defaulted = wrap (String, x: I32 = 0, y: I32 = 0)\n",
             "def juxtaposed_samples: () -> I32 = () => {\n",
             "  let chained: I32 = pair_add 1 2\n",
             "  let mut reference: Ref I32 = Ref 0\n",
             "  let replaced: I32 = Ref.replace reference 1\n",
             "  chained\n",
             "}\n",
-            "let via_value = defaulted\n",
+            "let via_value = Defaulted\n",
             "let indirect_result = via_value \"a\"\n",
-            "def default_samples: () -> I32 = () => {\n",
-            "  let plain: I32 = defaulted (\"a\")\n",
-            "  let designated: I32 = defaulted (\"b\", .y: 5)\n",
-            "  let explicit: I32 = defaulted (\"c\", 1, 2)\n",
+            "def default_samples: () -> Defaulted = () => {\n",
+            "  let plain = Defaulted (\"a\")\n",
+            "  let designated = Defaulted (\"b\", .y: 5)\n",
+            "  let explicit = Defaulted (\"c\", 1, 2)\n",
             "  let pair = (x: 3, y: 4)\n",
-            "  let spread: I32 = defaulted (\"d\", ...pair)\n",
+            "  let spread = Defaulted (\"d\", ...pair)\n",
             "  plain\n",
             "}\n",
         )
@@ -17987,13 +18002,13 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert!(program.validate().is_empty());
 
-        // A non-product argument checked against a defaulted product
-        // parameter: slot 0 explicit, defaults fill the rest in slot order.
+        // A one-element argument to a constructor with a defaulted
+        // representation: slot 0 explicit, defaults fill the rest in slot
+        // order. Constructor calls are direct, so no callee step precedes.
         assert!(program.calls.iter().any(|(_, call)| {
             matches!(
                 call.steps.as_slice(),
                 [
-                    LoweredCallStep::Callee { .. },
                     LoweredCallStep::ProductElement { slot: 0, .. },
                     LoweredCallStep::Default { slot: 1, .. },
                     LoweredCallStep::Default { slot: 2, .. },
@@ -18007,7 +18022,6 @@ mod tests {
             matches!(
                 call.steps.as_slice(),
                 [
-                    LoweredCallStep::Callee { .. },
                     LoweredCallStep::ProductElement { slot: 0, .. },
                     LoweredCallStep::ProductElement { slot: 2, .. },
                     LoweredCallStep::Default { slot: 1, .. },
@@ -19005,7 +19019,8 @@ mod tests {
         let module = checked_program(concat!(
             "let pair = (left: 2, right: 3)\n",
             "let expanded = (prefix: \"value\", ...pair, suffix: False)\n",
-            "let point: (x: I32 = 1, y: I32 = 2) = ()\n",
+            "type Point = from (x: I32 = 1, y: I32 = 2)\n",
+            "let point: Point = ()\n",
         ));
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());

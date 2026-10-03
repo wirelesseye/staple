@@ -1215,31 +1215,49 @@ overrides.
 
 #### Default field values
 
-A named field in a fixed product type may provide a default expression with
-`=`:
+A named field may provide a default expression with `=`, but only in the
+product that is the representation of a named [`wrap`](#type) or
+[`from`](#from) type declaration, or in a product nested in that
+representation's fields:
 
 ```staple
-let point: (x: I32 = 0, y: I32 = 0) = ()
-def text: (String, x: I32 = 0, y: I32 = 0) -> () =
-    (value, x, y) => ()
+type Point = from (x: I32 = 0, y: I32 = 0)
+type TextArgs = from (String, x: I32 = 0, y: I32 = 0)
+type Options = wrap (verbose: Bool = False, depth: I32 = 1)
+
+type Config = from (window: (width: I32 = 800, height: I32 = 600), title: String = "app")
+
+let origin: Point = ()
+let config: Config = (window: (.height: 900))
+def text: TextArgs -> () = args => ()
 
 text ("Hello")          // equivalent to text ("Hello", 0, 0)
 text ("Hello", .y: 10) // equivalent to text ("Hello", 0, 10)
+let options = Options (.depth: 3)
 ```
 
-Positional construction may omit only a trailing suffix for which every field
-has a default. Designated initializers may leave any defaulted field absent;
-every non-defaulted field must still be initialized. `()` is therefore valid
-when every field defaults. Explicit expressions are evaluated once in source
-order, followed by the defaults of absent fields in product-field order. A
-default is not evaluated when an explicit initializer supplies that field.
+Defaults are rejected everywhere else: on anonymous product types such as
+`let point: (x: I32 = 0, y: I32 = 0) = ()`, on function parameter types, on
+aliases, and on products inside a representation's function types or type
+arguments, such as `(x: I32 = 0, y: I32) -> I32` or `List (x: I32 = 0)`. A
+nested product field without a default of its own must still be written, as
+`window: ()` when every nested field defaults. To give a function optional
+arguments, accept a `from` type whose representation declares them, as `text`
+does above.
 
-Defaults are contextual construction metadata, not part of structural type
-identity or runtime representation. They are preserved through transparent
-aliases, product type spreads, and function parameter types, but are erased
-from a constructed product value. When a product parameter is constructed at a
-call site, its field defaults are inserted there; the callee always receives
-the complete ordinary product. They do not make function parameters optional.
+A product written where the named type is expected is checked against its
+representation: for a `from` type through the implicit conversion, and for a
+`wrap` type as the constructor's argument. Positional construction may omit
+only a trailing suffix for which every field has a default. Designated
+initializers may leave any defaulted field absent; every non-defaulted field
+must still be initialized. `()` is therefore valid when every field defaults.
+Explicit expressions are evaluated once in source order, followed by the
+defaults of absent fields in product-field order. A default is not evaluated
+when an explicit initializer supplies that field.
+
+Defaults are construction metadata of the named type, not part of the
+representation's structural type identity or runtime representation; a
+constructed value always holds every field.
 
 Defaults must be pure and portable: they may use literals, global names, and
 compile-time parameters, but may not capture local runtime values or refer to
@@ -2446,8 +2464,8 @@ Each element of a parameter product is a **slot**:
 * A slot may be named (`[x: I32, y: I32]`) and may be marked `mut` or `move`
   (`[mut List T, move T] -> ()`), but not both.
 * A slot cannot declare a default, and a parameter product cannot be variadic
-  (`[I32, ...]`). Defaults on fields of a product type nested inside a slot
-  remain ordinary product-construction defaults.
+  (`[I32, ...]`). A slot may instead take a `from` type whose representation
+  declares field defaults (see [Default field values](#default-field-values)).
 * `...P` inside the brackets spreads a parameter product or a fixed value
   product into slots: `type More = alias [...Inputs, String]`. A parameter
   product cannot be spread into a value product (`(...Inputs)`).

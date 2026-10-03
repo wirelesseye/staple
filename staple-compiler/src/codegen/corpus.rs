@@ -478,7 +478,11 @@ static CORPUS: [CorpusProgram; 89] = [
             inline(
                 "calls_curried_defaults",
                 concat!(
-                    "def sum3: (I32, b: I32 = 2, c: I32 = 3) -> I32 = (a, b, c) => a + b + c\n",
+                    "type Sum3 = from (I32, b: I32 = 2, c: I32 = 3)\n",
+                    "def sum3: Sum3 -> I32 = args => {\n",
+                    "    let (a, b, c) = args\n",
+                    "    a + b + c\n",
+                    "}\n",
                     "def pair_of: (I32, I32) -> (I32, I32) = (left, right) => (left, right)\n",
                     "def total: () -> I32 = () => sum3 (1, .c: 9)\n",
                     "def spread: (I32, I32) -> I32 = (left, right) => {\n",

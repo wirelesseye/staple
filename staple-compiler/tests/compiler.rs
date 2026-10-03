@@ -1987,26 +1987,26 @@ fn repeated_product_rejects_value_non_copy_and_oversized_counts() {
 }
 
 #[test]
-fn fills_anonymous_product_field_defaults_at_calls_and_construction() {
+fn fills_named_type_field_defaults_at_calls_and_construction() {
     let source = concat!(
-        "def text: (String, x: I32 = 0, y: I32 = 0) -> () = (value, x, y) => ()\n",
+        "type Text = from (String, x: I32 = 0, y: I32 = 0)\n",
+        "type Point = from (x: I32 = 1, y: I32 = 2)\n",
+        "type Boxed = wrap (value: I32 = 5, label: String = \"box\")\n",
+        "def text: Text -> () = args => ()\n",
         "text (\"Hello\")\n",
         "text (\"Hello\", x: 5)\n",
         "text (\"Hello\", .y: 10)\n",
-        "let inferred = text\n",
-        "inferred \"Hello\"\n",
-        "let point: (x: I32 = 1, y: I32 = 2) = ()\n",
-        "let selected: I32 = point.x + point.y\n",
-        "def mutate_default: (String, mut x: I32 = 0) -> () = (value, mut x) => { x = 1 }\n",
-        "mutate_default \"temporary\"\n",
-        "def move_default: (String, move suffix: String = \"!\") -> () = (value, move suffix) => ()\n",
-        "move_default \"Hello\"\n",
+        "let point: Point = ()\n",
+        "let shifted: Point = (.y: 3)\n",
+        "let selected: I32 = point.x + shifted.y\n",
+        "let boxed = Boxed ()\n",
+        "let labelled = Boxed (.label: \"other\")\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
-        .expect("defaulted product fields should generate LLVM");
+        .expect("defaulted named-type fields should generate LLVM");
 }
 
 #[test]
@@ -2026,15 +2026,12 @@ fn rejects_same_name_functions_at_different_arities() {
 
 #[test]
 fn rejects_a_default_on_a_curried_parameter() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve(
-            "def bad: (value: I32 = 1) -> I32 = value => value\n",
-        ))
+    let diagnostics = resolve_result("def bad: (value: I32 = 1) -> I32 = value => value\n")
         .expect_err_diagnostics("curried arrows cannot have defaults");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("only supported by juxtaposed functions")
+            .contains("only allowed in the representation of a `wrap` or `from` type")
     }));
 }
 
@@ -2132,24 +2129,56 @@ fn rejects_companion_item_overloads() {
 }
 
 #[test]
-fn preserves_product_field_defaults_through_aliases_and_type_spreads() {
+fn field_defaults_apply_in_products_nested_in_a_representation() {
+    let module = type_check(concat!(
+        "type Config = from (window: (width: I32 = 800, height: I32 = 600), title: String = \"app\")\n",
+        "type Boxed = wrap (inner: (a: I32 = 1, b: I32 = 2), c: I32 = 3)\n",
+        "let default_config: Config = (window: ())\n",
+        "let tall: Config = (window: (.height: 900), title: \"tall\")\n",
+        "let boxed = Boxed (inner: (.b: 5))\n",
+        "let width: I32 = default_config.window.width + tall.window.height + boxed.inner.a\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("nested representation defaults should generate LLVM");
+}
+
+#[test]
+fn field_defaults_may_name_singleton_values() {
+    let module = type_check(concat!(
+        "type Options = wrap (verbose: Bool = False, depth: I32 = 1)\n",
+        "let options = Options (.depth: 3)\n",
+        "let quiet: Bool = options.verbose\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("singleton defaults should generate LLVM");
+}
+
+#[test]
+fn named_type_field_defaults_combine_with_spread_fields() {
     let source = concat!(
-        "type Point = alias (x: I32 = 1, y: I32 = 2)\n",
-        "let point: Point = ()\n",
-        "let extended: (...Point, z: I32 = 3) = ()\n",
-        "let answer: I32 = point.x + extended.y + extended.z\n",
+        "type Base = alias (x: I32, y: I32)\n",
+        "type Point3 = from (...Base, z: I32 = 3)\n",
+        "let point: Point3 = (1, 2)\n",
+        "let answer: I32 = point.x + point.y + point.z\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
-        .expect("aliased and spread defaults should generate LLVM");
+        .expect("defaults after spread fields should generate LLVM");
 }
 
 #[test]
 fn rejects_invalid_product_field_defaults_and_missing_required_fields() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("let bad: (x: I32 = \"wrong\", y: I32 = 0) = ()\n"))
+        .check(resolve(concat!(
+            "type Bad = from (x: I32 = \"wrong\", y: I32 = 0)\n",
+            "let bad: Bad = ()\n",
+        )))
         .expect_err_diagnostics("a mismatched default should be rejected");
     assert!(
         diagnostics
@@ -2158,7 +2187,7 @@ fn rejects_invalid_product_field_defaults_and_missing_required_fields() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("let bad: (x: I32 = 1) = 1\n"))
+        .check(resolve("type Bad = from (x: I32 = 1)\nlet bad: Bad = 1\n"))
         .expect_err_diagnostics("a singleton default should be rejected");
     assert!(
         diagnostics
@@ -2168,7 +2197,8 @@ fn rejects_invalid_product_field_defaults_and_missing_required_fields() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def bad: (a: I32, b: I32 = 1, c: I32) -> () = (a, b, c) => ()\n",
+            "type Args = from (a: I32, b: I32 = 1, c: I32)\n",
+            "def bad: Args -> () = args => ()\n",
             "bad (a: 1)\n",
         )))
         .expect_err_diagnostics("a required trailing field should not be defaulted");
@@ -2181,7 +2211,8 @@ fn rejects_invalid_product_field_defaults_and_missing_required_fields() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "def make: I32 -> () = captured => {\n",
-            "    let bad: (x: I32 = captured, y: I32 = 0) = ()\n",
+            "    type Bad = from (x: I32 = captured, y: I32 = 0)\n",
+            "    let bad: Bad = ()\n",
             "    ()\n",
             "}\n",
         )))
@@ -2195,7 +2226,8 @@ fn rejects_invalid_product_field_defaults_and_missing_required_fields() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "let mut state: I32 = 1\n",
-            "let bad: (x: I32 = state, y: I32 = 0) = ()\n",
+            "type Bad = from (x: I32 = state, y: I32 = 0)\n",
+            "let bad: Bad = ()\n",
         )))
         .expect_err_diagnostics("a stateful default should not be pure");
     assert!(
@@ -2206,18 +2238,26 @@ fn rejects_invalid_product_field_defaults_and_missing_required_fields() {
 }
 
 #[test]
-fn explicit_function_annotations_replace_inferred_product_defaults() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "def original: (String, x: I32 = 0) -> () = (value, x) => ()\n",
-            "let strict: (String, x: I32) -> () = original\n",
-            "strict \"Hello\"\n",
-        )))
-        .expect_err_diagnostics("an explicit annotation without defaults should remove them");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("missing product field `x`")
-            || diagnostic.message.contains("expected `(")
-    }));
+fn rejects_field_defaults_outside_named_type_representations() {
+    let diagnostics = resolve_result(concat!(
+        "let point: (x: I32 = 0, y: I32 = 0) = ()\n",
+        "def text: (String, x: I32 = 0) -> () = (value, x) => ()\n",
+        "type Alias = alias (x: I32 = 0, y: I32 = 0)\n",
+        "type Callback = wrap (call: (x: I32 = 0, y: I32) -> I32, c: I32 = 2)\n",
+        "type Items = wrap (items: List (x: I32 = 0, y: I32))\n",
+    ))
+    .expect_err_diagnostics("defaults belong to `wrap`/`from` representations only");
+    let rejected = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.message
+                == "field default values are only allowed in the representation of a `wrap` or `from` type declaration"
+        })
+        .count();
+    // Both point fields, the parameter field, both alias fields, and the
+    // products inside a representation's function type and type argument;
+    // `c` belongs to the representation itself.
+    assert_eq!(rejected, 7, "{diagnostics:?}");
 }
 
 #[test]

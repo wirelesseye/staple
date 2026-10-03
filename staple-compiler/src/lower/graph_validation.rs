@@ -1340,8 +1340,9 @@ pub(crate) mod tests {
         // The generic call site lives inside `call_fill` so the default step
         // is part of an emitted instance body.
         let lowered = lower(concat!(
-            "def fill: <T where Copy T> (T, x: I32 = 7) -> T = (value, x) => value\n",
-            "def call_fill: <T where Copy T> T -> T = value => fill (value)\n",
+            "type Fill T = wrap (T, x: I32 = 7)\n",
+            "def fill: <T where Copy T> Fill T -> T = Fill (value, x) => value\n",
+            "def call_fill: <T where Copy T> T -> T = value => fill (Fill (value))\n",
             "let filled: I32 = call_fill 1\n",
         ));
         let program = &lowered.program;

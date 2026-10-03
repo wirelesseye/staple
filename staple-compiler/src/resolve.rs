@@ -1202,6 +1202,10 @@ pub struct NameResolver {
     definition_context_types: Vec<HashMap<String, TypeId>>,
     definition_context_namespaces: Vec<HashMap<String, ModuleId>>,
     binding_companion_targets: HashMap<SyntaxId, Type>,
+    /// The representation product of the `wrap`/`from` declaration being
+    /// resolved and the products nested in its fields: the only products
+    /// whose fields may declare defaults.
+    field_default_products: HashSet<SyntaxId>,
     binding_type_parameters: HashMap<SyntaxId, Vec<TypeParameterPattern>>,
     binding_trait_bounds: HashMap<SyntaxId, Vec<staple_syntax::TraitBound>>,
     binding_subtype_bounds: HashMap<SyntaxId, Vec<staple_syntax::SubtypeBound>>,
@@ -3395,7 +3399,12 @@ impl NameResolver {
             self.resolve_type(&bound.default);
         }
         if let Some(underlying) = declaration.underlying() {
+            let previous = std::mem::take(&mut self.field_default_products);
+            if declaration.kind().is_wrapper() {
+                collect_field_default_products(underlying, &mut self.field_default_products);
+            }
             self.resolve_type(underlying);
+            self.field_default_products = previous;
             if declaration.representation_visibility() != Visibility::Private {
                 self.validate_representation(underlying, declaration.representation_visibility());
             }
@@ -4869,9 +4878,16 @@ impl NameResolver {
                 }
             }
             Type::Product(product) | Type::ParameterProduct(product) => {
+                let defaults_allowed = self.field_default_products.contains(&product.syntax.id);
                 for element in &product.elements {
                     self.resolve_type_with(&element.ty, strict);
                     if let Some(default) = &element.default {
+                        if !defaults_allowed {
+                            self.diagnostics.push(Diagnostic::new(
+                                element.syntax.span.clone(),
+                                "field default values are only allowed in the representation of a `wrap` or `from` type declaration",
+                            ));
+                        }
                         self.resolve_expression(default, Some(&element.ty), None);
                     }
                 }
@@ -6726,4 +6742,18 @@ fn submodule_namespace_names(
         names.push(name.clone());
     }
     names
+}
+
+/// Collects the products whose fields may declare defaults in a `wrap`/`from`
+/// representation: the representation product itself and every product
+/// nested in its fields. Products inside function types or type arguments
+/// are parameter or instantiation positions, not construction sites, so they
+/// are not collected.
+fn collect_field_default_products(ty: &Type, products: &mut HashSet<SyntaxId>) {
+    if let Type::Product(product) = ty {
+        products.insert(product.syntax.id);
+        for element in &product.elements {
+            collect_field_default_products(&element.ty, products);
+        }
+    }
 }

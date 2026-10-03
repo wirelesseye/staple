@@ -4045,7 +4045,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_anonymous_product_field_defaults() {
+    fn runs_named_type_field_defaults() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -4057,9 +4057,11 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
-                "def text: (String, x: I32 = 0, y: I32 = 0) -> I32 = (value, x, y) => x + y\n",
-                "let point: (x: I32 = 1, y: I32 = 2) = ()\n",
-                "let result = text \"Hello\" + text (\"Hello\", .y: 10) + point.x + point.y\n",
+                "type Text = from (String, x: I32 = 0, y: I32 = 0)\n",
+                "type Point = from (x: I32 = 1, y: I32 = 2)\n",
+                "def text: Text -> I32 = args => args.x + args.y\n",
+                "let point: Point = ()\n",
+                "let result = text (\"Hello\") + text (\"Hello\", .y: 10) + point.x + point.y\n",
                 "exit (result - 13)\n",
             ),
         )

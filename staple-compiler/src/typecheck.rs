@@ -2268,8 +2268,10 @@ impl TypeChecker {
         self.validate_indexing_trait_method_types(&module);
         self.collect_trait_implementations(&module);
         self.validate_trait_implementation_prerequisites(&module);
-        self.seed_constructors(&module);
+        // Singleton values first: constructor representations may name them
+        // in field defaults, which are checked when the representation is.
         self.seed_singleton_values(&module);
+        self.seed_constructors(&module);
         self.collect_top_level_bindings(&module);
         self.seed_declared_bindings(&module);
         self.validate_intrinsics(&module);
@@ -6935,6 +6937,29 @@ impl TypeChecker {
             };
             self.implicit_thunk_context = true;
             return self.make_implicit_thunk(module, expression, result);
+        }
+        // A product written for a `from` type is built against its product
+        // representation, so field labels, designators, and field defaults
+        // apply, and the complete product is then introduced implicitly.
+        if let Expression::Product(_) = expression
+            && let Some(expected_type) = expected
+            && let Some(representation @ CheckedType::Product(_)) =
+                implicit_wrapper_representation(expected_type)
+        {
+            let representation = representation.clone();
+            let actual = self.check_expression_expected(module, expression, Some(&representation));
+            if actual == CheckedType::Error || self.did_return {
+                return actual;
+            }
+            let syntax = expression.syntax();
+            let source = self
+                .expression_coercions
+                .remove(&syntax.id)
+                .map_or(actual, |coercion| coercion.source);
+            let value_type =
+                self.coerce_expression_type(syntax.id, source, expected_type, syntax.span.clone());
+            self.expression_types.insert(syntax.id, value_type.clone());
+            return value_type;
         }
         let mut trait_methods = module
             .trait_methods_for_expression(expression.syntax().id)
@@ -15556,7 +15581,12 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
         declared: &HashSet<SymbolId>,
         captures: &mut Vec<SymbolId>,
     ) {
+        // A type's constructor or singleton value (such as `True`) is a
+        // global name even when declared in a companion, never a capture.
+        let type_value =
+            module.constructor_type(symbol).is_some() || module.singleton_type(symbol).is_some();
         if (module.symbol_owner(symbol).is_some() || !module.is_top_level_symbol(symbol))
+            && !type_value
             && !declared.contains(&symbol)
             && !captures.contains(&symbol)
         {
