@@ -272,6 +272,7 @@ impl DeclarationCollector<'_> {
                 self.pattern(&value.pattern);
                 self.expression(&value.body);
             }
+            Expression::TypeApplication(value) => self.expression(&value.value),
             Expression::TypeAscription(value) => self.expression(&value.value),
             Expression::Match(value) => {
                 self.expression(&value.subject);
@@ -849,6 +850,12 @@ impl Collector<'_> {
             Expression::Function(value) => {
                 self.pattern(&value.pattern);
                 self.expression(&value.body);
+            }
+            Expression::TypeApplication(application) => {
+                self.expression(&application.value);
+                for argument in &application.arguments {
+                    self.ty(argument);
+                }
             }
             Expression::TypeAscription(value) => {
                 self.expression(&value.value);

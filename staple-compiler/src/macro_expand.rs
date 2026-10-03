@@ -825,6 +825,9 @@ fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
             *expression = lower_unary_expression(unary, next_syntax_id);
         }
         Expression::Function(function) => desugar_expression(&mut function.body, next_syntax_id),
+        Expression::TypeApplication(application) => {
+            desugar_expression(&mut application.value, next_syntax_id)
+        }
         Expression::TypeAscription(ascription) => {
             desugar_expression(&mut ascription.value, next_syntax_id)
         }
@@ -1950,6 +1953,13 @@ impl MacroExpander {
                     self.check_compile_expression(module, &function.body, &mut nested, result);
                 CompileType::Function(Box::new(parameter), Box::new(body))
             }
+            Expression::TypeApplication(application) => {
+                self.diagnostics.push(Diagnostic::new(
+                    application.syntax.span.clone(),
+                    "call-site type arguments are only supported for runtime generic values",
+                ));
+                CompileType::Error
+            }
             Expression::TypeAscription(value) => {
                 let annotation = compile_type(&value.ty);
                 self.check_compile_expression(module, &value.value, environment, Some(&annotation))
@@ -2570,6 +2580,9 @@ impl MacroExpander {
             }
             Expression::Function(value) => {
                 self.check_quoted_expression(module, &value.body, environment)
+            }
+            Expression::TypeApplication(value) => {
+                self.check_quoted_expression(module, &value.value, environment)
             }
             Expression::TypeAscription(value) => {
                 self.check_quoted_expression(module, &value.value, environment)
@@ -4275,6 +4288,11 @@ impl MacroExpander {
                 function.body = Box::new(self.expand_expression(module, *function.body, depth));
                 Expression::Function(function)
             }
+            Expression::TypeApplication(mut application) => {
+                application.value =
+                    Box::new(self.expand_expression(module, *application.value, depth));
+                Expression::TypeApplication(application)
+            }
             Expression::TypeAscription(mut ascription) => {
                 ascription.value =
                     Box::new(self.expand_expression(module, *ascription.value, depth));
@@ -4884,6 +4902,7 @@ impl MacroExpander {
                 environment: environment.clone(),
                 quote_result: self.quote_context.clone(),
             }),
+            Expression::TypeApplication(_) => None,
             Expression::TypeAscription(ascription) => {
                 if let Some(expected) = meta_type(&ascription.ty)
                     && let Expression::Quote(quote) = ascription.value.as_ref()
@@ -7006,6 +7025,12 @@ impl MacroExpander {
             Expression::Function(function) => {
                 freshen_pattern(self, &mut function.pattern, module, mark);
                 self.freshen_expression(&mut function.body, module, mark);
+            }
+            Expression::TypeApplication(application) => {
+                self.freshen_expression(&mut application.value, module, mark);
+                for argument in &mut application.arguments {
+                    freshen_type(self, argument, module, mark);
+                }
             }
             Expression::TypeAscription(ascription) => {
                 self.freshen_expression(&mut ascription.value, module, mark);
@@ -9923,6 +9948,9 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
     if arity > 0 {
         return match expression {
             Expression::Function(function) => obviously_not_syntax(&function.body, arity - 1),
+            Expression::TypeApplication(application) => {
+                obviously_not_syntax(&application.value, arity)
+            }
             Expression::TypeAscription(ascription) => {
                 obviously_not_syntax(&ascription.value, arity)
             }
@@ -9938,6 +9966,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         | Expression::Call(_)
         | Expression::Access(_)
         | Expression::Index(_) => false,
+        Expression::TypeApplication(application) => obviously_not_syntax(&application.value, 0),
         Expression::TypeAscription(ascription) => obviously_not_syntax(&ascription.value, 0),
         Expression::Match(match_) => match_
             .arms
@@ -9985,12 +10014,14 @@ fn quote_at_tail(expression: &Expression, arity: usize) -> bool {
     if arity > 0 {
         return match expression {
             Expression::Function(function) => quote_at_tail(&function.body, arity - 1),
+            Expression::TypeApplication(application) => quote_at_tail(&application.value, arity),
             Expression::TypeAscription(ascription) => quote_at_tail(&ascription.value, arity),
             _ => false,
         };
     }
     match expression {
         Expression::Quote(quote) => quote.kind == staple_syntax::QuoteKind::Quote,
+        Expression::TypeApplication(application) => quote_at_tail(&application.value, 0),
         Expression::TypeAscription(ascription) => quote_at_tail(&ascription.value, 0),
         Expression::Match(match_) => match_.arms.iter().any(|arm| quote_at_tail(&arm.body, 0)),
         Expression::Block(block) => block.items.last().is_some_and(|item| match item {
@@ -10008,6 +10039,9 @@ fn directly_evaluates_resource(expression: &Expression, arity: usize) -> bool {
             Expression::Function(function) => {
                 directly_evaluates_resource(&function.body, arity - 1)
             }
+            Expression::TypeApplication(application) => {
+                directly_evaluates_resource(&application.value, arity)
+            }
             Expression::TypeAscription(ascription) => {
                 directly_evaluates_resource(&ascription.value, arity)
             }
@@ -10016,6 +10050,9 @@ fn directly_evaluates_resource(expression: &Expression, arity: usize) -> bool {
     }
     match expression {
         Expression::Resource(_) | Expression::With(_) => true,
+        Expression::TypeApplication(application) => {
+            directly_evaluates_resource(&application.value, 0)
+        }
         Expression::TypeAscription(ascription) => directly_evaluates_resource(&ascription.value, 0),
         _ => false,
     }
@@ -10733,6 +10770,12 @@ fn substitute_splices(
         Expression::Function(function) => {
             substitute_pattern(&mut function.pattern, environment, diagnostics)?;
             *function.body = substitute_splices(&function.body, environment, diagnostics)?
+        }
+        Expression::TypeApplication(application) => {
+            *application.value = substitute_splices(&application.value, environment, diagnostics)?;
+            for argument in &mut application.arguments {
+                substitute_type(argument, environment, diagnostics)?;
+            }
         }
         Expression::TypeAscription(ascription) => {
             *ascription.value = substitute_splices(&ascription.value, environment, diagnostics)?;
@@ -11801,6 +11844,9 @@ fn alpha_rename_expression(
             alpha_rename_expression(&mut function.body, mark, scopes);
             scopes.pop();
         }
+        Expression::TypeApplication(application) => {
+            alpha_rename_expression(&mut application.value, mark, scopes)
+        }
         Expression::TypeAscription(ascription) => {
             alpha_rename_expression(&mut ascription.value, mark, scopes)
         }
@@ -11931,6 +11977,7 @@ fn alpha_rename_block(
 fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
     match expression {
         Expression::Function(value) => &mut value.syntax,
+        Expression::TypeApplication(value) => &mut value.syntax,
         Expression::TypeAscription(value) => &mut value.syntax,
         Expression::Match(value) => &mut value.syntax,
         Expression::Loop(value) => &mut value.syntax,

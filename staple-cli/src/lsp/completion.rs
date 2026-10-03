@@ -741,6 +741,7 @@ impl Collector<'_> {
                 self.block(&value.body, module_index);
             }
             Expression::Block(value) => self.block(value, module_index),
+            Expression::TypeApplication(value) => self.expression(&value.value, module_index),
             Expression::TypeAscription(value) => self.expression(&value.value, module_index),
             Expression::Product(value) => {
                 for element in &value.elements {

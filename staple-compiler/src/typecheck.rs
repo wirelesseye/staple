@@ -2085,6 +2085,8 @@ pub struct TypeChecker {
     product_default_expressions: HashMap<SyntaxId, Expression>,
     curried_default_expressions: HashSet<SyntaxId>,
     symbol_types: HashMap<SymbolId, CheckedType>,
+    /// Generic argument templates in declaration order, including constructors.
+    call_type_parameters: HashMap<SymbolId, Vec<CheckedType>>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     type_representations: HashMap<TypeId, CheckedType>,
     type_parameter_templates: HashMap<TypeId, Vec<CheckedType>>,
@@ -2096,7 +2098,7 @@ pub struct TypeChecker {
     resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     function_subtype_bounds: HashMap<FunctionId, Vec<CheckedSubtypeBound>>,
-    intrinsic_bounds: HashMap<SymbolId, (Vec<CheckedTraitBound>, Vec<CheckedSubtypeBound>)>,
+    callable_symbol_bounds: HashMap<SymbolId, (Vec<CheckedTraitBound>, Vec<CheckedSubtypeBound>)>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
     trait_functional_dependencies: HashMap<TraitId, Vec<CheckedFunctionalDependency>>,
@@ -3665,6 +3667,13 @@ impl TypeChecker {
                     declaration_subtype_bounds.push(bound);
                 }
             }
+            self.callable_symbol_bounds.insert(
+                *symbol,
+                (
+                    declaration_bounds.clone(),
+                    declaration_subtype_bounds.clone(),
+                ),
+            );
             self.active_function_bounds.push(declaration_bounds);
             self.active_subtype_bounds.push(declaration_subtype_bounds);
             let parameter = self.resolve_source_type(module, underlying);
@@ -3673,6 +3682,7 @@ impl TypeChecker {
                 .iter()
                 .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
                 .collect::<Vec<_>>();
+            self.call_type_parameters.insert(*symbol, arguments.clone());
             let result = self.instantiate_type_declaration(module, *id, arguments);
             self.active_function_bounds.pop();
             self.active_subtype_bounds.pop();
@@ -3808,6 +3818,12 @@ impl TypeChecker {
         };
         let value_type = self.resolve_source_type(module, annotation);
         if let Some(symbol) = module.symbol_for(binding.syntax.id) {
+            let parameters = binding
+                .type_parameters
+                .iter()
+                .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
+                .collect();
+            self.call_type_parameters.insert(symbol, parameters);
             self.symbol_types.insert(symbol, value_type);
             if module.intrinsic_function(symbol).is_some() {
                 let bounds = binding
@@ -3821,7 +3837,7 @@ impl TypeChecker {
                     .iter()
                     .filter_map(|bound| self.resolve_subtype_bound(module, bound))
                     .collect();
-                self.intrinsic_bounds
+                self.callable_symbol_bounds
                     .insert(symbol, (bounds, subtype_bounds));
             }
             if let Some(id) = source_type_id(module, annotation) {
@@ -4349,6 +4365,12 @@ impl TypeChecker {
             if let Some(binding_syntax) = function.binding_syntax
                 && let Some(symbol) = module.symbol_for(binding_syntax)
             {
+                let parameters = function
+                    .type_parameters
+                    .iter()
+                    .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
+                    .collect();
+                self.call_type_parameters.insert(symbol, parameters);
                 self.function_symbols.insert(symbol, function.id);
                 self.symbol_types
                     .insert(symbol, CheckedType::Function(function_type.clone()));
@@ -4598,6 +4620,9 @@ impl TypeChecker {
         };
         match expression {
             Expression::Function(_) => CheckedEffectSet::default(),
+            Expression::TypeApplication(value) => {
+                self.expression_effects_now(module, &value.value, target_parameters)
+            }
             Expression::TypeAscription(value) => {
                 self.expression_effects_now(module, &value.value, target_parameters)
             }
@@ -5361,7 +5386,7 @@ impl TypeChecker {
                 .function_for(function.syntax.id)
                 .and_then(|id| self.function_types.get(&id).cloned())
                 .map(CheckedType::Function),
-            Expression::TypeAscription(_) => {
+            Expression::TypeApplication(_) | Expression::TypeAscription(_) => {
                 self.expression_types.get(&expression.syntax().id).cloned()
             }
             Expression::With(with) => self.refreshed_block_type(module, &with.body),
@@ -5527,6 +5552,9 @@ impl TypeChecker {
         let mut changed = match expression {
             Expression::Function(function) => {
                 self.refresh_expression_function_types(module, &function.body)
+            }
+            Expression::TypeApplication(value) => {
+                self.refresh_expression_function_types(module, &value.value)
             }
             Expression::TypeAscription(value) => {
                 self.refresh_expression_function_types(module, &value.value)
@@ -5711,6 +5739,13 @@ impl TypeChecker {
                 target_parameters,
                 current_module,
             ),
+            Expression::TypeApplication(value) => self.record_expression_effects(
+                module,
+                &value.value,
+                target_parameters,
+                current_module,
+            ),
+
             Expression::TypeAscription(value) => self.record_expression_effects(
                 module,
                 &value.value,
@@ -6412,6 +6447,7 @@ impl TypeChecker {
                 Expression::Resource(_) => true,
                 Expression::Access(value) => contains_resource(&value.value),
                 Expression::Index(value) => contains_resource(&value.value),
+                Expression::TypeApplication(value) => contains_resource(&value.value),
                 Expression::TypeAscription(value) => contains_resource(&value.value),
                 Expression::Product(value) => value
                     .elements
@@ -7275,6 +7311,9 @@ impl TypeChecker {
                     .map(CheckedType::Function)
                     .unwrap_or(CheckedType::Error)
             }
+            Expression::TypeApplication(application) => {
+                self.check_explicit_type_application(module, application, expected)
+            }
             Expression::TypeAscription(ascription) => {
                 let annotation = self.resolve_source_type(module, &ascription.ty);
                 self.check_expression_expected(module, &ascription.value, Some(&annotation))
@@ -7745,7 +7784,7 @@ impl TypeChecker {
                             argument.syntax().span.clone(),
                         );
                     }
-                    self.check_intrinsic_bounds(
+                    self.check_callable_symbol_bounds(
                         module.symbol_for(root_syntax),
                         &CheckedType::Function(function.clone()),
                         call.syntax.span.clone(),
@@ -7832,7 +7871,7 @@ impl TypeChecker {
                             selector.syntax.span.clone(),
                         );
                     }
-                    self.check_intrinsic_bounds(
+                    self.check_callable_symbol_bounds(
                         Some(symbol),
                         &callee_type,
                         selector.syntax.span.clone(),
@@ -8953,7 +8992,7 @@ impl TypeChecker {
                             call.callee.syntax().span.clone(),
                         );
                     }
-                    self.check_intrinsic_bounds(
+                    self.check_callable_symbol_bounds(
                         module.symbol_for(call.callee.syntax().id),
                         &callee_type,
                         call.callee.syntax().span.clone(),
@@ -11279,6 +11318,9 @@ impl TypeChecker {
             Expression::Name(name) => module
                 .symbol_for(name.syntax.id)
                 .and_then(|symbol| self.function_symbols.get(&symbol).copied()),
+            Expression::TypeApplication(application) => {
+                self.function_origin(module, &application.value)
+            }
             Expression::Access(access) => module
                 .symbol_for(access.syntax.id)
                 .and_then(|symbol| self.function_symbols.get(&symbol).copied()),
@@ -11338,7 +11380,7 @@ impl TypeChecker {
         self.check_instantiated_bounds(bounds, subtype_bounds, template, instantiated, span);
     }
 
-    fn check_intrinsic_bounds(
+    fn check_callable_symbol_bounds(
         &mut self,
         symbol: Option<SymbolId>,
         instantiated: &CheckedType,
@@ -11347,7 +11389,8 @@ impl TypeChecker {
         let Some(symbol) = symbol else {
             return;
         };
-        let Some((bounds, subtype_bounds)) = self.intrinsic_bounds.get(&symbol).cloned() else {
+        let Some((bounds, subtype_bounds)) = self.callable_symbol_bounds.get(&symbol).cloned()
+        else {
             return;
         };
         let Some(template) = self.symbol_types.get(&symbol).cloned() else {
@@ -11407,6 +11450,117 @@ impl TypeChecker {
                 ));
             }
         }
+    }
+
+    fn check_explicit_type_application(
+        &mut self,
+        module: &ResolvedModule,
+        application: &staple_syntax::TypeApplicationExpression,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
+        if matches!(application.value.as_ref(), Expression::TypeApplication(_)) {
+            self.diagnostics.push(Diagnostic::new(
+                application.syntax.span.clone(),
+                "a generic value can only have one call-site type argument list",
+            ));
+            return CheckedType::Error;
+        }
+        let methods = module.trait_methods_for_expression(application.value.syntax().id);
+        let symbol = module.symbol_for(application.syntax.id);
+        let (raw, parameters) = if let [method] = methods {
+            let trait_id = module
+                .trait_for_method(*method)
+                .expect("trait method owner");
+            let parameters = self.trait_parameter_arguments[&trait_id].clone();
+            (self.trait_method_types[method].clone(), parameters)
+        } else {
+            let raw = self.check_expression(module, &application.value);
+            if raw == CheckedType::Error {
+                return raw;
+            }
+            let Some(symbol) = symbol else {
+                self.diagnostics.push(Diagnostic::new(
+                    application.syntax.span.clone(),
+                    "call-site type arguments require a generic function or constructor",
+                ));
+                return CheckedType::Error;
+            };
+            (
+                raw,
+                self.call_type_parameters
+                    .get(&symbol)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        };
+        if parameters.is_empty() || parameters.len() != application.arguments.len() {
+            self.diagnostics.push(Diagnostic::new(
+                application.syntax.span.clone(),
+                format!(
+                    "generic value expects {} type arguments, but {} were supplied",
+                    parameters.len(),
+                    application.arguments.len()
+                ),
+            ));
+            return CheckedType::Error;
+        }
+        let mut substitutions = HashMap::new();
+        for (parameter, argument) in parameters.iter().zip(&application.arguments) {
+            let actual = self.resolve_source_type(module, argument);
+            if actual == CheckedType::Inferred {
+                continue;
+            }
+            if !infer_type_parameters(parameter, &actual, &mut substitutions) {
+                self.diagnostics.push(Diagnostic::new(
+                    argument.syntax().span.clone(),
+                    format!(
+                        "compile-time argument `{actual}` conflicts with parameter `{parameter}`"
+                    ),
+                ));
+                return CheckedType::Error;
+            }
+            if sized_type_parameter_ids(parameter).iter().any(|id| {
+                substitutions
+                    .get(id)
+                    .is_some_and(|ty| !ty.is_sized() && *ty != CheckedType::Error)
+            }) {
+                self.diagnostics.push(Diagnostic::new(argument.syntax().span.clone(),
+                    format!("compile-time argument `{actual}` does not satisfy the implicit `Sized` bound")));
+                return CheckedType::Error;
+            }
+        }
+        let instantiated = self.substitute_parameter_products(
+            raw.clone(),
+            &substitutions,
+            application.syntax.span.clone(),
+        );
+        let instantiated = self.instantiate_function_use(
+            instantiated,
+            None,
+            expected,
+            application.syntax.span.clone(),
+            true,
+        );
+        if let Some(function) = self.function_origin(module, &application.value) {
+            self.check_function_bounds(
+                function,
+                &raw,
+                &instantiated,
+                application.syntax.span.clone(),
+            );
+        }
+        self.check_callable_symbol_bounds(symbol, &instantiated, application.syntax.span.clone());
+        if !methods.is_empty() {
+            return self.resolve_trait_method_use(
+                module,
+                application.syntax.id,
+                methods,
+                None,
+                Some(&instantiated),
+                application.syntax.span.clone(),
+            );
+        }
+        instantiated
     }
 
     fn instantiate_function_use(
@@ -15422,6 +15576,9 @@ fn expression_reads_reactive(
                     .any(|value| item(module, value, derived))
         }
         Expression::Function(value) => expression_reads_reactive(module, &value.body, derived),
+        Expression::TypeApplication(value) => {
+            expression_reads_reactive(module, &value.value, derived)
+        }
         Expression::TypeAscription(value) => {
             expression_reads_reactive(module, &value.value, derived)
         }
@@ -15463,6 +15620,7 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
     fn expression(value: &Expression, bindings: &mut Vec<Binding>) {
         match value {
             Expression::Function(value) => expression(&value.body, bindings),
+            Expression::TypeApplication(value) => expression(&value.value, bindings),
             Expression::TypeAscription(value) => expression(&value.value, bindings),
             Expression::Match(value) => {
                 expression(&value.subject, bindings);
@@ -15626,6 +15784,9 @@ fn expression_mentions_symbols(
     }
     match expression {
         Expression::Function(value) => expression_mentions_symbols(module, &value.body, symbols),
+        Expression::TypeApplication(value) => {
+            expression_mentions_symbols(module, &value.value, symbols)
+        }
         Expression::TypeAscription(value) => {
             expression_mentions_symbols(module, &value.value, symbols)
         }
@@ -15721,6 +15882,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
     }
     match expression {
         Expression::Function(value) => expression_contains_assignment(&value.body),
+        Expression::TypeApplication(value) => expression_contains_assignment(&value.value),
         Expression::TypeAscription(value) => expression_contains_assignment(&value.value),
         Expression::Match(value) => {
             expression_contains_assignment(&value.subject)
@@ -15895,6 +16057,7 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
                     }
                 }
             }
+            Expression::TypeApplication(value) => visit(module, &value.value, &declared, captures),
             Expression::TypeAscription(value) => visit(module, &value.value, &declared, captures),
             Expression::Match(value) => {
                 visit(module, &value.subject, &declared, captures);

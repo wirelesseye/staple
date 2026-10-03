@@ -261,6 +261,9 @@ impl Collector<'_> {
                 self.collect_pattern_declarations(&function.pattern, false);
                 self.collect_expression_declarations(&function.body);
             }
+            Expression::TypeApplication(application) => {
+                self.collect_expression_declarations(&application.value)
+            }
             Expression::TypeAscription(ascription) => {
                 self.collect_expression_declarations(&ascription.value)
             }
@@ -1430,6 +1433,12 @@ impl Collector<'_> {
             Expression::Function(function) => {
                 self.pattern(&function.pattern);
                 self.expression(&function.body);
+            }
+            Expression::TypeApplication(application) => {
+                self.expression(&application.value);
+                for argument in &application.arguments {
+                    self.ty(argument);
+                }
             }
             Expression::TypeAscription(ascription) => {
                 self.expression(&ascription.value);

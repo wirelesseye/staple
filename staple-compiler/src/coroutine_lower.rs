@@ -239,6 +239,9 @@ fn scan_expression(
         }
         // Nested coroutines and functions are compiled separately.
         Expression::Coro(_) | Expression::Function(_) => {}
+        Expression::TypeApplication(value) => {
+            scan_expression(module, &value.value, info, diagnostics)
+        }
         Expression::TypeAscription(value) => {
             scan_expression(module, &value.value, info, diagnostics)
         }
@@ -390,6 +393,7 @@ fn collect_expression<'a>(
         }
         Expression::Await(await_) => collect_expression(&await_.operand, out),
         Expression::Function(function) => collect_expression(&function.body, out),
+        Expression::TypeApplication(application) => collect_expression(&application.value, out),
         Expression::TypeAscription(ascription) => collect_expression(&ascription.value, out),
         Expression::Match(match_) => {
             collect_expression(&match_.subject, out);

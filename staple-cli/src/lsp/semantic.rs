@@ -674,6 +674,12 @@ impl<'a> Classifier<'a> {
                 self.pattern(&value.pattern, PARAMETER, resolved);
                 self.expression(&value.body, resolved);
             }
+            Expression::TypeApplication(application) => {
+                self.expression(&application.value, resolved);
+                for argument in &application.arguments {
+                    self.ty(argument, resolved);
+                }
+            }
             Expression::TypeAscription(value) => {
                 self.expression(&value.value, resolved);
                 self.ty(&value.ty, resolved);

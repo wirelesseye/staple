@@ -518,6 +518,16 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             },
             render_expr(program, &logical.right),
         ),
+        Expression::TypeApplication(application) => format!(
+            "{}.<{}>",
+            render_expr(program, &application.value),
+            application
+                .arguments
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
         Expression::TypeAscription(ascription) => {
             format!(
                 "{} :: {}",
@@ -714,6 +724,7 @@ fn expr_has_generated(expression: &Expression) -> bool {
     }
     match expression {
         Expression::Function(function) => expr_has_generated(&function.body),
+        Expression::TypeApplication(application) => expr_has_generated(&application.value),
         Expression::TypeAscription(ascription) => expr_has_generated(&ascription.value),
         Expression::Match(match_) => {
             expr_has_generated(&match_.subject)

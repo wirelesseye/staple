@@ -2415,6 +2415,9 @@ fn find_block_submodules_in_block_item(item: &Item, out: &mut Vec<Submodule>) {
 fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Submodule>) {
     match expression {
         Expression::Function(function) => find_block_submodules_in_expression(&function.body, out),
+        Expression::TypeApplication(application) => {
+            find_block_submodules_in_expression(&application.value, out)
+        }
         Expression::TypeAscription(ascription) => {
             find_block_submodules_in_expression(&ascription.value, out)
         }
@@ -2577,6 +2580,9 @@ fn find_block_use_declarations_in_expression(
     match expression {
         Expression::Function(function) => {
             find_block_use_declarations_in_expression(&function.body, out)
+        }
+        Expression::TypeApplication(application) => {
+            find_block_use_declarations_in_expression(&application.value, out)
         }
         Expression::TypeAscription(ascription) => {
             find_block_use_declarations_in_expression(&ascription.value, out)

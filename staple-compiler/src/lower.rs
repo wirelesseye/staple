@@ -4450,6 +4450,9 @@ impl LoweredProgram {
             Expression::Product(product) if product.elements.len() == 1 => {
                 self.provider_value_has_place(module, &product.elements[0].value)
             }
+            Expression::TypeApplication(application) => {
+                self.provider_value_has_place(module, &application.value)
+            }
             Expression::TypeAscription(ascription) => {
                 self.provider_value_has_place(module, &ascription.value)
             }
@@ -4581,6 +4584,9 @@ impl LoweredProgram {
         let kind = match expression {
             Expression::Product(product) if product.elements.len() == 1 => {
                 return self.lower_place(module, owner, context, &product.elements[0].value);
+            }
+            Expression::TypeApplication(application) => {
+                return self.lower_place(module, owner, context, &application.value);
             }
             Expression::TypeAscription(ascription) => {
                 return self.lower_place(module, owner, context, &ascription.value);
@@ -5027,6 +5033,14 @@ impl LoweredProgram {
             (OrdinaryExpressionFamily::Access, Expression::Access(access)) => {
                 self.lower_access(module, owner, context, access)
             }
+            (OrdinaryExpressionFamily::Name, Expression::TypeApplication(application)) => self
+                .lower_name(
+                    module,
+                    owner,
+                    application.syntax.id,
+                    application.syntax.span.clone(),
+                    module.symbol_for(application.syntax.id),
+                ),
             (OrdinaryExpressionFamily::Name, Expression::Name(name)) => self.lower_name(
                 module,
                 owner,
@@ -12745,6 +12759,7 @@ fn classify_expression(module: &TypedModule, expression: &Expression) -> Express
     match expression {
         Expression::Function(_) => Ordinary(Family::Function),
         Expression::Call(_) => Ordinary(Family::Call),
+        Expression::TypeApplication(_) => Ordinary(Family::Name),
         Expression::TypeAscription(_) => Ordinary(Family::TypeAscription),
         Expression::Match(_) => Ordinary(Family::Match),
         Expression::Loop(_) => Ordinary(Family::Loop),
@@ -12910,6 +12925,7 @@ fn family_name(family: OrdinaryExpressionFamily) -> &'static str {
 fn expression_variant_name(expression: &Expression) -> &'static str {
     match expression {
         Expression::Function(_) => "Function",
+        Expression::TypeApplication(_) => "TypeApplication",
         Expression::TypeAscription(_) => "TypeAscription",
         Expression::Match(_) => "Match",
         Expression::Loop(_) => "Loop",
@@ -13829,6 +13845,7 @@ impl<'a> SourceCoverage<'a> {
             Expression::Product(product) if product.elements.len() == 1 => {
                 self.visit_place_origin(&product.elements[0].value);
             }
+            Expression::TypeApplication(application) => self.visit_place_origin(&application.value),
             Expression::TypeAscription(ascription) => self.visit_place_origin(&ascription.value),
             other => {
                 let syntax = other.syntax();
@@ -13976,6 +13993,9 @@ impl<'a> SourceCoverage<'a> {
         }
         match expression {
             Expression::Block(block) => self.visit_block(owner, block),
+            // The generic reference and its explicit arguments select one
+            // callable; they do not evaluate a separate runtime child.
+            Expression::TypeApplication(_) => {}
             Expression::TypeAscription(ascription) => {
                 self.visit_expression(owner, &ascription.value)
             }
@@ -16436,6 +16456,14 @@ mod tests {
             })),
         ));
         expressions.push((
+            "TypeApplication",
+            Expression::TypeApplication(Box::new(TypeApplicationExpression {
+                syntax: syntax.clone(),
+                value: Box::new(name_expression("value")),
+                arguments: vec![inferred_type()],
+            })),
+        ));
+        expressions.push((
             "TypeAscription",
             Expression::TypeAscription(Box::new(TypeAscriptionExpression {
                 syntax: syntax.clone(),
@@ -16683,7 +16711,7 @@ mod tests {
                 "Access" => Ordinary(OrdinaryExpressionFamily::Access),
                 "Index" => Ordinary(OrdinaryExpressionFamily::Index),
                 "Logical" => Ordinary(OrdinaryExpressionFamily::Logical),
-                "Name" => Ordinary(OrdinaryExpressionFamily::Name),
+                "Name" | "TypeApplication" => Ordinary(OrdinaryExpressionFamily::Name),
                 "String" => Ordinary(OrdinaryExpressionFamily::String),
                 "StringTemplate" => Ordinary(OrdinaryExpressionFamily::StringTemplate),
                 "CString" => Ordinary(OrdinaryExpressionFamily::CString),
@@ -17004,6 +17032,9 @@ mod tests {
         match expression {
             Expression::Function(function) => {
                 collect_call_routes(program, module, owner, &function.body, routes);
+            }
+            Expression::TypeApplication(application) => {
+                collect_call_routes(program, module, owner, &application.value, routes);
             }
             Expression::TypeAscription(ascription) => {
                 collect_call_routes(program, module, owner, &ascription.value, routes);
@@ -18030,6 +18061,7 @@ mod tests {
         }
         match expression {
             Expression::Function(function) => collect_calls(&function.body, visit),
+            Expression::TypeApplication(application) => collect_calls(&application.value, visit),
             Expression::TypeAscription(ascription) => collect_calls(&ascription.value, visit),
             Expression::Match(match_) => {
                 collect_calls(&match_.subject, visit);

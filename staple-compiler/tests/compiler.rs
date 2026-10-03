@@ -12833,3 +12833,137 @@ fn fixed_references_do_not_convert_to_slices_implicitly() {
         "let count: USize = Slice.length (Slice.from_ref fixed)\n",
     ));
 }
+
+#[test]
+fn call_site_type_arguments_specialize_functions_and_constructors() {
+    let module = type_check(concat!(
+        "use std.list.List\n",
+        "def identity: <T> move T -> T = move x => x\n",
+        "def second: <A, B> [move B, move A] -> B = [move b, move a] => b\n",
+        "let list = List.new.<I32> ()\n",
+        "let empty: () -> List I32 = List.new.<I32>\n",
+        "let another = empty ()\n",
+        "let value = identity.<I32> 42\n",
+        "let text = identity.<String> \"hello\"\n",
+        "let result = second.<String, I32> 7 \"discarded\"\n",
+        "let inferred = second.<_, I32> 8 \"inferred\"\n",
+        "type Box T = wrap T\n",
+        "let wrapped = Box.<I32> 9\n",
+        "type Bounded T where T <: I32 = wrap T\n",
+        "let inferred_wrapper = Bounded.<_> 10\n",
+        "let wide = identity.<I64> 42\n",
+    ));
+    let context = Context::create();
+    let lowered = lower(&module);
+    CodeGenerator::new(&context)
+        .compile_module(&lowered)
+        .expect("explicit generic arguments should lower and generate code");
+    assert!(lowered.planned_instance_names("identity").len() >= 2);
+}
+
+#[test]
+fn call_site_type_arguments_reject_wrong_arity_and_conflicts() {
+    for (source, message) in [
+        (
+            "def f: <T> move T -> T = move x => x\nlet x = f.<I32, String> 1\n",
+            "expects 1 type arguments",
+        ),
+        (
+            "def f: I32 -> I32 = x => x\nlet x = f.<I32> 1\n",
+            "expects 0 type arguments",
+        ),
+        (
+            "def f: <T> move T -> T = move x => x\nlet x = f.<I32> \"wrong\"\n",
+            "I32",
+        ),
+        (
+            "def f: <T> move T -> T = move x => x\nlet x: String = f.<I32> 1\n",
+            "String",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("explicit arguments should be checked");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(message)),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn call_site_type_arguments_enforce_trait_bounds() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Marker T { marker: T -> Bool }\n",
+            "def f: <T where Marker T> move T -> T = move x => x\n",
+            "let specialized = f.<I32>\n",
+        )))
+        .expect_err_diagnostics("explicit specialization must enforce bounds");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("trait bound")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn call_site_type_arguments_work_in_generic_bodies_and_macro_quotes() {
+    let module = type_check(concat!(
+        "def identity: <T> move T -> T = move x => x\n",
+        "def relay: <T> move T -> T = move x => identity.<T> x\n",
+        "let value = relay.<I32> 4\n",
+        "macro make_list: Type -> Expr = T => parse_quote { std.list.List.new.<$T> () }\n",
+        "let list = make_list I32\n",
+        "let same = Eq.eq.<I32> (1, 1)\n",
+        "let equals = Eq.eq.<I32>\n",
+        "let same_again = equals (2, 2)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("explicit arguments should survive generic and macro expansion");
+}
+
+#[test]
+fn call_site_type_arguments_enforce_sized_and_subtype_bounds() {
+    for (source, message) in [
+        (
+            "type Token = opaque\ndef f: <T> Ref T -> Ref T = x => x\nlet specialized = f.<Token>\n",
+            "Sized",
+        ),
+        (
+            "def f: <T where T <: I32> T -> T = x => x\nlet specialized = f.<String>\n",
+            "subtype",
+        ),
+        (
+            "def f: <T> move T -> T = move x => x\nlet specialized = f.<I32>.<String>\n",
+            "one call-site type argument list",
+        ),
+        (
+            "type Box T where T <: String = wrap T\nlet specialized = Box.<I32>\n",
+            "subtype",
+        ),
+        (
+            "type Box T where T <: String = wrap T\nlet specialized = Box.<_> 1\n",
+            "subtype",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics(source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(message)),
+            "{diagnostics:?}"
+        );
+    }
+    let module = type_check(
+        "type Token = opaque\ndef f: <T where ?Sized T> Ref T -> Ref T = x => x\nlet specialized = f.<Token>\n",
+    );
+    lower(&module);
+}

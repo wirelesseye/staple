@@ -2983,3 +2983,39 @@ fn extern_bindings_can_export_individual_members() {
     let formatted = staple_syntax::format_source(source).unwrap();
     assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
 }
+
+#[test]
+fn parses_call_site_type_arguments_losslessly() {
+    let source = "let list = List.new.<I32> ()\nlet f = select.<List I32, (I32, String) -> Bool>\nlet answer = identity.<I32> 1 < 2\n";
+    let module = parse(source).expect("call-site type arguments should parse");
+    assert_eq!(module.syntax.text(), source);
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("expected binding")
+    };
+    let Some(Expression::Call(call)) = &binding.value else {
+        panic!("expected call")
+    };
+    let Expression::TypeApplication(application) = call.callee.as_ref() else {
+        panic!("expected type application")
+    };
+    assert_eq!(application.arguments.len(), 1);
+    assert!(matches!(&application.arguments[0], Type::Named(ty) if ty.name == "I32"));
+    assert!(
+        matches!(application.value.as_ref(), Expression::Access(access) if matches!(&access.accessor, Accessor::Name(name) if name == "new"))
+    );
+    let formatted = staple_syntax::format_source(source).expect("format explicit arguments");
+    assert_eq!(staple_syntax::format_source(&formatted).unwrap(), formatted);
+    assert_eq!(parse(&formatted).unwrap().items.len(), 3);
+}
+
+#[test]
+fn rejects_malformed_call_site_type_arguments() {
+    for source in [
+        "let x = f.<> ()\n",
+        "let x = f.<I32,> ()\n",
+        "let x = f.<I32 ()\n",
+        "let x = f.<I32, , String> ()\n",
+    ] {
+        assert!(parse(source).is_err(), "unexpectedly parsed {source}");
+    }
+}

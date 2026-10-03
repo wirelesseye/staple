@@ -3076,6 +3076,21 @@ impl Grammar {
         let mut expression = self.parse_atom()?;
         loop {
             if self.eat(TokenKind::Dot) {
+                if self.eat_operator("<") {
+                    let mut arguments = vec![self.parse_type()?];
+                    while self.eat(TokenKind::Comma) {
+                        arguments.push(self.parse_type()?);
+                    }
+                    if !self.eat_operator(">") {
+                        return Err(self.error("expected `>` to close call-site type arguments"));
+                    }
+                    expression = Expression::TypeApplication(Box::new(TypeApplicationExpression {
+                        syntax: self.syntax(start),
+                        value: Box::new(expression),
+                        arguments,
+                    }));
+                    continue;
+                }
                 let accessor = if self.eat(TokenKind::Star) {
                     Accessor::Representation
                 } else {
@@ -4242,6 +4257,7 @@ fn parameter_has_nested_move(pattern: &Pattern) -> bool {
 fn macro_body_is_bare_function(expression: &Expression) -> bool {
     match expression {
         Expression::Function(_) => true,
+        Expression::TypeApplication(application) => macro_body_is_bare_function(&application.value),
         Expression::TypeAscription(ascription) => macro_body_is_bare_function(&ascription.value),
         _ => false,
     }

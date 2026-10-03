@@ -244,6 +244,7 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 true
             }
+            Expression::TypeApplication(value) => self.check_expression(&value.value, consume),
             Expression::TypeAscription(value) => self.check_expression(&value.value, consume),
             Expression::Match(value) => {
                 self.check_expression(&value.subject, true);
@@ -605,6 +606,7 @@ impl<'a> OwnershipChecker<'a> {
 
     fn borrow_origins(&self, expression: &Expression) -> Option<Vec<BorrowOrigin>> {
         match expression {
+            Expression::TypeApplication(value) => return self.borrow_origins(&value.value),
             Expression::TypeAscription(value) => return self.borrow_origins(&value.value),
             Expression::Block(block) => {
                 return match block.items.last()? {
@@ -708,10 +710,12 @@ impl<'a> OwnershipChecker<'a> {
     }
 
     fn is_borrow_producer_reference(&self, expression: &Expression) -> bool {
-        matches!(expression, Expression::Name(_) | Expression::Access(_))
-            && self
-                .static_callee(expression)
-                .is_some_and(|function| self.borrow_summaries.contains_key(&function))
+        matches!(
+            expression,
+            Expression::Name(_) | Expression::Access(_) | Expression::TypeApplication(_)
+        ) && self
+            .static_callee(expression)
+            .is_some_and(|function| self.borrow_summaries.contains_key(&function))
     }
 
     fn check_borrow_conflict(&mut self, symbol: SymbolId, requested: BorrowKind, syntax: &Syntax) {
@@ -1084,6 +1088,7 @@ fn returned_closure_ids(module: &TypedModule, expression: &Expression) -> Option
         Expression::Function(function) => module
             .function_for(function.syntax.id)
             .map(|function| vec![function]),
+        Expression::TypeApplication(value) => returned_closure_ids(module, &value.value),
         Expression::TypeAscription(value) => returned_closure_ids(module, &value.value),
         Expression::Block(block) => match block.items.last()? {
             Item::Expression(expression) => returned_closure_ids(module, expression),

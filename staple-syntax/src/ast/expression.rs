@@ -4,6 +4,7 @@ use super::{FunctionParameterStyle, Item, Pattern, Syntax, Type, VisibilitySynta
 pub enum Expression {
     Function(Box<FunctionExpression>),
     TypeAscription(Box<TypeAscriptionExpression>),
+    TypeApplication(Box<TypeApplicationExpression>),
     Match(MatchExpression),
     Loop(LoopExpression),
     Coro(CoroExpression),
@@ -36,6 +37,7 @@ impl Expression {
         match self {
             Self::Function(expression) => &expression.syntax,
             Self::TypeAscription(expression) => &expression.syntax,
+            Self::TypeApplication(expression) => &expression.syntax,
             Self::Match(expression) => &expression.syntax,
             Self::Loop(expression) => &expression.syntax,
             Self::Coro(expression) => &expression.syntax,
@@ -422,4 +424,12 @@ pub struct FloatExpression {
     pub syntax: Syntax,
     /// The literal exactly as written.
     pub literal: String,
+}
+
+/// Explicit compile-time arguments applied to a generic value (`f.<T, U>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeApplicationExpression {
+    pub syntax: Syntax,
+    pub value: Box<Expression>,
+    pub arguments: Vec<Type>,
 }

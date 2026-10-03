@@ -1620,6 +1620,19 @@ Product-pattern parameters are not permitted inside the angle brackets
 themselves — `first`'s two type parameters are declared as `<A, B>`, flattened,
 even though its value parameter is the product `(A, B)`.
 
+Call-site type arguments can be supplied explicitly after `.`:
+
+```staple
+let list = List.new.<I32> ()
+let answer = identity.<I32> 42
+let specialized = identity.<String>
+```
+
+Arguments follow the declaration's parameter order and must match its arity.
+Use `_` for an argument that should still be inferred. Explicit arguments must
+satisfy the declared bounds and agree with value arguments and expected types.
+The `.<...>` suffix binds like member access, before function application.
+
 The compiler infers concrete type arguments from call arguments and the
 expected result or function type. A generic function can therefore be used as
 a first-class value when its context fixes a concrete function type:

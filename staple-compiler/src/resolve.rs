@@ -3893,6 +3893,12 @@ impl NameResolver {
                 self.resolve_pattern_types_lenient(&value.pattern);
                 self.resolve_compile_time_expression_annotations(&value.body);
             }
+            Expression::TypeApplication(application) => {
+                self.resolve_compile_time_expression_annotations(&application.value);
+                for argument in &application.arguments {
+                    self.resolve_type_lenient(argument);
+                }
+            }
             Expression::TypeAscription(value) => {
                 self.resolve_compile_time_expression_annotations(&value.value);
                 self.resolve_type_lenient(&value.ty);
@@ -4090,6 +4096,9 @@ impl NameResolver {
                     self.resolve_quoted_item(item, scopes);
                 }
                 scopes.pop();
+            }
+            Expression::TypeApplication(value) => {
+                self.resolve_quoted_expression(&value.value, scopes)
             }
             Expression::TypeAscription(value) => {
                 self.resolve_quoted_expression(&value.value, scopes)
@@ -4499,6 +4508,15 @@ impl NameResolver {
                     captures,
                     body: (*function.body).clone(),
                 });
+            }
+            Expression::TypeApplication(application) => {
+                self.resolve_expression(&application.value, None, None);
+                for argument in &application.arguments {
+                    self.resolve_type(argument);
+                }
+                if let Some(symbol) = self.symbols.get(&application.value.syntax().id).copied() {
+                    self.symbols.insert(application.syntax.id, symbol);
+                }
             }
             Expression::TypeAscription(ascription) => {
                 self.resolve_type(&ascription.ty);
@@ -6091,6 +6109,9 @@ fn analyze_compile_expression(
                 );
             }
         }
+        Expression::TypeApplication(value) => {
+            analyze_compile_expression(&value.value, scope, parameter_kind, quoted)
+        }
         Expression::TypeAscription(value) => {
             analyze_compile_expression(&value.value, scope, parameter_kind, quoted)
         }
@@ -6367,6 +6388,9 @@ impl<'a> InitializationAnalyzer<'a> {
                 );
                 self.expression(&function.body, &mut function_local, &snapshot);
             }
+            Expression::TypeApplication(application) => {
+                self.expression(&application.value, local, outer)
+            }
             Expression::TypeAscription(ascription) => {
                 self.expression(&ascription.value, local, outer)
             }
@@ -6623,6 +6647,9 @@ fn find_block_type_declarations_in_expression<'a>(
     match expression {
         Expression::Function(function) => {
             find_block_type_declarations_in_expression(&function.body, out)
+        }
+        Expression::TypeApplication(application) => {
+            find_block_type_declarations_in_expression(&application.value, out)
         }
         Expression::TypeAscription(ascription) => {
             find_block_type_declarations_in_expression(&ascription.value, out)
