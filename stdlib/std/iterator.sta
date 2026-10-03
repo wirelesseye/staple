@@ -1,8 +1,8 @@
 pub mod
 
 companion IterStep {
-    pub type Done Iter = pub ctor Iter
-    pub type Yield (Item, Iter) = pub ctor (Item, Iter)
+    pub type Done Iter = pub wrap Iter
+    pub type Yield (Item, Iter) = pub wrap (Item, Iter)
 }
 
 /// One step of an iterator: either completion or an item and next iterator.

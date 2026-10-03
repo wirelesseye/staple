@@ -9,10 +9,10 @@ def typegroup_apply_modifiers: (Sequence Modifier, Item) -> Item = (modifiers, i
 
 def typegroup_body_item: (Ident String, TypeBody) -> Item = (variant, body) => match body {
     AliasBody underlying => parse_quote { pub type $variant = alias $underlying },
-    ConstructorBody (visibility, underlying) => match visibility {
-        Private => parse_quote { pub type $variant = ctor $underlying },
-        Package => parse_quote { pub type $variant = pub(package) ctor $underlying },
-        Public => parse_quote { pub type $variant = pub ctor $underlying },
+    WrapperBody (visibility, underlying) => match visibility {
+        Private => parse_quote { pub type $variant = wrap $underlying },
+        Package => parse_quote { pub type $variant = pub(package) wrap $underlying },
+        Public => parse_quote { pub type $variant = pub wrap $underlying },
     },
     OpaqueBody => panic "opaque typegroup variants are unsupported",
 }
@@ -20,10 +20,10 @@ def typegroup_body_item: (Ident String, TypeBody) -> Item = (variant, body) => m
 def typegroup_generic_body_item: (Ident String, Syntax, TypeBody) -> Item =
 (variant, parameters, body) => match body {
     AliasBody underlying => parse_quote { pub type $variant $parameters = alias $underlying },
-    ConstructorBody (visibility, underlying) => match visibility {
-        Private => parse_quote { pub type $variant $parameters = ctor $underlying },
-        Package => parse_quote { pub type $variant $parameters = pub(package) ctor $underlying },
-        Public => parse_quote { pub type $variant $parameters = pub ctor $underlying },
+    WrapperBody (visibility, underlying) => match visibility {
+        Private => parse_quote { pub type $variant $parameters = wrap $underlying },
+        Package => parse_quote { pub type $variant $parameters = pub(package) wrap $underlying },
+        Public => parse_quote { pub type $variant $parameters = pub wrap $underlying },
     },
     OpaqueBody => panic "opaque typegroup variants are unsupported",
 }
@@ -128,7 +128,7 @@ def typegroup_generic_sum_syntax:
 /// Declares a sum-type alias and companion variants from a compact definition.
 ///
 /// Every entry becomes a public declaration in the group's companion module.
-/// A bare name is a singleton variant; `ctor`, `alias`, and `opaque` bodies
+/// A bare name is a singleton variant; `wrap`, `alias`, and `opaque` bodies
 /// follow the ordinary type declaration body grammar. Every variant except an
 /// `opaque` one becomes an alternative of the group alias.
 ///
@@ -141,7 +141,7 @@ def typegroup_generic_sum_syntax:
 /// }
 ///
 /// typegroup Example {
-///     Wrapped = pub ctor I32,
+///     Wrapped = pub wrap I32,
 ///     Number = alias I32,
 ///     Empty,
 /// }

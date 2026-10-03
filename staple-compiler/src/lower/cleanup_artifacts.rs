@@ -1,7 +1,7 @@
 //! Ownership cleanup and garbage-collector finalizer planning.
 //!
 //! Drop plans select user implementations, runtime releases, and recursive
-//! product, sum, and distinct cleanup. Canonical key deduplication terminates
+//! product, sum, and wrapper cleanup. Canonical key deduplication terminates
 //! recursive requests. Finalizers record payload, cell, capture, and buffer
 //! cleanup; scanners attach uses to owners and collect owned bindings in order.
 //! Codegen expands these validated drop plans inline at their recorded sites.
@@ -1736,7 +1736,7 @@ fn drop_glue_body(
 ) -> Result<DropGlueBody, Vec<Diagnostic>> {
     if let Some(method) = user_drop_method(program, value_type, origin, requests)? {
         let representation = match value_type {
-            CheckedType::Distinct { representation, .. }
+            CheckedType::Wrapper { representation, .. }
                 if program.concrete_needs_drop(representation) =>
             {
                 Some(request_drop_glue(
@@ -1804,7 +1804,7 @@ fn drop_glue_body(
             }
             Ok(DropGlueBody::Sum { alternatives })
         }
-        CheckedType::Distinct { representation, .. } => {
+        CheckedType::Wrapper { representation, .. } => {
             if !program.concrete_needs_drop(representation) {
                 return Err(vec![Diagnostic::new(
                     origin.span.clone(),
@@ -1814,7 +1814,7 @@ fn drop_glue_body(
                 )]);
             }
             let glue = request_drop_glue(program, representation, origin, requests)?;
-            Ok(DropGlueBody::Distinct {
+            Ok(DropGlueBody::Wrapper {
                 representation: glue,
             })
         }
@@ -2064,14 +2064,14 @@ mod tests {
     const CLEANUP_FIXTURE: &str = concat!(
         "use std.cinterop.(CString, c_string)\n",
         "use std.coroutine.*\n",
-        "type Resource = ctor I32\n",
+        "type Resource = wrap I32\n",
         "impl Drop Resource { drop = Resource value => () }\n",
-        "type Handle = ctor CString\n",
+        "type Handle = wrap CString\n",
         "impl Drop Handle { drop = Handle value => () }\n",
-        "type Wrapped = ctor CString\n",
-        "type Box T = ctor (T)\n",
+        "type Wrapped = wrap CString\n",
+        "type Box T = wrap (T)\n",
         "impl<T where Copy T> Drop (Box T) { drop = Box value => () }\n",
-        "type Chain = ctor ((CString) | (Ref Chain))\n",
+        "type Chain = wrap ((CString) | (Ref Chain))\n",
         "def expose_resource: Resource -> I32 = value => 0\n",
         "def expose_handle: Handle -> I32 = value => 0\n",
         "def expose_wrapped: Wrapped -> I32 = value => 0\n",
@@ -2156,7 +2156,7 @@ mod tests {
             DropGlueBody::CStringFree
         );
 
-        // User `Drop` on a non-represented distinct: no representation glue.
+        // User `Drop` on a non-represented wrapper: no representation glue.
         let plan = drop_glue_plan(&program, &resource);
         let DropGlueBody::UserDrop {
             method,
@@ -2177,7 +2177,7 @@ mod tests {
             "the selected method edge is a drop-method edge"
         );
 
-        // User `Drop` on a represented distinct: the representation glue is the
+        // User `Drop` on a represented wrapper: the representation glue is the
         // nested CString glue and is only requested because CString needs drop.
         let plan = drop_glue_plan(&program, &handle);
         let DropGlueBody::UserDrop {
@@ -2200,10 +2200,10 @@ mod tests {
             ))
         );
 
-        // A represented distinct with no user `Drop`: the distinct branch.
+        // A represented wrapper with no user `Drop`: the wrapper branch.
         let plan = drop_glue_plan(&program, &wrapped);
-        let DropGlueBody::Distinct { representation } = &plan.body else {
-            panic!("Wrapped selects the distinct branch: {:?}", plan.body);
+        let DropGlueBody::Wrapper { representation } = &plan.body else {
+            panic!("Wrapped selects the wrapper branch: {:?}", plan.body);
         };
         assert_eq!(
             program
@@ -2259,8 +2259,8 @@ mod tests {
         // A recursive nominal type through a reference: the reference field is
         // skipped, so the glue body terminates on the CString.
         let plan = drop_glue_plan(&program, &chain);
-        let DropGlueBody::Distinct { representation } = &plan.body else {
-            panic!("Chain selects the distinct branch: {:?}", plan.body);
+        let DropGlueBody::Wrapper { representation } = &plan.body else {
+            panic!("Chain selects the wrapper branch: {:?}", plan.body);
         };
         let chain_representation = drop_glue_ordinal(&program, representation);
         let chain_representation_plan = match program
@@ -2305,7 +2305,7 @@ mod tests {
 
         // The generic `impl<T where Copy T> Drop (Box T)` applies to `Box I32`
         // (its bound discharges), so it selects a user drop; `Box CString` and
-        // `Box Handle` fail the `Copy` bound and keep the structural distinct
+        // `Box Handle` fail the `Copy` bound and keep the structural wrapper
         // branch. Two instantiations produce two keys.
         assert_ne!(
             CanonicalType::concrete(&box_c_string, &Origin::compiler()).expect("concrete"),
@@ -2333,8 +2333,8 @@ mod tests {
             );
             let plan = drop_glue_plan(&program, box_type);
             assert!(
-                matches!(plan.body, DropGlueBody::Distinct { .. }),
-                "Box CString selects the distinct branch: {:?}",
+                matches!(plan.body, DropGlueBody::Wrapper { .. }),
+                "Box CString selects the wrapper branch: {:?}",
                 plan.body
             );
         }
@@ -2389,7 +2389,7 @@ mod tests {
     #[test]
     fn drop_glue_converges_and_reports_closure_stats() {
         let source = concat!(
-            "type Resource = ctor I32\n",
+            "type Resource = wrap I32\n",
             "impl Drop Resource { drop = Resource value => () }\n",
             "def mutate_resource: move (Resource, Resource) -> (Resource, Resource) = move pair => {\n",
             "  let mut copy = pair\n",
@@ -2497,11 +2497,11 @@ mod tests {
     const FINALIZER_FIXTURE: &str = concat!(
         "use std.cinterop.*\n",
         "extern \"c\" { inspect: CString -> I32 }\n",
-        "type Owned = ctor CString\n",
-        "type CellValue = ctor CString\n",
-        "type BorrowedValue = ctor CString\n",
-        "type Wrapped = ctor CString\n",
-        "type DerivedValue = ctor CString\n",
+        "type Owned = wrap CString\n",
+        "type CellValue = wrap CString\n",
+        "type BorrowedValue = wrap CString\n",
+        "type Wrapped = wrap CString\n",
+        "type DerivedValue = wrap CString\n",
         "def make_owned = (move value: Owned) => { let callback = () => inspect (value.*); callback }\n",
         "def make_mutable = () => {\n",
         "  let mut cell = CellValue (c_string \"a\")\n",
@@ -2614,31 +2614,31 @@ mod tests {
             .origin
             .clone();
 
-        let owned_capture = CheckedType::Distinct {
+        let owned_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "Owned"),
             name: "Owned".to_string(),
             arguments: Vec::new(),
             representation: Box::new(CheckedType::CString),
         };
-        let cell_capture = CheckedType::Distinct {
+        let cell_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "CellValue"),
             name: "CellValue".to_string(),
             arguments: Vec::new(),
             representation: Box::new(CheckedType::CString),
         };
-        let borrowed_capture = CheckedType::Distinct {
+        let borrowed_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "BorrowedValue"),
             name: "BorrowedValue".to_string(),
             arguments: Vec::new(),
             representation: Box::new(CheckedType::CString),
         };
-        let derived_capture = CheckedType::Distinct {
+        let derived_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "DerivedValue"),
             name: "DerivedValue".to_string(),
             arguments: Vec::new(),
             representation: Box::new(CheckedType::CString),
         };
-        let wrapped_capture = CheckedType::Distinct {
+        let wrapped_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "Wrapped"),
             name: "Wrapped".to_string(),
             arguments: Vec::new(),
@@ -3015,7 +3015,7 @@ mod tests {
         "use std.buffer.*\n",
         "use std.clone.Clone\n",
         "use std.cinterop.(CString, c_string)\n",
-        "type Owned = ctor I32\n",
+        "type Owned = wrap I32\n",
         "impl Drop Owned { drop = Owned value => () }\n",
         "impl Clone Owned { clone = Owned value => Owned value }\n",
         "def clone_copy: (Buffer I32) -> Buffer I32 = buffer => Clone.clone buffer\n",

@@ -950,7 +950,7 @@ impl<'a> Classifier<'a> {
         // highlights; see the note in `lexical_kind`.
     }
 
-    /// Marks the contextual `alias`, `ctor`, or `opaque` marker of a type
+    /// Marks the contextual `alias`, `wrap`, or `opaque` marker of a type
     /// declaration body. These are ordinary identifiers, so they need an
     /// explicit semantic token to match the TextMate grammar's modifier
     /// highlighting.
@@ -960,7 +960,7 @@ impl<'a> Classifier<'a> {
         };
         let text = match body.kind {
             TypeBodyKind::Alias => "alias",
-            TypeBodyKind::Constructor => "ctor",
+            TypeBodyKind::Wrapper => "wrap",
             TypeBodyKind::Opaque => "opaque",
         };
         self.mark_first(&body.marker_syntax, text, MODIFIER, 0, 1);
@@ -1482,7 +1482,7 @@ mod tests {
             "macro identity = value => parse_quote { $value }\n",
             "def project: <T> T -> T = value => (field: value).field\n",
             "mod child { def nested = () => 1 }\n",
-            "type Clock = ctor I32\n",
+            "type Clock = wrap I32\n",
             "def read: () ->{Clock} Clock = () => resource Clock\n",
             "with Clock = Clock 1 { read () }\n",
             "let signal counter = 0\n",
@@ -1521,7 +1521,7 @@ mod tests {
     fn classifies_contextual_type_body_markers_as_modifiers() {
         let source = concat!(
             "type Alias = alias I32\n",
-            "type Nominal = pub ctor I32\n",
+            "type Nominal = pub wrap I32\n",
             "type Hidden = opaque\n",
             "type Marker\n",
         );
@@ -1529,7 +1529,7 @@ mod tests {
         let labels = labels(source, &tokens(source, Some(&module), None, None));
         for expected in [
             ("alias", MODIFIER),
-            ("ctor", MODIFIER),
+            ("wrap", MODIFIER),
             ("opaque", MODIFIER),
         ] {
             assert!(
@@ -2113,7 +2113,7 @@ mod tests {
     #[test]
     fn classifies_bare_trait_function() {
         let source = concat!(
-            "type Wrapper = ctor I32\n",
+            "type Wrapper = wrap I32\n",
             "impl ToString Wrapper { to_string = value => \"\" }\n",
             "def f: Wrapper -> String = to_string\n",
         );
@@ -2146,7 +2146,7 @@ mod tests {
     #[test]
     fn classifies_companion_qualified_access() {
         let source = concat!(
-            "type Box = ctor I32\n",
+            "type Box = wrap I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",

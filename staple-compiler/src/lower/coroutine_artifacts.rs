@@ -479,13 +479,13 @@ pub(super) fn expand_reactive_runner(
     Ok((plan, Vec::new()))
 }
 
-/// Whether `value_type` is the `Bool` sum, directly or through its distinct
+/// Whether `value_type` is the `Bool` sum, directly or through its wrapper
 /// representation. Alternative names may be qualified, so the last component
 /// is compared.
 fn is_bool_type(value_type: &CheckedType) -> bool {
     fn alternative_is_true(alternative: &CheckedType) -> bool {
         let name = match alternative {
-            CheckedType::Distinct { name, .. }
+            CheckedType::Wrapper { name, .. }
             | CheckedType::Opaque { name, .. }
             | CheckedType::TypeConstructor { name, .. } => name,
             _ => return false,
@@ -494,7 +494,7 @@ fn is_bool_type(value_type: &CheckedType) -> bool {
     }
     match value_type {
         CheckedType::Sum(sum) => sum.alternatives.iter().any(alternative_is_true),
-        CheckedType::Distinct { representation, .. } => is_bool_type(representation),
+        CheckedType::Wrapper { representation, .. } => is_bool_type(representation),
         _ => false,
     }
 }
@@ -1532,8 +1532,8 @@ mod tests {
         let source = concat!(
             "use std.coroutine.*\n",
             "use std.cinterop.(CString, c_string)\n",
-            "// A `Copy` distinct resource is passed by value.\n",
-            "type Counter = ctor (value: I32)\n",
+            "// A `Copy` wrapper resource is passed by value.\n",
+            "type Counter = wrap (value: I32)\n",
             "def read_counter: () ->{Counter} I32 = () => (resource Counter).value\n",
             "def use_counter: () -> Coroutine{Counter} I32 = () => coro { read_counter () }\n",
             "// A mutable resource slot is indirect.\n",
@@ -1542,7 +1542,7 @@ mod tests {
             "}\n",
             "def use_mut: () -> Coroutine{mut Counter} I32 = () => coro { increment (); 0 }\n",
             "// A non-`Copy` droppable resource slot is indirect.\n",
-            "type Token = ctor (id: I32, payload: CString)\n",
+            "type Token = wrap (id: I32, payload: CString)\n",
             "def observe_token: () ->{Token} I32 = () => (resource Token).id\n",
             "def use_token: () -> Coroutine{Token} I32 = () => coro { observe_token () }\n",
             "let a = with Counter = Counter (value: 1) { use_counter () }\n",
@@ -1885,7 +1885,7 @@ mod tests {
         let source = concat!(
             "use std.cinterop.(CString, c_string)\n",
             "extern \"c\" { inspect: CString -> I32 }\n",
-            "type Counter = ctor (value: I32)\n",
+            "type Counter = wrap (value: I32)\n",
             "def read_counter: () ->{Counter} I32 = () => (resource Counter).value\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
@@ -2013,7 +2013,7 @@ mod tests {
                 predicate_type.result.as_ref(),
                 CheckedType::Sum(sum)
                     if sum.alternatives.iter().any(|alternative| {
-                        matches!(alternative, CheckedType::Distinct { name, .. } if name == "True")
+                        matches!(alternative, CheckedType::Wrapper { name, .. } if name == "True")
                     })
             ),
             "the predicate returns `Bool`: {predicate_type:?}"

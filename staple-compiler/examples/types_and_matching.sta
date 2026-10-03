@@ -1,9 +1,9 @@
-// Aliases, distinct and generic types, singletons, sums, and exhaustive match.
+// Aliases, wrapper and generic types, singletons, sums, and exhaustive match.
 use std.io.println
 
 pub type Number = alias I32
-pub type UserId = pub ctor Number
-pub type Box T = pub ctor (value: T)
+pub type UserId = pub wrap Number
+pub type Box T = pub wrap (value: T)
 
 typegroup Switch {
     Enabled,

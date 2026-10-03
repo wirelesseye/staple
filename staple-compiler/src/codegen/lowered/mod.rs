@@ -809,7 +809,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend.builder.position_at_end(merge);
                 Ok(())
             }
-            DropGlueBody::Distinct { representation } => {
+            DropGlueBody::Wrapper { representation } => {
                 let plan = self.planned_drop_glue(representation, span)?;
                 self.emit_drop_glue(value, plan, span)
             }
@@ -3837,7 +3837,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             crate::LoweredPatternKind::Binding { .. } => {
                 if pattern.test.identity == crate::LoweredPatternIdentity::Singleton {
                     // A singleton sum test compares the tag; a singleton
-                    // distinct match succeeds unconditionally.
+                    // wrapper match succeeds unconditionally.
                     if let Some(index) = pattern.test.sum_alternative {
                         let sum = sum_of_subject(&span)?;
                         let Some(BasicValueEnum::StructValue(sum_value)) =
@@ -4114,7 +4114,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         environment,
                     )
                 }
-                CheckedType::Distinct { .. }
+                CheckedType::Wrapper { .. }
                     if pattern.test.identity == crate::LoweredPatternIdentity::Representation =>
                 {
                     self.emit_match_pattern_branch(
@@ -5806,7 +5806,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_struct_gep(container_llvm, pointer, *index as u32, "place.field")
                     .map_err(compiler_diagnostic)
             }
-            // A distinct representation read is the base place itself.
+            // A wrapper representation read is the base place itself.
             crate::LoweredPlaceKind::Representation { base } => {
                 self.emit_place_pointer(owner, *base, environment)
             }

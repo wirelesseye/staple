@@ -143,7 +143,7 @@ pub fn parse_type_template_fragment(
 }
 
 /// Reinterprets one macro argument's original tokens as exactly one type
-/// declaration body (`alias T`, `ctor T`, `pub ctor T`, or `opaque`).
+/// declaration body (`alias T`, `wrap T`, `pub wrap T`, or `opaque`).
 pub fn parse_type_body_fragment(
     syntax: &Syntax,
     next_syntax_id: &mut usize,
@@ -588,7 +588,7 @@ impl Grammar {
         }
         if self.peek_text("repr") {
             return Err(self.error(
-                "`pub(repr)` was removed; write representation visibility in the type body, as `type Name = pub ctor Type`",
+                "`pub(repr)` was removed; write representation visibility in the type body, as `type Name = pub wrap Type`",
             ));
         }
         Err(self.error("expected `package` or `)` in visibility modifier"))
@@ -1542,9 +1542,9 @@ impl Grammar {
         })
     }
 
-    /// Parses a distinct, alias, singleton, or opaque type declaration.
+    /// Parses a wrapper, alias, singleton, or opaque type declaration.
     ///
-    /// The contextual markers `alias`, `ctor`, and `opaque` are recognized
+    /// The contextual markers `alias`, `wrap`, and `opaque` are recognized
     /// only directly after `=`; elsewhere they are ordinary identifiers.
     fn parse_type_declaration(
         &mut self,
@@ -1607,8 +1607,8 @@ impl Grammar {
         })
     }
 
-    /// Parses a type declaration body after `=`: `alias T`, `ctor T`,
-    /// `pub ctor T`, `pub(package) ctor T`, or `opaque`.
+    /// Parses a type declaration body after `=`: `alias T`, `wrap T`,
+    /// `pub wrap T`, `pub(package) wrap T`, or `opaque`.
     fn parse_type_body(&mut self) -> Result<TypeBody, ParseError> {
         let start = self.position;
         if self.peek_text("opaque") {
@@ -1637,19 +1637,19 @@ impl Grammar {
                 kind: VisibilityKind::Private,
             }
         };
-        let kind = if self.peek_text("ctor") {
-            TypeBodyKind::Constructor
+        let kind = if self.peek_text("wrap") {
+            TypeBodyKind::Wrapper
         } else if self.peek_text("alias") {
             if representation.kind != VisibilityKind::Private {
                 return Err(self.error(
-                    "representation visibility requires `ctor`; a type alias cannot expose a representation",
+                    "representation visibility requires `wrap`; a type alias cannot expose a representation",
                 ));
             }
             TypeBodyKind::Alias
         } else if representation.kind != VisibilityKind::Private {
-            return Err(self.error("expected `ctor` after representation visibility"));
+            return Err(self.error("expected `wrap` after representation visibility"));
         } else {
-            return Err(self.error("expected `alias`, `ctor`, or `opaque` after `=`"));
+            return Err(self.error("expected `alias`, `wrap`, or `opaque` after `=`"));
         };
         let marker_syntax = self.parse_contextual_marker();
         let underlying = self.parse_type_declaration_body()?;
@@ -1675,7 +1675,7 @@ impl Grammar {
         underlying
     }
 
-    /// Consumes a contextual `alias`, `ctor`, or `opaque` marker and returns
+    /// Consumes a contextual `alias`, `wrap`, or `opaque` marker and returns
     /// its syntax.
     fn parse_contextual_marker(&mut self) -> Syntax {
         let start = self.position;

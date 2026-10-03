@@ -8,7 +8,7 @@ use std.core.index.(Index, MutateIndex)
 use std.syntax.*
 
 /// A growable sequence backed by a mutable buffer.
-pub type List T = ctor Buffer T
+pub type List T = wrap Buffer T
 
 impl<T where Clone T> Clone (List T) {
     clone = List buffer => List (Clone.clone buffer)
@@ -182,7 +182,7 @@ impl<T> MutateIndex (List T) USize T {
     }
 }
 
-pub type ListIter T = pub ctor (list: List T, index: USize)
+pub type ListIter T = pub wrap (list: List T, index: USize)
 
 // Copy-T-gated, like `get`/`Index` — yields owned copies. A Ref-yielding
 // iterator for non-Copy element types is intentionally left for later.

@@ -3020,7 +3020,7 @@ mod tests {
     #[test]
     fn artifact_requests_carry_family_matching_plans() {
         let (_, program) = lower(concat!(
-            "type Point = ctor (I32, I32)\n",
+            "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
@@ -3060,7 +3060,7 @@ mod tests {
     #[test]
     fn plan_identity_and_edge_kind_corruption_is_diagnosed() {
         let (_, mut program) = lower(concat!(
-            "type Point = ctor (I32, I32)\n",
+            "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
@@ -3138,7 +3138,7 @@ mod tests {
     #[test]
     fn structural_methods_and_constructor_adapters_are_recorded() {
         let (_, program) = lower(concat!(
-            "type Point = ctor (I32, I32)\n",
+            "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
@@ -3254,7 +3254,7 @@ mod tests {
             "def identity: <T where Copy T> T -> T = value => value\n",
             "def forward: <T where Copy T> T -> T = value => identity value\n",
             "let first: I32 = forward 1\n",
-            "type Point = ctor (I32, I32)\n",
+            "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",

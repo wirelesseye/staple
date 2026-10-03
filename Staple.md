@@ -91,7 +91,7 @@ macro choose = [condition, then, else] => parse_quote {
 
 Typed parameters constrain the grammar accepted at an invocation. `Ident` is a
 generic syntax type whose argument constrains its spelling, declared as
-`pub type Ident (Spelling = String) where Spelling <: String = pub ctor Spelling`.
+`pub type Ident (Spelling = String) where Spelling <: String = pub wrap Spelling`.
 `Ident` and `Ident String` both accept any identifier — `Spelling` defaults to
 `String` (see [Default type parameters](#default-type-parameters)) — and
 `Ident "else"` accepts exactly the identifier `else`, because every string
@@ -385,7 +385,7 @@ helpers accepting `Visibility`, but cannot survive expansion as runtime values.
 parameter of a function-style macro:
 
 ```staple
-pub type MacroCallMetadata = ctor (
+pub type MacroCallMetadata = wrap (
     modifiers: Sequence Modifier,
     visibility: Visibility,
 )
@@ -440,8 +440,8 @@ Inside an item quotation, a visibility value may be spliced immediately before
 a declaration. `Private` emits no prefix, `Package` emits `pub(package)`, and
 `Public` emits `pub`. Existing declaration rules are checked after
 substitution. Representation visibility is written in the type body itself:
-`= pub ctor T` exposes the constructor to importers, and
-`= pub(package) ctor T` keeps it package-scoped.
+`= pub wrap T` exposes the constructor to importers, and
+`= pub(package) wrap T` keeps it package-scoped.
 Modifiers surrounding a metadata-aware call belong to the metadata value and
 are not automatically applied after the call has produced its result.
 
@@ -743,7 +743,7 @@ Named types and type aliases may have companion items. A companion behaves as
 the type's namespace, so its public members are selected through the type name:
 
 ```staple
-type Animal = ctor ...
+type Animal = wrap ...
 
 companion Animal {
     pub def move_to = animal: Animal => position: (F32, F32) => animal
@@ -1445,7 +1445,7 @@ lambda. Both are function values and use the same syntax.
 Every function takes exactly one argument and matches it with a pattern.
 Patterns are recursive: a binding pattern introduces one name, a product
 pattern matches the elements of a product, and a nominal pattern exposes the
-single representation value of a distinct type when that representation is
+single representation value of a wrapper type when that representation is
 visible.
 
 `=>` introduces the body of the abstraction. The compiler infers the result
@@ -1535,7 +1535,7 @@ Nominal patterns use the generated constructor name followed by a nested
 pattern. They are irrefutable and add no runtime check or wrapper:
 
 ```staple
-type UserId = ctor I32
+type UserId = wrap I32
 def unwrap: UserId -> I32 = UserId value => value
 
 let user: UserId = UserId 42
@@ -1646,11 +1646,11 @@ There is no separate resource declaration: any fully concrete, sized nominal
 type may be used. For example:
 
 ```staple
-type Clock = ctor (
+type Clock = wrap (
     now: () -> I32,
 )
 
-type Logger = ctor (
+type Logger = wrap (
     write: String -> (),
 )
 ```
@@ -1982,7 +1982,7 @@ write through it, and the caller keeps ownership and its value remains usable
 after the call:
 
 ```staple
-type File = ctor I32
+type File = wrap I32
 impl Drop File {
     drop = File descriptor => close descriptor
 }
@@ -2334,7 +2334,7 @@ enforced — `string_identity 1` is rejected, since `I32` is not a subtype of
 `String`. `Ident`'s spelling parameter (see [Metaprogramming](#metaprogramming))
 is bounded this way, combined with a default (see [Default type
 parameters](#default-type-parameters)): `pub type Ident (Spelling = String)
-where Spelling <: String = pub ctor Spelling`.
+where Spelling <: String = pub wrap Spelling`.
 
 ### Default type parameters
 
@@ -2345,7 +2345,7 @@ be parenthesized to disambiguate the `=` from the trailing `=` that precedes
 a type's body or the `{` that opens a trait's member block:
 
 ```staple
-type Box (T = String) = ctor (value: T)
+type Box (T = String) = wrap (value: T)
 type Pair A (B = A) = alias (A, B)
 trait Increment (T = I32) { increment: T -> T }
 ```
@@ -2355,7 +2355,7 @@ separate clause. It may be combined with a subtype or trait bound in the
 `where` clause, as in `Ident`'s spelling parameter (see
 [Metaprogramming](#metaprogramming)), which declares a default together with a
 subtype bound: `pub type Ident (Spelling = String) where Spelling <:
-String = pub ctor Spelling`. Only a plain named parameter can carry a default — a
+String = pub wrap Spelling`. Only a plain named parameter can carry a default — a
 product or splice pattern in the parameter position is a parse error if
 followed by `=`.
 
@@ -2475,7 +2475,7 @@ A parameter product is a type, but not a value type. It may appear:
 1. as the parameter of a function type, written directly or reached through an
    alias;
 2. as the body of a `type … = alias …` declaration;
-3. as a type argument for a *capable* parameter of an `alias` or `ctor`
+3. as a type argument for a *capable* parameter of an `alias` or `wrap`
    declaration, or for any parameter of an `= opaque` declaration;
 4. as a spread inside another parameter product;
 5. as the inferred binding of a capable type parameter of a generic function or
@@ -2484,7 +2484,7 @@ A parameter product is a type, but not a value type. It may appear:
 ```staple
 type Inputs = alias [I32, I32]
 type Callable Arg Result = alias Arg -> Result
-type Handler Args = ctor (callback: Args -> (), label: String)
+type Handler Args = wrap (callback: Args -> (), label: String)
 
 type Add = alias Callable Inputs I32     // [I32, I32] -> I32
 def add: Add = [x, y] => x + y
@@ -2492,14 +2492,14 @@ def add: Add = [x, y] => x + y
 let handler: Handler Inputs = Handler (callback: [a, b] => println a, label: "sum")
 handler.callback 1 2                     // the field's type is [I32, I32] -> ()
 
-type Box T = ctor (value: T)
+type Box T = wrap (value: T)
 type Bad = alias Box Inputs              // error: `T` is used as a value type in `Box`
 type Nested = alias (Inputs, Inputs) -> () // error: a product element
 def numbers: [I32, I32] = 1 2            // error: a binding's type
 ```
 
 Everywhere else — binding annotations, value-product elements, slots of
-another parameter product, sum alternatives, function results, `ctor`
+another parameter product, sum alternatives, function results, `wrap`
 payloads, `Ref`/`Slice`/`Buffer`/array element types, effect resources,
 `impl` and `companion` targets, trait arguments, and subtype bounds — a
 parameter product is rejected with
@@ -2519,7 +2519,7 @@ signature is one of:
 * a type argument for another declaration's capable parameter.
 
 Each occurrence is classified by its innermost context: in
-`ctor (callbacks: List (P -> ()))`, `P` is the whole parameter of `P -> ()`,
+`wrap (callbacks: List (P -> ()))`, `P` is the whole parameter of `P -> ()`,
 so it is allowed even though that function type is itself a value inside
 `List`. Any other occurrence is a **value occurrence** and makes `P`
 single-value. Capability of mutually dependent declarations is the largest
@@ -2528,7 +2528,7 @@ when one of its occurrences is a value occurrence.
 
 The signature that is inspected depends on the declaration:
 
-* **`alias` and `ctor` declarations:** the alias target or the `ctor`
+* **`alias` and `wrap` declarations:** the alias target or the `wrap`
   representation. A parameter that never occurs is capable.
 * **`= opaque` declarations:** there is no body, so every parameter is capable.
   This includes standard-library opaque types such as `Task T`,
@@ -2570,7 +2570,7 @@ never binds to one.
 Inside a generic body, a capable parameter may only appear where the rules
 above allow it. No expression, binding or pattern may have type `A` or a type
 that uses `A` as a value, so a value `f: A -> R` cannot be called — its arity is
-unknown. It may be passed on, stored in a capable `ctor` field, or returned.
+unknown. It may be passed on, stored in a capable `wrap` field, or returned.
 Binding another function's type parameter to a capable `A` requires that
 parameter to be capable as well. When a signature leaves a parameter capable but
 the body needs a value of it, write the slot form `[A]`, which makes `A`
@@ -3026,8 +3026,8 @@ with every step. `Iter` functionally determines `Item`:
 
 ```staple
 pub mod IterStep {
-    pub type Done Iter = pub ctor Iter
-    pub type Yield (Item, Iter) = pub ctor (Item, Iter)
+    pub type Done Iter = pub wrap Iter
+    pub type Yield (Item, Iter) = pub wrap (Item, Iter)
 }
 
 pub type IterStep (Iter, Item) = alias
@@ -3153,7 +3153,7 @@ Manual implementations append text with `Formatter.write` and may delegate
 nested values directly to either formatting trait:
 
 ```staple
-type Point = ctor (x: I32, y: I32)
+type Point = wrap (x: I32, y: I32)
 
 impl Debug Point {
     fmt = (Point (x, y), formatter) => {
@@ -3182,7 +3182,7 @@ standard library implements `Eq String`, comparing the two UTF-8 byte
 sequences.
 
 `Ref T` is a garbage-collected reference to a value of type `T`. Its standard
-declaration is `pub type Ref T where ?Sized T = pub ctor T`, so its payload may be
+declaration is `pub type Ref T where ?Sized T = pub wrap T`, so its payload may be
 sized or unsized while the reference value itself always has a known
 representation.
 Constructing `Ref value` copies or moves `value` into a managed allocation;
@@ -3215,7 +3215,7 @@ let previous = Ref.replace value 20
 nominal type. For example, this declaration retains both constructor layers:
 
 ```staple
-type RefPoint = ctor Ref (x: I32, y: I32)
+type RefPoint = wrap Ref (x: I32, y: I32)
 let point = RefPoint (Ref (x: 10, y: 20))
 let RefPoint (Ref (x, y)) = point
 ```
@@ -3335,11 +3335,11 @@ whole-value destructuring, and closure capture move a non-`Copy` value; using
 it afterward is an error. Argument passing moves a non-`Copy` value only into
 a `move` parameter; an ordinary parameter borrows it instead (see "Move and
 borrow parameters" above). Integers, `Bool`, `String`,
-`Ref T`, C pointers, functions, and products/sums/distinct values made entirely
+`Ref T`, C pointers, functions, and products/sums/wrapper values made entirely
 from `Copy` fields are copied implicitly. The public prelude trait `Copy` can be
 used as a generic bound, but implementations are compiler-inferred and an
 explicit `impl Copy` is rejected. A custom `Drop` implementation makes its
-distinct target move-only regardless of its representation. A distinct target
+wrapper target move-only regardless of its representation. A wrapper target
 can also be opted out of `Copy` directly, without a `Drop` implementation, with
 a negative `impl !Copy T {}` declaration; this only affects assignment and
 moves, not destruction, so the type still needs no `drop` member and is not
@@ -3352,12 +3352,12 @@ trait Drop T {
     drop: T -> ()
 }
 
-type File = ctor I32
+type File = wrap I32
 impl Drop File {
     drop = File descriptor => close descriptor
 }
 
-type Handle = ctor I32
+type Handle = wrap I32
 impl !Copy Handle {}
 ```
 
@@ -3373,7 +3373,7 @@ applicable implementation is treated as not `Copy`, so a template that copies
 such a value is a move error even if some instantiation would qualify.
 
 ```staple
-type Box T = ctor (T)
+type Box T = wrap (T)
 impl<T where Copy T> Drop (Box T) {
     drop = Box value => ()
 }
@@ -3402,7 +3402,7 @@ A non-`Copy` type has no implicit `Clone`; implement it manually to allow
 explicit duplication:
 
 ```staple
-type Handle = ctor I32
+type Handle = wrap I32
 impl !Copy Handle {}
 impl Clone Handle {
     clone = Handle descriptor => Handle descriptor
@@ -3488,7 +3488,7 @@ Staple does not provide implicit numeric conversions.
 
 ### Type declarations
 
-staple distinguishes transparent aliases, distinct type definitions, and
+staple distinguishes transparent aliases, wrapper type definitions, and
 opaque type declarations.
 
 An opaque type has no source-level representation and uses the explicit
@@ -3570,17 +3570,17 @@ wrapper or compiler-specific type identity.
 
 #### `type`
 
-`type` creates a distinct nominal type
+`type` creates a nominal wrapper type
 with the same runtime representation as its underlying type:
 
 ```staple
-type UserId = ctor I32
-type OrderId = ctor I32
+type UserId = wrap I32
+type OrderId = wrap I32
 ```
 
-`UserId`, `OrderId`, and `I32` are distinct types and are not implicitly
-interchangeable, even though they share a representation. This provides type
-safety without adding a runtime wrapper. A represented distinct type also
+`UserId` and `OrderId` are wrapper types over `I32`. The three types are not
+implicitly interchangeable, even though they share a representation. This provides type
+safety without adding a runtime wrapper. A represented wrapper type also
 declares a private constructor in its defining module:
 
 ```staple
@@ -3596,7 +3596,7 @@ A represented nominal value can expose one layer of its inner representation
 with `.*` when that representation is visible in the current scope:
 
 ```staple
-type User = ctor (name: String, age: I32)
+type User = wrap (name: String, age: I32)
 let user = User (name: "Ada", age: 42)
 let inner = user.*
 inner.name
@@ -3609,11 +3609,11 @@ unwrap nested nominal types; use one `.*` for each visible layer, as in
 `outer.*.*.name`. Both explicit and shortcut forms are rejected when the
 representation is private in the current scope.
 
-`= pub ctor T` exposes the representation and generated constructor as part of
+`= pub wrap T` exposes the representation and generated constructor as part of
 the module interface:
 
 ```staple
-pub type Box T = pub ctor (value: T)
+pub type Box T = pub wrap (value: T)
 ```
 
 Importers may construct `Box` values and use `Box pattern` to destructure them,
@@ -3626,11 +3626,11 @@ Packages add a middle visibility level between private and public:
 
 ```staple
 pub(package) def internal_helper = 42
-pub type Shared = pub(package) ctor (value: I32)
+pub type Shared = pub(package) wrap (value: I32)
 ```
 
 `pub(package)` names are available from any module with the same canonical
-package identity. `= pub(package) ctor T` keeps representation access inside
+package identity. `= pub(package) wrap T` keeps representation access inside
 that package while the type name stays public. A package-visible
 re-export uses `pub(package) use`; ordinary `pub use` cannot promote a
 package-visible declaration into an external interface. Package visibility is
@@ -3644,8 +3644,8 @@ compile-time parameters directly after the type name, juxtaposed rather than
 bracketed as with generic functions:
 
 ```staple
-type Box T = ctor (value: T)
-type HashMap (K, V) = ctor (key: K, value: V)
+type Box T = wrap (value: T)
+type HashMap (K, V) = wrap (key: K, value: V)
 type Pair (A, B) = alias (A, B)
 ```
 
@@ -3701,9 +3701,9 @@ own ordinary arguments, as `Node T` or `Node I32`, never a bare `Node`.
 A represented type may refer to itself, directly or mutually, only where the
 reference passes through a managed indirection — `Ref`, `Slice`, or a
 `Syntax` value — so that every instance has a finite layout. A representation
-that would contain itself by value (`type Loop = ctor (head: I32, tail: Loop)`) is
+that would contain itself by value (`type Loop = wrap (head: I32, tail: Loop)`) is
 rejected as a cyclic definition; routing the back-edge through `Ref`
-(`type Loop = ctor (head: I32, tail: Option (Ref Loop))`) is well-founded and
+(`type Loop = wrap (head: I32, tail: Option (Ref Loop))`) is well-founded and
 accepted.
 
 Product types and values may have a trailing comma.
@@ -3738,7 +3738,7 @@ types independently and combine them wherever a type is accepted. `Ok` is a
 public represented type from `std.core`:
 
 ```staple
-pub type Ok T = pub ctor T
+pub type Ok T = pub wrap T
 ```
 
 Every alternative must be a sized value type. Primitive, product,
@@ -3815,7 +3815,7 @@ The prelude supplies a `typegroup` macro that conveniently generates sum types:
 
 ```staple
 pub typegroup Pattern {
-    Literal = pub ctor String,
+    Literal = pub wrap String,
     Wildcard,
 }
 ```
@@ -3826,19 +3826,19 @@ and multiple parameter atoms may be mixed freely:
 
 ```staple
 pub typegroup Result T E {
-    Ok = pub ctor T,
-    Err = pub ctor E,
+    Ok = pub wrap T,
+    Err = pub wrap E,
 }
 
 pub typegroup Mixed A (B, C) D {
     Empty,
-    Value = pub ctor (A, B, C, D),
+    Value = pub wrap (A, B, C, D),
 }
 ```
 
 Each entry becomes a public declaration in the group's companion module. A bare
-name is a singleton variant, and `= ctor T`, `= pub ctor T`,
-`= pub(package) ctor T`, and `= alias T` follow the ordinary type declaration
+name is a singleton variant, and `= wrap T`, `= pub wrap T`,
+`= pub(package) wrap T`, and `= alias T` follow the ordinary type declaration
 body grammar. Every non-opaque variant is also an alternative of the generated
 group alias. `= opaque` entries are rejected, because an opaque type cannot be a
 sum alternative. The group's own visibility controls the alias, while

@@ -47,6 +47,6 @@ pub typegroup Option T {
     /// Represents the absence of a value.
     None,
     /// Contains a present value.
-    Some = pub ctor T,
+    Some = pub wrap T,
 }
 pub use Option.*

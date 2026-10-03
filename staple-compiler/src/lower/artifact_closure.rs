@@ -2825,7 +2825,7 @@ mod tests {
         let source = concat!(
             "def identity: <T where Copy T> T -> T = value => value\n",
             "let first: I32 = identity 1\n",
-            "type Point = ctor (I32, I32)\n",
+            "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",

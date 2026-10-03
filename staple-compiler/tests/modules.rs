@@ -790,7 +790,7 @@ fn block_scoped_type_declarations_are_usable_within_their_block() {
         "main.sta",
         concat!(
             "let result: I32 = {\n",
-            "    type Wrapped = ctor I32\n",
+            "    type Wrapped = wrap I32\n",
             "    let value: Wrapped = Wrapped 42\n",
             "    match value { Wrapped inner => inner }\n",
             "}\n",
@@ -809,7 +809,7 @@ fn block_scoped_type_names_are_not_visible_outside_their_block() {
         "main.sta",
         concat!(
             "{\n",
-            "    type Wrapped = ctor I32\n",
+            "    type Wrapped = wrap I32\n",
             "    let value: Wrapped = Wrapped 42\n",
             "}\n",
             "let leaked: Wrapped = Wrapped 1\n",
@@ -828,9 +828,9 @@ fn block_scoped_types_shadow_module_level_types_of_the_same_name() {
     fixture.write(
         "main.sta",
         concat!(
-            "type Wrapped = ctor I32\n",
+            "type Wrapped = wrap I32\n",
             "let result: Bool = {\n",
-            "    type Wrapped = ctor Bool\n",
+            "    type Wrapped = wrap Bool\n",
             "    let value: Wrapped = Wrapped True\n",
             "    match value { Wrapped inner => inner }\n",
             "}\n",
@@ -848,9 +848,9 @@ fn block_scoped_type_constructors_do_not_enter_macro_definition_scope() {
     fixture.write(
         "main.sta",
         concat!(
-            "type Wrapped = ctor I32\n",
+            "type Wrapped = wrap I32\n",
             "macro make = _: Expr => parse_quote { Wrapped 42 }\n",
-            "{ type Wrapped = ctor Bool; () }\n",
+            "{ type Wrapped = wrap Bool; () }\n",
             "let result: Wrapped = make ()\n",
         ),
     );
@@ -867,12 +867,12 @@ fn sibling_blocks_may_reuse_the_same_type_name() {
         "main.sta",
         concat!(
             "let a: I32 = {\n",
-            "    type Wrapped = ctor I32\n",
+            "    type Wrapped = wrap I32\n",
             "    let value: Wrapped = Wrapped 1\n",
             "    match value { Wrapped inner => inner }\n",
             "}\n",
             "let b: Bool = {\n",
-            "    type Wrapped = ctor Bool\n",
+            "    type Wrapped = wrap Bool\n",
             "    let value: Wrapped = Wrapped True\n",
             "    match value { Wrapped inner => inner }\n",
             "}\n",
@@ -891,8 +891,8 @@ fn duplicate_type_names_in_the_same_block_are_rejected() {
         "main.sta",
         concat!(
             "let x: I32 = {\n",
-            "    type Foo = ctor I32\n",
-            "    type Foo = ctor Bool\n",
+            "    type Foo = wrap I32\n",
+            "    type Foo = wrap Bool\n",
             "    0\n",
             "}\n",
         ),
@@ -911,7 +911,7 @@ fn block_scoped_types_in_generic_functions_monomorphize_per_call_site() {
         "main.sta",
         concat!(
             "def wrap: <T> move T -> T = move value => {\n",
-            "    type Boxed = ctor T\n",
+            "    type Boxed = wrap T\n",
             "    match Boxed value { Boxed inner => inner }\n",
             "}\n",
             "wrap 1\n",
@@ -1096,7 +1096,7 @@ fn block_scoped_type_and_use_of_the_same_name_are_rejected_type_first() {
         "main.sta",
         concat!(
             "let x: I32 = {\n",
-            "    type Foo = ctor I32\n",
+            "    type Foo = wrap I32\n",
             "    use library.(Foo)\n",
             "    0\n",
             "}\n",
@@ -1118,7 +1118,7 @@ fn block_scoped_type_and_use_of_the_same_name_are_rejected_use_first() {
         concat!(
             "let x: I32 = {\n",
             "    use library.(Foo)\n",
-            "    type Foo = ctor I32\n",
+            "    type Foo = wrap I32\n",
             "    0\n",
             "}\n",
         ),
@@ -1435,7 +1435,7 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
     fixture.write(
         "values.sta",
         concat!(
-            "pub type UserId = ctor I32\n",
+            "pub type UserId = wrap I32\n",
             "pub def identity: <T> move T -> T = move x => x\n",
         ),
     );
@@ -1476,7 +1476,7 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
 #[test]
 fn exports_constructors_and_destructors_for_public_representations() {
     let fixture = Fixture::new();
-    fixture.write("boxes.sta", "pub type Box T = pub ctor (value: T)\n");
+    fixture.write("boxes.sta", "pub type Box T = pub wrap (value: T)\n");
     fixture.write(
         "main.sta",
         concat!(
@@ -1567,8 +1567,8 @@ fn composes_sum_variants_across_modules() {
     fixture.write(
         "errors.sta",
         concat!(
-            "pub type IOError = pub ctor String\n",
-            "pub type ParseError = pub ctor String\n",
+            "pub type IOError = pub wrap String\n",
+            "pub type ParseError = pub wrap String\n",
             "pub def read: String -> Ok String | IOError = path => Ok(path)\n",
         ),
     );
@@ -1591,8 +1591,8 @@ fn rejects_private_components_of_public_representations() {
     fixture.write(
         "main.sta",
         concat!(
-            "type Hidden = ctor I32\n",
-            "pub type Exposed = pub ctor Hidden\n",
+            "type Hidden = wrap I32\n",
+            "pub type Exposed = pub wrap Hidden\n",
         ),
     );
     let error = fixture
@@ -1607,7 +1607,7 @@ fn rejects_destructuring_an_imported_private_representation() {
     fixture.write(
         "ids.sta",
         concat!(
-            "pub type UserId = ctor I32\n",
+            "pub type UserId = wrap I32\n",
             "pub def make: I32 -> UserId = UserId\n",
         ),
     );
@@ -1627,7 +1627,7 @@ fn enforces_representation_visibility_for_explicit_and_shortcut_access() {
     private.write(
         "users.sta",
         concat!(
-            "pub type User = ctor (name: String)\n",
+            "pub type User = wrap (name: String)\n",
             "pub def make: String -> User = name => User (name)\n",
         ),
     );
@@ -1649,7 +1649,7 @@ fn enforces_representation_visibility_for_explicit_and_shortcut_access() {
     );
 
     let public = Fixture::new();
-    public.write("users.sta", "pub type User = pub ctor (name: String)\n");
+    public.write("users.sta", "pub type User = pub wrap (name: String)\n");
     public.write(
         "main.sta",
         concat!(
@@ -1681,7 +1681,7 @@ fn destructures_a_private_representation_from_the_defining_module_including_its_
     fixture.write(
         "main.sta",
         concat!(
-            "pub type Wrapped = ctor I32\n",
+            "pub type Wrapped = wrap I32\n",
             "companion Wrapped {\n",
             "    pub def unwrap: Wrapped -> I32 = value => {\n",
             "        let Wrapped inner = value\n",
@@ -1712,7 +1712,7 @@ fn companion_accesses_a_private_submodule_namespace_of_its_defining_module() {
     fixture.write(
         "main.sta",
         concat!(
-            "pub type Wrapped = ctor I32\n",
+            "pub type Wrapped = wrap I32\n",
             "mod helpers {\n",
             "    pub def helper: I32 -> I32 = x => x + 1\n",
             "}\n",
@@ -2294,7 +2294,7 @@ fn imports_resource_types_and_resource_bearing_functions() {
     fixture.write(
         "clocks.sta",
         concat!(
-            "pub type Clock = ctor I32\n",
+            "pub type Clock = wrap I32\n",
             "pub def system_clock = () => Clock 42\n",
             "pub def read: () ->{Clock} Clock = () => resource Clock\n",
         ),
@@ -2367,7 +2367,7 @@ fn enforces_trait_implementation_orphan_rules_across_packages() {
         "lib/src/root.sta",
         concat!(
             "pub trait Convert From To { convert: From -> To }\n",
-            "pub type External = pub ctor I32\n",
+            "pub type External = pub wrap I32\n",
             "impl Convert External I32 { convert = value => value.* }\n",
         ),
     );
@@ -2416,7 +2416,7 @@ fn enforces_trait_implementation_orphan_rules_across_packages() {
         "app/src/main.sta",
         concat!(
             "use lib.Convert\n",
-            "type Local = ctor I32\n",
+            "type Local = wrap I32\n",
             "impl Convert I32 Local { convert = value => Local value }\n",
             "let converted: Local = Convert.convert 42\n",
         ),
@@ -2561,7 +2561,7 @@ fn package_representation_is_usable_locally_but_not_by_a_dependency() {
     );
     fixture.write(
         "lib/src/root.sta",
-        "pub type Shared = pub(package) ctor I32\nlet local: Shared = Shared 1\n",
+        "pub type Shared = pub(package) wrap I32\nlet local: Shared = Shared 1\n",
     );
     fs::write(
         fixture.root.join("app/staple.kdl"),

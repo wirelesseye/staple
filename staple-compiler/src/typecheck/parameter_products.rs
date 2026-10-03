@@ -212,7 +212,7 @@ fn invalid_spread_substitution(
             }),
         CheckedType::Product(product) => product.elements.iter().find_map(|e| visit(&e.value_type)),
         CheckedType::Sum(sum) => sum.alternatives.iter().find_map(visit),
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -356,7 +356,7 @@ fn misplaced<'a>(
         CheckedType::Array { element, count } => {
             visit(element, false).or_else(|| visit(count, false))
         }
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             representation,
             arguments,
             ..
@@ -416,11 +416,11 @@ pub(super) fn single_value_conflict<'a>(
             .zip(&actual.elements)
             .find_map(|(t, a)| recurse(&t.value_type, &a.value_type)),
         (
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 arguments: template,
                 ..
             },
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 arguments: actual, ..
             },
         )

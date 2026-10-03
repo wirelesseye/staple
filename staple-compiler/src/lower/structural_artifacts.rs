@@ -840,7 +840,7 @@ fn structural_next_body(
     let mut done = Vec::new();
     let mut yields = Vec::new();
     for (index, alternative) in sum.alternatives.iter().enumerate() {
-        if let CheckedType::Distinct { representation, .. } = alternative {
+        if let CheckedType::Wrapper { representation, .. } = alternative {
             if representation.as_ref() == &iterator {
                 done.push(index);
             }
@@ -1015,7 +1015,7 @@ mod tests {
     #[test]
     fn ordinary_constructor_value_plans_its_flattened_parameters() {
         let (_, lowered) = lower(concat!(
-            "type Point = ctor (I32, I32)\n",
+            "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
         ));
         let plans = constructor_plans(&lowered);
@@ -1037,7 +1037,7 @@ mod tests {
     #[test]
     fn managed_ref_constructor_plans_a_finalizer_exactly_when_drop_is_needed() {
         let (module, lowered) = lower(concat!(
-            "type Resource = ctor I32\n",
+            "type Resource = wrap I32\n",
             "impl Drop Resource { drop = Resource value => () }\n",
             "let make: () -> (Resource -> Ref Resource) = () => Ref\n",
             "let make_copy: () -> (I32 -> Ref I32) = () => Ref\n",
@@ -1258,7 +1258,7 @@ mod tests {
     #[test]
     fn mutate_index_records_drop_previous_exactly_when_drop_is_needed() {
         let (module, lowered) = lower(concat!(
-            "type Resource = ctor I32\n",
+            "type Resource = wrap I32\n",
             "impl Drop Resource { drop = Resource value => () }\n",
             "def mutate_copy: (I32, I32) -> (I32, I32) = pair => {\n",
             "  let mut copy = pair\n",
@@ -1375,12 +1375,12 @@ mod tests {
         };
         assert!(matches!(
             &alternatives[done.index],
-            CheckedType::Distinct { representation, .. } if representation.as_ref() == iterator
+            CheckedType::Wrapper { representation, .. } if representation.as_ref() == iterator
         ));
         assert_eq!(done.alternative, alternatives[done.index]);
         assert!(matches!(
             &alternatives[yield_.index],
-            CheckedType::Distinct { representation, .. }
+            CheckedType::Wrapper { representation, .. }
                 if representation.as_ref() == &positional_product(&[item.clone(), iterator.clone()])
         ));
     }
@@ -1543,7 +1543,7 @@ mod tests {
     #[test]
     fn deref_index_delegates_to_an_explicit_index_implementation() {
         let (_, lowered) = lower(concat!(
-            "type Row = ctor (I32, I32)\n",
+            "type Row = wrap (I32, I32)\n",
             "impl Index Row USize I32 { index = (row, position) => 7 }\n",
             "def deref_row: (Ref Row, USize) -> I32 = (reference, position) => reference[position]\n",
             "let value = deref_row (Ref (Row (1, 2)), 0)\n",
@@ -1564,7 +1564,7 @@ mod tests {
                 .types
                 .iter()
                 .find(|(_, _, metadata)| metadata.name == "Row")
-                .map(|(_, id, _)| CheckedType::Distinct {
+                .map(|(_, id, _)| CheckedType::Wrapper {
                     id,
                     name: "Row".to_string(),
                     arguments: Vec::new(),
@@ -1688,7 +1688,7 @@ mod tests {
     #[test]
     fn debug_delegates_to_an_explicit_generic_implementation_instance() {
         let (_, lowered) = lower(concat!(
-            "type Held T = ctor (T)\n",
+            "type Held T = wrap (T)\n",
             "impl<T where Debug T> Debug (Held T) { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
             "def show_mixed: (Held I32, I32) -> String = pair => \"${pair:?}\"\n",
             "let text = show_mixed (Held 1, 2)\n",
@@ -1703,7 +1703,7 @@ mod tests {
                         if product.elements.len() == 2
                             && product.elements.iter().any(|element| matches!(
                                 element.value_type,
-                                CheckedType::Distinct { .. }
+                                CheckedType::Wrapper { .. }
                             ))
                 )
             })
@@ -1715,7 +1715,7 @@ mod tests {
             .iter()
             .find_map(|step| match step {
                 DebugStep::Element { delegate, .. }
-                    if matches!(delegate.value_type, CheckedType::Distinct { .. }) =>
+                    if matches!(delegate.value_type, CheckedType::Wrapper { .. }) =>
                 {
                     Some(delegate)
                 }
@@ -1741,9 +1741,9 @@ mod tests {
     #[test]
     fn closure_rounds_and_growth_stay_bounded() {
         let (_, lowered) = lower(concat!(
-            "type Resource = ctor I32\n",
+            "type Resource = wrap I32\n",
             "impl Drop Resource { drop = Resource value => () }\n",
-            "type Held T = ctor (T)\n",
+            "type Held T = wrap (T)\n",
             "impl<T where Debug T> Debug (Held T) { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
             "def index_pair: <T where Copy T> ((T, T), USize) -> T = (pair, position) => pair[position]\n",
             "def show_nested: ((I32, I32), (I32, I32)) -> String = nested => \"${nested:?}\"\n",
@@ -1815,7 +1815,7 @@ mod tests {
     #[test]
     fn named_constructor_value_plans_positional_slots() {
         let (_, lowered) = lower(concat!(
-            "type Named = ctor (left: I32, right: I32)\n",
+            "type Named = wrap (left: I32, right: I32)\n",
             "let make_named: () -> ((I32, I32) -> Named) = () => Named\n",
         ));
         let plans = constructor_plans(&lowered);

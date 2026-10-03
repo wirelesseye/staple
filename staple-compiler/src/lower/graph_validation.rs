@@ -959,7 +959,7 @@ pub(crate) mod tests {
     #[test]
     fn result_only_generics_infer_from_the_complete_callable_type() {
         let lowered = lower(concat!(
-            "type Phantom T = ctor ()\n",
+            "type Phantom T = wrap ()\n",
             "def phantom_result: <T> () -> Phantom T = () => Phantom ()\n",
             "let hidden: Phantom I32 = phantom_result ()\n",
         ));
@@ -1087,7 +1087,7 @@ pub(crate) mod tests {
     #[test]
     fn constructors_and_structural_selections_reserve_typed_artifacts() {
         let lowered = lower(concat!(
-            "type Point = ctor (I32, I32)\n",
+            "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
             "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (1 satisfies U8) }\n",
@@ -1156,7 +1156,7 @@ pub(crate) mod tests {
     #[test]
     fn constructor_and_structural_sites_need_no_structural_scanner() {
         let lowered = lower(concat!(
-            "type Point = ctor (I32, I32)\n",
+            "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "def debug_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
             "def index_pair: (I32, I32) -> I32 = pair => pair[0]\n",
@@ -2292,7 +2292,7 @@ pub(crate) mod tests {
         let mut max_growth = 0;
         for source in [
             concat!(
-                "type Resource = ctor I32\n",
+                "type Resource = wrap I32\n",
                 "impl Drop Resource { drop = Resource value => () }\n",
                 "def mutate_resource: move (Resource, Resource) -> (Resource, Resource) = move pair => {\n",
                 "  let mut copy = pair\n",
@@ -2303,9 +2303,9 @@ pub(crate) mod tests {
             ),
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
-                "type Handle = ctor CString\n",
+                "type Handle = wrap CString\n",
                 "impl Drop Handle { drop = Handle value => () }\n",
-                "type Wrapped = ctor CString\n",
+                "type Wrapped = wrap CString\n",
                 "def mutate_handle: move (Handle, Handle) -> (Handle, Handle) = move pair => {\n",
                 "  let mut copy = pair\n",
                 "  copy[0] = Handle (c_string \"b\")\n",
@@ -2349,7 +2349,7 @@ pub(crate) mod tests {
             ),
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
-                "type Box T = ctor (T)\n",
+                "type Box T = wrap (T)\n",
                 "impl<T where Copy T> Drop (Box T) { drop = Box value => () }\n",
                 "def mutate_box: move (Box CString, Box CString) -> (Box CString, Box CString) = move pair => {\n",
                 "  let mut copy = pair\n",
@@ -2599,9 +2599,9 @@ pub(crate) mod tests {
     #[test]
     fn indexed_assignment_cleanup_facts_match_checked_rules() {
         let lowered = lower(concat!(
-            "type Holder = ctor I32\n",
+            "type Holder = wrap I32\n",
             "impl Drop Holder { drop = Holder value => () }\n",
-            "type Item = ctor I32\n",
+            "type Item = wrap I32\n",
             "impl Drop Item { drop = Item value => () }\n",
             "impl Index Holder I32 Item { index = (holder, key) => Item 0 }\n",
             "impl MutateIndex Holder I32 Item { mutate_index = (mut holder, key, move value) => () }\n",

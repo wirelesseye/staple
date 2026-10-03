@@ -473,7 +473,7 @@ impl LoweredArtifactPlan {
                     | DropGlueBody::CoroutineCleanup
                     | DropGlueBody::RuntimeRelease(_)
                     | DropGlueBody::CStringFree
-                    | DropGlueBody::Distinct { .. } => {}
+                    | DropGlueBody::Wrapper { .. } => {}
                     DropGlueBody::Product { fields } => {
                         for DroppedElement {
                             index: _,
@@ -951,7 +951,7 @@ pub(crate) struct IndexedElement {
 pub(crate) struct SumAlternative {
     /// The alternative's position in the result sum.
     pub index: usize,
-    /// The alternative type (a `Distinct` representation).
+    /// The alternative type (a `Wrapper` representation).
     pub alternative: CheckedType,
     /// The concrete injection of `alternative` into the result sum, computed
     /// and revalidated during expansion like `IndexedElement::coercion_plan`.
@@ -977,7 +977,7 @@ pub(crate) enum DropGlueBody {
     UserDrop {
         /// The selected `Drop` implementation method instance.
         method: PlannedInstance,
-        /// The `Distinct` representation's own drop glue, requested only when
+        /// The `Wrapper` representation's own drop glue, requested only when
         /// the representation needs drop.
         representation: Option<PlannedArtifact>,
     },
@@ -996,8 +996,8 @@ pub(crate) enum DropGlueBody {
     Sum {
         alternatives: Vec<DroppedAlternative>,
     },
-    /// Drop the claimed `Distinct` representation.
-    Distinct { representation: PlannedArtifact },
+    /// Drop the claimed `Wrapper` representation.
+    Wrapper { representation: PlannedArtifact },
 }
 
 /// The runtime release one opaque-type drop performs. Expansion turns these
@@ -1054,7 +1054,7 @@ impl DropGluePlan {
                     visit(PlannedCalleeRef::Artifact(&alternative.glue));
                 }
             }
-            DropGlueBody::Distinct { representation } => {
+            DropGlueBody::Wrapper { representation } => {
                 visit(PlannedCalleeRef::Artifact(representation));
             }
         }
@@ -1085,7 +1085,7 @@ impl DropGluePlan {
                     visit(PlannedCalleeRefMut::Artifact(&mut alternative.glue));
                 }
             }
-            DropGlueBody::Distinct { representation } => {
+            DropGlueBody::Wrapper { representation } => {
                 visit(PlannedCalleeRefMut::Artifact(representation));
             }
         }

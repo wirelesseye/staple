@@ -24,11 +24,11 @@ impl<T> !Copy (Task T) {}
 
 /// The result of `await`-ing a `Task` that ran to completion; wraps the value
 /// the task produced.
-pub type Completed T = pub ctor T
+pub type Completed T = pub wrap T
 
 /// The result of `await`-ing a `Task` whose execution was cancelled before it
 /// produced a value.
-pub type Cancelled = pub ctor ()
+pub type Cancelled = pub wrap ()
 
 /// Runs a coroutine to completion on the current thread and yields its result,
 /// incorporating its deferred effects.

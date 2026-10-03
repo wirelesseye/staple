@@ -42,7 +42,7 @@ fn parses_string_templates_and_preserves_source() {
 #[test]
 fn parses_typed_resource_sets_accesses_and_providers_losslessly() {
     let source = concat!(
-        "type Clock = ctor (now: () -> I32)\n",
+        "type Clock = wrap (now: () -> I32)\n",
         "def read: () ->{Clock} I32 = () => (resource Clock).now ()\n",
         "def nested: () ->{Clock} () ->{} I32 = () => () => 1\n",
         "with Clock = system_clock { read () }\n",
@@ -124,8 +124,8 @@ fn parses_effect_parameters_on_type_declarations_and_applications() {
         Some(staple_syntax::Type::EffectApplication(_))
     ));
 
-    assert!(parse("type Empty{} = ctor I32\n").is_err());
-    assert!(parse("type Many{E, F} = ctor I32\n").is_err());
+    assert!(parse("type Empty{} = wrap I32\n").is_err());
+    assert!(parse("type Many{E, F} = wrap I32\n").is_err());
     assert!(parse("type Singleton{E}\n").is_err());
 }
 
@@ -596,7 +596,7 @@ fn rejects_def_keyword_on_implementation_members() {
 
 #[test]
 fn parses_negative_trait_implementations_losslessly() {
-    let source = concat!("type Handle = ctor I32\n", "impl !Copy Handle {}\n",);
+    let source = concat!("type Handle = wrap I32\n", "impl !Copy Handle {}\n",);
     let root = parse(source).expect("negative impl syntax should parse");
     assert_eq!(root.text(), source);
     assert!(matches!(
@@ -905,8 +905,8 @@ fn parses_package_visibility_losslessly() {
     let source = concat!(
         "pub(package) mod internal { pub(package) def value = 1 }\n",
         "pub(package) use internal.value\n",
-        "pub(package) type Hidden = ctor I32\n",
-        "pub type Shared = pub(package) ctor I32\n",
+        "pub(package) type Hidden = wrap I32\n",
+        "pub type Shared = pub(package) wrap I32\n",
     );
     let root = parse(source).expect("package visibility should parse");
     assert_eq!(root.text(), source);
@@ -924,7 +924,7 @@ fn parses_package_visibility_losslessly() {
             && declaration.representation_visibility() == Visibility::Package));
 
     assert!(parse("pub(repr(package)) def invalid = 1\n").is_err());
-    assert!(parse("pub(package(repr)) type Invalid = ctor I32\n").is_err());
+    assert!(parse("pub(package(repr)) type Invalid = wrap I32\n").is_err());
 }
 
 #[test]
@@ -951,7 +951,7 @@ fn parses_block_scoped_submodules_losslessly() {
 
 #[test]
 fn parses_block_scoped_type_declarations_losslessly() {
-    let source = "let x = {\n    type Wrapped = ctor I32\n    0\n}\n";
+    let source = "let x = {\n    type Wrapped = wrap I32\n    0\n}\n";
     let root = parse(source).expect("block-scoped type declarations should parse");
     assert_eq!(root.text(), source);
     let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
@@ -964,11 +964,11 @@ fn parses_block_scoped_type_declarations_losslessly() {
         panic!("expected block-scoped type declaration");
     };
     assert_eq!(declaration.name, "Wrapped");
-    assert_eq!(declaration.kind(), TypeDeclarationKind::Distinct);
+    assert_eq!(declaration.kind(), TypeDeclarationKind::Wrapper);
     assert_eq!(declaration.visibility, Visibility::Private);
     assert!(matches!(block.items[1], Item::Expression(_)));
 
-    assert!(parse("{ pub type Foo = ctor I32 }\n").is_err());
+    assert!(parse("{ pub type Foo = wrap I32 }\n").is_err());
 }
 
 #[test]
@@ -1045,9 +1045,9 @@ fn parses_opaque_type_declarations() {
 fn parses_type_declaration_bodies_into_structured_type_bodies() {
     let source = concat!(
         "type A = alias B\n",
-        "type C = ctor D\n",
-        "pub type E = pub ctor F\n",
-        "pub type G = pub(package) ctor H\n",
+        "type C = wrap D\n",
+        "pub type E = pub wrap F\n",
+        "pub type G = pub(package) wrap H\n",
         "pub type I = opaque\n",
         "pub type J\n",
     );
@@ -1070,18 +1070,18 @@ fn parses_type_declaration_bodies_into_structured_type_bodies() {
     assert!(matches!(alias.underlying, Some(Type::Named(_))));
 
     let nominal = bodies[1].as_ref().expect("constructor body");
-    assert_eq!(nominal.kind, TypeBodyKind::Constructor);
+    assert_eq!(nominal.kind, TypeBodyKind::Wrapper);
     assert_eq!(nominal.representation.kind, VisibilityKind::Private);
-    assert_eq!(nominal.marker_syntax.text().trim(), "ctor");
+    assert_eq!(nominal.marker_syntax.text().trim(), "wrap");
 
     let public = bodies[2].as_ref().expect("public constructor body");
-    assert_eq!(public.kind, TypeBodyKind::Constructor);
+    assert_eq!(public.kind, TypeBodyKind::Wrapper);
     assert_eq!(public.representation.kind, VisibilityKind::Public);
     assert_eq!(public.representation.syntax.text().trim(), "pub");
-    assert_eq!(public.marker_syntax.text().trim(), "ctor");
+    assert_eq!(public.marker_syntax.text().trim(), "wrap");
 
     let package = bodies[3].as_ref().expect("package constructor body");
-    assert_eq!(package.kind, TypeBodyKind::Constructor);
+    assert_eq!(package.kind, TypeBodyKind::Wrapper);
     assert_eq!(package.representation.kind, VisibilityKind::Package);
     assert_eq!(package.representation.syntax.text().trim(), "pub(package)");
 
@@ -1315,7 +1315,7 @@ fn parses_triple_slash_docs_on_named_declarations_and_members() {
     let source = concat!(
         "/// Type line 1\r\n",
         "/// Type line 2\r\n",
-        "pub type Documented = ctor I32\r\n",
+        "pub type Documented = wrap I32\r\n",
         "trait Example T {\r\n",
         "  /// Member docs\r\n",
         "  member: T -> T\r\n",
@@ -1456,7 +1456,7 @@ fn preserves_doc_comments_interleaved_with_metadata_modifiers() {
 fn parses_declaration_style_item_macro_punctuation_losslessly() {
     let source = concat!(
         "typegroup Local { Unit, }\n",
-        "pub typegroup Result (T, E,) { Ok = pub ctor T, Err = pub ctor E, }\n",
+        "pub typegroup Result (T, E,) { Ok = pub wrap T, Err = pub wrap E, }\n",
         "value = 1\n",
         "identity = argument => argument\n",
     );
@@ -1919,7 +1919,7 @@ fn block_comments_are_trivia_and_preserved() {
 fn parses_named_product_types_values_and_access() {
     let source = concat!(
         "def args: (name: String, int)\n",
-        "type user_id = ctor int\n",
+        "type user_id = wrap int\n",
         "def value = (name: \"staple\", 1)\n",
         "def by_name = args.name\n",
         "def by_index = args.1\n",
@@ -1939,7 +1939,7 @@ fn parses_named_product_types_values_and_access() {
     assert!(matches!(
         root.items[1],
         Item::TypeDeclaration(ref declaration)
-            if declaration.kind() == TypeDeclarationKind::Distinct
+            if declaration.kind() == TypeDeclarationKind::Wrapper
     ));
 
     let Item::Binding(value) = unmodified_item(&root.items[2]) else {
@@ -2017,7 +2017,7 @@ fn rejects_positional_elements_after_a_designated_initializer() {
 #[test]
 fn type_declaration_underlying_type_stops_at_newline() {
     let source = concat!(
-        "type Test = ctor ()\n",
+        "type Test = wrap ()\n",
         "\n",
         "std.io.println \"Hello, world!\"\n",
     );
@@ -2048,7 +2048,7 @@ fn type_declaration_underlying_type_stops_at_newline() {
 fn parses_compile_time_parameters_and_type_application() {
     let source = concat!(
         "type Pair (A, B) = alias (A, B)\n",
-        "type Box T = ctor (value: T)\n",
+        "type Box T = wrap (value: T)\n",
         "def identity: <T> T -> T = x => x\n",
         "def pair: Pair (String, I32)\n",
     );
@@ -2071,7 +2071,7 @@ fn parses_compile_time_parameters_and_type_application() {
 #[test]
 fn parses_default_type_bounds_losslessly() {
     let source = concat!(
-        "type Box (T = String) = ctor (value: T)\n",
+        "type Box (T = String) = wrap (value: T)\n",
         "type Pair A (B = A) = alias (A, B)\n",
         "trait Increment (T = I32) { increment: T -> T }\n",
     );
@@ -2101,7 +2101,7 @@ fn parses_default_type_bounds_losslessly() {
 #[test]
 fn parses_inline_default_type_bounds_losslessly() {
     let source = concat!(
-        "pub type Ident (Spelling = String) where Spelling <: String = pub ctor Spelling\n",
+        "pub type Ident (Spelling = String) where Spelling <: String = pub wrap Spelling\n",
         "type Pair A (B = A) = alias (A, B)\n",
         "trait Converts From (To = String) { convert: From -> To }\n",
     );
@@ -2158,7 +2158,7 @@ fn combines_inline_and_trailing_default_type_bounds() {
 #[test]
 fn parses_sized_relaxations_losslessly() {
     let source = concat!(
-        "pub type RefLike T where ?Sized T = pub ctor T\n",
+        "pub type RefLike T where ?Sized T = pub wrap T\n",
         "def preserve: <T where ?Sized T> Ref T -> Ref T = value => value\n",
         "def ordinary: <T> T -> T = value => value\n",
     );
@@ -2197,7 +2197,7 @@ fn parses_sized_relaxations_losslessly() {
 #[test]
 fn parses_public_representations_and_nominal_patterns() {
     let source = concat!(
-        "pub type Box T = pub ctor (value: T)\n",
+        "pub type Box T = pub wrap (value: T)\n",
         "let Box (value) = Box (value: 42)\n",
         "def unbox: Box I32 -> I32 = Box value => value\n",
     );
@@ -2223,7 +2223,7 @@ fn parses_public_representations_and_nominal_patterns() {
 #[test]
 fn parses_moved_nominal_destructure_patterns() {
     let source = concat!(
-        "pub type Box T = pub ctor (value: T)\n",
+        "pub type Box T = pub wrap (value: T)\n",
         "def unbox: <T> move Box T -> T = move Box (value) => value\n",
         "def pair: (move Box I32, I32) -> I32 = (move Box (value), other) => value\n",
     );
@@ -2258,12 +2258,12 @@ fn parses_moved_nominal_destructure_patterns() {
 #[test]
 fn rejects_move_outside_function_parameter_position() {
     assert!(
-        parse("pub type Box T = pub ctor (value: T)\nlet move Box (value) = Box (value: 1)\n")
+        parse("pub type Box T = pub wrap (value: T)\nlet move Box (value) = Box (value: 1)\n")
             .is_err()
     );
     assert!(
         parse(concat!(
-            "pub type Box T = pub ctor (value: T)\n",
+            "pub type Box T = pub wrap (value: T)\n",
             "def f = value => match value { move Box (inner) => inner }\n",
         ))
         .is_err()
@@ -2272,8 +2272,8 @@ fn rejects_move_outside_function_parameter_position() {
 
 #[test]
 fn rejects_invalid_representation_and_pattern_visibility_syntax() {
-    assert!(parse("pub(repr) type Number = ctor I32\n").is_err());
-    assert!(parse("pub(repr(package)) type Number = ctor I32\n").is_err());
+    assert!(parse("pub(repr) type Number = wrap I32\n").is_err());
+    assert!(parse("pub(repr(package)) type Number = wrap I32\n").is_err());
     assert!(parse("type Number = I32\n").is_err());
     assert!(parse("type Number = pub alias I32\n").is_err());
     assert!(parse("pub let (a, b) = (1, 2)\n").is_err());
@@ -2282,19 +2282,19 @@ fn rejects_invalid_representation_and_pattern_visibility_syntax() {
     // Representation visibility that exceeds the type's visibility is a
     // resolution diagnostic, not a parse error, so macro-generated
     // declarations can be validated after visibility splices are applied.
-    assert!(parse("type Number = pub ctor I32\n").is_ok());
-    assert!(parse("pub(package) type Number = pub ctor I32\n").is_ok());
-    assert!(parse("pub(package) type Number = pub(package) ctor I32\n").is_ok());
+    assert!(parse("type Number = pub wrap I32\n").is_ok());
+    assert!(parse("pub(package) type Number = pub wrap I32\n").is_ok());
+    assert!(parse("pub(package) type Number = pub(package) wrap I32\n").is_ok());
 }
 
 #[test]
-fn treats_alias_ctor_and_opaque_as_contextual_markers() {
+fn treats_alias_wrap_and_opaque_as_contextual_markers() {
     let source = concat!(
-        "type alias = ctor I32\n",
-        "type ctor = alias I32\n",
+        "type alias = wrap I32\n",
+        "type wrap = alias I32\n",
         "type opaque = opaque\n",
         "let alias = 1\n",
-        "let ctor = 2\n",
+        "let wrap = 2\n",
         "let opaque = 3\n",
     );
     let root = parse(source).expect("contextual markers should remain identifiers");
@@ -2303,12 +2303,12 @@ fn treats_alias_ctor_and_opaque_as_contextual_markers() {
         panic!("expected type declaration");
     };
     assert_eq!(alias.name, "alias");
-    assert_eq!(alias.kind(), TypeDeclarationKind::Distinct);
-    let Item::TypeDeclaration(ctor) = &root.items[1] else {
+    assert_eq!(alias.kind(), TypeDeclarationKind::Wrapper);
+    let Item::TypeDeclaration(wrap) = &root.items[1] else {
         panic!("expected type declaration");
     };
-    assert_eq!(ctor.name, "ctor");
-    assert_eq!(ctor.kind(), TypeDeclarationKind::Alias);
+    assert_eq!(wrap.name, "wrap");
+    assert_eq!(wrap.kind(), TypeDeclarationKind::Alias);
     let Item::TypeDeclaration(opaque) = &root.items[2] else {
         panic!("expected type declaration");
     };
@@ -2319,7 +2319,10 @@ fn treats_alias_ctor_and_opaque_as_contextual_markers() {
     }
 
     assert!(parse("type Alias = alias\n").is_err());
-    assert!(parse("type Ctor = ctor\n").is_err());
+    assert!(parse("type Wrap = wrap\n").is_err());
+    assert!(parse("type Legacy = ctor I32\n").is_err());
+    assert!(parse("type Legacy = pub ctor I32\n").is_err());
+    assert!(parse("type Legacy = pub(package) ctor I32\n").is_err());
 }
 
 #[test]
@@ -2774,8 +2777,14 @@ fn rejects_invalid_parameter_product_syntax_with_migration_hints() {
         ("type Invalid = alias I32[2]\n", "array types"),
         ("def f = [[a, b], c] => a\n", "cannot be nested"),
         ("def f = [a, [b, c]] => a\n", "cannot be nested"),
-        ("def identity<T> = value: T => value\n", "belong to the annotation"),
-        ("def keep<A>: (A -> ()) -> () = f => ()\n", "belong to the annotation"),
+        (
+            "def identity<T> = value: T => value\n",
+            "belong to the annotation",
+        ),
+        (
+            "def keep<A>: (A -> ()) -> () = f => ()\n",
+            "belong to the annotation",
+        ),
     ] {
         let error = parse(source).expect_err("invalid parameter product");
         assert!(error.message.contains(hint), "{source}: {error}");

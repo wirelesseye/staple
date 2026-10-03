@@ -72,14 +72,14 @@ pub(crate) enum CanonicalType {
 }
 
 /// The declared nominal form. Kept distinct for the same `TypeId` because the
-/// checker's own equality treats `TypeConstructor`, `Opaque`, and `Distinct`
+/// checker's own equality treats `TypeConstructor`, `Opaque`, and `Wrapper`
 /// as different types even when an alias or representation expansion would
 /// display them alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CanonicalNominalKind {
     TypeConstructor,
     Opaque,
-    Distinct,
+    Wrapper,
 }
 
 /// One product element: the declared field name (which the checker keeps as
@@ -265,13 +265,13 @@ impl CanonicalType {
                     )?))
                 }
             }
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 id,
                 arguments,
                 representation: _,
                 ..
             } => CanonicalType::Nominal {
-                kind: CanonicalNominalKind::Distinct,
+                kind: CanonicalNominalKind::Wrapper,
                 id: *id,
                 arguments: Self::convert_arguments(arguments, origin)?,
             },
@@ -754,7 +754,7 @@ impl ArtifactRequestKey {
     }
 }
 
-/// Append-only positions within their own key families. Distinct types keep
+/// Append-only positions within their own key families. Separate types keep
 /// a source-function instance ID from being used to look up an artifact (or
 /// the reverse), even when both families have the same numeric position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1018,13 +1018,13 @@ mod tests {
         }
     }
 
-    fn distinct(
+    fn wrapper(
         id: usize,
         name: &str,
         arguments: Vec<CheckedType>,
         representation: CheckedType,
     ) -> CheckedType {
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             id: TypeId(id),
             name: name.to_owned(),
             arguments,
@@ -1124,13 +1124,13 @@ mod tests {
             concrete(&opaque(8, "Second"))
         );
         assert_eq!(
-            concrete(&distinct(
+            concrete(&wrapper(
                 9,
                 "First",
                 vec![CheckedType::I32],
                 CheckedType::I32,
             )),
-            concrete(&distinct(
+            concrete(&wrapper(
                 9,
                 "Second",
                 vec![CheckedType::I32],
@@ -2011,12 +2011,12 @@ mod tests {
 
     #[test]
     fn recursive_nominal_keys_stay_compact() {
-        let mut expanded = distinct(11, "Node", vec![CheckedType::I32], CheckedType::I32);
+        let mut expanded = wrapper(11, "Node", vec![CheckedType::I32], CheckedType::I32);
         for _ in 0..64 {
-            expanded = distinct(11, "Node", vec![CheckedType::I32], expanded);
+            expanded = wrapper(11, "Node", vec![CheckedType::I32], expanded);
         }
         let expanded_key = concrete(&expanded);
-        let shallow_key = concrete(&distinct(
+        let shallow_key = concrete(&wrapper(
             11,
             "Node",
             vec![CheckedType::I32],

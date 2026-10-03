@@ -20,7 +20,6 @@ const KEYWORDS: &[&str] = &[
     "break",
     "const",
     "continue",
-    "ctor",
     "def",
     "extern",
     "impl",
@@ -43,6 +42,7 @@ const KEYWORDS: &[&str] = &[
     "type",
     "use",
     "with",
+    "wrap",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1603,7 +1603,7 @@ mod tests {
     #[test]
     fn completes_bare_trait_function() {
         let source = concat!(
-            "type Wrapper = ctor I32\n",
+            "type Wrapper = wrap I32\n",
             "impl ToString Wrapper { to_string = value => \"\" }\n",
             "def f: Wrapper -> String = to_string\n",
         );
@@ -2013,7 +2013,7 @@ mod tests {
         std::fs::write(root.join("src/root.sta"), "pub mod\n").unwrap();
         std::fs::write(
             root.join("src/helpers.sta"),
-            "pub mod\n\n/// Greets.\npub def greet = () => 0\npub type Widget = ctor ()\nlet secret = 1\n",
+            "pub mod\n\n/// Greets.\npub def greet = () => 0\npub type Widget = wrap ()\nlet secret = 1\n",
         )
         .unwrap();
         let source = "pub mod\n\ndef main = () => 0\n";

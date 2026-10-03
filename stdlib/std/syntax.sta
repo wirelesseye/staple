@@ -7,27 +7,27 @@ use std.core.sized.sized_opaque
 /// through `UnstructuredExpr` without exposing fields.
 /// An identifier syntax node, optionally constrained to one spelling.
 @recursive_constructor
-pub type Ident (Spelling = String) where Spelling <: String = pub ctor Spelling
+pub type Ident (Spelling = String) where Spelling <: String = pub wrap Spelling
 /// A structured call expression syntax node.
 @recursive_constructor
-pub type CallExpr = pub ctor (
+pub type CallExpr = pub wrap (
     callee: Expr,
     argument: Expr,
 )
 /// A string-literal expression constructed from a compile-time string.
 @recursive_constructor
-pub type StringExpr = pub ctor String
+pub type StringExpr = pub wrap String
 /// A sequence of syntax values.
 @recursive_constructor
-pub type Sequence Element = pub ctor
+pub type Sequence Element = pub wrap
     () |
     (first: Element, rest: Sequence Element)
 /// An optional syntax value.
 @recursive_constructor
-pub type Optional Element = pub ctor None | Some Element
+pub type Optional Element = pub wrap None | Some Element
 /// A separated syntax sequence with its separator and trailing state.
 @recursive_constructor
-pub type Separated Element Separator = pub ctor (
+pub type Separated Element Separator = pub wrap (
     separator: Separator,
     elements: Sequence Element,
     trailing: Bool,
@@ -40,13 +40,13 @@ pub type Equals
 pub type FatArrow
 /// A parenthesized syntax fragment.
 @recursive_constructor
-pub type Parenthesized Contents = pub ctor Contents
+pub type Parenthesized Contents = pub wrap Contents
 /// A bracketed syntax fragment.
 @recursive_constructor
-pub type Bracketed Contents = pub ctor Contents
+pub type Bracketed Contents = pub wrap Contents
 /// A braced syntax fragment.
 @recursive_constructor
-pub type Braced Contents = pub ctor Contents
+pub type Braced Contents = pub wrap Contents
 /// An expression syntax node without structured fields.
 @sized_opaque
 pub type UnstructuredExpr = opaque
@@ -60,10 +60,10 @@ pub type Type = opaque
 impl !Copy Type {}
 /// A binding pattern constructed from an identifier.
 @recursive_constructor
-pub type BindingPattern = pub ctor Ident String
+pub type BindingPattern = pub wrap Ident String
 /// A nominal destructuring pattern.
 @recursive_constructor
-pub type NominalPattern = pub ctor (name: Ident String, argument: Pattern)
+pub type NominalPattern = pub wrap (name: Ident String, argument: Pattern)
 /// A pattern whose structure is not exposed yet.
 @sized_opaque
 pub type UnstructuredPattern = opaque
@@ -72,14 +72,14 @@ impl !Copy UnstructuredPattern {}
 pub type Pattern = alias BindingPattern | NominalPattern | UnstructuredPattern
 /// The kind of a type declaration.
 pub type AliasDeclaration
-pub type DistinctDeclaration
+pub type WrapperDeclaration
 pub type SingletonDeclaration
 pub type OpaqueDeclaration
-pub type TypeDeclarationKind = alias AliasDeclaration | DistinctDeclaration | SingletonDeclaration | OpaqueDeclaration
+pub type TypeDeclarationKind = alias AliasDeclaration | WrapperDeclaration | SingletonDeclaration | OpaqueDeclaration
 /// An inspectable type declaration item. Type parameters are exposed by name;
 /// their original declaration syntax remains part of the lossless item value.
 @recursive_constructor
-pub type TypeDeclarationItem = pub ctor (
+pub type TypeDeclarationItem = pub wrap (
     kind: TypeDeclarationKind,
     name: Ident String,
     name_spelling: String,
@@ -89,14 +89,14 @@ pub type TypeDeclarationItem = pub ctor (
 )
 /// An `alias` type declaration body.
 @recursive_constructor
-pub type AliasBody Element = ctor Element
-/// A `ctor` type declaration body with its representation visibility.
+pub type AliasBody Element = wrap Element
+/// A `wrap` type declaration body with its representation visibility.
 @recursive_constructor
-pub type ConstructorBody Representation Element = ctor (Representation, Element)
+pub type WrapperBody Representation Element = wrap (Representation, Element)
 /// An `opaque` type declaration body.
 pub type OpaqueBody
 /// The body of a type declaration written after `=`.
-pub type TypeBody = alias AliasBody Type | ConstructorBody Visibility Type | OpaqueBody
+pub type TypeBody = alias AliasBody Type | WrapperBody Visibility Type | OpaqueBody
 /// An item whose structure is not exposed yet.
 @sized_opaque
 pub type UnstructuredItem = opaque
@@ -108,7 +108,7 @@ impl !Copy Modifier {}
 /// An item carrying modifiers that have not yet been applied. Modifiers are
 /// ordered outermost first.
 @recursive_constructor
-pub type ModifiedItem = pub ctor (
+pub type ModifiedItem = pub wrap (
     modifiers: Sequence Modifier,
     item: Item,
 )
@@ -117,7 +117,7 @@ pub type Item = alias ModifiedItem | TypeDeclarationItem | UnstructuredItem
 
 /// Compiler-owned metadata supplied to a function-style macro invocation.
 /// Modifiers are ordered outermost first.
-pub type MacroCallMetadata = ctor (
+pub type MacroCallMetadata = wrap (
     modifiers: Sequence Modifier,
     visibility: Visibility,
 )

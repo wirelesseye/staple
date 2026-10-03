@@ -242,7 +242,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             CheckedType::USize => Ok(self.compile_integer_type(IntegerType::USize).into()),
             CheckedType::F32 => Ok(self.compile_float_type(FloatType::F32).into()),
             CheckedType::F64 => Ok(self.compile_float_type(FloatType::F64).into()),
-            CheckedType::Distinct { representation, .. } => self.compile_type(representation),
+            CheckedType::Wrapper { representation, .. } => self.compile_type(representation),
         }
     }
 
@@ -526,7 +526,7 @@ mod tests {
                 "let indirect: I32 = apply identity 1\n",
             ),
             concat!(
-                "type Point = ctor (I32, I32)\n",
+                "type Point = wrap (I32, I32)\n",
                 "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
                 "let text: String = render 1\n",
                 "let make: () -> ((I32, I32) -> Point) = () => Point\n",
@@ -574,7 +574,7 @@ mod tests {
             ),
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
-                "type Box T = ctor (T)\n",
+                "type Box T = wrap (T)\n",
                 "impl<T where Copy T> Drop (Box T) { drop = Box value => () }\n",
                 "def take_i32: Box I32 -> I32 = value => 1\n",
                 "def take_cstring: Box CString -> I32 = value => 1\n",
@@ -639,12 +639,12 @@ mod tests {
     }
 }
 
-/// Strips `Distinct` wrappers from a place's container type
+/// Strips `Wrapper` wrappers from a place's container type
 /// before projecting a product field, shared by the emitter' place pointers.
 pub(crate) fn strip_place_wrappers(mut value_type: crate::CheckedType) -> crate::CheckedType {
     loop {
         match value_type {
-            crate::CheckedType::Distinct { representation, .. } => value_type = *representation,
+            crate::CheckedType::Wrapper { representation, .. } => value_type = *representation,
             other => return other,
         }
     }

@@ -1321,7 +1321,7 @@ mod tests {
     const INITIALIZER_SITES: &str = concat!(
         "use std.coroutine.*\n",
         "let signal flag = 0\n",
-        "type Counter = ctor (value: I32)\n",
+        "type Counter = wrap (value: I32)\n",
         "def add_one: I32 -> I32 = value => value + 1\n",
         "let doubled = flag + flag\n",
         "let text = \"n=${doubled}\"\n",

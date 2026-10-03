@@ -405,7 +405,7 @@ mod tests {
             "use std.cinterop.(CString, c_string)\n",
             "use std.buffer.*\n",
             "extern \"c\" { inspect: CString -> I32 }\n",
-            "type Resource = ctor I32\n",
+            "type Resource = wrap I32\n",
             "impl Drop Resource { drop = Resource value => () }\n",
             "let make_resource: () -> (Resource -> Ref Resource) = () => Ref\n",
             "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",

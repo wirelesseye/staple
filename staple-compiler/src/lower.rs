@@ -1089,7 +1089,7 @@ pub(crate) struct LoweredOptionAlternatives {
 
 impl LoweredOptionAlternatives {
     /// The alternatives of `Buffer.pop`'s result when `target` is that
-    /// intrinsic (the `Distinct` alternatives named `None` and `Some`); `None`
+    /// intrinsic (the `Wrapper` alternatives named `None` and `Some`); `None`
     /// for any other target.
     pub(crate) fn for_call(
         target: &LoweredCallableTarget,
@@ -1112,7 +1112,7 @@ impl LoweredOptionAlternatives {
                 .alternatives
                 .iter()
                 .position(|alternative| {
-                    matches!(alternative, CheckedType::Distinct { name, .. } if name.ends_with(suffix))
+                    matches!(alternative, CheckedType::Wrapper { name, .. } if name.ends_with(suffix))
                 })
                 .ok_or_else(|| format!("Option is missing {suffix}"))
         };
@@ -1872,7 +1872,7 @@ pub(crate) struct LoweredAccess {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LoweredAccessKind {
-    /// Distinct representation or single-element distinct access.
+    /// Wrapper representation or single-element wrapper access.
     Representation { dereference: Vec<CheckedType> },
     /// Element `index` of a fixed product, optionally behind `Ref` payloads.
     Product {
@@ -1946,7 +1946,7 @@ pub(crate) enum LoweredPatternIdentity {
     String,
     /// A `Ref` nominal destructure; the emitter loads the payload.
     Ref,
-    /// A distinct representation destructure where the subject is the distinct
+    /// A wrapper representation destructure where the subject is the wrapper
     /// type itself.
     Representation,
     /// A singleton name pattern (`True`, `False`, or a declared singleton).
@@ -2000,7 +2000,7 @@ fn pattern_test_plan(
                             .position(|alternative| {
                                 matches!(
                                     alternative,
-                                    CheckedType::Distinct { id, .. } if id == singleton
+                                    CheckedType::Wrapper { id, .. } if id == singleton
                                 )
                             })
                             .ok_or_else(|| {
@@ -2008,7 +2008,7 @@ fn pattern_test_plan(
                             })?,
                     );
                 }
-                CheckedType::Distinct { id, .. } if id == singleton => {}
+                CheckedType::Wrapper { id, .. } if id == singleton => {}
                 _ => {
                     return Err("checked singleton pattern has an incompatible value".to_owned());
                 }
@@ -2074,16 +2074,16 @@ fn pattern_test_plan(
                     .alternatives
                     .iter()
                     .position(|alternative| {
-                        matches!(alternative, CheckedType::Distinct { id, .. } if *id == expected)
+                        matches!(alternative, CheckedType::Wrapper { id, .. } if *id == expected)
                     })
                     .ok_or_else(|| "match pattern does not select a sum alternative".to_owned())?;
                 plan.sum_alternative = Some(index);
-                let CheckedType::Distinct { representation, .. } = &sum.alternatives[index] else {
-                    return Err("checked sum alternative is not a distinct type".to_owned());
+                let CheckedType::Wrapper { representation, .. } = &sum.alternatives[index] else {
+                    return Err("checked sum alternative is not a wrapper type".to_owned());
                 };
                 children.push(representation.as_ref().clone());
             }
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 id, representation, ..
             } if *target == Some(*id) => {
                 plan.identity = LoweredPatternIdentity::Representation;
@@ -2247,8 +2247,8 @@ pub(crate) enum LoweredPlaceKind {
         index: usize,
         slice: bool,
     },
-    /// The representation pointer of a distinct value, covering both `.*`
-    /// and single-element distinct access.
+    /// The representation pointer of a wrapper value, covering both `.*`
+    /// and single-element wrapper access.
     Representation { base: PlaceId },
     /// `base[index]` mutation, dispatched through the `MutateIndex` trait.
     Indexed { base: PlaceId, index: ExpressionId },
@@ -5833,7 +5833,7 @@ impl LoweredProgram {
                 .alternatives
                 .iter()
                 .position(|alternative| {
-                    matches!(alternative, CheckedType::Distinct { name, .. } if name == "True")
+                    matches!(alternative, CheckedType::Wrapper { name, .. } if name == "True")
                 })
                 .ok_or_else(|| {
                     Diagnostic::new(
@@ -12926,7 +12926,7 @@ fn nominal_type_id(value_type: &CheckedType) -> Option<TypeId> {
     match value_type {
         CheckedType::TypeConstructor { id, .. }
         | CheckedType::Opaque { id, .. }
-        | CheckedType::Distinct { id, .. } => Some(*id),
+        | CheckedType::Wrapper { id, .. } => Some(*id),
         _ => None,
     }
 }
@@ -13040,7 +13040,7 @@ fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
             checked_type_contains_ref(&function.parameter)
                 || checked_type_contains_ref(&function.result)
         }
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -15190,7 +15190,7 @@ mod tests {
         );
 
         let module = checked_program(concat!(
-            "type MyString = ctor String\n",
+            "type MyString = wrap String\n",
             "impl !Copy MyString {}\n",
             "companion MyString {\n",
             "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
@@ -15233,7 +15233,7 @@ mod tests {
             "let signal count: I32 = 1\n",
             "let doubled: I32 = count + count\n",
             "def double: I32 -> I32 = value => value + value\n",
-            "type Wrapper = ctor I32\n",
+            "type Wrapper = wrap I32\n",
             "type Enabled\n",
             "let enabled: Enabled = Enabled\n",
         ));
@@ -15364,9 +15364,9 @@ mod tests {
     #[test]
     fn type_catalog_matches_resolver_order_and_keeps_compact_templates() {
         let module = checked_program(concat!(
-            "type TestPair T = ctor (T, T)\n",
-            "type TestInner = ctor I32\n",
-            "type TestOuter = ctor (TestInner, TestInner)\n",
+            "type TestPair T = wrap (T, T)\n",
+            "type TestInner = wrap I32\n",
+            "type TestOuter = wrap (TestInner, TestInner)\n",
             "type TestAlias = alias TestOuter\n",
             "type TestCallback{E} = alias () ->{E} ()\n",
             "type TestHidden = opaque\n",
@@ -15464,7 +15464,7 @@ mod tests {
         let module = checked_program(concat!(
             "trait TestEq T { test_eq: (T, T) -> Bool }\n",
             "impl TestEq I32 { test_eq = (left, right) => left == right }\n",
-            "type TestHandle = ctor I32\n",
+            "type TestHandle = wrap I32\n",
             "impl !Copy TestHandle {}\n",
         ));
         let mut program = LoweredProgram::default();
@@ -15494,10 +15494,7 @@ mod tests {
             .expect("negative implementation");
         assert_eq!(negative.trait_id, copy_trait);
         assert_eq!(negative.arguments.len(), 1);
-        assert!(matches!(
-            negative.arguments[0],
-            CheckedType::Distinct { .. }
-        ));
+        assert!(matches!(negative.arguments[0], CheckedType::Wrapper { .. }));
         assert!(negative.methods.is_empty());
     }
 
@@ -15815,7 +15812,7 @@ mod tests {
             "def add: (I32, I32) -> I32 = (left, right) => left + right\n",
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "type TestBox T = ctor (value: T)\n",
+            "type TestBox T = wrap (value: T)\n",
             "type TestHidden = opaque\n",
             "type TestEnabled\n",
             "let enabled: TestEnabled = TestEnabled\n",
@@ -15842,7 +15839,7 @@ mod tests {
             "def identity: <T where Copy T> T -> T = value => value\n",
             "def forward: <T where Copy T> T -> T = value => identity value\n",
             "let first: I32 = forward 1\n",
-            "type Point = ctor (I32, I32)\n",
+            "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
@@ -15935,7 +15932,7 @@ mod tests {
     fn records_agree_with_checked_metadata_and_are_stable() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "type Counter = ctor (value: I32)\n",
+            "type Counter = wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
@@ -16584,7 +16581,7 @@ mod tests {
     fn dispatcher_lowers_every_expression_family_without_deferrals() {
         let module = checked_program(concat!(
             "use std.coroutine.(Coroutine)\n",
-            "type Counter = ctor (value: I32)\n",
+            "type Counter = wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
@@ -16612,7 +16609,7 @@ mod tests {
     fn resource_coroutine_route_table_covers_every_route() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "type Counter = ctor (value: I32)\n",
+            "type Counter = wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
@@ -16804,7 +16801,7 @@ mod tests {
             "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = value => value\n",
             "let juxtaposed: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
-            "type TestBox = ctor (value: I32)\n",
+            "type TestBox = wrap (value: I32)\n",
             "def sum_product: (I32, I32) -> I32 = pair => {\n",
             "  let mut total: I32 = 0\n",
             "  for value in pair { total = total + value }\n",
@@ -17009,9 +17006,9 @@ mod tests {
             "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = value => value\n",
             "def declared: I32 -> I32 = value => value\n",
-            "type TestBox = ctor (value: I32)\n",
+            "type TestBox = wrap (value: I32)\n",
             "def make_borrower: String -> () -> Slice U8 = value => () => String.bytes value\n",
-            "type MyString = ctor String\n",
+            "type MyString = wrap String\n",
             "impl !Copy MyString {}\n",
             "companion MyString {\n",
             "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
@@ -17227,7 +17224,7 @@ mod tests {
             "  external_identity: I32 -> I32\n",
             "  external_cstr: CString -> I32\n",
             "}\n",
-            "type MoveOnly = ctor String\n",
+            "type MoveOnly = wrap String\n",
             "impl !Copy MoveOnly {}\n",
             "def generic_identity: <T where Copy T> T -> T = value => value\n",
             "def declared: I32 -> I32 = value => value\n",
@@ -17414,8 +17411,8 @@ mod tests {
     #[test]
     fn call_resource_bindings_follow_effect_row_order_and_scope() {
         let module = checked_program(concat!(
-            "type A = ctor (value: I32)\n",
-            "type B = ctor (value: I32)\n",
+            "type A = wrap (value: I32)\n",
+            "type B = wrap (value: I32)\n",
             "def consume: () ->{A, B} I32 = () => (resource A).value + (resource B).value\n",
             "def driver: () -> I32 = () => {\n",
             "  let a = A (value: 1)\n",
@@ -17473,7 +17470,7 @@ mod tests {
     #[test]
     fn mutable_call_resource_bindings_borrow_the_provider_place() {
         let module = checked_program(concat!(
-            "type Counter = ctor (value: I32)\n",
+            "type Counter = wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
@@ -18006,7 +18003,7 @@ mod tests {
     fn constructor_calls_and_values_record_explicit_targets() {
         let module = checked_program(concat!(
             "use std.core.reference.(Ref)\n",
-            "type TestBox = ctor (value: I32)\n",
+            "type TestBox = wrap (value: I32)\n",
             "type TestEnabled\n",
             "let enabled: TestEnabled = TestEnabled\n",
             "let maker = TestBox\n",
@@ -18623,8 +18620,8 @@ mod tests {
             "let current: I32 = counter\n",
             "let truth: Bool = yes\n",
             "def identity = (value: I32) => value\n",
-            "type Wrapper = ctor (value: I32)\n",
-            "type MyString = ctor String\n",
+            "type Wrapper = wrap (value: I32)\n",
+            "type MyString = wrap String\n",
             "companion MyString { pub def make = value: String => MyString (value) }\n",
             "let built = Wrapper (value: 1)\n",
             "let callable = identity\n",
@@ -18698,9 +18695,9 @@ mod tests {
     fn structural_access_lowers_representation_product_slice_and_scalar() {
         let module = checked_program(concat!(
             "use std.slice.Slice\n",
-            "type MyString = ctor String\n",
-            "type Pair = ctor (left: I32, right: I32)\n",
-            "type Scalar = ctor (value: I32)\n",
+            "type MyString = wrap String\n",
+            "type Pair = wrap (left: I32, right: I32)\n",
+            "type Scalar = wrap (value: I32)\n",
             "let pair = Pair (left: 1, right: 2)\n",
             "let named = pair.left\n",
             "let other = pair.right\n",
@@ -19186,8 +19183,8 @@ mod tests {
             "use std.slice.Slice\n",
             "let widened = 42 satisfies I8\n",
             "let text: String = \"literal\"\n",
-            "type Ok T = ctor T\n",
-            "type IOError = ctor String\n",
+            "type Ok T = wrap T\n",
+            "type IOError = wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
             "let sum: Ok I32 | IOError = Ok (41)\n",
             "let slice: Slice I32 = Ref 8\n",
@@ -19243,7 +19240,7 @@ mod tests {
     #[test]
     fn blocks_preserve_nested_results_divergence_and_drop_facts() {
         let module = checked_program(concat!(
-            "type Handle = ctor I32\n",
+            "type Handle = wrap I32\n",
             "impl Drop Handle { drop = Handle value => () }\n",
             "def nested = () => {\n",
             "  let outer: I32 = { let inner: I32 = 1; inner + 2 }\n",
@@ -19254,8 +19251,8 @@ mod tests {
             "  Handle 1\n",
             "  ()\n",
             "}\n",
-            "type Ok T = ctor T\n",
-            "type IOError = ctor String\n",
+            "type Ok T = wrap T\n",
+            "type IOError = wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
             "def propagates = () => {\n",
             "  let Ok(value)? = read()\n",
@@ -19380,7 +19377,7 @@ mod tests {
             .alternatives
             .iter()
             .position(|alternative| {
-                matches!(alternative, CheckedType::Distinct { name, .. } if name == "True")
+                matches!(alternative, CheckedType::Wrapper { name, .. } if name == "True")
             })
             .expect("`Bool` has a `True` alternative");
         assert_eq!(logical.true_index, expected_true);
@@ -19401,7 +19398,7 @@ mod tests {
     #[test]
     fn loops_record_drop_facts_depth_and_owned_exits() {
         let module = checked_program(concat!(
-            "type Handle = ctor I32\n",
+            "type Handle = wrap I32\n",
             "impl Drop Handle { drop = Handle value => () }\n",
             "def select: Bool -> I32 = condition => loop {\n",
             "  match condition { True() => { break 9 }, False() => { continue } }\n",
@@ -19485,8 +19482,8 @@ mod tests {
     #[test]
     fn matches_lower_subject_arms_patterns_and_bound_symbols() {
         let module = checked_program(concat!(
-            "type Ok T = ctor T\n",
-            "type IOError = ctor String\n",
+            "type Ok T = wrap T\n",
+            "type IOError = wrap String\n",
             "def pick = (value: Ok I32 | IOError) => match value {\n",
             "  Ok payload => payload,\n",
             "  other => 0,\n",
@@ -19525,9 +19522,9 @@ mod tests {
     fn coercion_and_pattern_plans_match_checked_decisions() {
         let module = checked_program(concat!(
             "use std.slice.Slice\n",
-            "type Ok T = ctor T\n",
-            "type IOError = ctor String\n",
-            "type Other = ctor String\n",
+            "type Ok T = wrap T\n",
+            "type IOError = wrap String\n",
+            "type Other = wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
             "def widen: () -> Ok I32 | IOError | Other = () => read()\n",
             "let injected: Ok I32 | IOError = Ok (41)\n",
@@ -19647,7 +19644,7 @@ mod tests {
             .alternatives
             .iter()
             .position(
-                |alternative| matches!(alternative, CheckedType::Distinct { id, .. } if id == target),
+                |alternative| matches!(alternative, CheckedType::Wrapper { id, .. } if id == target),
             )
             .expect("Ok alternative");
         assert_eq!(ok.test.sum_alternative, Some(expected));
@@ -19677,7 +19674,7 @@ mod tests {
                 .alternatives
                 .iter()
                 .position(|alternative| {
-                    matches!(alternative, CheckedType::Distinct { id, .. } if id == singleton)
+                    matches!(alternative, CheckedType::Wrapper { id, .. } if id == singleton)
                 })
                 .expect("singleton alternative");
             assert_eq!(pattern.test.sum_alternative, Some(expected));
@@ -19788,7 +19785,7 @@ mod tests {
     fn index_reads_copy_checked_dispatch_recipes_and_temporaries() {
         let module = checked_program(concat!(
             "use std.slice.Slice\n",
-            "type Counter = ctor I32\n",
+            "type Counter = wrap I32\n",
             "impl Index Counter String I32 { index = (counter, key) => 0 }\n",
             "impl MutateIndex Counter String I32 { mutate_index = (mut counter, key, move value) => () }\n",
             "def make_counter = () => Counter 0\n",
@@ -19930,7 +19927,7 @@ mod tests {
     fn string_templates_record_parts_and_formatting_selections() {
         let module = checked_program(concat!(
             "use std.fmt.Formatter\n",
-            "type Label = ctor String\n",
+            "type Label = wrap String\n",
             "impl Display Label {\n",
             "  fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
             "}\n",
@@ -20118,9 +20115,9 @@ mod tests {
             "use std.cinterop.*\n",
             "use std.coroutine.(Coroutine)\n",
             "use std.fmt.Formatter\n",
-            "type Counter = ctor (value: I32)\n",
-            "type Ok T = ctor T\n",
-            "type IOError = ctor String\n",
+            "type Counter = wrap (value: I32)\n",
+            "type Ok T = wrap T\n",
+            "type IOError = wrap String\n",
             "let integer: I32 = 42\n",
             "let float: F64 = 1.5\n",
             "let string: String = \"text\"\n",
@@ -20789,7 +20786,7 @@ mod tests {
     #[test]
     fn function_parameter_patterns_lower_every_source_form() {
         let module = checked_program(concat!(
-            "type TestOwned = ctor String\n",
+            "type TestOwned = wrap String\n",
             "def pair = (left: I32, right: I32) => left + right\n",
             "def wildcard = (_: I32) => 0\n",
             "def moved: move String -> String = move value => value\n",
@@ -20929,9 +20926,9 @@ mod tests {
     #[test]
     fn pattern_binding_items_lower_patterns_and_propagation_metadata() {
         let module = checked_program(concat!(
-            "pub type Wrapper = pub ctor (value: I32)\n",
-            "pub type Ok T = pub ctor T\n",
-            "pub type IOError = pub ctor String\n",
+            "pub type Wrapper = pub wrap (value: I32)\n",
+            "pub type Ok T = pub wrap T\n",
+            "pub type IOError = pub wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok(42)\n",
             "def patterns = () => {\n",
             "  let (first, second) = (1, 2)\n",
@@ -21026,8 +21023,8 @@ mod tests {
     #[test]
     fn assignment_targets_lower_to_explicit_places() {
         let module = checked_program(concat!(
-            "type Wrapper = ctor (value: I32)\n",
-            "type Counter = ctor I32\n",
+            "type Wrapper = wrap (value: I32)\n",
+            "type Counter = wrap I32\n",
             "def places = (mut direct: I32, mut pair: (I32, I32), mut wrapper: Wrapper, mut counter: Counter, mut values: (I32; 2)) => {\n",
             "  direct = 1\n",
             "  pair.0 = 2\n",
@@ -21194,7 +21191,7 @@ mod tests {
         assert!(lowered_symbol(&program, *symbol).captured_cell);
 
         let module = checked_program(concat!(
-            "type Counter = ctor (value: I32)\n",
+            "type Counter = wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
@@ -21267,8 +21264,8 @@ mod tests {
     #[test]
     fn resource_uses_bind_the_nearest_matching_provider() {
         let module = checked_program(concat!(
-            "type A = ctor (value: I32)\n",
-            "type B = ctor (value: I32)\n",
+            "type A = wrap (value: I32)\n",
+            "type B = wrap (value: I32)\n",
             "def read_a: () ->{A} I32 = () => (resource A).value\n",
             "def read_b: () ->{B} I32 = () => (resource B).value\n",
             "def nested: () -> I32 = () => with A = A (value: 1) {\n",
@@ -21333,8 +21330,8 @@ mod tests {
     #[test]
     fn with_records_provider_storage_scope_exit_and_borrow_facts() {
         let module = checked_program(concat!(
-            "type A = ctor (value: I32)\n",
-            "type Handle = ctor I32\n",
+            "type A = wrap (value: I32)\n",
+            "type Handle = wrap I32\n",
             "impl Drop Handle { drop = Handle value => () }\n",
             "def mutable_provider: () -> () = () => {\n",
             "  let mut value = A (value: 1)\n",
@@ -21457,7 +21454,7 @@ mod tests {
     #[test]
     fn validator_rejects_inconsistent_resource_records() {
         let module = checked_program(concat!(
-            "type A = ctor (value: I32)\n",
+            "type A = wrap (value: I32)\n",
             "def bump: () ->{mut A} () = () => {\n",
             "  (resource A).value = (resource A).value + 1\n",
             "}\n",
@@ -21836,7 +21833,7 @@ mod tests {
     fn child_deferred_resources_bind_at_the_await_not_at_creation() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",
-            "type Counter = ctor (value: I32)\n",
+            "type Counter = wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = (resource Counter).value + 1\n",
             "}\n",
@@ -22248,7 +22245,7 @@ mod tests {
             "let mut mutable: I32 = 1\n",
             "mutable = 2\n",
             "count = 1\n",
-            "type Handle = ctor I32\n",
+            "type Handle = wrap I32\n",
             "impl Drop Handle { drop = Handle value => () }\n",
             "def discard = () => {\n",
             "  let owned: Handle = Handle 1\n",
@@ -22335,7 +22332,7 @@ mod tests {
                 .get(statement.expression)
                 .expect("statement expression")
                 .value_type,
-            CheckedType::Distinct { .. }
+            CheckedType::Wrapper { .. }
         ));
     }
 
@@ -22511,9 +22508,9 @@ mod tests {
     #[test]
     fn arenas_are_stable_across_repeated_lowering() {
         let module = checked_program(concat!(
-            "pub type Wrapper = pub ctor (value: I32)\n",
-            "pub type Ok T = pub ctor T\n",
-            "pub type IOError = pub ctor String\n",
+            "pub type Wrapper = pub wrap (value: I32)\n",
+            "pub type Ok T = pub wrap T\n",
+            "pub type IOError = pub wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok(42)\n",
             "let signal count: I32 = 0\n",
             "let doubled: I32 = count + count\n",

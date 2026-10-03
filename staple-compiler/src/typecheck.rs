@@ -63,7 +63,7 @@ fn checked_type_id(ty: &CheckedType) -> Option<TypeId> {
     match ty {
         CheckedType::TypeConstructor { id, .. }
         | CheckedType::Opaque { id, .. }
-        | CheckedType::Distinct { id, .. } => Some(*id),
+        | CheckedType::Wrapper { id, .. } => Some(*id),
         _ => None,
     }
 }
@@ -259,7 +259,7 @@ pub enum CheckedType {
     ParameterProduct(CheckedParameterProduct),
     Sum(CheckedSumType),
     Function(CheckedFunctionType),
-    Distinct {
+    Wrapper {
         id: TypeId,
         name: String,
         arguments: Vec<CheckedType>,
@@ -349,7 +349,7 @@ fn standard_function_named(module: &ResolvedModule, name: &str) -> Option<Functi
 
 fn compact_type_template(value_type: CheckedType) -> CheckedType {
     match value_type {
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             id,
             name,
             arguments,
@@ -940,7 +940,7 @@ impl CheckedType {
                         .all(|resource| resource.value_type.is_fully_known())
                     && function.result.is_fully_known()
             }
-            Self::Distinct { representation, .. } => representation.is_fully_known(),
+            Self::Wrapper { representation, .. } => representation.is_fully_known(),
             Self::Never
             | Self::I32
             | Self::I8
@@ -980,7 +980,7 @@ impl CheckedType {
                 .iter()
                 .all(|element| element.value_type.is_sized()),
             Self::Sum(sum) => sum.alternatives.iter().all(CheckedType::is_sized),
-            Self::Distinct { representation, .. } => representation.is_sized(),
+            Self::Wrapper { representation, .. } => representation.is_sized(),
             // These values all have a statically known handle or scalar representation.
             Self::Never
             | Self::Ref(_)
@@ -1141,7 +1141,7 @@ impl fmt::Display for CheckedType {
                     )
                 }
             }
-            Self::Distinct {
+            Self::Wrapper {
                 name, arguments, ..
             } => {
                 formatter.write_str(name)?;
@@ -2665,7 +2665,7 @@ impl TypeChecker {
                 .collect::<Vec<_>>();
             self.diagnostics.extend(placement_diagnostics);
             let representation = match instantiated {
-                CheckedType::Distinct { representation, .. } => *representation,
+                CheckedType::Wrapper { representation, .. } => *representation,
                 CheckedType::Error => continue,
                 other => other,
             };
@@ -2767,7 +2767,7 @@ impl TypeChecker {
                 continue;
             }
             if Some(implementation.trait_id) == self.drop_trait
-                && !matches!(target, CheckedType::Distinct { .. })
+                && !matches!(target, CheckedType::Wrapper { .. })
             {
                 self.diagnostics.push(Diagnostic::new(
                     span,
@@ -2778,7 +2778,7 @@ impl TypeChecker {
             if implementation.negative
                 && !matches!(
                     target,
-                    CheckedType::Distinct { .. }
+                    CheckedType::Wrapper { .. }
                         | CheckedType::Opaque { sized: true, .. }
                         | CheckedType::CString
                         | CheckedType::Buffer(_)
@@ -2801,7 +2801,7 @@ impl TypeChecker {
                 });
             let has_local_nominal_argument = arguments.iter().any(|argument| {
                 let id = match argument {
-                    CheckedType::Distinct { id, .. } | CheckedType::Opaque { id, .. } => *id,
+                    CheckedType::Wrapper { id, .. } | CheckedType::Opaque { id, .. } => *id,
                     _ => return false,
                 };
                 module
@@ -3620,8 +3620,8 @@ impl TypeChecker {
                         _ => None,
                     }).filter(|value| matches!(value,
                         CheckedType::Sum(sum) if sum.alternatives.len() == 2
-                            && matches!(&sum.alternatives[0], CheckedType::Distinct { name, .. } if name.ends_with("True"))
-                            && matches!(&sum.alternatives[1], CheckedType::Distinct { name, .. } if name.ends_with("False"))
+                            && matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("True"))
+                            && matches!(&sum.alternatives[1], CheckedType::Wrapper { name, .. } if name.ends_with("False"))
                     )).unwrap_or(CheckedType::Error);
                     CheckedType::Function(CheckedFunctionType {
                         parameter_style: staple_syntax::FunctionParameterStyle::Single,
@@ -3670,8 +3670,8 @@ impl TypeChecker {
                         _ => None,
                     }).filter(|value| matches!(value,
                         CheckedType::Sum(sum) if sum.alternatives.len() == 2
-                            && matches!(&sum.alternatives[0], CheckedType::Distinct { name, .. } if name.ends_with("True"))
-                            && matches!(&sum.alternatives[1], CheckedType::Distinct { name, .. } if name.ends_with("False"))
+                            && matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("True"))
+                            && matches!(&sum.alternatives[1], CheckedType::Wrapper { name, .. } if name.ends_with("False"))
                     )).unwrap_or(CheckedType::Error);
                     CheckedType::Function(CheckedFunctionType {
                         parameter_style: staple_syntax::FunctionParameterStyle::Single,
@@ -5736,7 +5736,7 @@ impl TypeChecker {
             }
             Pattern::Binding(binding) => {
                 if let Some(expected_id) = module.type_for_pattern(binding.syntax.id) {
-                    if !matches!(value_type, CheckedType::Distinct { id, .. } if *id == expected_id)
+                    if !matches!(value_type, CheckedType::Wrapper { id, .. } if *id == expected_id)
                         && *value_type != CheckedType::Error
                     {
                         self.diagnostics.push(Diagnostic::new(
@@ -5818,7 +5818,7 @@ impl TypeChecker {
                             "a slice cannot be destructured as a `Ref`",
                         ));
                     }
-                    CheckedType::Distinct {
+                    CheckedType::Wrapper {
                         id, representation, ..
                     } if *id == expected_id => {
                         self.bind_pattern_types(module, &pattern.argument, representation);
@@ -6208,7 +6208,7 @@ impl TypeChecker {
         };
         loop {
             match value_type {
-                CheckedType::Distinct { representation, .. } => value_type = *representation,
+                CheckedType::Wrapper { representation, .. } => value_type = *representation,
                 CheckedType::Ref(_) => return true,
                 _ => return false,
             }
@@ -6294,10 +6294,10 @@ impl TypeChecker {
             .iter()
             .enumerate()
             .filter(|(_, alternative)| {
-                matches!(alternative, CheckedType::Distinct { id, .. } if *id == expected_id)
+                matches!(alternative, CheckedType::Wrapper { id, .. } if *id == expected_id)
             })
             .collect::<Vec<_>>();
-        let [(success_index, CheckedType::Distinct { representation, .. })] = matches.as_slice()
+        let [(success_index, CheckedType::Wrapper { representation, .. })] = matches.as_slice()
         else {
             self.diagnostics.push(Diagnostic::new(
                 pattern.syntax.span.clone(),
@@ -8626,7 +8626,7 @@ impl TypeChecker {
                     .unwrap_or_else(|| module.program().entry());
                 if matches!(access.accessor, Accessor::Representation) {
                     let representation_type = match accessible {
-                        CheckedType::Distinct {
+                        CheckedType::Wrapper {
                             id,
                             name,
                             representation,
@@ -8658,7 +8658,7 @@ impl TypeChecker {
                     return self.finish_expression_type(expression, representation_type, expected);
                 }
 
-                if let CheckedType::Distinct {
+                if let CheckedType::Wrapper {
                     id,
                     name,
                     representation,
@@ -9134,7 +9134,7 @@ impl TypeChecker {
                     .iter()
                     .enumerate()
                     .filter_map(|(index, alternative)| {
-                        let CheckedType::Distinct { representation, .. } = alternative else {
+                        let CheckedType::Wrapper { representation, .. } = alternative else {
                             return None;
                         };
                         let specialized = matrix
@@ -9373,13 +9373,13 @@ impl TypeChecker {
         let cancelled = self.cancelled_type?;
         Some(CheckedType::Sum(CheckedSumType {
             alternatives: vec![
-                CheckedType::Distinct {
+                CheckedType::Wrapper {
                     id: completed,
                     name: "Completed".to_owned(),
                     arguments: vec![result.clone()],
                     representation: Box::new(result),
                 },
-                CheckedType::Distinct {
+                CheckedType::Wrapper {
                     id: cancelled,
                     name: "Cancelled".to_owned(),
                     arguments: Vec::new(),
@@ -9417,12 +9417,12 @@ impl TypeChecker {
                             .alternatives
                             .iter()
                             .filter(|alternative| {
-                                matches!(alternative, CheckedType::Distinct { id, .. } if *id == expected_id)
+                                matches!(alternative, CheckedType::Wrapper { id, .. } if *id == expected_id)
                             })
                             .collect::<Vec<_>>();
                         (matches.len() == 1).then(|| (*matches[0]).clone())
                     }
-                    CheckedType::Distinct { id, .. } if *id == expected_id => {
+                    CheckedType::Wrapper { id, .. } if *id == expected_id => {
                         Some(value_type.clone())
                     }
                     _ => None,
@@ -9555,7 +9555,7 @@ impl TypeChecker {
                             .alternatives
                             .iter()
                             .filter_map(|alternative| match alternative {
-                                CheckedType::Distinct {
+                                CheckedType::Wrapper {
                                     id, representation, ..
                                 } if *id == expected_id => Some(representation.as_ref().clone()),
                                 _ => None,
@@ -9573,7 +9573,7 @@ impl TypeChecker {
                         }
                         matches.into_iter().next()
                     }
-                    CheckedType::Distinct {
+                    CheckedType::Wrapper {
                         id, representation, ..
                     } if *id == expected_id => Some(representation.as_ref().clone()),
                     _ => None,
@@ -9636,7 +9636,7 @@ impl TypeChecker {
                         sum.alternatives
                             .iter()
                             .position(|alternative| {
-                                matches!(alternative, CheckedType::Distinct { id, .. } if *id == selected_id)
+                                matches!(alternative, CheckedType::Wrapper { id, .. } if *id == selected_id)
                             })
                             .into_iter()
                             .collect()
@@ -9660,7 +9660,7 @@ impl TypeChecker {
                         .type_for_pattern(pattern.syntax.id)
                         .and_then(|id| {
                             sum.alternatives.iter().position(
-                                |alternative| matches!(alternative, CheckedType::Distinct { id: alternative_id, .. } if *alternative_id == id),
+                                |alternative| matches!(alternative, CheckedType::Wrapper { id: alternative_id, .. } if *alternative_id == id),
                             )
                         })
                         .into_iter()
@@ -9681,7 +9681,7 @@ impl TypeChecker {
                 };
                 alternatives.into_iter().any(|index| {
                     let representation = match &sum.alternatives[index] {
-                        CheckedType::Distinct { representation, .. } => {
+                        CheckedType::Wrapper { representation, .. } => {
                             representation.as_ref().clone()
                         }
                         CheckedType::StringLiteralSet(values) => {
@@ -9731,17 +9731,17 @@ impl TypeChecker {
                     &specialized_candidate,
                 )
             }
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 id, representation, ..
             } => {
                 let Some(specialized_candidate) =
-                    Self::specialize_distinct_row(module, candidate, *id)
+                    Self::specialize_wrapper_row(module, candidate, *id)
                 else {
                     return false;
                 };
                 let specialized_matrix = matrix
                     .iter()
-                    .filter_map(|row| Self::specialize_distinct_row(module, row, *id))
+                    .filter_map(|row| Self::specialize_wrapper_row(module, row, *id))
                     .collect::<Vec<_>>();
                 let mut specialized_types = vec![representation.as_ref().clone()];
                 specialized_types.extend_from_slice(&types[1..]);
@@ -9900,7 +9900,7 @@ impl TypeChecker {
         if let CoveragePattern::Pattern(Pattern::Binding(binding)) = structural
             && let Some(selected_id) = module.type_for_pattern(binding.syntax.id)
         {
-            if !matches!(&sum.alternatives[index], CheckedType::Distinct { id, .. } if *id == selected_id)
+            if !matches!(&sum.alternatives[index], CheckedType::Wrapper { id, .. } if *id == selected_id)
             {
                 return None;
             }
@@ -9921,7 +9921,7 @@ impl TypeChecker {
         }
         let first = Self::canonical_coverage_pattern(row[0]);
         let selected_id = match &sum.alternatives[index] {
-            CheckedType::Distinct { id, .. } => *id,
+            CheckedType::Wrapper { id, .. } => *id,
             CheckedType::String | CheckedType::StringLiteralSet(_) => {
                 let head = match first {
                     CoveragePattern::Any => CoveragePattern::Any,
@@ -9977,7 +9977,7 @@ impl TypeChecker {
         Some(result)
     }
 
-    fn specialize_distinct_row<'a>(
+    fn specialize_wrapper_row<'a>(
         module: &ResolvedModule,
         row: &[CoveragePattern<'a>],
         id: TypeId,
@@ -10676,7 +10676,7 @@ impl TypeChecker {
                 .and_then(|function| self.function_result_companion_types.get(&function).copied()),
             Expression::Access(access) if matches!(access.accessor, Accessor::Representation) => {
                 let represented = self.expression_types.get(&access.value.syntax().id)?;
-                let CheckedType::Distinct { id, .. } = represented else {
+                let CheckedType::Wrapper { id, .. } = represented else {
                     return None;
                 };
                 self.type_declarations
@@ -11478,7 +11478,7 @@ impl TypeChecker {
                     || Some(*id) == self.reactive_type
                     || Some(*id) == self.tasks_type);
             let valid_nominal =
-                matches!(&value_type, CheckedType::Distinct { .. }) || builtin_resource;
+                matches!(&value_type, CheckedType::Wrapper { .. }) || builtin_resource;
             let concrete = !contains_type_parameter(&value_type)
                 && !contains_inferred_type(&value_type)
                 && value_type.is_fully_known();
@@ -11847,11 +11847,11 @@ impl TypeChecker {
         arguments: &[CheckedType],
     ) -> Option<CheckedType> {
         if self.recursive_construction_depth == 0
-            || declaration.kind() != TypeDeclarationKind::Distinct
+            || declaration.kind() != TypeDeclarationKind::Wrapper
         {
             return None;
         }
-        Some(CheckedType::Distinct {
+        Some(CheckedType::Wrapper {
             id,
             name: display_name.to_owned(),
             arguments: arguments.to_vec(),
@@ -11976,7 +11976,7 @@ impl TypeChecker {
             };
         }
         if declaration.kind() == TypeDeclarationKind::Singleton {
-            return CheckedType::Distinct {
+            return CheckedType::Wrapper {
                 id,
                 name: display_name,
                 arguments,
@@ -12036,16 +12036,16 @@ impl TypeChecker {
             declaration.kind() == TypeDeclarationKind::Alias,
             declaration.syntax.span.clone(),
         );
-        if declaration.kind() == TypeDeclarationKind::Distinct && !representation.is_sized() {
+        if declaration.kind() == TypeDeclarationKind::Wrapper && !representation.is_sized() {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
-                "distinct type representations must be sized",
+                "wrapper type representations must be sized",
             ));
             return CheckedType::Error;
         }
         match declaration.kind() {
             TypeDeclarationKind::Alias => representation,
-            TypeDeclarationKind::Distinct => CheckedType::Distinct {
+            TypeDeclarationKind::Wrapper => CheckedType::Wrapper {
                 id,
                 name: display_name,
                 arguments,
@@ -12506,7 +12506,7 @@ impl TypeChecker {
                     name: "Completed".to_owned(),
                     arguments: Vec::new(),
                 },
-                BuiltinType::Cancelled => CheckedType::Distinct {
+                BuiltinType::Cancelled => CheckedType::Wrapper {
                     id,
                     name: "Cancelled".to_owned(),
                     arguments: Vec::new(),
@@ -12554,7 +12554,7 @@ impl TypeChecker {
             return value_type;
         }
         if declaration.kind() == TypeDeclarationKind::Singleton {
-            let value_type = CheckedType::Distinct {
+            let value_type = CheckedType::Wrapper {
                 id,
                 name: display_name,
                 arguments: Vec::new(),
@@ -12584,16 +12584,16 @@ impl TypeChecker {
         );
         self.recursive_construction_depth = outer_recursive_depth;
         self.resolving_named_types.remove(&id);
-        if declaration.kind() == TypeDeclarationKind::Distinct && !representation.is_sized() {
+        if declaration.kind() == TypeDeclarationKind::Wrapper && !representation.is_sized() {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
-                "distinct type representations must be sized",
+                "wrapper type representations must be sized",
             ));
             return CheckedType::Error;
         }
         let value_type = match declaration.kind() {
             TypeDeclarationKind::Alias => representation,
-            TypeDeclarationKind::Distinct => CheckedType::Distinct {
+            TypeDeclarationKind::Wrapper => CheckedType::Wrapper {
                 id,
                 name: display_name,
                 arguments: Vec::new(),
@@ -12878,13 +12878,13 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
             Some(CheckedType::Sum(CheckedSumType { alternatives }))
         }
         (
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 id: actual_id,
                 name: actual_name,
                 arguments: actual_arguments,
                 representation: actual_representation,
             },
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 id: expected_id,
                 name: _,
                 arguments: expected_arguments,
@@ -12898,7 +12898,7 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
                 .zip(expected_arguments)
                 .map(|(actual, expected)| merge_types(actual, expected))
                 .collect::<Option<Vec<_>>>()?;
-            Some(CheckedType::Distinct {
+            Some(CheckedType::Wrapper {
                 id: actual_id,
                 name: actual_name,
                 arguments,
@@ -12907,7 +12907,7 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
                 } else if actual_inferred && expected_representation.is_fully_known() {
                     expected_representation
                 } else {
-                    Box::new(reconcile_distinct_representation(
+                    Box::new(reconcile_wrapper_representation(
                         actual_id,
                         *actual_representation,
                         *expected_representation,
@@ -12919,8 +12919,8 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
     }
 }
 
-/// Reconciles the `representation` of two `Distinct` types already known to
-/// share an `id` and argument arity. A `Distinct` is a nominal type — its
+/// Reconciles the `representation` of two `Wrapper` types already known to
+/// share an `id` and argument arity. A `Wrapper` is a nominal type — its
 /// `id` and `arguments` fully determine its representation — but a recursive
 /// self-reference stand-in carries an `Opaque { id }` placeholder in place of
 /// the real representation (see `recursive_self_reference`). That placeholder
@@ -12928,7 +12928,7 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
 /// at a shallower depth than a separately-resolved copy of the same type, so
 /// a structural merge of the two would spuriously fail (`Opaque` vs `Sum`).
 /// Prefer whichever side is not the placeholder before merging structurally.
-fn reconcile_distinct_representation(
+fn reconcile_wrapper_representation(
     id: TypeId,
     actual: CheckedType,
     expected: CheckedType,
@@ -13318,12 +13318,12 @@ pub(crate) fn substitute_type(
                 .map(|alternative| substitute_type(alternative, substitutions))
                 .collect(),
         ),
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             id,
             name,
             arguments,
             representation,
-        } => CheckedType::Distinct {
+        } => CheckedType::Wrapper {
             id,
             name,
             arguments: arguments
@@ -13431,12 +13431,12 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
         CheckedType::Sum(sum) => CheckedType::Sum(CheckedSumType {
             alternatives: sum.alternatives.iter().map(erase_type_parameters).collect(),
         }),
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             id,
             name,
             arguments,
             representation,
-        } => CheckedType::Distinct {
+        } => CheckedType::Wrapper {
             id: *id,
             name: name.clone(),
             arguments: arguments.iter().map(erase_type_parameters).collect(),
@@ -13485,7 +13485,7 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
                 || contains_type_parameter(&function.result)
         }
         CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_type_parameter),
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -13525,7 +13525,7 @@ fn contains_effect_parameter(value_type: &CheckedType) -> bool {
             .iter()
             .any(|element| contains_effect_parameter(&element.value_type)),
         CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_effect_parameter),
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -13570,7 +13570,7 @@ pub(crate) fn contains_inferred_type(value_type: &CheckedType) -> bool {
                 || contains_inferred_type(&function.result)
         }
         CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_inferred_type),
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -13623,7 +13623,7 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
                     collect(alternative, ids);
                 }
             }
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 arguments,
                 representation,
                 ..
@@ -13775,12 +13775,12 @@ fn unify_impl_headers(
             },
         )
         | (
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 id: left_id,
                 arguments: left_arguments,
                 ..
             },
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 id: right_id,
                 arguments: right_arguments,
                 ..
@@ -13957,7 +13957,7 @@ fn sized_type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId
                     collect(alternative, ids);
                 }
             }
-            CheckedType::Distinct {
+            CheckedType::Wrapper {
                 arguments,
                 representation,
                 ..
@@ -14184,8 +14184,8 @@ pub(crate) fn infer_type_parameters(
                     |(template, actual)| infer_type_parameters(template, actual, substitutions),
                 )
         }
-        CheckedType::Distinct { id, arguments, .. } => {
-            let CheckedType::Distinct {
+        CheckedType::Wrapper { id, arguments, .. } => {
+            let CheckedType::Wrapper {
                 id: actual_id,
                 arguments: actual_arguments,
                 ..
@@ -14265,7 +14265,7 @@ fn clear_function_effects(value_type: &mut CheckedType) {
             clear_function_effects(&mut function.parameter);
             clear_function_effects(&mut function.result);
         }
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -14402,7 +14402,7 @@ fn array_lengths_are_natural(
                 .iter()
                 .all(|argument| array_lengths_are_natural(argument, bounds, natural_trait))
         }
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -15443,7 +15443,7 @@ fn structural_index_length(target: &CheckedType) -> Option<usize> {
 
 fn checked_type_sort_key(value_type: &CheckedType) -> String {
     match value_type {
-        CheckedType::Distinct { id, arguments, .. } => {
+        CheckedType::Wrapper { id, arguments, .. } => {
             format!("{:020}:{arguments:?}", id.0)
         }
         other => format!("{other:?}"),
@@ -15463,7 +15463,7 @@ fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
         }
         CheckedType::CPointer { pointee } => checked_type_contains_sum(pointee),
         CheckedType::Ref(value) | CheckedType::Buffer(value) => checked_type_contains_sum(value),
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -15493,7 +15493,7 @@ fn checked_type_contains_slice(value_type: &CheckedType) -> bool {
             checked_type_contains_slice(&function.parameter)
                 || checked_type_contains_slice(&function.result)
         }
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -15516,7 +15516,7 @@ fn checked_type_contains_cstring(value_type: &CheckedType) -> bool {
             .iter()
             .any(|element| checked_type_contains_cstring(&element.value_type)),
         CheckedType::Sum(sum) => sum.alternatives.iter().any(checked_type_contains_cstring),
-        CheckedType::Distinct { representation, .. } => {
+        CheckedType::Wrapper { representation, .. } => {
             checked_type_contains_cstring(representation)
         }
         _ => false,
@@ -15645,13 +15645,13 @@ fn valid_buffer_intrinsic_type(
             };
             let has_none = option.alternatives.iter().any(|alternative| matches!(
                 alternative,
-                CheckedType::Distinct { name, representation, .. }
+                CheckedType::Wrapper { name, representation, .. }
                     if name.ends_with("None") && representation.as_ref() == &CheckedType::empty_product()
             ));
             let has_some = option.alternatives.iter().any(|alternative| {
                 matches!(
                     alternative,
-                    CheckedType::Distinct { name, representation, .. }
+                    CheckedType::Wrapper { name, representation, .. }
                         if name.ends_with("Some") && representation.as_ref() == element.as_ref()
                 )
             });
@@ -15809,7 +15809,7 @@ pub(crate) fn is_copy_type(
                 discharge,
             )
         }),
-        CheckedType::Distinct { representation, .. } => is_copy_type(
+        CheckedType::Wrapper { representation, .. } => is_copy_type(
             representation,
             copy_trait,
             drop_trait,
@@ -15839,7 +15839,7 @@ fn type_needs_drop(
         CheckedType::Sum(sum) => sum.alternatives.iter().any(|alternative| {
             type_needs_drop(alternative, drop_trait, implementations, discharge)
         }),
-        CheckedType::Distinct { representation, .. } => {
+        CheckedType::Wrapper { representation, .. } => {
             type_needs_drop(representation, drop_trait, implementations, discharge)
         }
         _ => false,

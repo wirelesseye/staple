@@ -360,7 +360,7 @@ fn collect_referenced_parameters(value_type: &CheckedType, out: &mut BTreeSet<Ty
             collect_referenced_effect_parameters(&function.effects, out);
             collect_referenced_parameters(&function.result, out);
         }
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -912,7 +912,7 @@ fn contains_placeholder(value_type: &CheckedType) -> bool {
                     .any(|resource| contains_placeholder(&resource.value_type))
                 || contains_placeholder(&function.result)
         }
-        CheckedType::Distinct {
+        CheckedType::Wrapper {
             arguments,
             representation,
             ..
@@ -1845,7 +1845,7 @@ fn concrete_type_needs_drop(program: &LoweredProgram, value_type: &CheckedType) 
             .alternatives
             .iter()
             .any(|alternative| concrete_type_needs_drop(program, alternative)),
-        CheckedType::Distinct { representation, .. } => {
+        CheckedType::Wrapper { representation, .. } => {
             concrete_type_needs_drop(program, representation)
         }
         _ => false,
@@ -2238,7 +2238,7 @@ impl<'a> ParameterCollector<'a> {
     }
 
     /// Collects every declared type/effect parameter reachable from a checked
-    /// type. `Distinct.representation` is not expanded: its semantics are
+    /// type. `Wrapper.representation` is not expanded: its semantics are
     /// carried by the nominal ID plus arguments, matching canonical keys.
     fn collect_type(&mut self, value_type: &CheckedType) {
         match value_type {
@@ -2292,7 +2292,7 @@ impl<'a> ParameterCollector<'a> {
                 }
             }
             CheckedType::Function(function) => self.collect_function_type(function),
-            CheckedType::Distinct { arguments, .. } => {
+            CheckedType::Wrapper { arguments, .. } => {
                 for argument in arguments {
                     self.collect_type(argument);
                 }
@@ -3102,7 +3102,7 @@ mod tests {
     #[test]
     fn body_only_parameter_is_found() {
         let (_, program) = lower(concat!(
-            "type Phantom T = ctor ()\n",
+            "type Phantom T = wrap ()\n",
             "def phantom: <T> () -> Phantom T = () => Phantom ()\n",
             "def body_only: <T> I32 -> I32 = value => {\n",
             "  let hidden: Phantom T = phantom ()\n",
@@ -3203,10 +3203,10 @@ mod tests {
             "use std.fmt.Formatter\n",
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
-            "type Counter = ctor (value: I32)\n",
-            "type Ok T = ctor T\n",
-            "type IOError = ctor String\n",
-            "type Phantom T = ctor ()\n",
+            "type Counter = wrap (value: I32)\n",
+            "type Ok T = wrap T\n",
+            "type IOError = wrap String\n",
+            "type Phantom T = wrap ()\n",
             "def identity: <T where Copy T> T -> T = value => value\n",
             "def body_only: <T> I32 -> I32 = value => {\n",
             "  let hidden: Phantom T = Phantom ()\n",
@@ -3595,7 +3595,7 @@ mod tests {
     #[test]
     fn result_only_parameter_infers_from_the_checked_callable_type() {
         let (_, program) = lower(concat!(
-            "type Phantom T = ctor ()\n",
+            "type Phantom T = wrap ()\n",
             "def phantom_result: <T> () -> Phantom T = () => Phantom ()\n",
             "let hidden: Phantom I32 = phantom_result ()\n",
         ));
@@ -4060,8 +4060,8 @@ mod tests {
     #[test]
     fn signature_identical_implementations_stay_distinct() {
         let (_, program) = lower(concat!(
-            "type Alpha = ctor ()\n",
-            "type Beta = ctor ()\n",
+            "type Alpha = wrap ()\n",
+            "type Beta = wrap ()\n",
             "trait TestTag T { test_tag: T -> I32 }\n",
             "impl TestTag Alpha { test_tag = _ => 1 }\n",
             "impl TestTag Beta { test_tag = _ => 2 }\n",
@@ -4099,7 +4099,7 @@ mod tests {
             "impl TestShow I32 { test_show = _ => True }\n",
             "trait TestGuarded T { guarded: T -> Bool }\n",
             "impl<T where TestShow T> TestGuarded T { guarded = value => test_show value }\n",
-            "type Plain = ctor ()\n",
+            "type Plain = wrap ()\n",
             "def use_guarded: <T where TestGuarded T> T -> Bool = value => guarded value\n",
             "let ok: Bool = use_guarded 1\n",
         ));
@@ -4121,7 +4121,7 @@ mod tests {
             .find(|(_, _, metadata)| metadata.name == "Plain")
             .expect("Plain type")
             .2;
-        let plain_type = CheckedType::Distinct {
+        let plain_type = CheckedType::Wrapper {
             id: plain.semantic_id,
             name: plain.name.clone(),
             arguments: Vec::new(),
@@ -4309,7 +4309,7 @@ mod tests {
     #[test]
     fn negative_implementations_are_rejected() {
         let (_, program) = lower(concat!(
-            "type MyString = ctor String\n",
+            "type MyString = wrap String\n",
             "impl !Copy MyString {}\n",
         ));
         let negative = program
@@ -4957,7 +4957,7 @@ mod tests {
     #[test]
     fn resolved_values_agree_with_checked_specialization_inference() {
         let (module, program) = lower(concat!(
-            "type Phantom T = ctor ()\n",
+            "type Phantom T = wrap ()\n",
             "def identity: <T where Copy T> T -> T = value => value\n",
             "def phantom_result: <T> () -> Phantom T = () => Phantom ()\n",
             "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",

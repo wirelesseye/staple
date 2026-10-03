@@ -1,9 +1,9 @@
 // Open sums, nominal payloads, propagating bindings, returns, and catch-all arms.
 use std.io.println
 
-pub type Found T = pub ctor T
-pub type Missing = pub ctor String
-pub type Invalid = pub ctor String
+pub type Found T = pub wrap T
+pub type Missing = pub wrap String
+pub type Invalid = pub wrap String
 
 def lookup: Bool -> Found I32 | Missing | Invalid = available => match available {
     True => Found(42),

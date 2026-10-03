@@ -229,7 +229,7 @@ impl LoweredProgram {
     /// Test-only: the surfaces one owner's emitted function references, for
     /// per-function comparison where the program-wide set is masked by the
     /// eagerly emitted standard library. The emitter inlines drop glue at each drop
-    /// site (nested product, sum, and distinct glue included), so the owner's
+    /// site (nested product, sum, and wrapper glue included), so the owner's
     /// drop-glue uses contribute their releases; finalizers and user `Drop`
     /// methods are separate functions and do not.
     #[cfg(test)]
@@ -268,7 +268,7 @@ impl LoweredProgram {
                     .iter()
                     .filter_map(|alternative| alternative.glue.artifact)
                     .collect(),
-                DropGlueBody::Distinct { representation } => {
+                DropGlueBody::Wrapper { representation } => {
                     representation.artifact.into_iter().collect()
                 }
                 DropGlueBody::UserDrop { representation, .. } => representation

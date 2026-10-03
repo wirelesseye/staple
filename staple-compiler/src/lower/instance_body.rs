@@ -5065,7 +5065,7 @@ mod tests {
     #[test]
     fn resource_uses_recompute_pass_mode_and_provider_indirectness() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "type A = ctor (value: I32)\n",
+            "type A = wrap (value: I32)\n",
             "def read_a: () ->{A} I32 = () => (resource A).value\n",
             "def forward: () ->{A} I32 = () => read_a ()\n",
             "let result = with A = A (value: 1) { forward () }\n",
@@ -5103,8 +5103,8 @@ mod tests {
     #[test]
     fn hidden_resource_bindings_recover_order_without_a_count_change() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "type A = ctor (value: I32)\n",
-            "type B = ctor (value: I32)\n",
+            "type A = wrap (value: I32)\n",
+            "type B = wrap (value: I32)\n",
             "def sum: () ->{A, B} I32 = () => (resource A).value + (resource B).value\n",
             "def forward: () ->{A, B} I32 = () => sum ()\n",
             "let result = with A = A (value: 1) { with B = B (value: 2) { forward () } }\n",
@@ -5272,7 +5272,7 @@ mod tests {
     #[test]
     fn constructor_and_structural_sites_bind_to_artifacts() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "type Point = ctor (I32, I32)\n",
+            "type Point = wrap (I32, I32)\n",
             "def make: () -> ((I32, I32) -> Point) = () => Point\n",
             "def describe: (I32, I32) -> String = value => \"${value:?}\"\n",
             "let text: String = describe (1, 2)\n",

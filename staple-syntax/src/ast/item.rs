@@ -258,7 +258,7 @@ pub struct ExternBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeDeclarationKind {
     Alias,
-    Distinct,
+    Wrapper,
     Singleton,
     Opaque,
 }
@@ -267,23 +267,23 @@ pub enum TypeDeclarationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeBodyKind {
     Alias,
-    Constructor,
+    Wrapper,
     Opaque,
 }
 
-/// The body of a type declaration written after `=`: `alias T`, `ctor T`,
-/// `pub ctor T`, `pub(package) ctor T`, or `opaque`.
+/// The body of a type declaration written after `=`: `alias T`, `wrap T`,
+/// `pub wrap T`, `pub(package) wrap T`, or `opaque`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeBody {
     /// The whole body, including any representation-visibility prefix.
     pub syntax: Syntax,
-    /// The contextual `alias`, `ctor`, or `opaque` marker.
+    /// The contextual `alias`, `wrap`, or `opaque` marker.
     pub marker_syntax: Syntax,
     pub kind: TypeBodyKind,
-    /// Representation visibility for `ctor` bodies, including the `pub` or
+    /// Representation visibility for `wrap` bodies, including the `pub` or
     /// `pub(package)` prefix syntax when one is written.
     pub representation: VisibilitySyntax,
-    /// The underlying type for `alias` and `ctor` bodies.
+    /// The underlying type for `alias` and `wrap` bodies.
     pub underlying: Option<Type>,
 }
 
@@ -312,7 +312,7 @@ impl TypeDeclaration {
             None => TypeDeclarationKind::Singleton,
             Some(body) => match body.kind {
                 TypeBodyKind::Alias => TypeDeclarationKind::Alias,
-                TypeBodyKind::Constructor => TypeDeclarationKind::Distinct,
+                TypeBodyKind::Wrapper => TypeDeclarationKind::Wrapper,
                 TypeBodyKind::Opaque => TypeDeclarationKind::Opaque,
             },
         }

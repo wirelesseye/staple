@@ -1065,8 +1065,8 @@ fn infers_open_effect_rows_and_checks_fixed_effects() {
 #[test]
 fn infers_checks_and_lowers_typed_resources() {
     let module = type_check(concat!(
-        "type Clock = ctor (now: () -> I32)\n",
-        "type Logger = ctor (write: I32 -> ())\n",
+        "type Clock = wrap (now: () -> I32)\n",
+        "type Logger = wrap (write: I32 -> ())\n",
         "def system_clock = Clock (now: () => 41)\n",
         "def logger = Logger (write: value => ())\n",
         "def read: () ->{Clock} I32 = () => (resource Clock).now ()\n",
@@ -1293,7 +1293,7 @@ fn rejects_invalid_resource_contracts_and_types() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Clock = ctor (now: () -> I32)\n",
+            "type Clock = wrap (now: () -> I32)\n",
             "def need = () => (resource Clock).now ()\n",
             "def invalid: () ->{} I32 = () => need ()\n",
         )))
@@ -1309,8 +1309,8 @@ fn rejects_invalid_resource_contracts_and_types() {
 fn mutable_and_non_copy_resources_follow_parameter_ownership() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
-        "type Counter = ctor (value: I32)\n",
-        "type Handle = ctor CString\n",
+        "type Counter = wrap (value: I32)\n",
+        "type Handle = wrap CString\n",
         "def increment: () ->{mut Counter} () = () => {\n",
         "  (resource Counter).value = (resource Counter).value + 1\n",
         "}\n",
@@ -1340,7 +1340,7 @@ fn mutable_and_non_copy_resources_follow_parameter_ownership() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.cinterop.*\n",
-            "type Handle = ctor CString\n",
+            "type Handle = wrap CString\n",
             "def take: move Handle -> () = move value => ()\n",
             "def invalid: () ->{Handle} () = () => take (resource Handle)\n",
         )))
@@ -1353,7 +1353,7 @@ fn mutable_and_non_copy_resources_follow_parameter_ownership() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Counter = ctor (value: I32)\n",
+            "type Counter = wrap (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = 1\n",
             "}\n",
@@ -1369,7 +1369,7 @@ fn mutable_and_non_copy_resources_follow_parameter_ownership() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Counter = ctor (value: I32)\n",
+            "type Counter = wrap (value: I32)\n",
             "let counter = Counter (value: 0)\n",
             "with mut Counter = counter { () }\n",
         )))
@@ -1432,10 +1432,10 @@ fn allows_io_at_entry_module_top_level_but_rejects_non_builtin_opaque_resources(
 #[test]
 fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
     let module = type_check(concat!(
-        "type Clock = ctor I32\n",
+        "type Clock = wrap I32\n",
         "type CurrentClock = alias Clock\n",
-        "type Logger = ctor I32\n",
-        "type Box T = ctor (value: T)\n",
+        "type Logger = wrap I32\n",
+        "type Box T = wrap (value: T)\n",
         "trait Observe T { observe: T ->{Clock} Clock }\n",
         "impl Observe I32 { observe = value => resource CurrentClock }\n",
         "macro request = _: Ident \"clock\" => parse_quote { resource CurrentClock }\n",
@@ -1485,7 +1485,7 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Clock = ctor I32\n",
+            "type Clock = wrap I32\n",
             "def need: () ->{Clock} Clock = () => resource Clock\n",
             "let incompatible: () -> Clock = need\n",
         )))
@@ -1497,11 +1497,11 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
 
     for (source, expected) in [
         (
-            "type Clock = ctor I32\nresource Clock\n",
+            "type Clock = wrap I32\nresource Clock\n",
             "top-level initialization requires resources",
         ),
         (
-            "type Clock = ctor I32\nextern \"c\" { read: () ->{Clock} Clock }\n",
+            "type Clock = wrap I32\nextern \"c\" { read: () ->{Clock} Clock }\n",
             "external functions cannot require Staple resources",
         ),
     ] {
@@ -1563,7 +1563,7 @@ fn marks_compiler_owned_recursive_constructors() {
 fn rejects_a_recursive_type_that_omits_the_self_reference_arguments() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "type Node T = ctor (value: T, next: Option Node)\n",
+            "type Node T = wrap (value: T, next: Option Node)\n",
         ))
         .expect_err_diagnostics("a bare generic self-reference is not a value type");
     assert!(
@@ -1591,9 +1591,9 @@ fn rejects_a_bare_generic_type_constructor_used_as_a_value_type() {
 
 #[test]
 fn allows_a_recursive_type_guarded_by_a_recursive_constructor() {
-    type_check("type Node T = ctor (value: T, next: Option (Ref (Node I32)))\n");
-    type_check("type List T = ctor (head: T, tail: Option (Ref (List T)))\n");
-    type_check("type Chain = ctor (head: I32, tail: Option (Ref Chain))\n");
+    type_check("type Node T = wrap (value: T, next: Option (Ref (Node I32)))\n");
+    type_check("type List T = wrap (head: T, tail: Option (Ref (List T)))\n");
+    type_check("type Chain = wrap (head: I32, tail: Option (Ref Chain))\n");
 }
 
 #[test]
@@ -1603,7 +1603,7 @@ fn constructs_a_recursive_value_through_its_own_indirection_arm() {
     // makes generic inference for `Ref` reconcile that placeholder against the
     // fully-resolved `Node`, which must not be reported as a conflict.
     type_check(concat!(
-        "type Node = ctor () | (Ref Node)\n",
+        "type Node = wrap () | (Ref Node)\n",
         "let node1 = Node ()\n",
         "let node2 = Node (Ref node1)\n",
         "let node3 = Node (Ref node2)\n",
@@ -1613,7 +1613,7 @@ fn constructs_a_recursive_value_through_its_own_indirection_arm() {
 #[test]
 fn still_rejects_a_recursive_type_with_no_indirection() {
     TypeChecker::new()
-        .check(resolve("type Loop = ctor (head: I32, tail: Loop)\n"))
+        .check(resolve("type Loop = wrap (head: I32, tail: Loop)\n"))
         .expect_err_diagnostics("a type that directly contains itself has no finite layout");
 }
 
@@ -1623,8 +1623,8 @@ fn recursive_constructor_guard_does_not_leak_into_a_nested_type() {
     // `Inner`'s own by-value self-reference.
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Inner = ctor (here: I32, again: Inner)\n",
-            "type Outer = ctor (inner: Option (Ref Inner))\n",
+            "type Inner = wrap (here: I32, again: Inner)\n",
+            "type Outer = wrap (inner: Option (Ref Inner))\n",
         )))
         .expect_err_diagnostics("a nested by-value cycle is still rejected");
     assert!(
@@ -1662,7 +1662,7 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
     copy_directory(&root.join("stdlib"), &temporary);
     let production_string = include_str!("../../stdlib/std/string.sta");
     let production_body = production_string
-        .split_once("pub type String = ctor Slice U8\n")
+        .split_once("pub type String = wrap Slice U8\n")
         .map(|(_, body)| body)
         .expect("production String module has its canonical declaration");
     std::fs::write(
@@ -2117,7 +2117,7 @@ fn rejects_trait_member_overloads() {
 #[test]
 fn rejects_companion_item_overloads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("type Box = ctor I32\ncompanion Box {\n pub def make: I32 -> Box = value => Box value\n pub def make: [I32, I32] -> Box = [left, right] => Box left\n}\n", root).expect("source loads");
+    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("type Box = wrap I32\ncompanion Box {\n pub def make: I32 -> Box = value => Box value\n pub def make: [I32, I32] -> Box = [left, right] => Box left\n}\n", root).expect("source loads");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err_diagnostics("duplicate names must be rejected");
@@ -2452,7 +2452,7 @@ fn type_checks_the_two_binding_mutability_forms() {
     // effect covers the corresponding position. Match binders still use an
     // explicit `mut` pattern.
     type_check(concat!(
-        "type Box = ctor I32\n",
+        "type Box = wrap I32\n",
         "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
         "def field_write: mut Ref (x: I32, y: I32) -> () = mut value => { value.x = 1 }\n",
         "def matched = (value: Box) => match value { Box (mut inner) => { inner = 2; inner } }\n",
@@ -2652,7 +2652,7 @@ fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
 #[test]
 fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
     let module = type_check(concat!(
-        "type MyInt = ctor Ref I32\n",
+        "type MyInt = wrap Ref I32\n",
         "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
         "  let MyInt mut inner = my_int\n",
         "  Ref.replace inner value\n",
@@ -2667,7 +2667,7 @@ fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type MyInt = ctor Ref I32\n",
+            "type MyInt = wrap Ref I32\n",
             "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
             "  let MyInt mut inner = my_int\n",
             "  Ref.replace inner value\n",
@@ -2703,7 +2703,7 @@ fn llvm_parameter_count(llvm: &str, function: &str) -> usize {
 #[test]
 fn a_mut_effect_adds_no_hidden_parameter_to_the_abi() {
     let module = type_check(concat!(
-        "type Clock = ctor I32\n",
+        "type Clock = wrap I32\n",
         "def f: mut Ref (I32, I32) -> () = mut p => { p.0 = 1 }\n",
         "def g: mut Ref (I32, I32) ->{Clock} () = mut p => { p.0 = 1 }\n",
     ));
@@ -2823,7 +2823,7 @@ fn parameter_move_markers_must_match_explicit_function_and_trait_effects() {
 #[test]
 fn resource_inference_preserves_parameter_declared_mutation() {
     let module = type_check(concat!(
-        "type Clock = ctor I32\n",
+        "type Clock = wrap I32\n",
         "def use_both = (mut value: Clock) => { value = resource Clock }\n",
     ));
     let function = module
@@ -2955,7 +2955,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
 #[test]
 fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
     type_check(concat!(
-        "type Box = ctor I32\n",
+        "type Box = wrap I32\n",
         "type Empty\n",
         "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
         "def matched = (value: Box | Empty) => match value { Box (mut inner) => { inner = 3; inner }, Empty() => 0 }\n",
@@ -2964,7 +2964,7 @@ fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Resource = ctor I32\n",
+            "type Resource = wrap I32\n",
             "impl Drop Resource { drop = Resource value => () }\n",
             "def invalid = (value: Ref Resource) => { let Ref (mut inner) = value; inner }\n",
         )))
@@ -3050,7 +3050,7 @@ fn derives_trait_delegated_product_indexing() {
 #[test]
 fn delegates_brackets_to_explicit_indexing_implementations() {
     let source = concat!(
-        "type Target = ctor I32\n",
+        "type Target = wrap I32\n",
         "impl Index Target String Target { index = (target, position) => target }\n",
         "impl MutateIndex Target String Target { mutate_index = (mut target, position, move value) => () }\n",
         "let selected: Target = (Target 4)[\"key\"]\n",
@@ -3142,7 +3142,7 @@ fn delegates_indexing_through_refs_to_the_payload() {
         "let fixed: Ref (I32; 3) = Ref (1, 2, 3)\n",
         "let values: Slice I32 = fixed\n",
         "def slice_at: (Ref (Slice I32), USize) -> I32 = (slice, position) => slice[position]\n",
-        "type Keyed = ctor (key: String, value: I32)\n",
+        "type Keyed = wrap (key: String, value: I32)\n",
         "impl Index Keyed String I32 { index = (entry, key) => entry.value }\n",
         "def keyed_at: (Ref Keyed, String) -> I32 = (entry, key) => entry[key]\n",
         "def nested_at: (Ref (Ref (I32; 3)), USize) -> I32 = (values, position) => values[position]\n",
@@ -3167,7 +3167,7 @@ fn delegates_indexed_assignment_through_refs_to_the_payload() {
         "def set_list = (mut list: Ref (List I32), position: USize, value: I32) => { list[position] = value }\n",
         "def set_nested = (mut values: Ref (Ref (I32; 2)), position: USize, value: I32) => { values[position] = value }\n",
         "def set_fixed = (mut values: Ref (I32; 2), position: USize, value: I32) => { values[position] = value }\n",
-        "type Counter = ctor I32\n",
+        "type Counter = wrap I32\n",
         "impl MutateIndex Counter String I32 { mutate_index = (mut counter, key, move value) => () }\n",
         "def set_keyed = (mut counter: Ref Counter, key: String, value: I32) => { counter[key] = value }\n",
         "let list = List.of (1, 2, 3)\n",
@@ -3317,7 +3317,7 @@ fn rejects_slice_iteration_for_non_copy_elements() {
 fn rejects_explicit_indexing_implementations_for_ref_targets() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Target = ctor I32\n",
+            "type Target = wrap I32\n",
             "impl Index Target String Target { index = (target, position) => target }\n",
             "impl Index (Ref Target) String Target { index = (target, position) => target }\n",
         )))
@@ -3542,11 +3542,11 @@ fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
         "impl Default (I32, String) { default = () => (0, \"\") }\n",
         "impl Default () { default = () => () }\n",
         concat!(
-            "type Local = ctor I32\n",
+            "type Local = wrap I32\n",
             "impl Default (Local, I32) { default = () => (Local 0, 0) }\n",
         ),
         concat!(
-            "type Local = ctor I32\n",
+            "type Local = wrap I32\n",
             "impl Default (Ref Local) { default = () => loop {} }\n",
         ),
         concat!(
@@ -3567,13 +3567,13 @@ fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
     }
 
     type_check(concat!(
-        "type Local = ctor I32\n",
+        "type Local = wrap I32\n",
         "impl Default Local { default = () => Local 0 }\n",
         "impl !Copy Local {}\n",
         "let value: Local = default ()\n",
     ));
     type_check(concat!(
-        "type Generic T = ctor T\n",
+        "type Generic T = wrap T\n",
         "impl Default (Generic I32) { default = () => Generic 0 }\n",
         "let value: Generic I32 = default ()\n",
     ));
@@ -3677,8 +3677,8 @@ fn checks_general_satisfies_expressions_and_contextually_types_functions() {
 #[test]
 fn infers_and_lowers_nominal_sums_with_propagation() {
     let module = type_check(concat!(
-        "pub type Ok T = pub ctor T\n",
-        "pub type IOError = pub ctor String\n",
+        "pub type Ok T = pub wrap T\n",
+        "pub type IOError = pub wrap String\n",
         "def read: String -> Ok String | IOError = path => Ok(path)\n",
         "def parse = (path: String) => { let Ok(file)? = read(path); Ok(file) }\n",
         "parse \"input\"\n",
@@ -3708,7 +3708,7 @@ fn infers_and_lowers_nominal_sums_with_propagation() {
 #[test]
 fn exhaustively_matches_sum_values_and_destructures_payloads() {
     let module = type_check(concat!(
-        "pub type IOError = pub ctor String\n",
+        "pub type IOError = pub wrap String\n",
         "def choose = result: Ok I32 | IOError => match result {\n",
         "  Ok value => value,\n",
         "  IOError _ => 0,\n",
@@ -3739,7 +3739,7 @@ fn exhaustively_matches_sum_values_and_destructures_payloads() {
 #[test]
 fn matches_singletons_and_joins_nominal_arm_results() {
     let module = type_check(concat!(
-        "pub type IOError = pub ctor String\n",
+        "pub type IOError = pub wrap String\n",
         "def choose = value: Bool => match value {\n",
         "  True => Ok(1),\n",
         "  False => IOError(\"no\"),\n",
@@ -3769,7 +3769,7 @@ fn matches_singletons_and_joins_nominal_arm_results() {
 #[test]
 fn supports_match_catch_alls_wildcard_parameters_and_returning_arms() {
     let module = type_check(concat!(
-        "pub type IOError = pub ctor String\n",
+        "pub type IOError = pub wrap String\n",
         "def preserve: (Ok I32 | IOError) -> Ok I32 | IOError = result => match result {\n",
         "  Ok value => Ok(value),\n",
         "  other => other,\n",
@@ -3797,7 +3797,7 @@ fn supports_match_catch_alls_wildcard_parameters_and_returning_arms() {
 #[test]
 fn matches_values_of_any_runtime_type() {
     let module = type_check(concat!(
-        "pub type Wrapped = pub ctor I32\n",
+        "pub type Wrapped = pub wrap I32\n",
         "def integer = value: I32 => match value { number => number }\n",
         "def float = value: F64 => match value { _: F64 => value }\n",
         "def identity = value: I32 => value\n",
@@ -3848,7 +3848,7 @@ fn rejects_invalid_match_patterns_and_coverage() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "pub type IOError = pub ctor String\n",
+            "pub type IOError = pub wrap String\n",
             "def invalid = result: Ok I32 | IOError => match result { Ok value => value, }\n",
             "invalid (Ok 1)\n",
         )))
@@ -3860,7 +3860,7 @@ fn rejects_invalid_match_patterns_and_coverage() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "pub type IOError = pub ctor String\n",
+            "pub type IOError = pub wrap String\n",
             "def invalid = result: Ok I32 | IOError => match result {\n",
             "  Ok value => value,\n",
             "  Ok other => other,\n",
@@ -3953,8 +3953,8 @@ fn checks_product_match_coverage_and_reachability() {
 #[test]
 fn injects_and_widens_sum_values() {
     let module = type_check(concat!(
-        "pub type IOError = pub ctor String\n",
-        "pub type ParseError = pub ctor String\n",
+        "pub type IOError = pub wrap String\n",
+        "pub type ParseError = pub wrap String\n",
         "type Result T = alias Ok T | IOError\n",
         "def small: () -> Ok I32 | IOError = () => Ok(1)\n",
         "let reordered: IOError | Ok I32 = small()\n",
@@ -3985,8 +3985,8 @@ fn injects_and_widens_sum_values() {
 #[test]
 fn propagates_each_residual_variant_and_joins_explicit_returns() {
     let module = type_check(concat!(
-        "pub type IOError = pub ctor String\n",
-        "pub type ParseError = pub ctor String\n",
+        "pub type IOError = pub wrap String\n",
+        "pub type ParseError = pub wrap String\n",
         "def fail: () -> Ok I32 | IOError = () => IOError(\"io\")\n",
         "def parse = () => { let Ok(value)? = fail(); return ParseError(\"parse\"); }\n",
         "parse()\n",
@@ -4070,7 +4070,7 @@ fn rejects_unsized_sum_alternatives_and_ambiguous_nominal_patterns() {
 fn rejects_invalid_propagation_and_sum_ffi() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "pub type IOError = pub ctor String\n",
+            "pub type IOError = pub wrap String\n",
             "def invalid = () => { let Ok(value)? = Ok(1); Ok(value) }\n",
         )))
         .expect_err_diagnostics("propagation requires a sum");
@@ -4082,7 +4082,7 @@ fn rejects_invalid_propagation_and_sum_ffi() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "pub type IOError = pub ctor String\n",
+            "pub type IOError = pub wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok(1)\n",
             "def invalid: () -> Ok I32 = () => { let Ok(value)? = read(); Ok(value) }\n",
         )))
@@ -4095,7 +4095,7 @@ fn rejects_invalid_propagation_and_sum_ffi() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "pub type IOError = pub ctor String\n",
+            "pub type IOError = pub wrap String\n",
             "extern \"c\" { invalid: () -> Ok I32 | IOError }\n",
         )))
         .expect_err_diagnostics("sum ABI should remain internal");
@@ -4113,7 +4113,7 @@ fn rejects_propagation_outside_functions_and_non_nominal_roots() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "pub type IOError = pub ctor String\n",
+                "pub type IOError = pub wrap String\n",
                 "let Ok(value)? = Ok(1)\n",
                 "def invalid = () => { let (Ok(value), other)? = (Ok(1), 2); Ok(value) }\n",
             ),
@@ -4339,7 +4339,7 @@ fn binds_whole_copy_values_while_destructuring_them() {
 #[test]
 fn at_patterns_are_structural_in_matches_and_propagation() {
     let module = type_check(concat!(
-        "pub type IOError = pub ctor String\n",
+        "pub type IOError = pub wrap String\n",
         "def read: () -> Ok I32 | IOError = () => Ok(42)\n",
         "def choose = pair: (Bool, I32) => match pair {\n",
         "  whole@(True(), value) => whole.1 + value,\n",
@@ -4540,7 +4540,7 @@ fn rejects_invalid_float_contexts_and_float_ord() {
 fn requires_only_the_core_ordering_methods() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "type Text = ctor String\nimpl PartialOrd Text {}\n",
+            "type Text = wrap String\nimpl PartialOrd Text {}\n",
         ))
         .expect_err_diagnostics("partial_cmp is required");
     assert!(
@@ -4550,7 +4550,7 @@ fn requires_only_the_core_ordering_methods() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("type Text = ctor String\nimpl Ord Text {}\n"))
+        .check(resolve("type Text = wrap String\nimpl Ord Text {}\n"))
         .expect_err_diagnostics("cmp is required");
     assert!(
         diagnostics
@@ -4562,7 +4562,7 @@ fn requires_only_the_core_ordering_methods() {
 #[test]
 fn requires_only_the_core_equality_method() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("type Text = ctor String\nimpl Eq Text {}\n"))
+        .check(resolve("type Text = wrap String\nimpl Eq Text {}\n"))
         .expect_err_diagnostics("eq is required");
     assert!(
         diagnostics
@@ -4571,7 +4571,7 @@ fn requires_only_the_core_equality_method() {
     );
 
     let module = type_check(concat!(
-        "type Point = ctor (x: I32, y: I32)\n",
+        "type Point = wrap (x: I32, y: I32)\n",
         "impl Eq Point { eq = (left, right) => left.x == right.x && left.y == right.y }\n",
         "let a: Point = Point (x: 1, y: 2)\n",
         "let b: Point = Point (x: 1, y: 2)\n",
@@ -4838,7 +4838,7 @@ fn buffer_intrinsics_type_check_and_compile() {
 fn buffer_and_list_are_move_only_and_clone_their_elements() {
     let module = type_check(concat!(
         "use std.buffer.Buffer\nuse std.slice.Slice\n",
-        "type Resource = ctor I32\n",
+        "type Resource = wrap I32\n",
         "impl !Copy Resource {}\n",
         "impl Clone Resource { clone = Resource value => Resource value }\n",
         "def exercise: () -> () = () => {\n",
@@ -4902,7 +4902,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.buffer.Buffer\n",
-            "type Resource = ctor I32\n",
+            "type Resource = wrap I32\n",
             "impl !Copy Resource {}\n",
             "def invalid: Buffer Resource -> Buffer Resource = buffer => Clone.clone buffer\n",
         )))
@@ -5014,7 +5014,7 @@ fn companion_where_bound_resolves_independently_for_every_member() {
     // failed with "trait bound is not satisfied" even when the bound
     // plainly held.
     let module = type_check(concat!(
-        "pub type Box T = pub ctor (value: T)\n",
+        "pub type Box T = pub wrap (value: T)\n",
         "companion<T where Copy T> Box T {\n",
         "    pub def first: Box T -> T = Box value => value\n",
         "    pub def second: Box T -> T = Box value => value\n",
@@ -5044,7 +5044,7 @@ fn macro_declared_inside_a_companion_resolves_as_type_dot_macro() {
     // without repeating the import inside the companion itself.
     let module = type_check(concat!(
         "use std.syntax.*\n",
-        "pub type Box T = pub ctor (value: T)\n",
+        "pub type Box T = pub wrap (value: T)\n",
         "companion<T> Box T {\n",
         "    pub macro of = value: Expr => parse_quote { Box (value: $value) }\n",
         "}\n",
@@ -5091,7 +5091,7 @@ fn rejects_inferred_trait_obligations_whose_impl_bounds_do_not_hold() {
         .check(resolve(concat!(
             "use std.cinterop.CString\n",
             "trait Make T U where T ~> U { make: T -> U }\n",
-            "type Box T = ctor (value: T)\n",
+            "type Box T = wrap (value: T)\n",
             "impl<T where Copy T> Make (Box T) T { make = Box (value) => value }\n",
             "def inferred: Box CString -> () = box => {\n",
             "    let value = Make.make box\n",
@@ -5174,7 +5174,7 @@ fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
 #[test]
 fn validates_the_standard_library_string_representation() {
     let valid_diagnostics = string_contract_diagnostics(concat!(
-        "pub type String = ctor Slice U8\n",
+        "pub type String = wrap Slice U8\n",
         "def exposed_bytes: String -> Slice U8 = String value => value\n",
         "def matched_bytes: String -> Slice U8 = value => match value { String bytes => bytes, }\n",
     ));
@@ -5186,18 +5186,18 @@ fn validates_the_standard_library_string_representation() {
     for (declaration, expected) in [
         (
             "pub type String = opaque\n",
-            "standard library type `String` must be a represented distinct type",
+            "standard library type `String` must be a represented wrapper type",
         ),
         (
-            "pub type String = pub ctor Slice U8\n",
+            "pub type String = pub wrap Slice U8\n",
             "standard library type `String` must keep its representation private",
         ),
         (
-            "pub type String T = ctor Slice U8\n",
+            "pub type String T = wrap Slice U8\n",
             "standard library type `String` must not accept compile-time arguments",
         ),
         (
-            "pub type String = ctor Slice I8\n",
+            "pub type String = wrap Slice I8\n",
             "standard library type `String` must be represented by `Slice U8`, found `Slice I8`",
         ),
     ] {
@@ -5982,7 +5982,7 @@ fn expands_metadata_aware_macros_and_contextual_visibility_splices() {
 fn expands_standard_typegroup_into_module_variants_and_alias() {
     let module = type_check(concat!(
         "pub typegroup Pattern {\n",
-        "    Literal = pub ctor String,\n",
+        "    Literal = pub wrap String,\n",
         "    Wildcard,\n",
         "}\n",
         "pub use Pattern.*\n",
@@ -6004,7 +6004,7 @@ fn typegroup_applies_call_modifiers_to_the_alias_and_entry_modifiers_to_variants
         "typegroup Tagged T {\n",
         "    ///outer\n",
         "    @doc(\"inner\")\n",
-        "    Marked = ctor T,\n",
+        "    Marked = wrap T,\n",
         "    Plain,\n",
         "}\n",
     ));
@@ -6194,19 +6194,19 @@ fn typegroup_supports_generic_groups_and_reexports_their_variants() {
     let module = type_check(concat!(
         "pub typegroup Maybe T {\n",
         "    Missing,\n",
-        "    Present = pub ctor T,\n",
+        "    Present = pub wrap T,\n",
         "}\n",
         "pub use Maybe.*\n",
         "let missing: Maybe I32 = Missing\n",
         "let present: Maybe I32 = Present 1\n",
         "let qualified: Maybe String = Maybe.Present \"value\"\n",
         "pub typegroup Either (L, R,) {\n",
-        "    Left = pub ctor L,\n",
-        "    Right = pub ctor R,\n",
+        "    Left = pub wrap L,\n",
+        "    Right = pub wrap R,\n",
         "}\n",
         "pub typegroup Mixed A (B, C) D {\n",
         "    Empty,\n",
-        "    Value = pub ctor (A, B, C, D),\n",
+        "    Value = pub wrap (A, B, C, D),\n",
         "}\n",
         "let value: (I32, String, Bool, F64) = (1, \"two\", True, 4.0)\n",
         "let mixed: Mixed I32 (String, Bool) F64 = Mixed.Value value\n",
@@ -6221,7 +6221,7 @@ fn typegroup_supports_generic_groups_and_reexports_their_variants() {
 fn typegroup_alias_variants_participate_in_the_generated_sum() {
     let module = type_check(concat!(
         "pub typegroup Example {\n",
-        "    Wrapped = pub ctor I32,\n",
+        "    Wrapped = pub wrap I32,\n",
         "    Number = alias I32,\n",
         "    Empty,\n",
         "}\n",
@@ -6460,11 +6460,11 @@ fn typegroup_variants_require_an_explicit_reexport() {
 fn typegroup_supports_private_construction_compound_types_and_trailing_commas() {
     let module = type_check(concat!(
         "typegroup Local {\n",
-        "    Pair = pub ctor (I32, String),\n",
+        "    Pair = pub wrap (I32, String),\n",
         "    Empty,\n",
         "}\n",
         "pub typegroup Generic {\n",
-        "    Wrapped = pub ctor Option I32,\n",
+        "    Wrapped = pub wrap Option I32,\n",
         "}\n",
         "pub typegroup PublicGroup {\n",
         "    Unit,\n",
@@ -6512,7 +6512,7 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
 #[test]
 fn macro_call_metadata_can_generate_a_public_representation() {
     let module = type_check(concat!(
-        "macro define_box = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote { $visibility type Box = pub ctor I32 } }\n",
+        "macro define_box = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote { $visibility type Box = pub wrap I32 } }\n",
         "pub define_box\n",
         "let boxed: Box = Box 42\n",
     ));
@@ -6611,7 +6611,7 @@ fn diagnoses_invalid_metadata_macro_uses() {
             "visibility may only be spliced onto `let`, `def`, `type`, `extern`, or `trait` declarations",
         ),
         (
-            "type Number = pub ctor I32\n",
+            "type Number = pub wrap I32\n",
             "representation visibility cannot exceed the type's visibility",
         ),
         (
@@ -6686,15 +6686,15 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
             "modifier name `@doc` is reserved by the compiler",
         ),
         (
-            "@doc\ntype Documented = ctor I32\n",
+            "@doc\ntype Documented = wrap I32\n",
             "`@doc` requires a parenthesized string literal",
         ),
         (
-            "@doc(42)\ntype Documented = ctor I32\n",
+            "@doc(42)\ntype Documented = wrap I32\n",
             "`@doc` requires a string literal argument",
         ),
         (
-            "@doc(\"bad\\q\")\ntype Documented = ctor I32\n",
+            "@doc(\"bad\\q\")\ntype Documented = wrap I32\n",
             "unknown string escape `\\q`",
         ),
         (
@@ -6706,11 +6706,11 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
             "`@doc` may only modify a named declaration",
         ),
         (
-            "@recursive_constructor\ntype Box = ctor I32\n",
+            "@recursive_constructor\ntype Box = wrap I32\n",
             "`@recursive_constructor` may only mark a compiler-owned recursive constructor",
         ),
         (
-            "@recursive_constructor(1)\ntype Box = ctor I32\n",
+            "@recursive_constructor(1)\ntype Box = wrap I32\n",
             "`@recursive_constructor` does not accept an argument",
         ),
         (
@@ -7762,7 +7762,7 @@ fn expands_standard_while_with_loop_control() {
 #[test]
 fn expands_standard_for_over_ranges_and_product_iterators() {
     let module = type_check(concat!(
-        "pub type PairIterator = pub ctor (current: I32, end: I32)\n",
+        "pub type PairIterator = pub wrap (current: I32, end: I32)\n",
         "impl Iterator PairIterator (I32, I32) {\n",
         "  next = move PairIterator (current, end) => match current < end {\n",
         "    True() => IterStep.Yield ((current, current + 10), PairIterator (current + 1, end)),\n",
@@ -8551,7 +8551,7 @@ fn compares_refs_through_the_standard_library_eq_implementation() {
         "let different: Bool = a != c\n",
         "let generic: Bool = refs_equal (a, b)\n",
         "let nested: Bool = Ref (Ref 3) == Ref (Ref 3)\n",
-        "type Bag = ctor Buffer I32\n",
+        "type Bag = wrap Buffer I32\n",
         "impl Eq Bag {\n",
         "  eq = (left, right) => Buffer.capacity left.* == Buffer.capacity right.*\n",
         "}\n",
@@ -8585,7 +8585,7 @@ fn rejects_ref_equality_when_the_payload_is_not_eq() {
 #[test]
 fn preserves_literal_nominal_ref_container_semantics() {
     let module = type_check(concat!(
-        "type RefPoint = ctor Ref (x: I32, y: I32)\n",
+        "type RefPoint = wrap Ref (x: I32, y: I32)\n",
         "let point: RefPoint = RefPoint (Ref (x: 3, y: 4))\n",
         "let x: I32 = point.x\n",
         "let RefPoint (Ref (captured_x, captured_y)) = point\n",
@@ -8870,9 +8870,9 @@ fn compiles_logical_not_via_not_trait() {
 #[test]
 fn prefix_operators_dispatch_to_user_defined_impls() {
     let module = type_check(concat!(
-        "type Vec2 = ctor (x: I32, y: I32)\n",
+        "type Vec2 = wrap (x: I32, y: I32)\n",
         "impl Neg Vec2 { negate = (Vec2 (x, y)) => Vec2 (x: 0 - x, y: 0 - y) }\n",
-        "type Flag = ctor (raised: Bool)\n",
+        "type Flag = wrap (raised: Bool)\n",
         "impl Not Flag { not = (Flag (raised)) => Flag (raised: !raised) }\n",
         "let here: Vec2 = Vec2 (x: 3, y: 4)\n",
         "let away: Vec2 = -here\n",
@@ -9003,7 +9003,7 @@ fn provides_to_string_for_prelude_scalar_types() {
 fn provides_formatter_display_debug_and_structural_product_debug() {
     let module = type_check(concat!(
         "use std.fmt.Formatter\n",
-        "type Point = ctor (x: I32, y: I32)\n",
+        "type Point = wrap (x: I32, y: I32)\n",
         "impl Debug Point {\n",
         "  fmt = (Point (x, y), mut formatter) => {\n",
         "    Formatter.write formatter \"Point \"\n",
@@ -9054,9 +9054,9 @@ fn provides_structural_debug_for_sum_types() {
 fn derives_debug_for_nominal_representations() {
     let module = type_check(concat!(
         "use std.fmt.*\n",
-        "@derive_debug\ntype Point = ctor (x: I32, y: I32)\n",
-        "@derive_debug\ntype Choice = ctor I32 | String\n",
-        "@derive_debug\ntype Box T = ctor T\n",
+        "@derive_debug\ntype Point = wrap (x: I32, y: I32)\n",
+        "@derive_debug\ntype Choice = wrap I32 | String\n",
+        "@derive_debug\ntype Box T = wrap T\n",
         "let point_debug: String = Formatter.debug (Point (x: 3, y: 4))\n",
         "let choice_debug: String = Formatter.debug (Choice (42 satisfies I32 | String))\n",
         "let box_debug: String = Formatter.debug (Box 7)\n",
@@ -9121,11 +9121,11 @@ fn quoted_type_declarations_from_one_template_get_distinct_identity() {
 fn exposes_type_declarations_as_structured_items() {
     let module = type_check(concat!(
         "macro @inspect_item: Item -> Item = item => match item {\n",
-        "  TypeDeclarationItem (DistinctDeclaration(), Ident name, spelling, declared_type, parameters, Some representation) => item,\n",
+        "  TypeDeclarationItem (WrapperDeclaration(), Ident name, spelling, declared_type, parameters, Some representation) => item,\n",
         "  UnstructuredItem() => item,\n",
         "  _ => panic \"inspect_item item is unsupported\",\n",
         "}\n",
-        "@inspect_item\ntype Pair T = ctor (T, T)\n",
+        "@inspect_item\ntype Pair T = wrap (T, T)\n",
         "@inspect_item\ndef answer = () => 42\n",
         "let pair = Pair (1, 2)\nlet result = answer ()\n",
     ));
@@ -9139,7 +9139,7 @@ fn exposes_type_declarations_as_structured_items() {
 fn type_checks_and_generates_string_templates() {
     let module = type_check(concat!(
         "use std.fmt.Formatter\n",
-        "type Label = ctor String\n",
+        "type Label = wrap String\n",
         "impl Display Label {\n",
         "  fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
         "}\n",
@@ -9165,7 +9165,7 @@ fn string_templates_require_the_selected_formatting_trait() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.fmt.Formatter\n",
-            "type Secret = ctor I32\n",
+            "type Secret = wrap I32\n",
             "let secret = Secret 1\n",
             "let message = \"$secret\"\n",
         )))
@@ -9182,7 +9182,7 @@ fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_represen
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.fmt.Formatter\n",
-            "type Secret = ctor I32\n",
+            "type Secret = wrap I32\n",
             "let secret = Secret 1\n",
             "let product = (secret,)\n",
             "let text = Formatter.debug product\n",
@@ -9197,7 +9197,7 @@ fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_represen
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.fmt.Formatter\n",
-            "type Secret = ctor I32\n",
+            "type Secret = wrap I32\n",
             "let secret = Secret 1\n",
             "let text = Formatter.debug secret\n",
         )))
@@ -9440,7 +9440,7 @@ fn rejects_invalid_functional_dependency_declarations() {
 #[test]
 fn preserves_applied_types_as_unary_trait_arguments() {
     let module = type_check(concat!(
-        "type Box T = ctor (value: T)\n",
+        "type Box T = wrap (value: T)\n",
         "trait Echo T { echo: T -> T }\n",
         "impl Echo Box I32 { echo = value => value }\n",
         "def echo_box: <T where Echo Box T> (Box T) -> Box T = value => Echo.echo value\n",
@@ -9770,10 +9770,10 @@ fn requires_qualification_for_ambiguous_trait_methods() {
 }
 
 #[test]
-fn constructs_distinct_and_generic_distinct_values() {
+fn constructs_wrapper_and_generic_wrapper_values() {
     let module = type_check(concat!(
-        "type UserId = ctor I32\n",
-        "type Box T = ctor (value: T)\n",
+        "type UserId = wrap I32\n",
+        "type Box T = wrap (value: T)\n",
         "let user: UserId = UserId 42\n",
         "let boxed: Box I32 = Box (value: 42)\n",
     ));
@@ -9856,8 +9856,8 @@ fn contextually_specializes_first_class_generic_functions() {
 #[test]
 fn contextually_specializes_first_class_constructors() {
     let module = type_check(concat!(
-        "type UserId = ctor I32\n",
-        "type Box T = ctor (value: T)\n",
+        "type UserId = wrap I32\n",
+        "type Box T = wrap (value: T)\n",
         "let make_user: I32 -> UserId = UserId\n",
         "let make_box: (value: I32) -> Box I32 = Box\n",
         "let user: UserId = make_user 42\n",
@@ -9872,8 +9872,8 @@ fn contextually_specializes_first_class_constructors() {
 #[test]
 fn destructures_nominal_values_in_lets_and_functions() {
     let module = type_check(concat!(
-        "type UserId = ctor I32\n",
-        "type PairIds = ctor (UserId, UserId)\n",
+        "type UserId = wrap I32\n",
+        "type PairIds = wrap (UserId, UserId)\n",
         "let user: UserId = UserId 42\n",
         "let UserId raw = user\n",
         "let pair: PairIds = PairIds (UserId 1, UserId 2)\n",
@@ -9891,9 +9891,9 @@ fn destructures_nominal_values_in_lets_and_functions() {
 #[test]
 fn accesses_visible_nominal_representations_explicitly_and_by_shortcut() {
     let module = type_check(concat!(
-        "type User = ctor (name: String, age: I32)\n",
-        "type Inner = ctor (name: String, tag: I32)\n",
-        "type Outer = ctor Inner\n",
+        "type User = wrap (name: String, age: I32)\n",
+        "type Inner = wrap (name: String, tag: I32)\n",
+        "type Outer = wrap Inner\n",
         "let mut user = User (name: \"Ada\", age: 42)\n",
         "let inner: (name: String, age: I32) = user.*\n",
         "let name: String = user.*.name\n",
@@ -9912,8 +9912,8 @@ fn accesses_visible_nominal_representations_explicitly_and_by_shortcut() {
 fn representation_access_requires_a_nominal_value_and_unwraps_one_shortcut_layer() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Inner = ctor (name: String, tag: I32)\n",
-            "type Outer = ctor Inner\n",
+            "type Inner = wrap (name: String, tag: I32)\n",
+            "type Outer = wrap Inner\n",
             "let outer = Outer (Inner (name: \"Ada\", tag: 1))\n",
             "let invalid: String = outer.name\n",
             "let also_invalid = (42).*\n",
@@ -9934,7 +9934,7 @@ fn representation_access_requires_a_nominal_value_and_unwraps_one_shortcut_layer
 #[test]
 fn destructures_contextually_typed_generic_nominal_patterns() {
     let module = type_check(concat!(
-        "type Box T = ctor (value: T)\n",
+        "type Box T = wrap (value: T)\n",
         "def unbox: <T> move Box T -> T = move Box (value) => value\n",
         "let answer: I32 = unbox (Box (value: 42))\n",
         "let text: String = unbox (Box (value: \"hello\"))\n",
@@ -9948,7 +9948,7 @@ fn destructures_contextually_typed_generic_nominal_patterns() {
 #[test]
 fn captures_values_bound_by_nominal_patterns() {
     let module = type_check(concat!(
-        "type UserId = ctor I32\n",
+        "type UserId = wrap I32\n",
         "def capture: UserId -> (() -> I32) = user => {\n",
         "  let UserId id = user\n",
         "  () => id\n",
@@ -9995,8 +9995,8 @@ fn rejects_non_nominal_and_mismatched_nominal_patterns() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Left = ctor I32\n",
-            "type Right = ctor I32\n",
+            "type Left = wrap I32\n",
+            "type Right = wrap I32\n",
             "let right: Right = Right 42\n",
             "let Left value = right\n",
         )))
@@ -10042,7 +10042,7 @@ fn monomorphizes_generic_closures_with_captures() {
 fn infers_product_and_result_only_compile_time_parameters() {
     let module = type_check(concat!(
         "def first: <A, B> (move A, B) -> A = (move a, b) => a\n",
-        "type Phantom T = ctor I32\n",
+        "type Phantom T = wrap I32\n",
         "def make: <T> I32 -> Phantom T = x => Phantom x\n",
         "let answer: I32 = first (42, \"ignored\")\n",
         "let contextual: Phantom String = make 7\n",
@@ -10355,7 +10355,7 @@ fn emits_a_native_object_file() {
 #[test]
 fn infers_copy_and_enforces_affine_moves() {
     type_check(concat!(
-        "type Point = ctor (I32, I32)\n",
+        "type Point = wrap (I32, I32)\n",
         "def copied = () => { let point = Point (1, 2); let other = point; point; other }\n",
     ));
 
@@ -10389,7 +10389,7 @@ fn infers_copy_and_enforces_affine_moves() {
 #[test]
 fn borrowed_curried_closures_are_lexically_scoped() {
     let module = type_check(concat!(
-        "type MyString = ctor String\n",
+        "type MyString = wrap String\n",
         "impl !Copy MyString {}\n",
         "companion MyString {\n",
         "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
@@ -10408,7 +10408,7 @@ fn borrowed_curried_closures_are_lexically_scoped() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type MyString = ctor String\n",
+            "type MyString = wrap String\n",
             "impl !Copy MyString {}\n",
             "companion MyString {\n",
             "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
@@ -10426,7 +10426,7 @@ fn borrowed_curried_closures_are_lexically_scoped() {
 #[test]
 fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
     let mutable = type_check(concat!(
-        "type MyString = ctor String\n",
+        "type MyString = wrap String\n",
         "impl !Copy MyString {}\n",
         "companion MyString {\n",
         "  pub def concat = mut a: MyString => b: MyString => MyString (a.* + b.*)\n",
@@ -10443,19 +10443,19 @@ fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
 
     for source in [
         concat!(
-            "type MyString = ctor String\nimpl !Copy MyString {}\n",
+            "type MyString = wrap String\nimpl !Copy MyString {}\n",
             "companion MyString { pub def concat = a: MyString => b: MyString => MyString (a.* + b.*) }\n",
             "def consume = f: (MyString -> MyString) => ()\n",
             "def invalid = value: MyString => consume (MyString.concat value)\n",
         ),
         concat!(
-            "type MyString = ctor String\nimpl !Copy MyString {}\n",
+            "type MyString = wrap String\nimpl !Copy MyString {}\n",
             "companion MyString { pub def concat = a: MyString => b: MyString => MyString (a.* + b.*) }\n",
             "def take = move value: MyString => ()\n",
             "def invalid = move value: MyString => { let append = MyString.concat value; take value }\n",
         ),
         concat!(
-            "type MyString = ctor String\nimpl !Copy MyString {}\n",
+            "type MyString = wrap String\nimpl !Copy MyString {}\n",
             "companion MyString { pub def concat = a: MyString => b: MyString => MyString (a.* + b.*) }\n",
             "def invalid = value: MyString => { let concat = MyString.concat; concat value }\n",
         ),
@@ -10471,14 +10471,14 @@ fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
     }
 
     type_check(concat!(
-        "type MyString = ctor String\nimpl !Copy MyString {}\n",
+        "type MyString = wrap String\nimpl !Copy MyString {}\n",
         "companion MyString { pub def concat = move a: MyString => b: MyString => MyString (a.* + b.*) }\n",
         "def make = move value: MyString => MyString.concat value\n",
     ));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type MyString = ctor String\nimpl !Copy MyString {}\n",
+            "type MyString = wrap String\nimpl !Copy MyString {}\n",
             "def combine = (left: MyString, right: MyString) => tail: MyString => MyString (left.* + right.* + tail.*)\n",
             "def take = move value: MyString => ()\n",
             "def invalid = (move left: MyString, move right: MyString) => {\n",
@@ -10498,7 +10498,7 @@ fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
 fn exposes_copy_but_rejects_explicit_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Value = ctor I32\n",
+            "type Value = wrap I32\n",
             "impl Copy Value {}\n",
         )))
         .expect_err_diagnostics("Copy implementations must be inferred");
@@ -10552,7 +10552,7 @@ fn c_string_to_string_consumes_its_argument() {
 fn negative_copy_impl_opts_a_nominal_type_out_of_copy_without_drop() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Handle = ctor I32\n",
+            "type Handle = wrap I32\n",
             "impl !Copy Handle {}\n",
             "def invalid = (move value: Handle) => { let moved = value; value }\n",
         )))
@@ -10566,7 +10566,7 @@ fn negative_copy_impl_opts_a_nominal_type_out_of_copy_without_drop() {
     // Declaring `!Copy` alone does not require a `drop` method or add
     // destructor glue: the type is move-only but not finalized.
     type_check(concat!(
-        "type Handle = ctor I32\n",
+        "type Handle = wrap I32\n",
         "impl !Copy Handle {}\n",
         "def make = () => Handle 1\n",
     ));
@@ -10576,7 +10576,7 @@ fn negative_copy_impl_opts_a_nominal_type_out_of_copy_without_drop() {
 fn rejects_negative_impl_for_traits_other_than_copy() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Handle = ctor I32\n",
+            "type Handle = wrap I32\n",
             "impl !Drop Handle {}\n",
         )))
         .expect_err_diagnostics("only `Copy` can be negated");
@@ -10605,7 +10605,7 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
     // coherence rejects it and selection needs no precedence rule.
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Box T = ctor (T)\n",
+            "type Box T = wrap (T)\n",
             "impl<T> Drop (Box T) { drop = Box value => () }\n",
             "impl Drop (Box I32) { drop = Box value => () }\n",
         )))
@@ -10619,7 +10619,7 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
     // A `Drop` bound may constrain only the implementation's own parameters.
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Box T = ctor (T)\n",
+            "type Box T = wrap (T)\n",
             "impl<T where Copy (Box T)> Drop (Box T) { drop = Box value => () }\n",
         )))
         .expect_err_diagnostics("a bound on the header type is rejected");
@@ -10633,7 +10633,7 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
     // `Copy`, so copying it is a move error.
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Box T = ctor (T)\n",
+            "type Box T = wrap (T)\n",
             "impl<T> Drop (Box T) { drop = Box value => () }\n",
             "def dup: <T> Box T -> (Box T, Box T) = value => (value, value)\n",
         )))
@@ -10648,7 +10648,7 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
 #[test]
 fn lowers_custom_drop_and_gc_finalizer_glue() {
     let module = type_check(concat!(
-        "type Resource = ctor I32\n",
+        "type Resource = wrap I32\n",
         "impl Drop Resource { drop = Resource value => () }\n",
         "def release = () => { let resource = Resource 7; drop resource }\n",
         "def managed = () => Ref (Resource 9)\n",
@@ -10780,7 +10780,7 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
 #[test]
 fn lowers_path_sensitive_drop_flags() {
     let module = type_check(concat!(
-        "type Resource = ctor I32\n",
+        "type Resource = wrap I32\n",
         "impl Drop Resource { drop = Resource value => () }\n",
         "def conditional = (flag: Bool, move resource: Resource) => match flag {\n",
         "  True() => { drop resource; () },\n",
@@ -10852,7 +10852,7 @@ fn rejects_invalid_string_literal_narrowing() {
 #[test]
 fn matches_literal_sets_strings_and_mixed_nominal_unions() {
     let module = type_check(concat!(
-        "type Some = ctor String\n",
+        "type Some = wrap String\n",
         "def pure: (\"yes\" | \"no\") -> String = value => match value {\n",
         "  \"yes\" => \"affirmative\",\n",
         "  \"no\" => \"negative\",\n",
@@ -11196,7 +11196,7 @@ fn checks_reachability_correctly_after_a_top_level_loop_with_break() {
 #[test]
 fn checks_ownership_across_loop_exits_and_back_edges() {
     let module = type_check(concat!(
-        "type Resource = ctor I32\n",
+        "type Resource = wrap I32\n",
         "impl Drop Resource { drop = Resource _ => () }\n",
         "def choose: Bool -> Resource = condition => loop {\n",
         "  let value = Resource 1\n",
@@ -11215,7 +11215,7 @@ fn checks_ownership_across_loop_exits_and_back_edges() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Resource = ctor I32\n",
+            "type Resource = wrap I32\n",
             "impl Drop Resource { drop = Resource _ => () }\n",
             "def invalid = (move value: Resource) => loop {\n",
             "  let consumed = value\n",
@@ -11233,13 +11233,13 @@ fn checks_ownership_across_loop_exits_and_back_edges() {
 #[test]
 fn pub_repr_type_constructor_satisfies_its_own_subtype_bound() {
     let module = type_check(concat!(
-        "pub type Ident2 Spelling where Spelling <: String = pub ctor Spelling\n",
+        "pub type Ident2 Spelling where Spelling <: String = pub wrap Spelling\n",
         "let literal: Ident2 String = Ident2 \"answer\"\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
-        .expect("distinct type whose representation is a bare bounded parameter should compile");
+        .expect("wrapper type whose representation is a bare bounded parameter should compile");
 }
 
 #[test]
@@ -11439,7 +11439,7 @@ fn every_copy_type_gets_a_blanket_clone_implementation() {
 #[test]
 fn a_non_copy_type_can_implement_clone_manually() {
     let module = type_check(concat!(
-        "type Resource = ctor I32\n",
+        "type Resource = wrap I32\n",
         "impl Drop Resource { drop = Resource value => () }\n",
         "impl Clone Resource { clone = Resource value => Resource value }\n",
         "def duplicate: Resource -> Resource = resource => Clone.clone resource\n",
@@ -11641,7 +11641,7 @@ fn rejects_opaque_types_in_sized_positions() {
             "def invalid: () -> Token = () => loop {}\n",
             "function parameters and results must be sized",
         ),
-        ("type Invalid = ctor Token\n", "must be sized"),
+        ("type Invalid = wrap Token\n", "must be sized"),
         (
             "type Invalid = alias (Token, I32)\ndef use_invalid: Ref Invalid -> () = _ => ()\n",
             "must be sized",
@@ -11655,7 +11655,7 @@ fn rejects_opaque_types_in_sized_positions() {
             "implicit `Sized` bound",
         ),
         (
-            "type Box T = ctor T\ntype Invalid = alias Box Token\ndef use_invalid: Ref Invalid -> () = _ => ()\n",
+            "type Box T = wrap T\ntype Invalid = alias Box Token\ndef use_invalid: Ref Invalid -> () = _ => ()\n",
             "implicit `Sized` bound",
         ),
     ] {
@@ -11853,9 +11853,9 @@ fn parameter_product_aliases_normalize_function_parameters() {
 fn parameter_products_survive_nominal_type_arguments_and_specialization() {
     let module = type_check(concat!(
         "type Inputs = alias [I32, I32]\n",
-        "type Handler Args = ctor (callback: Args -> I32, label: String)\n",
-        "type Wrapped Args = ctor Args -> I32\n",
-        "type Tag P = ctor I32\n",
+        "type Handler Args = wrap (callback: Args -> I32, label: String)\n",
+        "type Wrapped Args = wrap Args -> I32\n",
+        "type Tag P = wrap I32\n",
         "def add: Inputs -> I32 = [x, y] => x + y\n",
         "def identity: Handler Inputs -> Handler Inputs = h => h\n",
         "let handler: Handler Inputs = Handler (callback: add, label: \"sum\")\n",
@@ -11888,14 +11888,14 @@ fn rejects_parameter_products_in_value_positions() {
     for suffix in [
         "let invalid: Inputs = 1\n",
         "type Nested = alias (Inputs, Inputs) -> ()\n",
-        "type Payload = ctor Inputs\n",
+        "type Payload = wrap Inputs\n",
         "type Bad = alias (Inputs, I32)\nlet invalid: Bad = (1, 2)\n",
         "def invalid: I32 -> Inputs = x => x\n",
         "let invalid: Inputs | I32 = 1\n",
         "def invalid: [Inputs, I32] -> I32 = [x, y] => y\n",
         "let invalid: (...Inputs) = (1, 2)\n",
         "def invalid: mut Inputs -> () = mut x => ()\n",
-        "type Box T = ctor (value: T)\nlet invalid: Box Inputs = Box 1\n",
+        "type Box T = wrap (value: T)\nlet invalid: Box Inputs = Box 1\n",
         "type Bad A = alias (A, I32)\nlet invalid: Bad Inputs = (1, 2)\n",
     ] {
         let source = format!("type Inputs = alias [I32, I32]\n{suffix}");
@@ -11915,7 +11915,7 @@ fn rejects_parameter_products_in_value_positions() {
 #[test]
 fn capable_generic_signatures_accept_juxtaposed_callbacks() {
     let module = type_check(concat!(
-        "type Registry A = ctor (callback: A -> (), label: String)\n",
+        "type Registry A = wrap (callback: A -> (), label: String)\n",
         "def keep: <A> [Registry A, A -> ()] -> Registry A = [registry, callback] => registry\n",
         "def add: [I32, I32] -> () = [a, b] => ()\n",
         "let registry: Registry [I32, I32] = Registry (callback: add, label: \"sum\")\n",
@@ -11931,9 +11931,9 @@ fn capable_generic_signatures_accept_juxtaposed_callbacks() {
 #[test]
 fn capable_generic_bodies_cannot_call_unknown_arity_parameters() {
     let diagnostics = TypeChecker::new()
-        .check(resolve(
-            concat!("def bad: <A> (A -> ()) -> () = f => f 1\n",),
-        ))
+        .check(resolve(concat!(
+            "def bad: <A> (A -> ()) -> () = f => f 1\n",
+        )))
         .expect_err_diagnostics("unknown arity cannot be called");
     assert!(
         diagnostics
@@ -11980,7 +11980,7 @@ fn single_value_generic_signatures_reject_juxtaposed_callbacks() {
 #[test]
 fn companion_capability_is_decided_per_member() {
     let prefix = concat!(
-        "type Handler A = ctor (callback: A -> I32, label: String)\n",
+        "type Handler A = wrap (callback: A -> I32, label: String)\n",
         "companion<A> Handler A {\n",
         " pub def get_callback: Handler A -> A -> I32 = handler => handler.callback\n",
         " pub def evaluate: [Handler A, A] -> I32 = [handler, value] => handler.callback value\n",
@@ -12033,7 +12033,7 @@ fn opaque_and_phantom_parameters_accept_parameter_products() {
         "type Handle Args = opaque\n",
         "def pointer: CPointer Inputs -> CPointer Inputs = value => value\n",
         "def task: move Task Inputs -> Task Inputs = move value => value\n",
-        "type Outer P = ctor (handle: Ref (Handle P))\n",
+        "type Outer P = wrap (handle: Ref (Handle P))\n",
         "extern \"c\" { foreign: Ref (Handle Inputs) -> Outer Inputs }\n",
     ));
 }
@@ -12104,7 +12104,7 @@ fn parameter_product_spreads_validate_after_substitution() {
 #[test]
 fn parameter_products_pass_through_generic_impl_headers() {
     let module = type_check(concat!(
-        "type Handler A = ctor (callback: A -> (), label: String)\n",
+        "type Handler A = wrap (callback: A -> (), label: String)\n",
         "trait Inspect T { inspect: T -> () }\n",
         "impl<A> Inspect (Handler A) { inspect = handler => () }\n",
         "def callback: [I32, I32] -> () = [a, b] => ()\n",

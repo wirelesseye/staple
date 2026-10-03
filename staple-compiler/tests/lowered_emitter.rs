@@ -72,7 +72,7 @@ fn strict_emission_of_a_mixed_program_has_no_placeholder_bodies() {
         "use std.coroutine.*\n",
         "def first: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
         "def second: () -> () = () => with Reactive = reactive_scope () { reaction { () } }\n",
-        "type Point = ctor (I32, I32)\n",
+        "type Point = wrap (I32, I32)\n",
         "let point: Point = Point (1, 2)\n",
         "let make: () -> ((I32, I32) -> Point) = () => Point\n",
         "let pair = (1, 2)\n",
