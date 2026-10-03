@@ -1251,7 +1251,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value_llvm = self.backend.compile_type(&value_type)?;
                 let slot = self
                     .backend
-                    .builder
+                    .entry_builder()
                     .build_alloca(value_llvm, "resolver.value.slot")
                     .map_err(compiler_diagnostic)?;
                 self.backend

@@ -165,6 +165,10 @@ pub(crate) struct LoweredEmissions {
     /// Ground truth references outside runtime internals and the entry harness.
     #[cfg(test)]
     pub(crate) runtime_references: Vec<(String, String)>,
+    /// `(function, instruction)` for every `alloca` outside its function's
+    /// entry block, including the linked runtime modules.
+    #[cfg(test)]
+    pub(crate) misplaced_allocas: Vec<(String, String)>,
 }
 
 #[cfg(test)]
@@ -233,6 +237,25 @@ fn snapshot_lowered(llvm_module: &LlvmModule<'_>, _module: &LoweredModule) -> Lo
                 .filter(|name| !catalog.contains(name))
                 .collect();
             referenced_runtime_symbols(llvm_module, &excluded)
+        },
+        #[cfg(test)]
+        misplaced_allocas: {
+            let mut misplaced = Vec::new();
+            for function in llvm_module.get_functions() {
+                let name = function.get_name().to_string_lossy().into_owned();
+                for block in function.get_basic_blocks().into_iter().skip(1) {
+                    for instruction in block.get_instructions() {
+                        if instruction.get_opcode() == inkwell::values::InstructionOpcode::Alloca {
+                            misplaced.push((
+                                name.clone(),
+                                inkwell::values::AnyValue::print_to_string(&instruction)
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+            misplaced
         },
     }
 }

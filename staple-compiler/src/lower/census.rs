@@ -129,3 +129,20 @@ pub(crate) fn assert_catalog_census(
         );
     }
 }
+
+/// Every compiled function allocates its stack slots in its entry block. A slot
+/// outside the entry block is allocated again on every pass through a loop, so
+/// the stack would grow with the iteration count. The hand-written runtime
+/// modules manage their own frames and are excluded.
+pub(crate) fn assert_entry_block_allocas(label: &str, emitted: &crate::codegen::LoweredEmissions) {
+    let runtime = crate::lower::worklist::runtime_module_symbols();
+    let misplaced = emitted
+        .misplaced_allocas
+        .iter()
+        .filter(|(function, _)| !runtime.contains(function))
+        .collect::<Vec<_>>();
+    assert!(
+        misplaced.is_empty(),
+        "stack slots are allocated outside an entry block: {misplaced:?}\n{label}"
+    );
+}

@@ -753,6 +753,26 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(product.into())
     }
 
+    /// A builder positioned at the start of the current function's entry block.
+    /// Every stack slot is allocated through it, so a slot created inside a
+    /// loop body is allocated once per call and reused on each iteration
+    /// instead of growing the stack.
+    pub(crate) fn entry_builder(&self) -> inkwell::builder::Builder<'context> {
+        let builder = self.context.create_builder();
+        let entry = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .and_then(|function| function.get_first_basic_block());
+        if let Some(entry) = entry {
+            match entry.get_first_instruction() {
+                Some(first) => builder.position_before(&first),
+                None => builder.position_at_end(entry),
+            }
+        }
+        builder
+    }
+
     /// Allocates storage for a concrete parameter type and stores its value.
     pub(crate) fn build_argument_temporary(
         &self,
@@ -762,7 +782,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
         let pointer = self
-            .builder
+            .entry_builder()
             .build_alloca(llvm_type, name)
             .map_err(compiler_diagnostic)?;
         self.builder
@@ -780,7 +800,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
         let capacity = self.context.i32_type().const_int(128, false);
         let buffer = self
-            .builder
+            .entry_builder()
             .build_array_alloca(self.context.i8_type(), capacity, "to_string.buffer")
             .map_err(compiler_diagnostic)?;
         let format = match numeric {
@@ -1031,7 +1051,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     ) -> CodeGenerationResult<SumStorageSlot<'context>> {
         let llvm_type = self.compile_sum_type(sum)?;
         let slot = self
-            .builder
+            .entry_builder()
             .build_alloca(llvm_type, "sum.target")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         self.builder
@@ -1096,7 +1116,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             Diagnostic::new(span.clone(), "sum alternative is not a first-class value")
         })?;
         let source_slot = self
-            .builder
+            .entry_builder()
             .build_alloca(source_type, "sum.source")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         self.builder
@@ -1128,7 +1148,7 @@ impl<'program, 'context> Backend<'program, 'context> {
     ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
         let sum_type = self.compile_sum_type(sum)?;
         let sum_slot = self
-            .builder
+            .entry_builder()
             .build_alloca(sum_type, "sum.extract.source")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         self.builder
@@ -1149,7 +1169,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         })?;
         let alternative_type = self.compile_type(alternative)?;
         let alternative_slot = self
-            .builder
+            .entry_builder()
             .build_alloca(alternative_type, "sum.extract.value")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         self.builder
@@ -1314,7 +1334,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         self.build_trap_if(out, span)?;
         let output_type = self.compile_type(output)?;
         let output_slot = self
-            .builder
+            .entry_builder()
             .build_alloca(output_type, "index.result")
             .map_err(compiler_diagnostic)?;
         self.builder
@@ -1392,7 +1412,7 @@ impl<'program, 'context> Backend<'program, 'context> {
 
         let result_type = self.compile_type(result)?;
         let result_slot = self
-            .builder
+            .entry_builder()
             .build_alloca(result_type, "next.result")
             .map_err(compiler_diagnostic)?;
 

@@ -2576,6 +2576,7 @@ mod tests {
             }
             crate::lower::census::assert_catalog_census(program.name, &lowered, &emitted);
             assert_focus_emissions(program, &lowered, &emitted.defined_functions);
+            crate::lower::census::assert_entry_block_allocas(program.name, &emitted);
             defined += emitted.defined_functions.len();
         }
 

@@ -823,7 +823,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .build_store(parent_slot, ptr_type.const_null())
             .map_err(compiler_diagnostic)?;
         let leaf_out = self
-            .builder
+            .entry_builder()
             .build_alloca(ptr_type, "coro.leaf")
             .map_err(compiler_diagnostic)?;
 

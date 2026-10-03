@@ -692,7 +692,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .const_null();
                 let pointer = self
                     .backend
-                    .builder
+                    .entry_builder()
                     .build_alloca(value.get_type(), "drop.borrow")
                     .map_err(compiler_diagnostic)?;
                 self.backend
@@ -1384,7 +1384,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )?
         } else {
             self.backend
-                .builder
+                .entry_builder()
                 .build_alloca(cell_type, "binding.cell")
                 .map_err(compiler_diagnostic)?
         };
@@ -1506,7 +1506,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 let live = self
                     .backend
-                    .builder
+                    .entry_builder()
                     .build_alloca(self.backend.context.bool_type(), "drop.live")
                     .map_err(compiler_diagnostic)?;
                 self.backend
@@ -1659,7 +1659,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let ty = self.backend.compile_type(&resource.resource.value_type)?;
                     let slot = self
                         .backend
-                        .builder
+                        .entry_builder()
                         .build_alloca(ty, "io.resource")
                         .map_err(compiler_diagnostic)?;
                     self.backend
@@ -1872,7 +1872,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )?;
                 let index_slot = self
                     .backend
-                    .builder
+                    .entry_builder()
                     .build_alloca(self.backend.size_type, "buffer.finalize.index")
                     .map_err(compiler_diagnostic)?;
                 self.backend
@@ -2144,7 +2144,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.builder.position_at_end(entry);
         let stack_bottom = self
             .backend
-            .builder
+            .entry_builder()
             .build_alloca(self.backend.context.i8_type(), "gc.stack.bottom")
             .map_err(compiler_diagnostic)?;
         let set_stack_bottom = self
@@ -3495,7 +3495,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .unwrap_basic();
         let storage = self
             .backend
-            .builder
+            .entry_builder()
             .build_alloca(formatter.get_type(), "template.formatter.storage")
             .map_err(compiler_diagnostic)?;
         self.backend
@@ -6430,7 +6430,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let llvm_type = self.backend.compile_type(&provider.resource.value_type)?;
                 let slot = self
                     .backend
-                    .builder
+                    .entry_builder()
                     .build_alloca(llvm_type, "resource.provider")
                     .map_err(compiler_diagnostic)?;
                 let value = value_as_basic(value).ok_or_else(|| {
@@ -7224,7 +7224,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let option_type = self.backend.compile_sum_type(option)?;
         let result_slot = self
             .backend
-            .builder
+            .entry_builder()
             .build_alloca(option_type, "buffer.pop.result")
             .map_err(compiler_diagnostic)?;
         self.backend
@@ -7528,7 +7528,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)?;
         let index_slot = self
             .backend
-            .builder
+            .entry_builder()
             .build_alloca(self.backend.size_type, "buffer.clone.index.slot")
             .map_err(compiler_diagnostic)?;
         self.backend

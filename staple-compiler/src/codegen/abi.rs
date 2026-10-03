@@ -74,7 +74,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         for (index, value) in values.iter().enumerate() {
             if indirect[index] && !mutations[index] {
                 let pointer = self
-                    .builder
+                    .entry_builder()
                     .build_alloca(self.compile_type(parameter_types[index])?, "trait.argument")
                     .map_err(compiler_diagnostic)?;
                 self.builder

@@ -207,19 +207,19 @@ impl<'program, 'context> Backend<'program, 'context> {
         let byte_type = self.context.i8_type();
         self.builder.position_at_end(entry);
         let index_slot = self
-            .builder
+            .entry_builder()
             .build_alloca(self.size_type, "index")
             .map_err(compiler_diagnostic)?;
         let remaining_slot = self
-            .builder
+            .entry_builder()
             .build_alloca(byte_type, "remaining")
             .map_err(compiler_diagnostic)?;
         let minimum_slot = self
-            .builder
+            .entry_builder()
             .build_alloca(byte_type, "minimum")
             .map_err(compiler_diagnostic)?;
         let maximum_slot = self
-            .builder
+            .entry_builder()
             .build_alloca(byte_type, "maximum")
             .map_err(compiler_diagnostic)?;
         for (slot, value) in [

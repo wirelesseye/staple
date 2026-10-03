@@ -239,7 +239,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 let pointer = self
                     .backend
-                    .builder
+                    .entry_builder()
                     .build_alloca(
                         self.backend
                             .compile_type(structural_argument(plan, span)?)?,
