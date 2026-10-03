@@ -612,7 +612,7 @@ impl<'a> Classifier<'a> {
             | DEFINITION
             | if binding.mutable || binding.signal {
                 MUTABLE
-            } else if binding.kind == BindingKind::Let {
+            } else if matches!(binding.kind, BindingKind::Let | BindingKind::Extern) {
                 0
             } else {
                 READONLY

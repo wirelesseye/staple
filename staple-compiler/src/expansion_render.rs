@@ -170,8 +170,8 @@ fn visibility_prefix(visibility: Visibility) -> &'static str {
 fn render_binding(program: &Program, binding: &staple_syntax::Binding) -> String {
     let mut out = String::new();
     out.push_str(visibility_prefix(binding.visibility));
-    if !binding.external {
-        out.push_str(binding.keyword());
+    if let Some(keyword) = binding.keyword() {
+        out.push_str(keyword);
         out.push(' ');
         if binding.mutable {
             out.push_str("mut ");

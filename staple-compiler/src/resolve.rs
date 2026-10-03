@@ -2646,9 +2646,9 @@ impl NameResolver {
         if binding.kind == BindingKind::Const {
             self.const_symbols.insert(symbol);
         }
-        if binding.kind == BindingKind::Def || binding.external {
+        if matches!(binding.kind, BindingKind::Def | BindingKind::Extern) {
             self.overloadable_symbols.insert(symbol);
-            if binding.external || binding_declares_function(binding) {
+            if binding.is_extern() || binding_declares_function(binding) {
                 self.function_candidate_symbols.insert(symbol);
             }
         }
@@ -5346,10 +5346,10 @@ impl NameResolver {
                     .insert(symbol, binding.syntax.span.clone());
                 symbol
             });
-        let overloadable = binding.kind == BindingKind::Def || binding.external;
+        let overloadable = matches!(binding.kind, BindingKind::Def | BindingKind::Extern);
         if overloadable {
             self.overloadable_symbols.insert(symbol);
-            if binding.external || binding_declares_function(binding) {
+            if binding.is_extern() || binding_declares_function(binding) {
                 self.function_candidate_symbols.insert(symbol);
             }
         }
@@ -6114,7 +6114,7 @@ fn analyze_compile_item(
                         .as_ref()
                         .and_then(|value| compile_expression_type(value, scope))
                 });
-            let mut prefix = binding.keyword().to_owned();
+            let mut prefix = binding.keyword().unwrap_or_default().to_owned();
             if binding.mutable {
                 prefix.push_str(" mut");
             }

@@ -417,6 +417,9 @@ pub enum BindingKind {
     Let,
     Def,
     Const,
+    /// A member of an `extern` block, written as a bare `name: Type` with no
+    /// keyword in source.
+    Extern,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -427,9 +430,6 @@ pub struct Binding {
     pub kind: BindingKind,
     pub mutable: bool,
     pub signal: bool,
-    /// Whether this binding is a member of an `extern` block, written as a
-    /// bare `name: Type` with no `let`/`def`/`const` keyword in source.
-    pub external: bool,
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
@@ -439,19 +439,26 @@ pub struct Binding {
 }
 
 impl Binding {
-    pub fn keyword(&self) -> &'static str {
+    /// The keyword that introduces this binding, or `None` for extern members,
+    /// which are written without one.
+    pub fn keyword(&self) -> Option<&'static str> {
         match self.kind {
-            BindingKind::Def => "def",
-            BindingKind::Let => "let",
-            BindingKind::Const => "const",
+            BindingKind::Def => Some("def"),
+            BindingKind::Let => Some("let"),
+            BindingKind::Const => Some("const"),
+            BindingKind::Extern => None,
         }
     }
 
+    pub fn is_extern(&self) -> bool {
+        self.kind == BindingKind::Extern
+    }
+
     pub fn declaration_prefix(&self) -> String {
-        if self.external {
+        let Some(keyword) = self.keyword() else {
             return "<extern>".to_owned();
-        }
-        let mut prefix = self.keyword().to_owned();
+        };
+        let mut prefix = keyword.to_owned();
         if self.mutable {
             prefix.push_str(" mut");
         }

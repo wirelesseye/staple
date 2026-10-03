@@ -1286,7 +1286,7 @@ impl ExternalScan<'_> {
             CompletionItemKind::VARIABLE
         };
         let name = &binding.name;
-        let detail = match (&binding.annotation, binding.external) {
+        let detail = match (&binding.annotation, binding.is_extern()) {
             (Some(annotation), true) => {
                 format!("{}: {}", name, annotation.syntax().text().trim())
             }

@@ -1511,10 +1511,9 @@ impl Grammar {
                 syntax: self.syntax(binding_start),
                 docs,
                 visibility: Visibility::Private,
-                kind: BindingKind::Let,
+                kind: BindingKind::Extern,
                 mutable: false,
                 signal: false,
-                external: true,
                 name,
                 type_parameters: Vec::new(),
                 trait_bounds: Vec::new(),
@@ -1741,7 +1740,7 @@ impl Grammar {
                 BindingKind::Let => {
                     return Err(self.error("`let` bindings require an initializer"));
                 }
-                BindingKind::Def => {}
+                BindingKind::Def | BindingKind::Extern => {}
             }
         }
         Ok(Binding {
@@ -1751,7 +1750,6 @@ impl Grammar {
             kind,
             mutable,
             signal,
-            external: false,
             name,
             type_parameters,
             trait_bounds,
