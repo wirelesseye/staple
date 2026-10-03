@@ -1418,7 +1418,7 @@ own product-construction trait instead:
 trait ProductDefault T { product_default: () -> T }
 
 impl ProductDefault (I32, Bool) {
-    def product_default = () => (0, False)
+    product_default = () => (0, False)
 }
 
 let pair: (I32, Bool) = product_default ()
@@ -1983,7 +1983,7 @@ after the call:
 ```staple
 type File = ctor I32
 impl Drop File {
-    def drop = File descriptor => close descriptor
+    drop = File descriptor => close descriptor
 }
 
 def describe: File -> String = file => "file $file"
@@ -2184,17 +2184,17 @@ type. Member types are taken from the trait and do not need to be repeated:
 
 ```staple
 impl ToString I32 {
-    def to_string = number => {
+    to_string = number => {
         // ...
     }
 }
 
 impl Add I32 I32 I32 {
-    def add = (left, right) => left + right
+    add = (left, right) => left + right
 }
 
 impl Convert (I32, String) {
-    def convert = value => "converted"
+    convert = value => "converted"
 }
 ```
 
@@ -2279,10 +2279,10 @@ bounds.
 trait Bound T { check: T -> Bool }
 trait Target T { act: T -> T }
 
-impl Bound I32 { def check = value => True }
+impl Bound I32 { check = value => True }
 
 impl <T where Bound T> Target T {
-    def act = value => value
+    act = value => value
 }
 ```
 
@@ -3036,7 +3036,7 @@ nested values directly to either formatting trait:
 type Point = ctor (x: I32, y: I32)
 
 impl Debug Point {
-    def fmt = (Point (x, y), formatter) => {
+    fmt = (Point (x, y), formatter) => {
         Formatter.write formatter "Point "
         Debug.fmt ((x: x, y: y), formatter)
     }
@@ -3234,7 +3234,7 @@ trait Drop T {
 
 type File = ctor I32
 impl Drop File {
-    def drop = File descriptor => close descriptor
+    drop = File descriptor => close descriptor
 }
 
 type Handle = ctor I32
@@ -3255,7 +3255,7 @@ such a value is a move error even if some instantiation would qualify.
 ```staple
 type Box T = ctor (T)
 impl<T where Copy T> Drop (Box T) {
-    def drop = Box value => ()
+    drop = Box value => ()
 }
 
 // `Box I32` has the custom destructor above; `Box CString` does not (its
@@ -3274,7 +3274,7 @@ trait Clone T {
 }
 
 impl<T where Copy T> Clone T {
-    def clone = value => value
+    clone = value => value
 }
 ```
 
@@ -3285,7 +3285,7 @@ explicit duplication:
 type Handle = ctor I32
 impl !Copy Handle {}
 impl Clone Handle {
-    def clone = Handle descriptor => Handle descriptor
+    clone = Handle descriptor => Handle descriptor
 }
 ```
 

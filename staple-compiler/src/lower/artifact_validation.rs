@@ -407,7 +407,7 @@ mod tests {
             "use std.buffer.*\n",
             "extern \"c\" { inspect: CString -> I32 }\n",
             "type Resource = ctor I32\n",
-            "impl Drop Resource { def drop = Resource value => () }\n",
+            "impl Drop Resource { drop = Resource value => () }\n",
             "let make_resource: () -> (Resource -> Ref Resource) = () => Ref\n",
             "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
             "def pick: Bool -> (CString | I32) = condition => when { condition => c_string \"a\", else => 1 }\n",

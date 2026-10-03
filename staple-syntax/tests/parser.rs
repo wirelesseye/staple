@@ -556,7 +556,7 @@ fn parses_traits_implementations_and_bounds_losslessly() {
         "  to_string: T -> String\n",
         "}\n",
         "impl ToString I32 {\n",
-        "  def to_string = number => \"number\"\n",
+        "  to_string = number => \"number\"\n",
         "}\n",
         "def print: <T where ToString T> T -> () = value => ()\n",
     );
@@ -586,6 +586,15 @@ fn parses_traits_implementations_and_bounds_losslessly() {
 }
 
 #[test]
+fn rejects_def_keyword_on_implementation_members() {
+    let source = concat!(
+        "trait Show T { show: T -> String }\n",
+        "impl Show I32 { def show = value => \"\" }\n",
+    );
+    parse(source).expect_err("impl members are written without `def`");
+}
+
+#[test]
 fn parses_negative_trait_implementations_losslessly() {
     let source = concat!("type Handle = ctor I32\n", "impl !Copy Handle {}\n",);
     let root = parse(source).expect("negative impl syntax should parse");
@@ -606,13 +615,13 @@ fn parses_generic_conditional_trait_implementations_losslessly() {
         "trait Other T { verify: T -> Bool }\n",
         "trait Target T { act: T -> T }\n",
         "impl Target I32 {\n",
-        "  def act = value => value\n",
+        "  act = value => value\n",
         "}\n",
         "impl <T where Bound T> Target T {\n",
-        "  def act = value => value\n",
+        "  act = value => value\n",
         "}\n",
         "impl <T where Bound T, Other T> Target T {\n",
-        "  def act = value => value\n",
+        "  act = value => value\n",
         "}\n",
     );
     let root = parse(source).expect("generic trait implementation syntax should parse");
@@ -649,8 +658,8 @@ fn parses_curried_and_product_trait_parameters_and_arguments() {
     let source = concat!(
         "trait Add Left Right Output { add: (Left, Right) -> Output }\n",
         "trait Convert (From, To) { convert: From -> To }\n",
-        "impl Add I32 I32 I32 { def add = (left, right) => left + right }\n",
-        "impl Convert (I32, String) { def convert = value => \"converted\" }\n",
+        "impl Add I32 I32 I32 { add = (left, right) => left + right }\n",
+        "impl Convert (I32, String) { convert = value => \"converted\" }\n",
         "def combine: <L, R, O where Add L R O> (L, R) -> O = pair => Add.add pair\n",
     );
     let root = parse(source).expect("multi-parameter trait syntax should parse");

@@ -8,11 +8,11 @@ trait Label T {
 }
 
 impl Label I32 {
-    def label = _ => "integer"
+    label = _ => "integer"
 }
 
 impl Label Bool {
-    def label = value => match value {
+    label = value => match value {
         True => "true",
         False => "false",
     }

@@ -12,15 +12,15 @@ pub typegroup Bool {
 pub use Bool.*
 
 impl Display Bool {
-    def fmt = (value, mut formatter) => formatter^write (if value { "True" } else { "False" })
+    fmt = (value, mut formatter) => formatter^write (if value { "True" } else { "False" })
 }
 
 impl Debug Bool {
-    def fmt = (value, mut formatter) => Display.fmt (value, formatter)
+    fmt = (value, mut formatter) => Display.fmt (value, formatter)
 }
 
 impl Eq Bool {
-    def eq = (left, right) => match (left, right) {
+    eq = (left, right) => match (left, right) {
         (True(), True()) => True,
         (False(), False()) => True,
         _ => False,
@@ -28,5 +28,5 @@ impl Eq Bool {
 }
 
 impl Not Bool {
-    def not = value => if value { False } else { True }
+    not = value => if value { False } else { True }
 }

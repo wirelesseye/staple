@@ -1206,7 +1206,7 @@ fn inline_glob_reexports_types_traits_and_macros() {
         "main.sta",
         concat!(
             "use library.*\n",
-            "impl Identity I32 { def identity = value => value }\n",
+            "impl Identity I32 { identity = value => value }\n",
             "let answer: Number = identity (reveal 42)\n",
             "let ready: Variant.Ready = Variant.Ready\n",
         ),
@@ -1278,7 +1278,7 @@ fn imports_public_traits_and_discovers_loaded_global_implementations() {
         "implementations.sta",
         concat!(
             "use traits\n",
-            "impl traits.Increment I32 { def increment = value => value + 1 }\n",
+            "impl traits.Increment I32 { increment = value => value + 1 }\n",
         ),
     );
     fixture.write(
@@ -1349,8 +1349,8 @@ fn preserves_trait_prerequisites_across_modules() {
         "implementations.sta",
         concat!(
             "use traits\n",
-            "impl traits.Derived I32 { def derived = value => value }\n",
-            "impl traits.Base I32 { def base = value => value }\n",
+            "impl traits.Derived I32 { derived = value => value }\n",
+            "impl traits.Base I32 { base = value => value }\n",
         ),
     );
     fixture.write(
@@ -1379,7 +1379,7 @@ fn preserves_trait_functional_dependencies_across_modules() {
         "implementations.sta",
         concat!(
             "use traits\n",
-            "impl traits.Iterator I32 String { def next = value => \"next\" }\n",
+            "impl traits.Iterator I32 String { next = value => \"next\" }\n",
         ),
     );
     fixture.write(
@@ -1412,7 +1412,7 @@ fn imports_and_specializes_default_trait_members() {
         "implementations.sta",
         concat!(
             "use traits\n",
-            "impl traits.Increment I32 { def increment = value => value + 1 }\n",
+            "impl traits.Increment I32 { increment = value => value + 1 }\n",
         ),
     );
     fixture.write(
@@ -2368,7 +2368,7 @@ fn enforces_trait_implementation_orphan_rules_across_packages() {
         concat!(
             "pub trait Convert From To { convert: From -> To }\n",
             "pub type External = pub ctor I32\n",
-            "impl Convert External I32 { def convert = value => value.* }\n",
+            "impl Convert External I32 { convert = value => value.* }\n",
         ),
     );
     fs::create_dir_all(fixture.root.join("app")).unwrap();
@@ -2387,7 +2387,7 @@ fn enforces_trait_implementation_orphan_rules_across_packages() {
         "app/src/main.sta",
         concat!(
             "use lib.(Convert, External)\n",
-            "impl Convert External String { def convert = value => \"external\" }\n",
+            "impl Convert External String { convert = value => \"external\" }\n",
         ),
     );
     let graph = staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
@@ -2417,7 +2417,7 @@ fn enforces_trait_implementation_orphan_rules_across_packages() {
         concat!(
             "use lib.Convert\n",
             "type Local = ctor I32\n",
-            "impl Convert I32 Local { def convert = value => Local value }\n",
+            "impl Convert I32 Local { convert = value => Local value }\n",
             "let converted: Local = Convert.convert 42\n",
         ),
     );

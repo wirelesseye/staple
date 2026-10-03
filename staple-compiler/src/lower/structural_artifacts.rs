@@ -1038,7 +1038,7 @@ mod tests {
     fn managed_ref_constructor_plans_a_finalizer_exactly_when_drop_is_needed() {
         let (module, lowered) = lower(concat!(
             "type Resource = ctor I32\n",
-            "impl Drop Resource { def drop = Resource value => () }\n",
+            "impl Drop Resource { drop = Resource value => () }\n",
             "let make: () -> (Resource -> Ref Resource) = () => Ref\n",
             "let make_copy: () -> (I32 -> Ref I32) = () => Ref\n",
         ));
@@ -1259,7 +1259,7 @@ mod tests {
     fn mutate_index_records_drop_previous_exactly_when_drop_is_needed() {
         let (module, lowered) = lower(concat!(
             "type Resource = ctor I32\n",
-            "impl Drop Resource { def drop = Resource value => () }\n",
+            "impl Drop Resource { drop = Resource value => () }\n",
             "def mutate_copy: (I32, I32) -> (I32, I32) = pair => {\n",
             "  let mut copy = pair\n",
             "  copy[0] = 3\n",
@@ -1544,7 +1544,7 @@ mod tests {
     fn deref_index_delegates_to_an_explicit_index_implementation() {
         let (_, lowered) = lower(concat!(
             "type Row = ctor (I32, I32)\n",
-            "impl Index Row USize I32 { def index = (row, position) => 7 }\n",
+            "impl Index Row USize I32 { index = (row, position) => 7 }\n",
             "def deref_row: (Ref Row, USize) -> I32 = (reference, position) => reference[position]\n",
             "let value = deref_row (Ref (Row (1, 2)), 0)\n",
         ));
@@ -1689,7 +1689,7 @@ mod tests {
     fn debug_delegates_to_an_explicit_generic_implementation_instance() {
         let (_, lowered) = lower(concat!(
             "type Held T = ctor (T)\n",
-            "impl<T where Debug T> Debug (Held T) { def fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
+            "impl<T where Debug T> Debug (Held T) { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
             "def show_mixed: (Held I32, I32) -> String = pair => \"${pair:?}\"\n",
             "let text = show_mixed (Held 1, 2)\n",
         ));
@@ -1742,9 +1742,9 @@ mod tests {
     fn closure_rounds_and_growth_stay_bounded() {
         let (_, lowered) = lower(concat!(
             "type Resource = ctor I32\n",
-            "impl Drop Resource { def drop = Resource value => () }\n",
+            "impl Drop Resource { drop = Resource value => () }\n",
             "type Held T = ctor (T)\n",
-            "impl<T where Debug T> Debug (Held T) { def fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
+            "impl<T where Debug T> Debug (Held T) { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }\n",
             "def index_pair: <T where Copy T> ((T, T), USize) -> T = (pair, position) => pair[position]\n",
             "def show_nested: ((I32, I32), (I32, I32)) -> String = nested => \"${nested:?}\"\n",
             "def show_mixed: (Held I32, I32) -> String = pair => \"${pair:?}\"\n",

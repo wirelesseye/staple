@@ -10,5 +10,5 @@ pub trait Clone T {
 }
 
 impl<T where Copy T> Clone T {
-    def clone = value => value
+    clone = value => value
 }

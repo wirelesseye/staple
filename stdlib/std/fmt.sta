@@ -36,7 +36,7 @@ def derived_debug_implementation:
         Sequence () => {
             parse_quote {
                 impl Debug $target {
-                    def fmt = ($value_pattern, mut formatter) => {
+                    fmt = ($value_pattern, mut formatter) => {
                         formatter^write $name_expression
                         formatter^write " "
                         Debug.fmt ($inner_name, formatter)
@@ -47,7 +47,7 @@ def derived_debug_implementation:
         _ => {
             parse_quote {
                 impl<$parameters... where Debug $representation> Debug $target {
-                    def fmt = ($value_pattern, mut formatter) => {
+                    fmt = ($value_pattern, mut formatter) => {
                         formatter^write $name_expression
                         formatter^write " "
                         Debug.fmt ($inner_name, formatter)
@@ -65,7 +65,7 @@ def derived_singleton_debug_implementation: (String, Type) -> Item = (name, targ
     let name_expression = StringExpr name
     parse_quote {
         impl Debug $target {
-            def fmt = (_, mut formatter) => formatter^write $name_expression
+            fmt = (_, mut formatter) => formatter^write $name_expression
         }
     } satisfies Item
 }
@@ -182,13 +182,13 @@ companion Formatter {
 }
 
 impl<T where Display T> ToString T {
-    def to_string = value => Formatter.display value
+    to_string = value => Formatter.display value
 }
 
 impl Display String {
-    def fmt = (value, mut formatter) => formatter^write value
+    fmt = (value, mut formatter) => formatter^write value
 }
 
 impl Debug String {
-    def fmt = (value, mut formatter) => formatter_write_debug (formatter, value)
+    fmt = (value, mut formatter) => formatter_write_debug (formatter, value)
 }

@@ -49,5 +49,5 @@ companion<T> Buffer T {
 }
 
 impl<T where Clone T> Clone (Buffer T) {
-    def clone = buffer => __buffer_clone buffer
+    clone = buffer => __buffer_clone buffer
 }

@@ -2053,7 +2053,7 @@ impl Declaration {
 
     /// The declared, generic signature shown as the primary hover line:
     /// keeps the `def`/`let` prefix and the `<T …>` generic prefix, e.g.
-    /// `def identity: <T> move T -> T`.
+    /// `identity: <T> move T -> T`.
     fn declared_signature(&self, declared: &str) -> String {
         match &self.prefix {
             Some(prefix) => format!("{prefix} {}: {}{declared}", self.name, self.generics),
@@ -2580,7 +2580,7 @@ mod tests {
         let source = concat!(
             "///Converts a value to its string representation.\n",
             "trait ToString T { to_string: T -> String }\n",
-            "impl ToString I32 { def to_string = value => \"\" }\n",
+            "impl ToString I32 { to_string = value => \"\" }\n",
             "def f: I32 -> String = ToString.to_string\n",
         );
         let path = std::env::temp_dir().join("staple-hover-trait-access.sta");
@@ -3071,7 +3071,7 @@ mod tests {
     fn formats_def_and_trait_member_declarations() {
         let source = concat!(
             "trait Identity T { identity: T -> T }\n",
-            "impl Identity I32 { def identity = value => value }\n",
+            "impl Identity I32 { identity = value => value }\n",
             "def apply = () => identity 1\n",
             "apply\n",
         );
@@ -3262,8 +3262,8 @@ mod tests {
         let source = concat!(
             "trait Bound T { check: T -> Bool }\n",
             "trait Target T { act: move T -> T }\n",
-            "impl Bound I32 { def check = value => True }\n",
-            "impl <T where Bound T> Target T { def act = move value => value }\n",
+            "impl Bound I32 { check = value => True }\n",
+            "impl <T where Bound T> Target T { act = move value => value }\n",
         );
         let path = std::env::temp_dir().join("staple-hover-generic-impl-test.sta");
         let program = ProgramLoader::new()

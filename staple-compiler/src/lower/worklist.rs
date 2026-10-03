@@ -2939,7 +2939,7 @@ mod tests {
     fn declared_bound_calls_select_concrete_methods() {
         let (module, program) = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
             "let shown: Bool = show_bound 1\n",
         ));
@@ -2985,8 +2985,8 @@ mod tests {
             "  test_show: T -> Bool\n",
             "  test_other: T -> Bool = value => test_show value\n",
             "}\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
-            "impl TestShow U8 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
+            "impl TestShow U8 { test_show = _ => True }\n",
             "def use_other: <T where TestShow T> T -> Bool = value => test_other value\n",
             "let applied: Bool = use_other 1\n",
             "let other: Bool = use_other (1 satisfies U8)\n",

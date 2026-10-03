@@ -30,7 +30,7 @@ pub def range_inclusive : <T where Copy T> T -> T -> RangeInclusive T = start =>
 )
 
 impl Iterator (Range I8) I8 {
-    def next = move Range (current, end) => if (current < end) {
+    next = move Range (current, end) => if (current < end) {
         Yield (
             current,
             Range (
@@ -47,11 +47,11 @@ impl Iterator (Range I8) I8 {
 }
 
 impl IntoIterator (Range I8) (Range I8) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (RangeInclusive I8) I8 {
-    def next = move RangeInclusive (current, end, finished) => when {
+    next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
@@ -82,11 +82,11 @@ impl Iterator (RangeInclusive I8) I8 {
 }
 
 impl IntoIterator (RangeInclusive I8) (RangeInclusive I8) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (Range I16) I16 {
-    def next = move Range (current, end) => if (current < end) {
+    next = move Range (current, end) => if (current < end) {
         Yield (
             current,
             Range (
@@ -103,11 +103,11 @@ impl Iterator (Range I16) I16 {
 }
 
 impl IntoIterator (Range I16) (Range I16) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (RangeInclusive I16) I16 {
-    def next = move RangeInclusive (current, end, finished) => when {
+    next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
@@ -138,11 +138,11 @@ impl Iterator (RangeInclusive I16) I16 {
 }
 
 impl IntoIterator (RangeInclusive I16) (RangeInclusive I16) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (Range I32) I32 {
-    def next = move Range (current, end) => if (current < end) {
+    next = move Range (current, end) => if (current < end) {
         Yield (
             current,
             Range (
@@ -159,11 +159,11 @@ impl Iterator (Range I32) I32 {
 }
 
 impl IntoIterator (Range I32) (Range I32) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (RangeInclusive I32) I32 {
-    def next = move RangeInclusive (current, end, finished) => when {
+    next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
@@ -194,11 +194,11 @@ impl Iterator (RangeInclusive I32) I32 {
 }
 
 impl IntoIterator (RangeInclusive I32) (RangeInclusive I32) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (Range I64) I64 {
-    def next = move Range (current, end) => if (current < end) {
+    next = move Range (current, end) => if (current < end) {
         Yield (
             current,
             Range (
@@ -215,11 +215,11 @@ impl Iterator (Range I64) I64 {
 }
 
 impl IntoIterator (Range I64) (Range I64) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (RangeInclusive I64) I64 {
-    def next = move RangeInclusive (current, end, finished) => when {
+    next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
@@ -250,11 +250,11 @@ impl Iterator (RangeInclusive I64) I64 {
 }
 
 impl IntoIterator (RangeInclusive I64) (RangeInclusive I64) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (Range U8) U8 {
-    def next = move Range (current, end) => if (current < end) {
+    next = move Range (current, end) => if (current < end) {
         Yield (
             current,
             Range (
@@ -271,11 +271,11 @@ impl Iterator (Range U8) U8 {
 }
 
 impl IntoIterator (Range U8) (Range U8) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (RangeInclusive U8) U8 {
-    def next = move RangeInclusive (current, end, finished) => when {
+    next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
@@ -306,11 +306,11 @@ impl Iterator (RangeInclusive U8) U8 {
 }
 
 impl IntoIterator (RangeInclusive U8) (RangeInclusive U8) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (Range U16) U16 {
-    def next = move Range (current, end) => if (current < end) {
+    next = move Range (current, end) => if (current < end) {
         Yield (
             current,
             Range (
@@ -327,11 +327,11 @@ impl Iterator (Range U16) U16 {
 }
 
 impl IntoIterator (Range U16) (Range U16) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (RangeInclusive U16) U16 {
-    def next = move RangeInclusive (current, end, finished) => when {
+    next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
@@ -362,11 +362,11 @@ impl Iterator (RangeInclusive U16) U16 {
 }
 
 impl IntoIterator (RangeInclusive U16) (RangeInclusive U16) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (Range U32) U32 {
-    def next = move Range (current, end) => if (current < end) {
+    next = move Range (current, end) => if (current < end) {
         Yield (
             current,
             Range (
@@ -383,11 +383,11 @@ impl Iterator (Range U32) U32 {
 }
 
 impl IntoIterator (Range U32) (Range U32) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (RangeInclusive U32) U32 {
-    def next = move RangeInclusive (current, end, finished) => when {
+    next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
@@ -418,11 +418,11 @@ impl Iterator (RangeInclusive U32) U32 {
 }
 
 impl IntoIterator (RangeInclusive U32) (RangeInclusive U32) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (Range U64) U64 {
-    def next = move Range (current, end) => if (current < end) {
+    next = move Range (current, end) => if (current < end) {
         Yield (
             current,
             Range (
@@ -439,11 +439,11 @@ impl Iterator (Range U64) U64 {
 }
 
 impl IntoIterator (Range U64) (Range U64) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (RangeInclusive U64) U64 {
-    def next = move RangeInclusive (current, end, finished) => when {
+    next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
@@ -474,11 +474,11 @@ impl Iterator (RangeInclusive U64) U64 {
 }
 
 impl IntoIterator (RangeInclusive U64) (RangeInclusive U64) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (Range ISize) ISize {
-    def next = move Range (current, end) => if (current < end) {
+    next = move Range (current, end) => if (current < end) {
         Yield (
             current,
             Range (
@@ -495,11 +495,11 @@ impl Iterator (Range ISize) ISize {
 }
 
 impl IntoIterator (Range ISize) (Range ISize) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (RangeInclusive ISize) ISize {
-    def next = move RangeInclusive (current, end, finished) => when {
+    next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
@@ -530,11 +530,11 @@ impl Iterator (RangeInclusive ISize) ISize {
 }
 
 impl IntoIterator (RangeInclusive ISize) (RangeInclusive ISize) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (Range USize) USize {
-    def next = move Range (current, end) => if (current < end) {
+    next = move Range (current, end) => if (current < end) {
         Yield (
             current,
             Range (
@@ -551,11 +551,11 @@ impl Iterator (Range USize) USize {
 }
 
 impl IntoIterator (Range USize) (Range USize) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }
 
 impl Iterator (RangeInclusive USize) USize {
-    def next = move RangeInclusive (current, end, finished) => when {
+    next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
@@ -586,5 +586,5 @@ impl Iterator (RangeInclusive USize) USize {
 }
 
 impl IntoIterator (RangeInclusive USize) (RangeInclusive USize) {
-    def into_iterator = move iterator => iterator
+    into_iterator = move iterator => iterator
 }

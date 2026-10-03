@@ -1652,8 +1652,8 @@ mod tests {
         let source = concat!(
             "trait Bound T { check: T -> Bool }\n",
             "trait Target T { act: move T -> T }\n",
-            "impl Bound I32 { def check = value => True }\n",
-            "impl <T where Bound T> Target T { def act = move value => value }\n",
+            "impl Bound I32 { check = value => True }\n",
+            "impl <T where Bound T> Target T { act = move value => value }\n",
         );
         let path = std::env::temp_dir().join("staple-semantic-generic-impl.sta");
         let program = ProgramLoader::new()
@@ -2071,7 +2071,7 @@ mod tests {
     fn classifies_trait_qualified_access() {
         let source = concat!(
             "trait ToString T { to_string: T -> String }\n",
-            "impl ToString I32 { def to_string = value => \"\" }\n",
+            "impl ToString I32 { to_string = value => \"\" }\n",
             "def f: I32 -> String = ToString.to_string\n",
         );
         let path = std::env::temp_dir().join("staple-semantic-trait-access.sta");
@@ -2114,7 +2114,7 @@ mod tests {
     fn classifies_bare_trait_function() {
         let source = concat!(
             "type Wrapper = ctor I32\n",
-            "impl ToString Wrapper { def to_string = value => \"\" }\n",
+            "impl ToString Wrapper { to_string = value => \"\" }\n",
             "def f: Wrapper -> String = to_string\n",
         );
         let path = std::env::temp_dir().join("staple-semantic-trait-bare.sta");

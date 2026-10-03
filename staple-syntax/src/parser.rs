@@ -1173,7 +1173,6 @@ impl Grammar {
             }
             let member_start = self.position;
             let docs = self.parse_member_docs(member_start)?;
-            self.expect(TokenKind::Def, "expected `def` in trait implementation")?;
             let name = self
                 .expect(TokenKind::Identifier, "expected implementation member name")?
                 .text;

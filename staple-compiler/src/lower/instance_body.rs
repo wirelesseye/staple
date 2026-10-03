@@ -4968,7 +4968,7 @@ mod tests {
     fn concrete_product_call_slots_are_recorded_and_revalidated() {
         let module = checked_program(concat!(
             "trait Merge Left Right Output { merge: (Left, Right) -> Output }\n",
-            "impl Merge I32 I32 I32 { def merge = (left, right) => left + right }\n",
+            "impl Merge I32 I32 I32 { merge = (left, right) => left + right }\n",
             "def combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\n",
             "let total: I32 = combine (20, 22)\n",
         ));

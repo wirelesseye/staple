@@ -179,7 +179,7 @@ static CORPUS: [CorpusProgram; 87] = [
                 "type Point = ctor (I32, I32)\n",
                 "let make: () -> ((I32, I32) -> Point) = () => Point\n",
                 "type Resource = ctor I32\n",
-                "impl Drop Resource { def drop = Resource value => () }\n",
+                "impl Drop Resource { drop = Resource value => () }\n",
                 "let make_resource: () -> (Resource -> Ref Resource) = () => Ref\n",
                 "def ref_maker: <T where Copy T> () -> (T -> Ref T) = () => Ref\n",
                 "let maker_i32: I32 -> Ref I32 = ref_maker ()\n",
@@ -271,7 +271,7 @@ static CORPUS: [CorpusProgram; 87] = [
             "let pair = (1, 2)\n",
             "let shown = \"${pair:?}\"\n",
             "type Resource = ctor I32\n",
-            "impl Drop Resource { def drop = Resource value => () }\n",
+            "impl Drop Resource { drop = Resource value => () }\n",
             "let reference: Ref Resource = Ref (Resource 1)\n",
             "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",
             "def counter: () -> I32 = () => {\n",
@@ -524,7 +524,7 @@ static CORPUS: [CorpusProgram; 87] = [
                 concat!(
                     "type Point = ctor (I32, I32)\n",
                     "type Resource = ctor I32\n",
-                    "impl Drop Resource { def drop = Resource value => () }\n",
+                    "impl Drop Resource { drop = Resource value => () }\n",
                     "def make: I32 -> Point = x => Point (x, x)\n",
                     "def call_make: I32 -> Point = x => make x\n",
                     // A managed `Ref` construction inside a function, so the
@@ -731,8 +731,8 @@ static CORPUS: [CorpusProgram; 87] = [
                 concat!(
                     "type Counter = ctor I32\n",
                     "type Wrapper = ctor (value: I32)\n",
-                    "impl Index Counter String I32 { def index = (counter, key) => 0 }\n",
-                    "impl MutateIndex Counter String I32 { def mutate_index = (mut counter, key, move value) => () }\n",
+                    "impl Index Counter String I32 { index = (counter, key) => 0 }\n",
+                    "impl MutateIndex Counter String I32 { mutate_index = (mut counter, key, move value) => () }\n",
                     "def make_counter = () => Counter 0\n",
                     "\n",
                     "def places = (mut direct: I32, mut pair: (I32, I32), mut wrapper: Wrapper, mut counter: Counter, mut values: (I32; 2)) => {\n",
@@ -884,7 +884,7 @@ static CORPUS: [CorpusProgram; 87] = [
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = ctor CString\n",
-                    "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
+                    "impl Drop Tag { drop = Tag text => { puts text; () } }\n",
                     "\n",
                     "def scoped: () -> () = () => {\n",
                     "    let a = Tag (c_string \"scope\")\n",
@@ -898,7 +898,7 @@ static CORPUS: [CorpusProgram; 87] = [
                     "\n",
                     "type Ok = ctor I32\n",
                     "type Bad = ctor CString\n",
-                    "impl Drop Bad { def drop = Bad text => { puts text; () } }\n",
+                    "impl Drop Bad { drop = Bad text => { puts text; () } }\n",
                     "def fails: () -> Ok | Bad = () => Bad (c_string \"failure\")\n",
                     "def propagated: () -> Ok | Bad = () => {\n",
                     "    let c = Tag (c_string \"propagate\")\n",
@@ -987,7 +987,7 @@ static CORPUS: [CorpusProgram; 87] = [
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Handle = ctor CString\n",
-                    "impl Drop Handle { def drop = Handle text => { puts text; () } }\n",
+                    "impl Drop Handle { drop = Handle text => { puts text; () } }\n",
                     "type Wrapper = ctor Handle\n",
                     "type Left = ctor (CString, I32)\n",
                     "type Right = ctor (I32, I32)\n",
@@ -1034,7 +1034,7 @@ static CORPUS: [CorpusProgram; 87] = [
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Payload = ctor CString\n",
-                    "impl Drop Payload { def drop = Payload value => () }\n",
+                    "impl Drop Payload { drop = Payload value => () }\n",
                     "\n",
                     "def make_ref: () -> Ref Payload = () => Ref (Payload (c_string \"ref\"))\n",
                     "\n",
@@ -1065,8 +1065,8 @@ static CORPUS: [CorpusProgram; 87] = [
                     "use std.slice.Slice\n",
                     "use std.cinterop.(CString, c_string)\n",
                     "type Tag = ctor CString\n",
-                    "impl Drop Tag { def drop = Tag text => () }\n",
-                    "impl Clone Tag { def clone = Tag text => Tag (c_string \"clone\") }\n",
+                    "impl Drop Tag { drop = Tag text => () }\n",
+                    "impl Clone Tag { clone = Tag text => Tag (c_string \"clone\") }\n",
                     "\n",
                     "def basics: () -> USize = () => {\n",
                     "    let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
@@ -1186,7 +1186,7 @@ static CORPUS: [CorpusProgram; 87] = [
                 r#"use std.cinterop.(CString, c_string)
 extern "c" { puts: CString -> I32 }
 type Held T = ctor (T)
-impl<T where Debug T> Debug (Held T) { def fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }
+impl<T where Debug T> Debug (Held T) { fmt = (Held value, mut formatter) => Debug.fmt (value, formatter) }
 def nested: ((I32, I32), (I32, I32)) -> String = pair => "${pair:?}"
 def named: (left: I32, right: I32) -> String = pair => "${pair:?}"
 def sum: (I32 | U8) -> String = value => "${value:?}"
@@ -1222,7 +1222,7 @@ puts (CString.from_string (nested_sum ((14 satisfies U8) satisfies ((I32, I32) |
                 r#"use std.cinterop.CString
 extern "c" { puts: CString -> I32 }
 type Row = ctor (I32, I32)
-impl Index Row USize I32 { def index = (row, position) => 7 }
+impl Index Row USize I32 { index = (row, position) => 7 }
 def mixed: (U8, I32) -> (I32 | U8) = pair => pair[1]
 def uniform: (I32, I32) -> I32 = pair => pair[0]
 def replace: (I32, I32) -> (I32, I32) = pair => { let mut own = pair; own[0] = 3; own }
@@ -1274,7 +1274,7 @@ walk_uniform (3, 4)
                 r#"use std.cinterop.(CString, c_string)
 extern "c" { puts: CString -> I32 }
 type Tag = ctor CString
-impl Drop Tag { def drop = Tag text => { puts text; () } }
+impl Drop Tag { drop = Tag text => { puts text; () } }
 def replace_owned: move (Tag, Tag) -> () = move pair => {
     let mut own = pair
     own[0] = Tag (c_string "replacement")
@@ -1297,7 +1297,7 @@ replace_owned (Tag (c_string "old"), Tag (c_string "second"))
                 r#"use std.cinterop.(CString, c_string)
 extern "c" { puts: CString -> I32 }
 type Tag = ctor CString
-impl Drop Tag { def drop = Tag text => { puts text; () } }
+impl Drop Tag { drop = Tag text => { puts text; () } }
 def ref_mutate: move (Ref (Tag, Tag)) -> () = move reference => {
     let mut own = reference
     own[0] = Tag (c_string "ref replacement")
@@ -1678,7 +1678,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = ctor CString\n",
-                    "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
+                    "impl Drop Tag { drop = Tag text => { puts text; () } }\n",
                     "def tag: move CString -> Tag = move text => Tag text\n",
                     "def with_tags: () -> Coroutine{Tasks, IO} () = () => coro {\n",
                     "  let first = tag (c_string \"first\")\n",
@@ -1777,7 +1777,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
     must_run(expect_stdout(
         inline(
             "product_trait_argument",
-            "trait Merge Left Right Output { merge: (Left, Right) -> Output }\nimpl Merge I32 I32 I32 { def merge = (left, right) => left + right }\ndef combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\nlet total: I32 = combine (20, 22)\n",
+            "trait Merge Left Right Output { merge: (Left, Right) -> Output }\nimpl Merge I32 I32 I32 { merge = (left, right) => left + right }\ndef combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\nlet total: I32 = combine (20, 22)\n",
             "emission",
         ),
         "",
@@ -2044,7 +2044,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = ctor CString\n",
-                    "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
+                    "impl Drop Tag { drop = Tag text => { puts text; () } }\n",
                     "def tag: move CString -> Tag = move text => Tag text\n",
                     "def completes: () -> Coroutine{} () = () => coro {\n",
                     "    let kept = tag (c_string \"complete\")\n",
@@ -2116,7 +2116,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Box T = ctor (T)\n",
-                    "impl<T where Copy T> Drop (Box T) { def drop = Box value => { puts (c_string \"copy box\"); () } }\n",
+                    "impl<T where Copy T> Drop (Box T) { drop = Box value => { puts (c_string \"copy box\"); () } }\n",
                     "def run_i32: () -> () = () => { let b = Box 2; () }\n",
                     "def run_product: () -> () = () => { let b = Box (1, 2); () }\n",
                     "def run_cstring: () -> () = () => { let b = Box (c_string \"free me\"); () }\n",
@@ -2162,7 +2162,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "use std.io.(IO, println)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Wrapper T = ctor (T)\n",
-                    "impl<T> Drop (Wrapper T) { def drop = Wrapper value => { puts (c_string \"wrapper\"); () } }\n",
+                    "impl<T> Drop (Wrapper T) { drop = Wrapper value => { puts (c_string \"wrapper\"); () } }\n",
                     "def wrap: <T> move T -> Wrapper T = move value => Wrapper value\n",
                     "def run_i32: () -> () = () => { let w = wrap 1; () }\n",
                     "def run_cstring: () -> () = () => { let w = wrap (c_string \"x\"); () }\n",
@@ -2191,9 +2191,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "    ()\n",
                     "}\n",
                     "type Inner = ctor CString\n",
-                    "impl Drop Inner { def drop = Inner text => { puts text; () } }\n",
+                    "impl Drop Inner { drop = Inner text => { puts text; () } }\n",
                     "type Outer T = ctor (T)\n",
-                    "impl<T> Drop (Outer T) { def drop = Outer value => { puts (c_string \"outer\"); () } }\n",
+                    "impl<T> Drop (Outer T) { drop = Outer value => { puts (c_string \"outer\"); () } }\n",
                     "def outer: <T> move T -> Outer T = move value => Outer value\n",
                     "def owned_parameter: () -> () = () => {\n",
                     "    let value = outer (Inner (c_string \"inner\"))\n",
@@ -2269,9 +2269,9 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "use std.cinterop.(CString, c_string)\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = ctor CString\n",
-                    "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
+                    "impl Drop Tag { drop = Tag text => { puts text; () } }\n",
                     "trait Measure T { measure: T -> I32 }\n",
-                    "impl Measure Tag { def measure = tag => 1 }\n",
+                    "impl Measure Tag { measure = tag => 1 }\n",
                     "def borrow: Tag -> I32 = tag => 1\n",
                     "def take: move Tag -> I32 = move tag => 2\n",
                     "def pair: (Tag, I32) -> I32 = (tag, count) => count\n",
@@ -2341,7 +2341,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "use std.buffer.Buffer\n",
                     "extern \"c\" { puts: CString -> I32 }\n",
                     "type Tag = ctor CString\n",
-                    "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
+                    "impl Drop Tag { drop = Tag text => { puts text; () } }\n",
                     "def from_array: () -> Ref Tag = () => {\n",
                     "    let values: Slice Tag = Ref (Tag (c_string \"drop array first\"), Tag (c_string \"drop array second\"), Tag (c_string \"drop array third\"))\n",
                     "    Slice.get_ref values 2\n",

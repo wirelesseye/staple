@@ -3140,7 +3140,7 @@ mod tests {
     fn evidence_only_and_effect_only_parameters_are_found() {
         let (_, program) = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
             "def effectful: <effect E> () ->{E} () = () => ()\n",
             "let applied = show_bound 1\n",
@@ -3192,7 +3192,7 @@ mod tests {
             "use std.coroutine.(Coroutine)\n",
             "use std.fmt.Formatter\n",
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "type Counter = ctor (value: I32)\n",
             "type Ok T = ctor T\n",
             "type IOError = ctor String\n",
@@ -3995,12 +3995,12 @@ mod tests {
     fn resolves_direct_explicit_methods_and_defaults() {
         let (module, program) = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "trait TestDefaulted T {\n",
             "  test_primary: T -> Bool\n",
             "  test_fallback: T -> Bool = value => test_primary value\n",
             "}\n",
-            "impl TestDefaulted I32 { def test_primary = _ => True }\n",
+            "impl TestDefaulted I32 { test_primary = _ => True }\n",
             "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
             "def fallback_bound: <T where TestDefaulted T> T -> Bool = value => test_fallback value\n",
             "let shown: Bool = show_bound 1\n",
@@ -4052,8 +4052,8 @@ mod tests {
             "type Alpha = ctor ()\n",
             "type Beta = ctor ()\n",
             "trait TestTag T { test_tag: T -> I32 }\n",
-            "impl TestTag Alpha { def test_tag = _ => 1 }\n",
-            "impl TestTag Beta { def test_tag = _ => 2 }\n",
+            "impl TestTag Alpha { test_tag = _ => 1 }\n",
+            "impl TestTag Beta { test_tag = _ => 2 }\n",
             "def use_tag: <T where TestTag T> T -> I32 = value => test_tag value\n",
             "let one: I32 = use_tag (Alpha ())\n",
             "let two: I32 = use_tag (Beta ())\n",
@@ -4085,9 +4085,9 @@ mod tests {
     fn conditional_implementations_discharge_their_bounds() {
         let (module, program) = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "trait TestGuarded T { guarded: T -> Bool }\n",
-            "impl<T where TestShow T> TestGuarded T { def guarded = value => test_show value }\n",
+            "impl<T where TestShow T> TestGuarded T { guarded = value => test_show value }\n",
             "type Plain = ctor ()\n",
             "def use_guarded: <T where TestGuarded T> T -> Bool = value => guarded value\n",
             "let ok: Bool = use_guarded 1\n",
@@ -4142,8 +4142,8 @@ mod tests {
         let (_, program) = lower(concat!(
             "trait TestBase T { base_test: T -> Bool }\n",
             "trait TestDerived T where TestBase T { derived_test: T -> Bool }\n",
-            "impl TestBase I32 { def base_test = _ => True }\n",
-            "impl TestDerived I32 { def derived_test = value => base_test value }\n",
+            "impl TestBase I32 { base_test = _ => True }\n",
+            "impl TestDerived I32 { derived_test = value => base_test value }\n",
             "def use_derived: <T where TestDerived T> T -> Bool = value => base_test value\n",
             "let result: Bool = use_derived 1\n",
         ));
@@ -4158,8 +4158,8 @@ mod tests {
         let (_, program) = lower(concat!(
             "trait TestInner T { inner_test: T -> I32 }\n",
             "trait TestOuter T { outer_test: T -> I32 }\n",
-            "impl TestInner I32 { def inner_test = _ => 1 }\n",
-            "impl<T where TestInner T> TestOuter T { def outer_test = value => inner_test value }\n",
+            "impl TestInner I32 { inner_test = _ => 1 }\n",
+            "impl<T where TestInner T> TestOuter T { outer_test = value => inner_test value }\n",
             "def use_outer: <T where TestOuter T> T -> I32 = value => outer_test value\n",
             "let result: I32 = use_outer 1\n",
         ));
@@ -4176,7 +4176,7 @@ mod tests {
             "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
             "  test_convert: (Target, Position) -> Output\n",
             "}\n",
-            "impl TestConvert I32 I32 I32 { def test_convert = pair => pair.0 }\n",
+            "impl TestConvert I32 I32 I32 { test_convert = pair => pair.0 }\n",
         ));
         let convert = trait_id_named(&program, "TestConvert");
         let method = program.traits.get(convert).expect("convert trait").methods[0];
@@ -4332,7 +4332,7 @@ mod tests {
             "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
             "  test_convert: (Target, Position) -> Output\n",
             "}\n",
-            "impl TestConvert I32 I32 I32 { def test_convert = pair => pair.0 }\n",
+            "impl TestConvert I32 I32 I32 { test_convert = pair => pair.0 }\n",
         ));
         let convert = trait_id_named(&program, "TestConvert");
         let method = program.traits.get(convert).expect("convert trait").methods[0];
@@ -4358,7 +4358,7 @@ mod tests {
 
         let (_, program) = lower(concat!(
             "trait TestCycle T { cycle_test: T -> Bool }\n",
-            "impl<T where TestCycle T> TestCycle T { def cycle_test = _ => True }\n",
+            "impl<T where TestCycle T> TestCycle T { cycle_test = _ => True }\n",
         ));
         let cycle = trait_id_named(&program, "TestCycle");
         let method = program.traits.get(cycle).expect("cycle trait").methods[0];
@@ -4373,7 +4373,7 @@ mod tests {
     fn bounds_with_outer_parameters_resolve_after_substitution() {
         let (_, program) = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "def outer_bound: <T where TestShow T> T -> () -> Bool = value => () => test_show value\n",
             "let applied = (outer_bound 1) ()\n",
         ));
@@ -4398,7 +4398,7 @@ mod tests {
         let (_, program) = lower(concat!(
             "use std.fmt.Formatter\n",
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "let direct: Bool = test_show 1\n",
             "let pair = (1, 2)\n",
             "let first = pair[0]\n",
@@ -5003,16 +5003,16 @@ mod tests {
     fn resolved_methods_agree_with_the_checker_selector() {
         let (module, program) = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "trait TestDefaulted T {\n",
             "  test_primary: T -> Bool\n",
             "  test_fallback: T -> Bool = value => test_primary value\n",
             "}\n",
-            "impl TestDefaulted I32 { def test_primary = _ => True }\n",
+            "impl TestDefaulted I32 { test_primary = _ => True }\n",
             "trait TestInner T { inner_test: T -> I32 }\n",
             "trait TestOuter T { outer_test: T -> I32 }\n",
-            "impl TestInner I32 { def inner_test = _ => 1 }\n",
-            "impl<T where TestInner T> TestOuter T { def outer_test = value => inner_test value }\n",
+            "impl TestInner I32 { inner_test = _ => 1 }\n",
+            "impl<T where TestInner T> TestOuter T { outer_test = value => inner_test value }\n",
             "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
             "def fallback_bound: <T where TestDefaulted T> T -> Bool = value => test_fallback value\n",
             "def use_outer: <T where TestOuter T> T -> I32 = value => outer_test value\n",

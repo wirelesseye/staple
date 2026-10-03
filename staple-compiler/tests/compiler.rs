@@ -344,8 +344,8 @@ fn direct_trait_method_matches_beat_implicit_thunking() {
     let module = type_check(concat!(
         "trait Direct T { choose: T -> I32 }\n",
         "trait Lazy T { choose: (() -> T) -> I32 }\n",
-        "impl Direct I32 { def choose = value => value }\n",
-        "impl Lazy I32 { def choose = callback => callback () }\n",
+        "impl Direct I32 { choose = value => value }\n",
+        "impl Lazy I32 { choose = callback => callback () }\n",
         "let answer = choose 42\n",
     ));
     let answer = module.syntax().items.last().expect("answer binding");
@@ -362,7 +362,7 @@ fn direct_trait_method_matches_beat_implicit_thunking() {
 fn trait_methods_fall_back_to_implicit_thunking() {
     let module = type_check(concat!(
         "trait Lazy T { force: (() -> T) -> T }\n",
-        "impl Lazy I32 { def force = callback => callback () }\n",
+        "impl Lazy I32 { force = callback => callback () }\n",
         "let answer = force 42\n",
     ));
     let context = Context::create();
@@ -1437,7 +1437,7 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
         "type Logger = ctor I32\n",
         "type Box T = ctor (value: T)\n",
         "trait Observe T { observe: T ->{Clock} Clock }\n",
-        "impl Observe I32 { def observe = value => resource CurrentClock }\n",
+        "impl Observe I32 { observe = value => resource CurrentClock }\n",
         "macro request = _: Ident \"clock\" => parse_quote { resource CurrentClock }\n",
         "def generated = () => request clock\n",
         "def declared: () ->{Logger, Clock, Clock} () = () => ()\n",
@@ -2126,8 +2126,8 @@ fn applies_arity_overloads_on_trait_methods() {
         "  render: T * T -> T\n",
         "}\n",
         "impl Render I32 {\n",
-        "  def render = value => value\n",
-        "  def render = left * right => left + right\n",
+        "  render = value => value\n",
+        "  render = left * right => left + right\n",
         "}\n",
         "let unary: I32 = Render.render 2\n",
         "let binary: I32 = Render.render 2 3\n",
@@ -2667,7 +2667,7 @@ fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Reset T { reset: T -> () }\n",
-            "impl Reset (Ref (I32, I32)) { def reset = p => { p.0 = 0 } }\n",
+            "impl Reset (Ref (I32, I32)) { reset = p => { p.0 = 0 } }\n",
         )))
         .expect_err_diagnostics("the impl mutates a parameter its trait does not declare");
     assert!(
@@ -2805,14 +2805,14 @@ fn parameter_markers_must_match_explicit_function_and_trait_effects() {
     type_check(concat!(
         "def replace: mut I32 -> () = mut value: I32 => { value = 1 }\n",
         "trait Replace T { replace: mut T -> () }\n",
-        "impl Replace I32 { def replace = mut value => { value = 2 } }\n",
+        "impl Replace I32 { replace = mut value => { value = 2 } }\n",
     ));
 
     for source in [
         "def mismatch: (I32, mut I32) -> () = (mut first, second) => ()\n",
         concat!(
             "trait Replace T { replace: (mut T, T) -> () }\n",
-            "impl Replace I32 { def replace = (first, mut second) => () }\n",
+            "impl Replace I32 { replace = (first, mut second) => () }\n",
         ),
     ] {
         let diagnostics = TypeChecker::new()
@@ -2834,7 +2834,7 @@ fn parameter_move_markers_must_match_explicit_function_and_trait_effects() {
         "def mismatch: move I32 -> () = value => ()\n",
         concat!(
             "trait Consume T { consume: move T -> () }\n",
-            "impl Consume I32 { def consume = value => () }\n",
+            "impl Consume I32 { consume = value => () }\n",
         ),
     ] {
         let diagnostics = TypeChecker::new()
@@ -2993,7 +2993,7 @@ fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Resource = ctor I32\n",
-            "impl Drop Resource { def drop = Resource value => () }\n",
+            "impl Drop Resource { drop = Resource value => () }\n",
             "def invalid = (value: Ref Resource) => { let Ref (mut inner) = value; inner }\n",
         )))
         .expect_err_diagnostics("move-only Ref borrows cannot become mutable locals");
@@ -3079,8 +3079,8 @@ fn derives_trait_delegated_product_indexing() {
 fn delegates_brackets_to_explicit_indexing_implementations() {
     let source = concat!(
         "type Target = ctor I32\n",
-        "impl Index Target String Target { def index = (target, position) => target }\n",
-        "impl MutateIndex Target String Target { def mutate_index = (mut target, position, move value) => () }\n",
+        "impl Index Target String Target { index = (target, position) => target }\n",
+        "impl MutateIndex Target String Target { mutate_index = (mut target, position, move value) => () }\n",
         "let selected: Target = (Target 4)[\"key\"]\n",
         "(Target 4)[\"key\"] = Target 5\n",
     );
@@ -3149,7 +3149,7 @@ fn rejects_overlapping_structural_indexing_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "impl Index (I32; 2) USize I32 {\n",
-            "  def index = (values, position) => values.0\n",
+            "  index = (values, position) => values.0\n",
             "}\n",
         )))
         .expect_err_diagnostics("structural product Index cannot be overridden");
@@ -3171,7 +3171,7 @@ fn delegates_indexing_through_refs_to_the_payload() {
         "let values: Slice I32 = fixed\n",
         "def slice_at: (Ref (Slice I32), USize) -> I32 = (slice, position) => slice[position]\n",
         "type Keyed = ctor (key: String, value: I32)\n",
-        "impl Index Keyed String I32 { def index = (entry, key) => entry.value }\n",
+        "impl Index Keyed String I32 { index = (entry, key) => entry.value }\n",
         "def keyed_at: (Ref Keyed, String) -> I32 = (entry, key) => entry[key]\n",
         "def nested_at: (Ref (Ref (I32; 3)), USize) -> I32 = (values, position) => values[position]\n",
         "def fixed_at: (Ref (I32; 3), USize) -> I32 = (values, position) => values[position]\n",
@@ -3196,7 +3196,7 @@ fn delegates_indexed_assignment_through_refs_to_the_payload() {
         "def set_nested = (mut values: Ref (Ref (I32; 2)), position: USize, value: I32) => { values[position] = value }\n",
         "def set_fixed = (mut values: Ref (I32; 2), position: USize, value: I32) => { values[position] = value }\n",
         "type Counter = ctor I32\n",
-        "impl MutateIndex Counter String I32 { def mutate_index = (mut counter, key, move value) => () }\n",
+        "impl MutateIndex Counter String I32 { mutate_index = (mut counter, key, move value) => () }\n",
         "def set_keyed = (mut counter: Ref Counter, key: String, value: I32) => { counter[key] = value }\n",
         "let list = List.of (1, 2, 3)\n",
         "let operation: (mut Ref (List I32), USize, I32) -> () = MutateIndex.mutate_index\n",
@@ -3346,8 +3346,8 @@ fn rejects_explicit_indexing_implementations_for_ref_targets() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Target = ctor I32\n",
-            "impl Index Target String Target { def index = (target, position) => target }\n",
-            "impl Index (Ref Target) String Target { def index = (target, position) => target }\n",
+            "impl Index Target String Target { index = (target, position) => target }\n",
+            "impl Index (Ref Target) String Target { index = (target, position) => target }\n",
         )))
         .expect_err_diagnostics("Ref indexing is derived from the payload's implementation");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -3440,7 +3440,7 @@ fn rejects_overlapping_structural_iterator_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "impl IntoIterator (I32; 2) ((I32; 2), USize) {\n",
-            "  def into_iterator = move value => (value, 0 satisfies USize)\n",
+            "  into_iterator = move value => (value, 0 satisfies USize)\n",
             "}\n",
         )))
         .expect_err_diagnostics("structural product IntoIterator cannot be overridden");
@@ -3549,8 +3549,8 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
 fn allows_local_trait_implementations_for_products() {
     let source = concat!(
         "trait ProductDefault T { product_default: () -> T }\n",
-        "impl ProductDefault (I32, Bool) { def product_default = () => (7, True) }\n",
-        "impl ProductDefault () { def product_default = () => () }\n",
+        "impl ProductDefault (I32, Bool) { product_default = () => (7, True) }\n",
+        "impl ProductDefault () { product_default = () => () }\n",
         "let pair: (I32, Bool) = product_default ()\n",
         "let unit: () = product_default ()\n",
         "let (number, condition) = pair\n",
@@ -3567,19 +3567,19 @@ fn allows_local_trait_implementations_for_products() {
 #[test]
 fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
     for source in [
-        "impl Default (I32, String) { def default = () => (0, \"\") }\n",
-        "impl Default () { def default = () => () }\n",
+        "impl Default (I32, String) { default = () => (0, \"\") }\n",
+        "impl Default () { default = () => () }\n",
         concat!(
             "type Local = ctor I32\n",
-            "impl Default (Local, I32) { def default = () => (Local 0, 0) }\n",
+            "impl Default (Local, I32) { default = () => (Local 0, 0) }\n",
         ),
         concat!(
             "type Local = ctor I32\n",
-            "impl Default (Ref Local) { def default = () => loop {} }\n",
+            "impl Default (Ref Local) { default = () => loop {} }\n",
         ),
         concat!(
             "type LocalAlias = alias I32\n",
-            "impl Default LocalAlias { def default = () => 0 }\n",
+            "impl Default LocalAlias { default = () => 0 }\n",
         ),
     ] {
         let diagnostics = TypeChecker::new()
@@ -3596,18 +3596,18 @@ fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
 
     type_check(concat!(
         "type Local = ctor I32\n",
-        "impl Default Local { def default = () => Local 0 }\n",
+        "impl Default Local { default = () => Local 0 }\n",
         "impl !Copy Local {}\n",
         "let value: Local = default ()\n",
     ));
     type_check(concat!(
         "type Generic T = ctor T\n",
-        "impl Default (Generic I32) { def default = () => Generic 0 }\n",
+        "impl Default (Generic I32) { default = () => Generic 0 }\n",
         "let value: Generic I32 = default ()\n",
     ));
     type_check(concat!(
         "trait LocalTrait T { value: () -> T }\n",
-        "impl LocalTrait I32 { def value = () => 0 }\n",
+        "impl LocalTrait I32 { value = () => 0 }\n",
         "let value: I32 = LocalTrait.value ()\n",
     ));
 }
@@ -4600,7 +4600,7 @@ fn requires_only_the_core_equality_method() {
 
     let module = type_check(concat!(
         "type Point = ctor (x: I32, y: I32)\n",
-        "impl Eq Point { def eq = (left, right) => left.x == right.x && left.y == right.y }\n",
+        "impl Eq Point { eq = (left, right) => left.x == right.x && left.y == right.y }\n",
         "let a: Point = Point (x: 1, y: 2)\n",
         "let b: Point = Point (x: 1, y: 2)\n",
         "let c: Point = Point (x: 3, y: 4)\n",
@@ -4868,7 +4868,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
         "use std.buffer.Buffer\nuse std.slice.Slice\n",
         "type Resource = ctor I32\n",
         "impl !Copy Resource {}\n",
-        "impl Clone Resource { def clone = Resource value => Resource value }\n",
+        "impl Clone Resource { clone = Resource value => Resource value }\n",
         "def exercise: () -> () = () => {\n",
         "let mut buffer: Buffer Resource = Buffer.with_capacity (4 satisfies USize)\n",
         "Buffer.push buffer (Resource 7)\n",
@@ -5096,9 +5096,9 @@ fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_t
     let module = type_check(concat!(
         "trait Bound T { check: T -> Bool }\n",
         "trait Convert Source Target where Source ~> Target { convert: move Source -> Target }\n",
-        "impl Bound I32 { def check = value => True }\n",
+        "impl Bound I32 { check = value => True }\n",
         "impl <T where Bound T> Convert T T {\n",
-        "    def convert = move value => value\n",
+        "    convert = move value => value\n",
         "}\n",
         "let result: I32 = Convert.convert (5 satisfies I32)\n",
     ));
@@ -5120,7 +5120,7 @@ fn rejects_inferred_trait_obligations_whose_impl_bounds_do_not_hold() {
             "use std.cinterop.CString\n",
             "trait Make T U where T ~> U { make: T -> U }\n",
             "type Box T = ctor (value: T)\n",
-            "impl<T where Copy T> Make (Box T) T { def make = Box (value) => value }\n",
+            "impl<T where Copy T> Make (Box T) T { make = Box (value) => value }\n",
             "def inferred: Box CString -> () = box => {\n",
             "    let value = Make.make box\n",
             "    ()\n",
@@ -7211,7 +7211,7 @@ fn generates_extern_trait_and_implementation_items() {
         "    trait GeneratedTrait T { transform: T -> T }\n",
         "}\n",
         "macro define_impl = replacement: Expr => parse_quote {\n",
-        "    impl GeneratedTrait I32 { def transform = value => $replacement }\n",
+        "    impl GeneratedTrait I32 { transform = value => $replacement }\n",
         "}\n",
         "define_extern ()\n",
         "define_trait ()\n",
@@ -7229,9 +7229,9 @@ fn generates_generic_conditional_trait_implementation_items() {
     let module = type_check(concat!(
         "trait Bound T { check: T -> Bool }\n",
         "trait Target T { act: move T -> T }\n",
-        "impl Bound I32 { def check = value => True }\n",
+        "impl Bound I32 { check = value => True }\n",
         "macro define_impl = _: Expr => parse_quote {\n",
-        "    impl <T where Bound T> Target T { def act = move value => value }\n",
+        "    impl <T where Bound T> Target T { act = move value => value }\n",
         "}\n",
         "define_impl ()\n",
         "let answer: I32 = Target.act 41\n",
@@ -7249,7 +7249,7 @@ fn generates_traits_with_functional_dependencies() {
         "    trait Generated Input Output where Input ~> Output { generate: Input -> Output }\n",
         "}\n",
         "define_trait ()\n",
-        "impl Generated I32 String { def generate = value => \"generated\" }\n",
+        "impl Generated I32 String { generate = value => \"generated\" }\n",
         "let generated = Generated.generate 1\n",
     ));
     let context = Context::create();
@@ -7792,12 +7792,12 @@ fn expands_standard_for_over_ranges_and_product_iterators() {
     let module = type_check(concat!(
         "pub type PairIterator = pub ctor (current: I32, end: I32)\n",
         "impl Iterator PairIterator (I32, I32) {\n",
-        "  def next = move PairIterator (current, end) => match current < end {\n",
+        "  next = move PairIterator (current, end) => match current < end {\n",
         "    True() => IterStep.Yield ((current, current + 10), PairIterator (current + 1, end)),\n",
         "    False() => IterStep.Done (PairIterator (current, end)),\n",
         "  }\n",
         "}\n",
-        "impl IntoIterator PairIterator PairIterator { def into_iterator = move iterator => iterator }\n",
+        "impl IntoIterator PairIterator PairIterator { into_iterator = move iterator => iterator }\n",
         "def run = () => {\n",
         "  let mut total = 0\n",
         "  for value in (0 ..= 4) {\n",
@@ -8115,7 +8115,7 @@ fn default_type_bound_does_not_fire_when_a_later_parameter_lacks_one() {
 fn trait_default_type_bound_fills_missing_implementation_and_bound_arguments() {
     let module = type_check(concat!(
         "trait Converts From (To = String) { convert: From -> To }\n",
-        "impl Converts I32 { def convert = value => to_string value }\n",
+        "impl Converts I32 { convert = value => to_string value }\n",
         "def show: <T where Converts T> T -> String = value => convert value\n",
         "let text: String = show 42\n",
     ));
@@ -8156,7 +8156,7 @@ fn inline_default_type_bound_combines_with_a_trailing_subtype_bound() {
 fn inline_default_type_bound_for_trait_parameter_fills_missing_argument() {
     let module = type_check(concat!(
         "trait Converts From (To = String) { convert: From -> To }\n",
-        "impl Converts I32 { def convert = value => to_string value }\n",
+        "impl Converts I32 { convert = value => to_string value }\n",
         "def show: <T where Converts T> T -> String = value => convert value\n",
         "let text: String = show 42\n",
     ));
@@ -8581,7 +8581,7 @@ fn compares_refs_through_the_standard_library_eq_implementation() {
         "let nested: Bool = Ref (Ref 3) == Ref (Ref 3)\n",
         "type Bag = ctor Buffer I32\n",
         "impl Eq Bag {\n",
-        "  def eq = (left, right) => Buffer.capacity left.* == Buffer.capacity right.*\n",
+        "  eq = (left, right) => Buffer.capacity left.* == Buffer.capacity right.*\n",
         "}\n",
         "let bags: Bool = Ref (Bag (Buffer.with_capacity 2)) == Ref (Bag (Buffer.with_capacity 2))\n",
         "let bags_differ: Bool = Ref (Bag (Buffer.with_capacity 2)) != Ref (Bag (Buffer.with_capacity 3))\n",
@@ -8899,9 +8899,9 @@ fn compiles_logical_not_via_not_trait() {
 fn prefix_operators_dispatch_to_user_defined_impls() {
     let module = type_check(concat!(
         "type Vec2 = ctor (x: I32, y: I32)\n",
-        "impl Neg Vec2 { def negate = (Vec2 (x, y)) => Vec2 (x: 0 - x, y: 0 - y) }\n",
+        "impl Neg Vec2 { negate = (Vec2 (x, y)) => Vec2 (x: 0 - x, y: 0 - y) }\n",
         "type Flag = ctor (raised: Bool)\n",
-        "impl Not Flag { def not = (Flag (raised)) => Flag (raised: !raised) }\n",
+        "impl Not Flag { not = (Flag (raised)) => Flag (raised: !raised) }\n",
         "let here: Vec2 = Vec2 (x: 3, y: 4)\n",
         "let away: Vec2 = -here\n",
         "let up: Flag = Flag (raised: True)\n",
@@ -8989,9 +8989,9 @@ fn type_checks_static_traits_and_bounded_generic_functions() {
         "trait Increment T { increment: T -> T }\n",
         "trait Echo T { echo: T -> T }\n",
         "trait Swap T { swap: T -> T }\n",
-        "impl Increment I32 { def increment = value => value + 1 }\n",
-        "impl Echo I32 { def echo = value => value }\n",
-        "impl Swap (I32, I32) { def swap = (left, right) => (right, left) }\n",
+        "impl Increment I32 { increment = value => value + 1 }\n",
+        "impl Echo I32 { echo = value => value }\n",
+        "impl Swap (I32, I32) { swap = (left, right) => (right, left) }\n",
         "def increment_twice: <T where Increment T> T -> T = value => increment (increment value)\n",
         "def increment_echo: <T where Increment T, Echo T> T -> T = value => echo (increment value)\n",
         "let direct: I32 = Increment.increment 40\n",
@@ -9033,7 +9033,7 @@ fn provides_formatter_display_debug_and_structural_product_debug() {
         "use std.fmt.Formatter\n",
         "type Point = ctor (x: I32, y: I32)\n",
         "impl Debug Point {\n",
-        "  def fmt = (Point (x, y), mut formatter) => {\n",
+        "  fmt = (Point (x, y), mut formatter) => {\n",
         "    Formatter.write formatter \"Point \"\n",
         "    Debug.fmt ((x: x, y: y), formatter)\n",
         "  }\n",
@@ -9169,7 +9169,7 @@ fn type_checks_and_generates_string_templates() {
         "use std.fmt.Formatter\n",
         "type Label = ctor String\n",
         "impl Display Label {\n",
-        "  def fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
+        "  fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
         "}\n",
         "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
         "let name: String = \"world\"\n",
@@ -9246,7 +9246,7 @@ fn uses_generic_default_trait_members_and_concrete_overrides() {
         "  increment: T -> T\n",
         "  twice: T -> T = value => increment (increment value)\n",
         "}\n",
-        "impl Increment I32 { def increment = value => value + 1 }\n",
+        "impl Increment I32 { increment = value => value + 1 }\n",
         "let direct: I32 = Increment.twice 40\n",
         "let first_class: I32 -> I32 = Increment.twice\n",
         "let answer: I32 = first_class direct\n",
@@ -9281,7 +9281,7 @@ fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
 fn explicit_trait_members_override_defaults() {
     let module = type_check(concat!(
         "trait Identity T { identity: move T -> T = move value => value }\n",
-        "impl Identity I32 { def identity = move value => value + 1 }\n",
+        "impl Identity I32 { identity = move value => value + 1 }\n",
         "let answer: I32 = Identity.identity 41\n",
     ));
     let context = Context::create();
@@ -9336,8 +9336,8 @@ fn type_checks_product_and_curried_multi_parameter_traits() {
     let module = type_check(concat!(
         "trait Merge Left Right Output { merge: (Left, Right) -> Output }\n",
         "trait Convert (From, To) { convert: From -> To }\n",
-        "impl Merge I32 I32 I32 { def merge = (left, right) => left + right }\n",
-        "impl Convert (I32, String) { def convert = value => \"converted\" }\n",
+        "impl Merge I32 I32 I32 { merge = (left, right) => left + right }\n",
+        "impl Convert (I32, String) { convert = value => \"converted\" }\n",
         "def combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\n",
         "let total: I32 = combine (20, 22)\n",
         "let converted: String = Convert.convert total\n",
@@ -9353,19 +9353,19 @@ fn type_checks_product_and_curried_multi_parameter_traits() {
 fn infers_trait_functional_dependency_arguments() {
     let module = type_check(concat!(
         "trait Iterator Iter Item where Iter ~> Item { next: Iter -> Item }\n",
-        "impl Iterator I32 String { def next = value => \"next\" }\n",
+        "impl Iterator I32 String { next = value => \"next\" }\n",
         "trait AddTo Left Right Output where {Left, Right} ~> Output { add_to: Left -> Right -> Output }\n",
-        "impl AddTo I32 I32 I32 { def add_to = left => right => left + right }\n",
+        "impl AddTo I32 I32 I32 { add_to = left => right => left + right }\n",
         "trait Chain A B C where A ~> B, B ~> C { chained: A -> (B, C) }\n",
-        "impl Chain I32 String U8 { def chained = value => (\"chain\", 7) }\n",
+        "impl Chain I32 String U8 { chained = value => (\"chain\", 7) }\n",
         "trait ConvertPair (From, To) where From ~> To { convert_pair: From -> To }\n",
-        "impl ConvertPair (I32, String) { def convert_pair = value => \"pair\" }\n",
+        "impl ConvertPair (I32, String) { convert_pair = value => \"pair\" }\n",
         "def requires_iterator: <T where Iterator T> T -> () = value => ()\n",
         "def requires_iterator_explicit: <T where Iterator T _> T -> () = value => ()\n",
         "def requires_add: <T where AddTo T T> move T -> T = move value => value\n",
         "def requires_pair: <T where ConvertPair (T, _)> T -> () = value => ()\n",
         "trait UsesIterator Iter where Iterator Iter { use_iterator: Iter -> Iter }\n",
-        "impl UsesIterator I32 { def use_iterator = value => value }\n",
+        "impl UsesIterator I32 { use_iterator = value => value }\n",
         "let next_value = Iterator.next 1\n",
         "let next_string: String = next_value\n",
         "let sum: I32 = AddTo.add_to 20 22\n",
@@ -9386,8 +9386,8 @@ fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Convert From To where From ~> To { convert: From -> To }\n",
-            "impl Convert I32 String { def convert = value => \"one\" }\n",
-            "impl Convert I32 I32 { def convert = value => value }\n",
+            "impl Convert I32 String { convert = value => \"one\" }\n",
+            "impl Convert I32 I32 { convert = value => value }\n",
         )))
         .expect_err_diagnostics("functional dependencies must make implementations coherent");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -9411,7 +9411,7 @@ fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Convert From To where From ~> To { convert: From -> To }\n",
-            "impl Convert I32 { def convert = value => value }\n",
+            "impl Convert I32 { convert = value => value }\n",
         )))
         .expect_err_diagnostics("implementation headers remain exact-arity");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -9470,7 +9470,7 @@ fn preserves_applied_types_as_unary_trait_arguments() {
     let module = type_check(concat!(
         "type Box T = ctor (value: T)\n",
         "trait Echo T { echo: T -> T }\n",
-        "impl Echo Box I32 { def echo = value => value }\n",
+        "impl Echo Box I32 { echo = value => value }\n",
         "def echo_box: <T where Echo Box T> (Box T) -> Box T = value => Echo.echo value\n",
         "let boxed: Box I32 = Box 42\n",
         "let echoed: Box I32 = echo_box boxed\n",
@@ -9487,9 +9487,9 @@ fn enforces_and_propagates_transitive_trait_prerequisites() {
         "trait Base T { base: T -> T }\n",
         "trait Middle T where Base T { middle: T -> T }\n",
         "trait Derived T where Middle T { derived: T -> T }\n",
-        "impl Derived I32 { def derived = value => value }\n",
-        "impl Middle I32 { def middle = value => value }\n",
-        "impl Base I32 { def base = value => value }\n",
+        "impl Derived I32 { derived = value => value }\n",
+        "impl Middle I32 { middle = value => value }\n",
+        "impl Base I32 { base = value => value }\n",
         "def apply: <T where Derived T> T -> T = value => Base.base (Middle.middle (Derived.derived value))\n",
         "let answer: I32 = apply 42\n",
     ));
@@ -9503,7 +9503,7 @@ fn enforces_and_propagates_transitive_trait_prerequisites() {
         .check(resolve(concat!(
             "trait Base T { base: T -> T }\n",
             "trait Derived T where Base T { derived: T -> T }\n",
-            "impl Derived I32 { def derived = value => value }\n",
+            "impl Derived I32 { derived = value => value }\n",
         )))
         .expect_err_diagnostics("implementations must satisfy trait prerequisites");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -9517,7 +9517,7 @@ fn enforces_and_propagates_transitive_trait_prerequisites() {
 fn prerequisite_copy_bounds_are_visible_to_ownership_checking() {
     type_check(concat!(
         "trait Duplicate T where Copy T { duplicate: T -> T }\n",
-        "impl Duplicate I32 { def duplicate = value => value }\n",
+        "impl Duplicate I32 { duplicate = value => value }\n",
         "def pair: <T where Duplicate T> T -> (T, T) = value => (value, value)\n",
         "let values: (I32, I32) = pair 42\n",
     ));
@@ -9527,7 +9527,7 @@ fn prerequisite_copy_bounds_are_visible_to_ownership_checking() {
 fn substitutes_product_parameters_into_multiple_prerequisites() {
     type_check(concat!(
         "trait BothEqual (Left, Right) where Eq Left, Eq Right { equal: (Left, Left, Right, Right) -> (Bool, Bool) }\n",
-        "impl BothEqual (I32, I32) { def equal = (left_a, left_b, right_a, right_b) => (Eq.eq (left_a, left_b), Eq.eq (right_a, right_b)) }\n",
+        "impl BothEqual (I32, I32) { equal = (left_a, left_b, right_a, right_b) => (Eq.eq (left_a, left_b), Eq.eq (right_a, right_b)) }\n",
         "def compare_both: <Left, Right where Copy Left, Copy Right, BothEqual (Left, Right)> (Left, Left, Right, Right) -> (Bool, Bool) = (left_a, left_b, right_a, right_b) => (Eq.eq (left_a, left_b), Eq.eq (right_a, right_b))\n",
         "let result: (Bool, Bool) = compare_both (1, 1, 2, 2)\n",
     ));
@@ -9561,7 +9561,7 @@ fn rejects_invalid_multi_parameter_trait_uses_and_members() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Add Left Right Output { add: (Left, Right) -> Output }\n",
-            "impl Add I32 I32 { def add = pair => 0 }\n",
+            "impl Add I32 I32 { add = pair => 0 }\n",
         )))
         .expect_err_diagnostics("trait implementation arity must match the declaration");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -9584,7 +9584,7 @@ fn rejects_invalid_multi_parameter_trait_uses_and_members() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Convert (From, To) { convert: From -> To }\n",
-            "impl Convert I32 { def convert = value => value }\n",
+            "impl Convert I32 { convert = value => value }\n",
         )))
         .expect_err_diagnostics("product binders require product arguments");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -9612,8 +9612,8 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
         .check(resolve(concat!(
             "trait Increment T { increment: T -> T }\n",
             "type Number = alias I32\n",
-            "impl Increment I32 { def increment = value => value }\n",
-            "impl Increment Number { def increment = value => value }\n",
+            "impl Increment I32 { increment = value => value }\n",
+            "impl Increment Number { increment = value => value }\n",
         )))
         .expect_err_diagnostics("aliases may not create overlapping implementations");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -9625,7 +9625,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Increment T { increment: T -> T }\n",
-            "impl Increment I32 { def increment = value => \"wrong\" }\n",
+            "impl Increment I32 { increment = value => \"wrong\" }\n",
         )))
         .expect_err_diagnostics("implementation bodies must match their trait member types");
     assert!(
@@ -9638,7 +9638,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Increment T { increment: T -> T }\n",
-            "impl Increment I32 { def increment = value => value }\n",
+            "impl Increment I32 { increment = value => value }\n",
             "def invalid: <T> T -> T = value => increment value\n",
         )))
         .expect_err_diagnostics("generic callers must propagate trait bounds");
@@ -9668,7 +9668,7 @@ fn rejects_invalid_trait_member_signatures_and_non_concrete_targets() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Increment T { increment: T -> T }\n",
-            "impl Increment _ { def increment = value => value }\n",
+            "impl Increment _ { increment = value => value }\n",
         )))
         .expect_err_diagnostics("implementation targets must be concrete");
     assert!(
@@ -9683,8 +9683,8 @@ fn generic_conditional_trait_implementation_dispatches_and_compiles() {
     let module = type_check(concat!(
         "trait Bound T { check: T -> Bool }\n",
         "trait Target T { act: T -> Bool }\n",
-        "impl Bound I32 { def check = value => True }\n",
-        "impl <T where Bound T> Target T { def act = value => Bound.check value }\n",
+        "impl Bound I32 { check = value => True }\n",
+        "impl <T where Bound T> Target T { act = value => Bound.check value }\n",
         "let answer: Bool = Target.act 41\n",
     ));
     let context = Context::create();
@@ -9700,7 +9700,7 @@ fn rejects_generic_trait_implementation_dispatch_when_bound_is_unmet() {
         .check(resolve(concat!(
             "trait Bound T { check: T -> Bool }\n",
             "trait Target T { act: T -> T }\n",
-            "impl <T where Bound T> Target T { def act = value => value }\n",
+            "impl <T where Bound T> Target T { act = value => value }\n",
             "let answer: I32 = Target.act 41\n",
         )))
         .expect_err_diagnostics(
@@ -9719,8 +9719,8 @@ fn rejects_alpha_equivalent_duplicate_generic_trait_implementations() {
         .check(resolve(concat!(
             "trait Bound T { check: T -> Bool }\n",
             "trait Target T { act: T -> T }\n",
-            "impl <T where Bound T> Target T { def act = value => value }\n",
-            "impl <U where Bound U> Target U { def act = value => value }\n",
+            "impl <T where Bound T> Target T { act = value => value }\n",
+            "impl <U where Bound U> Target U { act = value => value }\n",
         )))
         .expect_err_diagnostics(
             "alpha-equivalent generic implementations must be rejected as duplicates",
@@ -9744,9 +9744,9 @@ fn rejects_a_blanket_implementation_that_overlaps_an_earlier_concrete_one_before
         .check(resolve(concat!(
             "trait Bound T { check: T -> Bool }\n",
             "trait Target T { act: T -> T }\n",
-            "impl Bound I32 { def check = value => True }\n",
-            "impl Target I32 { def act = value => value }\n",
-            "impl <T where Bound T> Target T { def act = value => value }\n",
+            "impl Bound I32 { check = value => True }\n",
+            "impl Target I32 { act = value => value }\n",
+            "impl <T where Bound T> Target T { act = value => value }\n",
         )))
         .expect_err_diagnostics(
             "a concrete impl and an applicable blanket impl must be rejected as overlapping",
@@ -9763,7 +9763,7 @@ fn cyclic_trait_implementation_bound_fails_without_hanging() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Cyclic T { check: T -> Bool }\n",
-            "impl <T where Cyclic T> Cyclic T { def check = value => True }\n",
+            "impl <T where Cyclic T> Cyclic T { check = value => True }\n",
             "let answer: Bool = Cyclic.check 41\n",
         )))
         .expect_err_diagnostics(
@@ -9781,8 +9781,8 @@ fn requires_qualification_for_ambiguous_trait_methods() {
     let source = concat!(
         "trait Left T { convert: T -> T }\n",
         "trait Right T { convert: T -> T }\n",
-        "impl Left I32 { def convert = value => value }\n",
-        "impl Right I32 { def convert = value => value }\n",
+        "impl Left I32 { convert = value => value }\n",
+        "impl Right I32 { convert = value => value }\n",
         "let left: I32 = Left.convert 1\n",
         "let right: I32 = Right.convert 2\n",
         "let ambiguous: I32 = convert 3\n",
@@ -10634,8 +10634,8 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Box T = ctor (T)\n",
-            "impl<T> Drop (Box T) { def drop = Box value => () }\n",
-            "impl Drop (Box I32) { def drop = Box value => () }\n",
+            "impl<T> Drop (Box T) { drop = Box value => () }\n",
+            "impl Drop (Box I32) { drop = Box value => () }\n",
         )))
         .expect_err_diagnostics("overlapping Drop implementations are rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -10648,7 +10648,7 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Box T = ctor (T)\n",
-            "impl<T where Copy (Box T)> Drop (Box T) { def drop = Box value => () }\n",
+            "impl<T where Copy (Box T)> Drop (Box T) { drop = Box value => () }\n",
         )))
         .expect_err_diagnostics("a bound on the header type is rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -10662,7 +10662,7 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Box T = ctor (T)\n",
-            "impl<T> Drop (Box T) { def drop = Box value => () }\n",
+            "impl<T> Drop (Box T) { drop = Box value => () }\n",
             "def dup: <T> Box T -> (Box T, Box T) = value => (value, value)\n",
         )))
         .expect_err_diagnostics("a generically droppable type is move-only");
@@ -10677,7 +10677,7 @@ fn generic_drop_selection_rules_are_enforced_at_declaration() {
 fn lowers_custom_drop_and_gc_finalizer_glue() {
     let module = type_check(concat!(
         "type Resource = ctor I32\n",
-        "impl Drop Resource { def drop = Resource value => () }\n",
+        "impl Drop Resource { drop = Resource value => () }\n",
         "def release = () => { let resource = Resource 7; drop resource }\n",
         "def managed = () => Ref (Resource 9)\n",
     ));
@@ -10809,7 +10809,7 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
 fn lowers_path_sensitive_drop_flags() {
     let module = type_check(concat!(
         "type Resource = ctor I32\n",
-        "impl Drop Resource { def drop = Resource value => () }\n",
+        "impl Drop Resource { drop = Resource value => () }\n",
         "def conditional = (flag: Bool, move resource: Resource) => match flag {\n",
         "  True() => { drop resource; () },\n",
         "  False() => (),\n",
@@ -11222,7 +11222,7 @@ fn checks_reachability_correctly_after_a_top_level_loop_with_break() {
 fn checks_ownership_across_loop_exits_and_back_edges() {
     let module = type_check(concat!(
         "type Resource = ctor I32\n",
-        "impl Drop Resource { def drop = Resource _ => () }\n",
+        "impl Drop Resource { drop = Resource _ => () }\n",
         "def choose: Bool -> Resource = condition => loop {\n",
         "  let value = Resource 1\n",
         "  match condition {\n",
@@ -11241,7 +11241,7 @@ fn checks_ownership_across_loop_exits_and_back_edges() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Resource = ctor I32\n",
-            "impl Drop Resource { def drop = Resource _ => () }\n",
+            "impl Drop Resource { drop = Resource _ => () }\n",
             "def invalid = (move value: Resource) => loop {\n",
             "  let consumed = value\n",
             "  continue\n",
@@ -11465,8 +11465,8 @@ fn every_copy_type_gets_a_blanket_clone_implementation() {
 fn a_non_copy_type_can_implement_clone_manually() {
     let module = type_check(concat!(
         "type Resource = ctor I32\n",
-        "impl Drop Resource { def drop = Resource value => () }\n",
-        "impl Clone Resource { def clone = Resource value => Resource value }\n",
+        "impl Drop Resource { drop = Resource value => () }\n",
+        "impl Clone Resource { clone = Resource value => Resource value }\n",
         "def duplicate: Resource -> Resource = resource => Clone.clone resource\n",
     ));
     let context = Context::create();
@@ -11479,7 +11479,7 @@ fn a_non_copy_type_can_implement_clone_manually() {
 #[test]
 fn rejects_an_external_clone_impl_for_a_standard_library_type() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("impl Clone I32 { def clone = value => value }\n"))
+        .check(resolve("impl Clone I32 { clone = value => value }\n"))
         .expect_err_diagnostics("both `Clone` and `I32` are external");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
@@ -11493,8 +11493,8 @@ fn rejects_a_blanket_bounded_impl_that_overlaps_an_earlier_concrete_one() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Greet T { greet: T -> String }\n",
-            "impl Greet I32 { def greet = value => \"hi\" }\n",
-            "impl<T where Copy T> Greet T { def greet = value => \"hi\" }\n",
+            "impl Greet I32 { greet = value => \"hi\" }\n",
+            "impl<T where Copy T> Greet T { greet = value => \"hi\" }\n",
         )))
         .expect_err_diagnostics(
             "the blanket impl also covers `I32`, already implemented concretely above",
@@ -11676,7 +11676,7 @@ fn rejects_opaque_types_in_sized_positions() {
             "sized",
         ),
         (
-            "impl Default Token { def default = () => loop {} }\n",
+            "impl Default Token { default = () => loop {} }\n",
             "implicit `Sized` bound",
         ),
         (

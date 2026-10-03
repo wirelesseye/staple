@@ -1191,7 +1191,7 @@ mod tests {
         let source = concat!(
             "type Wrapper T = ctor (value: T)\n",
             "trait Identity T { identity: T -> T }\n",
-            "impl Identity I32 { def identity = value => value }\n",
+            "impl Identity I32 { identity = value => value }\n",
             "def wrap: <T> move T -> Wrapper T = move value => Wrapper (value: value)\n",
             "def apply = () => identity 1\n",
             "let (first, second) = (1, 2)\n",
@@ -1376,7 +1376,7 @@ mod tests {
     fn qualified_trait_access_targets_the_trait_declaration() {
         let source = concat!(
             "trait ToString T { to_string: T -> String }\n",
-            "impl ToString I32 { def to_string = value => \"\" }\n",
+            "impl ToString I32 { to_string = value => \"\" }\n",
             "def f: I32 -> String = ToString.to_string\n",
         );
         let path = std::env::temp_dir().join("staple-definition-trait-access-test.sta");
@@ -1419,8 +1419,8 @@ mod tests {
         let source = concat!(
             "trait Bound T { check: T -> Bool }\n",
             "trait Target T { act: move T -> T }\n",
-            "impl Bound I32 { def check = value => True }\n",
-            "impl <T where Bound T> Target T { def act = move value => value }\n",
+            "impl Bound I32 { check = value => True }\n",
+            "impl <T where Bound T> Target T { act = move value => value }\n",
         );
         let path = std::env::temp_dir().join("staple-definition-generic-impl-test.sta");
         let program = ProgramLoader::new()

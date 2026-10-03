@@ -14798,7 +14798,7 @@ mod tests {
     fn function_templates_copy_checked_signatures_parameters_and_bounds() {
         let module = checked_program(concat!(
             "trait Increment T { increment: T -> T }\n",
-            "impl Increment I32 { def increment = value => value + 1 }\n",
+            "impl Increment I32 { increment = value => value + 1 }\n",
             "def increment_twice: <T where Increment T> T -> T = value => increment (increment value)\n",
         ));
         let mut program = LoweredProgram::default();
@@ -15470,7 +15470,7 @@ mod tests {
     fn trait_implementation_catalog_records_arguments_bounds_and_negation() {
         let module = checked_program(concat!(
             "trait TestEq T { test_eq: (T, T) -> Bool }\n",
-            "impl TestEq I32 { def test_eq = (left, right) => left == right }\n",
+            "impl TestEq I32 { test_eq = (left, right) => left == right }\n",
             "type TestHandle = ctor I32\n",
             "impl !Copy TestHandle {}\n",
         ));
@@ -15821,7 +15821,7 @@ mod tests {
             "let doubled: I32 = count + count\n",
             "def add: (I32, I32) -> I32 = (left, right) => left + right\n",
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "type TestBox T = ctor (value: T)\n",
             "type TestHidden = opaque\n",
             "type TestEnabled\n",
@@ -16808,7 +16808,7 @@ mod tests {
             "use std.cinterop.*\n",
             "extern \"c\" { external_identity: I32 -> I32 }\n",
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = value => value\n",
             "let juxtaposed: x: I32 * y: I32 -> I32 = x * y => x + y\n",
             "type TestBox = ctor (value: I32)\n",
@@ -17013,7 +17013,7 @@ mod tests {
             "use std.fmt.Formatter\n",
             "extern \"c\" { external_identity: I32 -> I32 }\n",
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = value => value\n",
             "def declared: I32 -> I32 = value => value\n",
             "type TestBox = ctor (value: I32)\n",
@@ -18110,7 +18110,7 @@ mod tests {
     fn trait_calls_index_mutation_and_interpolations_carry_evidence() {
         let module = checked_program(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "def show_bound: <T where TestShow T> T -> Bool = value => test_show value\n",
             "def evidence_samples: () -> Bool = () => {\n",
             "  let arithmetic: I32 = 1 + 2\n",
@@ -18231,7 +18231,7 @@ mod tests {
             "use std.io.IO\n",
             "extern \"c\" { external_identity: I32 -> I32 }\n",
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = value => value\n",
             "let pair_add: x: I32 * y: I32 -> I32 = x * y => x + y\n",
             "def trait_sample: () -> Bool = () => test_show 1\n",
@@ -19251,7 +19251,7 @@ mod tests {
     fn blocks_preserve_nested_results_divergence_and_drop_facts() {
         let module = checked_program(concat!(
             "type Handle = ctor I32\n",
-            "impl Drop Handle { def drop = Handle value => () }\n",
+            "impl Drop Handle { drop = Handle value => () }\n",
             "def nested = () => {\n",
             "  let outer: I32 = { let inner: I32 = 1; inner + 2 }\n",
             "  outer\n",
@@ -19409,7 +19409,7 @@ mod tests {
     fn loops_record_drop_facts_depth_and_owned_exits() {
         let module = checked_program(concat!(
             "type Handle = ctor I32\n",
-            "impl Drop Handle { def drop = Handle value => () }\n",
+            "impl Drop Handle { drop = Handle value => () }\n",
             "def select: Bool -> I32 = condition => loop {\n",
             "  match condition { True() => { break 9 }, False() => { continue } }\n",
             "}\n",
@@ -19796,8 +19796,8 @@ mod tests {
         let module = checked_program(concat!(
             "use std.slice.Slice\n",
             "type Counter = ctor I32\n",
-            "impl Index Counter String I32 { def index = (counter, key) => 0 }\n",
-            "impl MutateIndex Counter String I32 { def mutate_index = (mut counter, key, move value) => () }\n",
+            "impl Index Counter String I32 { index = (counter, key) => 0 }\n",
+            "impl MutateIndex Counter String I32 { mutate_index = (mut counter, key, move value) => () }\n",
             "def make_counter = () => Counter 0\n",
             "let mut counter = Counter 0\n",
             "let read = counter[\"key\"]\n",
@@ -19939,7 +19939,7 @@ mod tests {
             "use std.fmt.Formatter\n",
             "type Label = ctor String\n",
             "impl Display Label {\n",
-            "  def fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
+            "  fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
             "}\n",
             "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
             "let name: String = \"world\"\n",
@@ -21342,7 +21342,7 @@ mod tests {
         let module = checked_program(concat!(
             "type A = ctor (value: I32)\n",
             "type Handle = ctor I32\n",
-            "impl Drop Handle { def drop = Handle value => () }\n",
+            "impl Drop Handle { drop = Handle value => () }\n",
             "def mutable_provider: () -> () = () => {\n",
             "  let mut value = A (value: 1)\n",
             "  with mut A = value { () }\n",
@@ -22256,7 +22256,7 @@ mod tests {
             "mutable = 2\n",
             "count = 1\n",
             "type Handle = ctor I32\n",
-            "impl Drop Handle { def drop = Handle value => () }\n",
+            "impl Drop Handle { drop = Handle value => () }\n",
             "def discard = () => {\n",
             "  let owned: Handle = Handle 1\n",
             "  owned\n",

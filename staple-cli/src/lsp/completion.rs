@@ -1604,7 +1604,7 @@ mod tests {
     fn completes_bare_trait_function() {
         let source = concat!(
             "type Wrapper = ctor I32\n",
-            "impl ToString Wrapper { def to_string = value => \"\" }\n",
+            "impl ToString Wrapper { to_string = value => \"\" }\n",
             "def f: Wrapper -> String = to_string\n",
         );
         let path = std::env::temp_dir().join("staple-completion-trait-bare.sta");
@@ -1721,7 +1721,7 @@ mod tests {
     fn completes_qualified_modules_companions_and_trait_members() {
         let source = concat!(
             "trait Local T { render: T -> String }\n",
-            "impl Local I32 { def render = value => \"\" }\n",
+            "impl Local I32 { render = value => \"\" }\n",
             "let print = std.io.println\n",
             "let list: List I32 = List.new ()\n",
             "let render = Local.render\n",

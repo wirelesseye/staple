@@ -3877,7 +3877,7 @@ mod tests {
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
                 "trait ProductDefault T { product_default: () -> T }\n",
-                "impl ProductDefault (I32, I32, I32) { def product_default = () => (2, 3, 5) }\n",
+                "impl ProductDefault (I32, I32, I32) { product_default = () => (2, 3, 5) }\n",
                 "let values: (I32, I32, I32) = product_default ()\n",
                 "exit (values.0 + values.1 + values.2 - 10)\n",
             ),
@@ -4143,7 +4143,7 @@ mod tests {
                 "extern \"c\" { exit: I32 -> () }\n",
                 "type Resource = ctor I32\n",
                 "impl Drop Resource {\n",
-                "  def drop = Resource value => exit value\n",
+                "  drop = Resource value => exit value\n",
                 "}\n",
                 "def exercise = () => {\n",
                 "  let first = Resource 1\n",

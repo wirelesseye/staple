@@ -20,14 +20,14 @@ companion<T> Slice T {
 }
 
 impl<T where Copy T> Index (Slice T) USize T {
-    def index = (values, position) => {
+    index = (values, position) => {
         let Ref value = Slice.get_ref values position
         value
     }
 }
 
 impl<T> MutateIndex (Slice T) USize T {
-    def mutate_index = (mut values, position, move value) => {
+    mutate_index = (mut values, position, move value) => {
         let mut reference = Slice.get_ref values position
         Ref.replace reference value
         ()
@@ -37,7 +37,7 @@ impl<T> MutateIndex (Slice T) USize T {
 pub type SliceIter T = pub ctor (slice: Slice T, index: USize)
 
 impl<T where Copy T> Iterator (SliceIter T) T {
-    def next = move SliceIter (slice, index) => if (index < Slice.length slice) {
+    next = move SliceIter (slice, index) => if (index < Slice.length slice) {
         let Ref value = Slice.get_ref slice index
         Yield (value, SliceIter (slice: slice, index: index + 1))
     } else {
@@ -46,11 +46,11 @@ impl<T where Copy T> Iterator (SliceIter T) T {
 }
 
 impl<T where Copy T> IntoIterator (Slice T) (SliceIter T) {
-    def into_iterator = move slice => SliceIter (slice: slice, index: 0)
+    into_iterator = move slice => SliceIter (slice: slice, index: 0)
 }
 
 impl<T where Eq T> Eq (Slice T) {
-    def eq = (left, right) => {
+    eq = (left, right) => {
         let length = Slice.length left
         if (length == Slice.length right) {
             let mut index: USize = 0

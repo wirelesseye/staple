@@ -11,7 +11,7 @@ use std.syntax.*
 pub type List T = ctor Buffer T
 
 impl<T where Clone T> Clone (List T) {
-    def clone = List buffer => List (Clone.clone buffer)
+    clone = List buffer => List (Clone.clone buffer)
 }
 
 // Doubles capacity (minimum 4 on first growth) and moves every element
@@ -171,11 +171,11 @@ companion<T where Copy T> List T {
 }
 
 impl<T where Copy T> Index (List T) USize T {
-    def index = (list, position) => List.get_unchecked list position
+    index = (list, position) => List.get_unchecked list position
 }
 
 impl<T> MutateIndex (List T) USize T {
-    def mutate_index = (mut list, position, move value) => {
+    mutate_index = (mut list, position, move value) => {
         let mut reference = List.get_ref_unchecked list position
         Ref.replace reference value
         ()
@@ -187,7 +187,7 @@ pub type ListIter T = pub ctor (list: List T, index: USize)
 // Copy-T-gated, like `get`/`Index` — yields owned copies. A Ref-yielding
 // iterator for non-Copy element types is intentionally left for later.
 impl<T where Copy T> Iterator (ListIter T) T {
-    def next = move ListIter (list, index) => if (index < List.length list) {
+    next = move ListIter (list, index) => if (index < List.length list) {
         // The bounds check just above already guarantees `index` is valid,
         // so `get_unchecked` avoids a second, redundant one.
         Yield (
@@ -200,5 +200,5 @@ impl<T where Copy T> Iterator (ListIter T) T {
 }
 
 impl<T where Copy T> IntoIterator (List T) (ListIter T) {
-    def into_iterator = move list => ListIter (list: list, index: 0)
+    into_iterator = move list => ListIter (list: list, index: 0)
 }

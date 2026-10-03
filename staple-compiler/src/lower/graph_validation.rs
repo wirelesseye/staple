@@ -757,7 +757,7 @@ pub(crate) mod tests {
     fn graph_validator_reports_template_only_evidence_arguments() {
         let mut program = lower(concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "def show: <T where TestShow T> T -> Bool = value => test_show value\n",
             "let shown: Bool = show 1\n",
         ))
@@ -1243,9 +1243,9 @@ pub(crate) mod tests {
     fn conditional_implementations_and_functional_dependencies_select_methods() {
         let source = concat!(
             "trait TestShow T { test_show: T -> Bool }\n",
-            "impl TestShow I32 { def test_show = _ => True }\n",
+            "impl TestShow I32 { test_show = _ => True }\n",
             "trait TestGuarded T { guarded: T -> Bool }\n",
-            "impl<T where TestShow T> TestGuarded T { def guarded = value => test_show value }\n",
+            "impl<T where TestShow T> TestGuarded T { guarded = value => test_show value }\n",
             "def use_guarded: <T where TestGuarded T> T -> Bool = value => guarded value\n",
             "let ok: Bool = use_guarded 1\n",
         );
@@ -1276,7 +1276,7 @@ pub(crate) mod tests {
             "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
             "  test_convert: (Target, Position) -> Output\n",
             "}\n",
-            "impl TestConvert I32 I32 I32 { def test_convert = pair => pair.0 }\n",
+            "impl TestConvert I32 I32 I32 { test_convert = pair => pair.0 }\n",
             "def call_convert: (I32, I32) -> I32 = pair => test_convert pair\n",
             "let converted: I32 = call_convert (1, 2)\n",
         ));
@@ -2290,7 +2290,7 @@ pub(crate) mod tests {
         for source in [
             concat!(
                 "type Resource = ctor I32\n",
-                "impl Drop Resource { def drop = Resource value => () }\n",
+                "impl Drop Resource { drop = Resource value => () }\n",
                 "def mutate_resource: move (Resource, Resource) -> (Resource, Resource) = move pair => {\n",
                 "  let mut copy = pair\n",
                 "  copy[0] = Resource 3\n",
@@ -2301,7 +2301,7 @@ pub(crate) mod tests {
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
                 "type Handle = ctor CString\n",
-                "impl Drop Handle { def drop = Handle value => () }\n",
+                "impl Drop Handle { drop = Handle value => () }\n",
                 "type Wrapped = ctor CString\n",
                 "def mutate_handle: move (Handle, Handle) -> (Handle, Handle) = move pair => {\n",
                 "  let mut copy = pair\n",
@@ -2347,7 +2347,7 @@ pub(crate) mod tests {
             concat!(
                 "use std.cinterop.(CString, c_string)\n",
                 "type Box T = ctor (T)\n",
-                "impl<T where Copy T> Drop (Box T) { def drop = Box value => () }\n",
+                "impl<T where Copy T> Drop (Box T) { drop = Box value => () }\n",
                 "def mutate_box: move (Box CString, Box CString) -> (Box CString, Box CString) = move pair => {\n",
                 "  let mut copy = pair\n",
                 "  copy[0] = Box (c_string \"b\")\n",
@@ -2597,11 +2597,11 @@ pub(crate) mod tests {
     fn indexed_assignment_cleanup_facts_match_checked_rules() {
         let lowered = lower(concat!(
             "type Holder = ctor I32\n",
-            "impl Drop Holder { def drop = Holder value => () }\n",
+            "impl Drop Holder { drop = Holder value => () }\n",
             "type Item = ctor I32\n",
-            "impl Drop Item { def drop = Item value => () }\n",
-            "impl Index Holder I32 Item { def index = (holder, key) => Item 0 }\n",
-            "impl MutateIndex Holder I32 Item { def mutate_index = (mut holder, key, move value) => () }\n",
+            "impl Drop Item { drop = Item value => () }\n",
+            "impl Index Holder I32 Item { index = (holder, key) => Item 0 }\n",
+            "impl MutateIndex Holder I32 Item { mutate_index = (mut holder, key, move value) => () }\n",
             "def make_holder: () -> Holder = () => Holder 0\n",
             "def assign_temp: () -> () = () => { (make_holder ())[0] = Item 1 }\n",
             "def assign_place: () -> () = () => {\n",
