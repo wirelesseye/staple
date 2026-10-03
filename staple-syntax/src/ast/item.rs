@@ -380,19 +380,41 @@ pub struct TraitDeclaration {
     pub docs: Vec<String>,
     pub visibility: Visibility,
     pub name: String,
+    /// Explicit parameters followed by one hidden trailing parameter per
+    /// associated type, in declaration order.
     pub type_parameters: Vec<TypeParameterPattern>,
-    pub functional_dependencies: Vec<FunctionalDependency>,
+    pub associated_types: Vec<AssociatedTypeDeclaration>,
     pub prerequisites: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
     pub default_bounds: Vec<DefaultTypeBound>,
     pub members: Vec<TraitMember>,
 }
 
+impl TraitDeclaration {
+    /// The parameters written in the trait header, without the hidden
+    /// parameters that represent associated types.
+    pub fn explicit_type_parameters(&self) -> &[TypeParameterPattern] {
+        let count = self
+            .type_parameters
+            .len()
+            .saturating_sub(self.associated_types.len());
+        &self.type_parameters[..count]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionalDependency {
+pub struct AssociatedTypeDeclaration {
     pub syntax: Syntax,
-    pub determinants: Vec<NamedType>,
-    pub dependent: NamedType,
+    pub docs: Vec<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssociatedTypeBinding {
+    pub syntax: Syntax,
+    pub docs: Vec<String>,
+    pub name: String,
+    pub value: Type,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -415,6 +437,7 @@ pub struct TraitImplementation {
     pub negative: bool,
     pub trait_name: NamedType,
     pub arguments: Vec<Type>,
+    pub associated_types: Vec<AssociatedTypeBinding>,
     pub members: Vec<ImplementationMember>,
 }
 

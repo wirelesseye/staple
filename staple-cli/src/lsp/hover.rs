@@ -564,10 +564,9 @@ impl Collector<'_> {
                     .map(|resolved| resolved.declaration.docs.clone())
                     .unwrap_or_else(|| declaration.docs.clone());
                 let (parameters, where_clause) = self.juxtaposed_generic_suffix(
-                    &declaration.type_parameters,
+                    declaration.explicit_type_parameters(),
                     &declaration.prerequisites,
                     &declaration.subtype_bounds,
-                    &declaration.functional_dependencies,
                 );
                 let module = self.syntax_module_label(declaration.syntax.id);
                 self.named_with_docs(
@@ -577,14 +576,18 @@ impl Collector<'_> {
                     docs,
                     module,
                 );
-                for parameter in &declaration.type_parameters {
+                for parameter in declaration.explicit_type_parameters() {
                     self.type_parameter(parameter);
                 }
-                for dependency in &declaration.functional_dependencies {
-                    for determinant in &dependency.determinants {
-                        self.ty(&Type::Named(determinant.clone()));
-                    }
-                    self.ty(&Type::Named(dependency.dependent.clone()));
+                for associated in &declaration.associated_types {
+                    let module = self.syntax_module_label(declaration.syntax.id);
+                    self.named_with_docs(
+                        &associated.syntax,
+                        &associated.name,
+                        format!("type {}.{}", declaration.name, associated.name),
+                        associated.docs.clone(),
+                        module,
+                    );
                 }
                 for prerequisite in &declaration.prerequisites {
                     self.trait_bound(prerequisite);
@@ -887,10 +890,9 @@ impl Collector<'_> {
             DefinitionId::Trait(id) => resolved.traits().get(&id).map(|resolved| {
                 let declaration = &resolved.declaration;
                 let (parameters, where_clause) = self.juxtaposed_generic_suffix(
-                    &declaration.type_parameters,
+                    declaration.explicit_type_parameters(),
                     &declaration.prerequisites,
                     &declaration.subtype_bounds,
-                    &declaration.functional_dependencies,
                 );
                 (
                     format!("trait {}{parameters}{where_clause}", declaration.name),
@@ -963,23 +965,17 @@ impl Collector<'_> {
             .collect()
     }
 
-    /// Builds the unified `where` clause text (trait bounds, subtype
-    /// bounds, and — for traits — functional dependencies), e.g.
+    /// Builds the unified `where` clause text (trait bounds and subtype
+    /// bounds), e.g.
     /// ` where Debug T, T <: Super`, or an empty string when there are none.
     fn where_clause(
         &self,
         trait_bounds: &[TraitBound],
         subtype_bounds: &[SubtypeBound],
-        functional_dependencies: &[FunctionalDependency],
     ) -> String {
-        let constraints = functional_dependencies
+        let constraints = subtype_bounds
             .iter()
-            .map(|dependency| dependency.syntax.text().trim().to_owned())
-            .chain(
-                subtype_bounds
-                    .iter()
-                    .map(|bound| bound.syntax.text().trim().to_owned()),
-            )
+            .map(|bound| bound.syntax.text().trim().to_owned())
             .chain(
                 trait_bounds
                     .iter()
@@ -1006,7 +1002,7 @@ impl Collector<'_> {
             return String::new();
         }
         let parameters = self.parameter_names(type_parameters).join(", ");
-        let where_clause = self.where_clause(trait_bounds, subtype_bounds, &[]);
+        let where_clause = self.where_clause(trait_bounds, subtype_bounds);
         format!("<{parameters}{where_clause}> ")
     }
 
@@ -1019,7 +1015,6 @@ impl Collector<'_> {
         type_parameters: &[TypeParameterPattern],
         trait_bounds: &[TraitBound],
         subtype_bounds: &[SubtypeBound],
-        functional_dependencies: &[FunctionalDependency],
     ) -> (String, String) {
         let parameters = self.parameter_names(type_parameters).join(" ");
         let parameters = if parameters.is_empty() {
@@ -1027,7 +1022,7 @@ impl Collector<'_> {
         } else {
             format!(" {parameters}")
         };
-        let where_clause = self.where_clause(trait_bounds, subtype_bounds, functional_dependencies);
+        let where_clause = self.where_clause(trait_bounds, subtype_bounds);
         (parameters, where_clause)
     }
 
@@ -1054,7 +1049,6 @@ impl Collector<'_> {
             ordinary_parameters,
             &declaration.trait_bounds,
             &declaration.subtype_bounds,
-            &[],
         );
         let head = format!(
             "type {}{effect_parameter}{parameters}{where_clause}",
@@ -1658,10 +1652,9 @@ impl Collector<'_> {
         if let Some(resolved) = self.typed.resolved().traits().get(&trait_id) {
             let declaration = &resolved.declaration;
             let (parameters, where_clause) = self.juxtaposed_generic_suffix(
-                &declaration.type_parameters,
+                declaration.explicit_type_parameters(),
                 &declaration.prerequisites,
                 &declaration.subtype_bounds,
-                &declaration.functional_dependencies,
             );
             let module = self.definition_module_label(DefinitionId::Trait(trait_id));
             self.named_with_docs(

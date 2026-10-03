@@ -11392,22 +11392,6 @@ fn substitute_item(
             }
         }
         Item::TraitDeclaration(declaration) => {
-            for dependency in &mut declaration.functional_dependencies {
-                substitute_identifier(
-                    &mut dependency.dependent.name,
-                    &mut dependency.dependent.syntax,
-                    environment,
-                    diagnostics,
-                )?;
-                for determinant in &mut dependency.determinants {
-                    substitute_identifier(
-                        &mut determinant.name,
-                        &mut determinant.syntax,
-                        environment,
-                        diagnostics,
-                    )?;
-                }
-            }
             for prerequisite in &mut declaration.prerequisites {
                 substitute_trait_bound(prerequisite, environment, diagnostics)?;
             }
@@ -11438,6 +11422,9 @@ fn substitute_item(
             }
             for argument in &mut implementation.arguments {
                 substitute_type(argument, environment, diagnostics)?;
+            }
+            for associated in &mut implementation.associated_types {
+                substitute_type(&mut associated.value, environment, diagnostics)?;
             }
             for member in &mut implementation.members {
                 member.value = substitute_splices(&member.value, environment, diagnostics)?;
@@ -12235,12 +12222,8 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             for parameter in &mut declaration.type_parameters {
                 freshen_type_parameter(expander, parameter, module, mark);
             }
-            for dependency in &mut declaration.functional_dependencies {
-                expander.freshen_syntax(&mut dependency.syntax, module, mark);
-                for determinant in &mut dependency.determinants {
-                    expander.freshen_syntax(&mut determinant.syntax, module, mark);
-                }
-                expander.freshen_syntax(&mut dependency.dependent.syntax, module, mark);
+            for associated in &mut declaration.associated_types {
+                expander.freshen_syntax(&mut associated.syntax, module, mark);
             }
             for prerequisite in &mut declaration.prerequisites {
                 freshen_trait_bound(expander, prerequisite, module, mark);
@@ -12273,6 +12256,10 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             expander.freshen_syntax(&mut implementation.trait_name.syntax, module, mark);
             for argument in &mut implementation.arguments {
                 freshen_type(expander, argument, module, mark);
+            }
+            for associated in &mut implementation.associated_types {
+                expander.freshen_syntax(&mut associated.syntax, module, mark);
+                freshen_type(expander, &mut associated.value, module, mark);
             }
             for member in &mut implementation.members {
                 expander.freshen_syntax(&mut member.syntax, module, mark);

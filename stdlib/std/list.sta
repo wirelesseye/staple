@@ -170,11 +170,13 @@ companion<T where Copy T> List T {
     }
 }
 
-impl<T where Copy T> Index (List T) USize T {
+impl<T where Copy T> Index (List T) USize {
+    type Output = T
     index = (list, position) => List.get_unchecked list position
 }
 
-impl<T> MutateIndex (List T) USize T {
+impl<T> MutateIndex (List T) USize {
+    type Value = T
     mutate_index = (mut list, position, move value) => {
         let mut reference = List.get_ref_unchecked list position
         Ref.replace reference value
@@ -186,7 +188,8 @@ pub type ListIter T = pub wrap (list: List T, index: USize)
 
 // Copy-T-gated, like `get`/`Index` — yields owned copies. A Ref-yielding
 // iterator for non-Copy element types is intentionally left for later.
-impl<T where Copy T> Iterator (ListIter T) T {
+impl<T where Copy T> Iterator (ListIter T) {
+    type Item = T
     next = move ListIter (list, index) => if (index < List.length list) {
         // The bounds check just above already guarantees `index` is valid,
         // so `get_unchecked` avoids a second, redundant one.
@@ -199,6 +202,7 @@ impl<T where Copy T> Iterator (ListIter T) T {
     }
 }
 
-impl<T where Copy T> IntoIterator (List T) (ListIter T) {
+impl<T where Copy T> IntoIterator (List T) {
+    type Iter = ListIter T
     into_iterator = move list => ListIter (list: list, index: 0)
 }

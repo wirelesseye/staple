@@ -1,13 +1,19 @@
 pub mod
 
 /// Provides read-only indexing for a target and position.
-pub trait Index Target Position Output where {Target, Position} ~> Output {
+pub trait Index Target Position {
+    /// The type of the indexed value.
+    type Output
+
     /// Returns the indexed value.
     index: (Target, Position) -> Output
 }
 
 /// Provides mutable indexing for a target and position.
-pub trait MutateIndex Target Position Value where {Target, Position} ~> Value {
+pub trait MutateIndex Target Position {
+    /// The type of the value stored at the index.
+    type Value
+
     /// Replaces the indexed value.
     mutate_index: (mut Target, Position, move Value) -> ()
 }

@@ -29,7 +29,8 @@ pub def range_inclusive : <T where Copy T> T -> T -> RangeInclusive T = start =>
     finished: False,
 )
 
-impl Iterator (Range I8) I8 {
+impl Iterator (Range I8) {
+    type Item = I8
     next = move Range (current, end) => if (current < end) {
         Yield (
             current,
@@ -46,11 +47,13 @@ impl Iterator (Range I8) I8 {
     }
 }
 
-impl IntoIterator (Range I8) (Range I8) {
+impl IntoIterator (Range I8) {
+    type Iter = Range I8
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (RangeInclusive I8) I8 {
+impl Iterator (RangeInclusive I8) {
+    type Item = I8
     next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
@@ -81,11 +84,13 @@ impl Iterator (RangeInclusive I8) I8 {
     }
 }
 
-impl IntoIterator (RangeInclusive I8) (RangeInclusive I8) {
+impl IntoIterator (RangeInclusive I8) {
+    type Iter = RangeInclusive I8
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (Range I16) I16 {
+impl Iterator (Range I16) {
+    type Item = I16
     next = move Range (current, end) => if (current < end) {
         Yield (
             current,
@@ -102,11 +107,13 @@ impl Iterator (Range I16) I16 {
     }
 }
 
-impl IntoIterator (Range I16) (Range I16) {
+impl IntoIterator (Range I16) {
+    type Iter = Range I16
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (RangeInclusive I16) I16 {
+impl Iterator (RangeInclusive I16) {
+    type Item = I16
     next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
@@ -137,11 +144,13 @@ impl Iterator (RangeInclusive I16) I16 {
     }
 }
 
-impl IntoIterator (RangeInclusive I16) (RangeInclusive I16) {
+impl IntoIterator (RangeInclusive I16) {
+    type Iter = RangeInclusive I16
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (Range I32) I32 {
+impl Iterator (Range I32) {
+    type Item = I32
     next = move Range (current, end) => if (current < end) {
         Yield (
             current,
@@ -158,11 +167,13 @@ impl Iterator (Range I32) I32 {
     }
 }
 
-impl IntoIterator (Range I32) (Range I32) {
+impl IntoIterator (Range I32) {
+    type Iter = Range I32
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (RangeInclusive I32) I32 {
+impl Iterator (RangeInclusive I32) {
+    type Item = I32
     next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
@@ -193,11 +204,13 @@ impl Iterator (RangeInclusive I32) I32 {
     }
 }
 
-impl IntoIterator (RangeInclusive I32) (RangeInclusive I32) {
+impl IntoIterator (RangeInclusive I32) {
+    type Iter = RangeInclusive I32
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (Range I64) I64 {
+impl Iterator (Range I64) {
+    type Item = I64
     next = move Range (current, end) => if (current < end) {
         Yield (
             current,
@@ -214,11 +227,13 @@ impl Iterator (Range I64) I64 {
     }
 }
 
-impl IntoIterator (Range I64) (Range I64) {
+impl IntoIterator (Range I64) {
+    type Iter = Range I64
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (RangeInclusive I64) I64 {
+impl Iterator (RangeInclusive I64) {
+    type Item = I64
     next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
@@ -249,11 +264,13 @@ impl Iterator (RangeInclusive I64) I64 {
     }
 }
 
-impl IntoIterator (RangeInclusive I64) (RangeInclusive I64) {
+impl IntoIterator (RangeInclusive I64) {
+    type Iter = RangeInclusive I64
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (Range U8) U8 {
+impl Iterator (Range U8) {
+    type Item = U8
     next = move Range (current, end) => if (current < end) {
         Yield (
             current,
@@ -270,11 +287,13 @@ impl Iterator (Range U8) U8 {
     }
 }
 
-impl IntoIterator (Range U8) (Range U8) {
+impl IntoIterator (Range U8) {
+    type Iter = Range U8
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (RangeInclusive U8) U8 {
+impl Iterator (RangeInclusive U8) {
+    type Item = U8
     next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
@@ -305,11 +324,13 @@ impl Iterator (RangeInclusive U8) U8 {
     }
 }
 
-impl IntoIterator (RangeInclusive U8) (RangeInclusive U8) {
+impl IntoIterator (RangeInclusive U8) {
+    type Iter = RangeInclusive U8
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (Range U16) U16 {
+impl Iterator (Range U16) {
+    type Item = U16
     next = move Range (current, end) => if (current < end) {
         Yield (
             current,
@@ -326,11 +347,13 @@ impl Iterator (Range U16) U16 {
     }
 }
 
-impl IntoIterator (Range U16) (Range U16) {
+impl IntoIterator (Range U16) {
+    type Iter = Range U16
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (RangeInclusive U16) U16 {
+impl Iterator (RangeInclusive U16) {
+    type Item = U16
     next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
@@ -361,11 +384,13 @@ impl Iterator (RangeInclusive U16) U16 {
     }
 }
 
-impl IntoIterator (RangeInclusive U16) (RangeInclusive U16) {
+impl IntoIterator (RangeInclusive U16) {
+    type Iter = RangeInclusive U16
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (Range U32) U32 {
+impl Iterator (Range U32) {
+    type Item = U32
     next = move Range (current, end) => if (current < end) {
         Yield (
             current,
@@ -382,11 +407,13 @@ impl Iterator (Range U32) U32 {
     }
 }
 
-impl IntoIterator (Range U32) (Range U32) {
+impl IntoIterator (Range U32) {
+    type Iter = Range U32
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (RangeInclusive U32) U32 {
+impl Iterator (RangeInclusive U32) {
+    type Item = U32
     next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
@@ -417,11 +444,13 @@ impl Iterator (RangeInclusive U32) U32 {
     }
 }
 
-impl IntoIterator (RangeInclusive U32) (RangeInclusive U32) {
+impl IntoIterator (RangeInclusive U32) {
+    type Iter = RangeInclusive U32
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (Range U64) U64 {
+impl Iterator (Range U64) {
+    type Item = U64
     next = move Range (current, end) => if (current < end) {
         Yield (
             current,
@@ -438,11 +467,13 @@ impl Iterator (Range U64) U64 {
     }
 }
 
-impl IntoIterator (Range U64) (Range U64) {
+impl IntoIterator (Range U64) {
+    type Iter = Range U64
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (RangeInclusive U64) U64 {
+impl Iterator (RangeInclusive U64) {
+    type Item = U64
     next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
@@ -473,11 +504,13 @@ impl Iterator (RangeInclusive U64) U64 {
     }
 }
 
-impl IntoIterator (RangeInclusive U64) (RangeInclusive U64) {
+impl IntoIterator (RangeInclusive U64) {
+    type Iter = RangeInclusive U64
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (Range ISize) ISize {
+impl Iterator (Range ISize) {
+    type Item = ISize
     next = move Range (current, end) => if (current < end) {
         Yield (
             current,
@@ -494,11 +527,13 @@ impl Iterator (Range ISize) ISize {
     }
 }
 
-impl IntoIterator (Range ISize) (Range ISize) {
+impl IntoIterator (Range ISize) {
+    type Iter = Range ISize
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (RangeInclusive ISize) ISize {
+impl Iterator (RangeInclusive ISize) {
+    type Item = ISize
     next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
@@ -529,11 +564,13 @@ impl Iterator (RangeInclusive ISize) ISize {
     }
 }
 
-impl IntoIterator (RangeInclusive ISize) (RangeInclusive ISize) {
+impl IntoIterator (RangeInclusive ISize) {
+    type Iter = RangeInclusive ISize
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (Range USize) USize {
+impl Iterator (Range USize) {
+    type Item = USize
     next = move Range (current, end) => if (current < end) {
         Yield (
             current,
@@ -550,11 +587,13 @@ impl Iterator (Range USize) USize {
     }
 }
 
-impl IntoIterator (Range USize) (Range USize) {
+impl IntoIterator (Range USize) {
+    type Iter = Range USize
     into_iterator = move iterator => iterator
 }
 
-impl Iterator (RangeInclusive USize) USize {
+impl Iterator (RangeInclusive USize) {
+    type Item = USize
     next = move RangeInclusive (current, end, finished) => when {
         finished => Done (RangeInclusive (
             current: current,
@@ -585,6 +624,7 @@ impl Iterator (RangeInclusive USize) USize {
     }
 }
 
-impl IntoIterator (RangeInclusive USize) (RangeInclusive USize) {
+impl IntoIterator (RangeInclusive USize) {
+    type Iter = RangeInclusive USize
     into_iterator = move iterator => iterator
 }

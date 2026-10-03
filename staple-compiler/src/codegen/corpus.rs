@@ -800,8 +800,8 @@ static CORPUS: [CorpusProgram; 89] = [
                 concat!(
                     "type Counter = wrap I32\n",
                     "type Wrapper = wrap (value: I32)\n",
-                    "impl Index Counter String I32 { index = (counter, key) => 0 }\n",
-                    "impl MutateIndex Counter String I32 { mutate_index = (mut counter, key, move value) => () }\n",
+                    "impl Index Counter String { type Output = I32; index = (counter, key) => 0 }\n",
+                    "impl MutateIndex Counter String { type Value = I32; mutate_index = (mut counter, key, move value) => () }\n",
                     "def make_counter = () => Counter 0\n",
                     "\n",
                     "def places = (mut direct: I32, mut pair: (I32, I32), mut wrapper: Wrapper, mut counter: Counter, mut values: (I32; 2)) => {\n",
@@ -1291,7 +1291,7 @@ puts (CString.from_string (nested_sum (((I32, I32) | U8) :: (U8 :: 14))))
                 r#"use std.cinterop.CString
 extern "c" { puts: CString -> I32 }
 type Row = wrap (I32, I32)
-impl Index Row USize I32 { index = (row, position) => 7 }
+impl Index Row USize { type Output = I32; index = (row, position) => 7 }
 def mixed: (U8, I32) -> (I32 | U8) = pair => pair[1]
 def uniform: (I32, I32) -> I32 = pair => pair[0]
 def replace: (I32, I32) -> (I32, I32) = pair => { let mut own = pair; own[0] = 3; own }

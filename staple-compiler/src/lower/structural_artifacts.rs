@@ -1551,7 +1551,7 @@ mod tests {
     fn deref_index_delegates_to_an_explicit_index_implementation() {
         let (_, lowered) = lower(concat!(
             "type Row = wrap (I32, I32)\n",
-            "impl Index Row USize I32 { index = (row, position) => 7 }\n",
+            "impl Index Row USize { type Output = I32; index = (row, position) => 7 }\n",
             "def deref_row: (Ref Row, USize) -> I32 = (reference, position) => reference[position]\n",
             "let value = deref_row (Ref (Row (1, 2)), 0)\n",
         ));

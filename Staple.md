@@ -1399,13 +1399,13 @@ let index: USize = 1
 let value = values[index]
 ```
 
-`Index` has target, position, and output parameters, with the target and
-position determining the output. User-defined implementations may use any
+`Index` has target and position parameters and an associated `Output` type
+determined by them. User-defined implementations may use any
 position type. The compiler derives `Index P USize Output` for every non-empty
 fixed product whose elements are all `Copy`; `Output` is the duplicate-free sum
 of its element types. Thus indexing `(I32, String, I32)` produces
 `I32 | String`, while indexing `(I32; N)` produces `I32`. The standard library
-implements `Index (Slice T) USize T` when `T` is `Copy`, backed by
+implements `Index (Slice T) USize` with `type Output = T` when `T` is `Copy`, backed by
 `Slice.get_ref_unchecked`, so a `Slice T` is indexed like a fixed product of `T`. Known
 bad fixed-product indices are rejected and dynamic out-of-bounds indices trap.
 
@@ -2157,50 +2157,46 @@ trait Increment T {
 }
 ```
 
-A trait may declare functional dependencies in its `where` clause, alongside
-any prerequisite trait bounds. A dependency states that the parameters on the
-left uniquely determine the parameter on the right:
+A trait may declare associated types with `type` inside its body. An
+associated type is a type that each implementation chooses, uniquely determined
+by the trait's parameters:
 
 ```staple
-trait Iterator Iter Item where Iter ~> Item {
+trait Iterator Iter {
+    type Item
     next: Iter -> IterStep (Iter, Item)
 }
 
-trait Add Left Right Output where {Left, Right} ~> Output {
+trait Add Left Right {
+    type Output
     add: Left -> Right -> Output
 }
 ```
 
-The left side is either one parameter or a non-empty comma-separated set in
-braces. The right side is one parameter. A trait may declare multiple
-dependencies, including chains such as `where A ~> B, B ~> C`. Dependencies and
-prerequisite trait bounds are comma-separated entries of the same `where`
-clause and may be mixed freely, as in `where Source ~> Iter, Iterator Iter`.
+Inside the trait body, an associated type is in scope by its bare name, as
+`Item` and `Output` are above. An associated type may carry its own `where`
+clause; those bounds become prerequisites of the trait, as in
+`type Iter where Iterator Iter`. Trait parameters are written in the header
+only, so `Iterator Iter` is the complete bound for an iterator type. A bound
+(but not an `impl` header) may append associated types positionally to constrain
+them, as in `Iterator Iter Item`, or use `_` to leave one open.
 
-A dependent argument may be written as `_` when all of its determinants are
-known. If every remaining argument is inferable, the trailing arguments may be
-omitted entirely. These forms are equivalent:
+An implementation binds every associated type exactly once with
+`type Name = Type`:
 
 ```staple
-Iterator Iter Item
-Iterator Iter _
-Iterator Iter
-
-Add I32 I32 I32
-Add I32 I32 _
-Add I32 I32
+impl Iterator Counter {
+    type Item = I32
+    next = move Counter (current) => IterStep.Yield (current, Counter (current + 1))
+}
 ```
 
-An underscore in a non-dependent position is an error. Product binders may
-infer individual elements, as in `Convert (From, _)`, when the corresponding
-parameter is functionally dependent. Trait implementation headers do not
-support this inference and must name every argument explicitly; see
+Associated types are global coherence promises. Two implementations cannot
+agree on every trait parameter while binding different associated types;
+contradictory generic bounds are rejected for the same reason. Implementation
+headers must name every trait parameter explicitly; see
 [Generic trait implementations](#generic-trait-implementations) below for how
 an implementation may still be generic over its own compile-time parameters.
-
-Functional dependencies are global coherence promises. Two implementations
-cannot agree on every determinant while choosing different dependent types;
-contradictory generic bounds are rejected for the same reason.
 
 Trait members must have function types, must mention every trait parameter, and
 cannot contain inferred types. Traits may be exported with `pub trait` and are
@@ -2404,7 +2400,7 @@ against that parameter's own subtype and trait bounds, exactly as an explicit
 argument would be.
 
 Trait defaults apply the same way to under-supplied trait arguments, in both
-an `impl` header and a bound clause — complementing the functional-dependency
+an `impl` header and a bound clause — complementing the associated-type
 based inference described above ([Traits and bounded generic
 functions](#traits-and-bounded-generic-functions)). Given `trait Converts
 From (To = String) { convert: From -> To }`, `impl Converts I32 { ... }`
@@ -3051,7 +3047,7 @@ reference for wiring a real update loop to Staple coroutines.
 ## Iteration and ranges
 
 The prelude's consuming iterator protocol returns the successor iterator state
-with every step. `Iter` functionally determines `Item`:
+with every step. `Iter` determines its associated `Item`:
 
 ```staple
 pub mod IterStep {
@@ -3063,11 +3059,13 @@ pub type IterStep (Iter, Item) = alias
     IterStep.Done Iter |
     IterStep.Yield (Item, Iter)
 
-pub trait Iterator Iter Item where Iter ~> Item {
+pub trait Iterator Iter {
+    type Item
     next: move Iter -> IterStep (Iter, Item)
 }
 
-pub trait IntoIterator Source Iter where Source ~> Iter, Iterator Iter {
+pub trait IntoIterator Source {
+    type Iter where Iterator Iter
     into_iterator: move Source -> Iter
 }
 ```

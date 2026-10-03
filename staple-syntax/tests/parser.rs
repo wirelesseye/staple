@@ -324,7 +324,7 @@ fn parses_float_literals_losslessly_without_stealing_access_dots() {
 
 #[test]
 fn lexes_only_the_fixed_operator_vocabulary() {
-    let source = "..= && || == != <= >= .. <: ~> ? | < > ^ *^ *. ++ %";
+    let source = "..= && || == != <= >= .. <: ? | < > ^ *^ *. ++ %";
     let tokens = staple_syntax::lex(source)
         .into_iter()
         .filter(|token| !token.kind.is_trivia())
@@ -342,7 +342,6 @@ fn lexes_only_the_fixed_operator_vocabulary() {
             (TokenKind::Operator, ">="),
             (TokenKind::Operator, ".."),
             (TokenKind::Operator, "<:"),
-            (TokenKind::Operator, "~>"),
             (TokenKind::Operator, "?"),
             (TokenKind::Operator, "|"),
             (TokenKind::Operator, "<"),
@@ -723,41 +722,42 @@ fn parses_trait_prerequisites_losslessly() {
 }
 
 #[test]
-fn parses_trait_functional_dependencies_losslessly() {
+fn parses_trait_associated_types_losslessly() {
     let source = concat!(
-        "trait Iterator Iter Item where Iter ~> Item { next: Iter -> Item }\n",
-        "trait Add Left Right Output where {Left, Right} ~> Output, Eq Output { add: Left -> Right -> Output }\n",
+        "trait Iterator Iter { type Item\n next: Iter -> Item }\n",
+        "trait Add Left Right { type Output where Eq Output\n add: Left -> Right -> Output }\n",
+        "impl Iterator Counter { type Item = Int\n next = value => value }\n",
         "def iterate: <Iter where Iterator Iter> Iter -> () = value => ()\n",
-        "def add: <T where Add T T _> T -> T = value => value\n",
     );
-    let root = parse(source).expect("functional dependency syntax should parse");
+    let root = parse(source).expect("associated type syntax should parse");
     assert_eq!(root.text(), source);
 
     let Item::TraitDeclaration(iterator) = &root.items[0] else {
         panic!("expected Iterator trait");
     };
-    assert_eq!(iterator.functional_dependencies.len(), 1);
-    assert_eq!(
-        iterator.functional_dependencies[0].determinants[0].name,
-        "Iter"
-    );
-    assert_eq!(iterator.functional_dependencies[0].dependent.name, "Item");
+    assert_eq!(iterator.associated_types.len(), 1);
+    assert_eq!(iterator.associated_types[0].name, "Item");
+    assert_eq!(iterator.type_parameters.len(), 2);
+    assert_eq!(iterator.members.len(), 1);
 
     let Item::TraitDeclaration(add) = &root.items[1] else {
         panic!("expected Add trait");
     };
-    assert_eq!(add.functional_dependencies[0].determinants.len(), 2);
-    assert_eq!(add.functional_dependencies[0].dependent.name, "Output");
+    assert_eq!(add.associated_types[0].name, "Output");
+    assert_eq!(add.type_parameters.len(), 3);
     assert_eq!(add.prerequisites.len(), 1);
 
-    let Item::Binding(iterate) = unmodified_item(&root.items[2]) else {
+    let Item::TraitImplementation(implementation) = &root.items[2] else {
+        panic!("expected Iterator implementation");
+    };
+    assert_eq!(implementation.associated_types.len(), 1);
+    assert_eq!(implementation.associated_types[0].name, "Item");
+    assert_eq!(implementation.members.len(), 1);
+
+    let Item::Binding(iterate) = unmodified_item(&root.items[3]) else {
         panic!("expected iterate binding");
     };
     assert_eq!(iterate.trait_bounds[0].arguments.len(), 1);
-    let Item::Binding(add_use) = unmodified_item(&root.items[3]) else {
-        panic!("expected add binding");
-    };
-    assert_eq!(add_use.trait_bounds[0].arguments.len(), 3);
 }
 
 #[test]

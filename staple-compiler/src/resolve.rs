@@ -74,6 +74,9 @@ pub struct ResolvedTraitImplementation {
     pub trait_id: TraitId,
     pub parameters: Vec<TypeParameterId>,
     pub arguments: Vec<Type>,
+    /// Bound associated types, ordered like the trait's declaration. Empty
+    /// for negative implementations.
+    pub associated_arguments: Vec<Type>,
     pub trait_bounds: Vec<staple_syntax::TraitBound>,
     pub subtype_bounds: Vec<staple_syntax::SubtypeBound>,
     pub negative: bool,
@@ -2307,13 +2310,29 @@ impl NameResolver {
                             self.trait_method_traits.insert(method, id);
                             methods.push(method);
                         }
+                        // Associated types are hidden trailing parameters
+                        // determined by the explicit parameters.
+                        let explicit_count = parameters
+                            .len()
+                            .saturating_sub(declaration.associated_types.len());
+                        let functional_dependencies = if explicit_count == 0 {
+                            Vec::new()
+                        } else {
+                            parameters[explicit_count..]
+                                .iter()
+                                .map(|dependent| ResolvedFunctionalDependency {
+                                    determinants: parameters[..explicit_count].to_vec(),
+                                    dependent: *dependent,
+                                })
+                                .collect()
+                        };
                         self.traits.insert(
                             id,
                             ResolvedTrait {
                                 id,
                                 declaration: declaration.clone(),
                                 parameters,
-                                functional_dependencies: Vec::new(),
+                                functional_dependencies,
                                 methods,
                                 default_methods: HashMap::new(),
                             },
@@ -3435,67 +3454,6 @@ impl NameResolver {
                 for parameter in &declaration.type_parameters {
                     self.scope_allocated_type_parameter_pattern(parameter);
                 }
-                let mut functional_dependencies = Vec::new();
-                for dependency in &declaration.functional_dependencies {
-                    let mut determinants = Vec::new();
-                    let mut seen = HashSet::new();
-                    for determinant in &dependency.determinants {
-                        let Some(parameter) = self.lookup_type_parameter(&determinant.name) else {
-                            self.diagnostics.push(Diagnostic::new(
-                                determinant.syntax.span.clone(),
-                                format!(
-                                    "unknown trait type parameter `{}` in functional dependency",
-                                    determinant.name
-                                ),
-                            ));
-                            continue;
-                        };
-                        self.type_parameters
-                            .insert(determinant.syntax.id, parameter);
-                        if !seen.insert(parameter) {
-                            self.diagnostics.push(Diagnostic::new(
-                                determinant.syntax.span.clone(),
-                                format!(
-                                    "duplicate functional dependency determinant `{}`",
-                                    determinant.name
-                                ),
-                            ));
-                            continue;
-                        }
-                        determinants.push(parameter);
-                    }
-                    let Some(dependent) = self.lookup_type_parameter(&dependency.dependent.name)
-                    else {
-                        self.diagnostics.push(Diagnostic::new(
-                            dependency.dependent.syntax.span.clone(),
-                            format!(
-                                "unknown trait type parameter `{}` in functional dependency",
-                                dependency.dependent.name
-                            ),
-                        ));
-                        continue;
-                    };
-                    self.type_parameters
-                        .insert(dependency.dependent.syntax.id, dependent);
-                    if seen.contains(&dependent) {
-                        self.diagnostics.push(Diagnostic::new(
-                            dependency.dependent.syntax.span.clone(),
-                            "functional dependency cannot determine one of its determinants",
-                        ));
-                        continue;
-                    }
-                    if determinants.is_empty() {
-                        continue;
-                    }
-                    functional_dependencies.push(ResolvedFunctionalDependency {
-                        determinants,
-                        dependent,
-                    });
-                }
-                self.traits
-                    .get_mut(&trait_id)
-                    .expect("resolved trait")
-                    .functional_dependencies = functional_dependencies;
                 for prerequisite in &declaration.prerequisites {
                     if let Some(trait_id) = self.resolve_trait_name(&prerequisite.trait_name) {
                         self.trait_references
@@ -3600,6 +3558,48 @@ impl NameResolver {
                     }
                     self.resolve_type(&bound.supertype);
                 }
+                let mut associated_arguments = Vec::new();
+                for binding in &implementation.associated_types {
+                    self.resolve_type(&binding.value);
+                }
+                if let Some(trait_id) = trait_id {
+                    let declared = self.traits[&trait_id]
+                        .declaration
+                        .associated_types
+                        .iter()
+                        .map(|associated| associated.name.clone())
+                        .collect::<Vec<_>>();
+                    let mut bound = HashSet::new();
+                    for binding in &implementation.associated_types {
+                        if !declared.contains(&binding.name) {
+                            self.diagnostics.push(Diagnostic::new(
+                                binding.syntax.span.clone(),
+                                format!("trait has no associated type named `{}`", binding.name),
+                            ));
+                        } else if !bound.insert(binding.name.clone()) {
+                            self.diagnostics.push(Diagnostic::new(
+                                binding.syntax.span.clone(),
+                                format!("duplicate associated type `{}`", binding.name),
+                            ));
+                        }
+                    }
+                    if !implementation.negative {
+                        for name in &declared {
+                            if let Some(binding) = implementation
+                                .associated_types
+                                .iter()
+                                .find(|binding| &binding.name == name)
+                            {
+                                associated_arguments.push(binding.value.clone());
+                            } else {
+                                self.diagnostics.push(Diagnostic::new(
+                                    implementation.syntax.span.clone(),
+                                    format!("implementation is missing associated type `{name}`"),
+                                ));
+                            }
+                        }
+                    }
+                }
                 let mut methods = HashMap::new();
                 for member in &implementation.members {
                     let method = trait_id.and_then(|trait_id| {
@@ -3664,6 +3664,7 @@ impl NameResolver {
                             trait_id,
                             parameters,
                             arguments: implementation.arguments.clone(),
+                            associated_arguments,
                             trait_bounds: implementation.trait_bounds.clone(),
                             subtype_bounds: implementation.subtype_bounds.clone(),
                             negative: implementation.negative,

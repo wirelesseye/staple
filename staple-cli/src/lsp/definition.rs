@@ -538,14 +538,11 @@ impl Collector<'_> {
             }
             Item::TraitDeclaration(value) => {
                 self.add_resolved(&value.syntax, &value.name, false);
-                for parameter in &value.type_parameters {
+                for parameter in value.explicit_type_parameters() {
                     self.type_parameter(parameter);
                 }
-                for dependency in &value.functional_dependencies {
-                    for determinant in &dependency.determinants {
-                        self.named_type(determinant);
-                    }
-                    self.named_type(&dependency.dependent);
+                for associated in &value.associated_types {
+                    self.add_resolved(&associated.syntax, &associated.name, false);
                 }
                 for bound in &value.prerequisites {
                     self.trait_bound(bound);
@@ -568,6 +565,9 @@ impl Collector<'_> {
                 self.named_type(&value.trait_name);
                 for argument in &value.arguments {
                     self.ty(argument);
+                }
+                for associated in &value.associated_types {
+                    self.ty(&associated.value);
                 }
                 for member in &value.members {
                     self.add_resolved(&member.syntax, &member.name, false);

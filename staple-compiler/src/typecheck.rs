@@ -2522,6 +2522,7 @@ impl TypeChecker {
                         && resolved.parameters.len() == 3
                         && resolved.declaration.members.len() == 1
                         && resolved.declaration.members[0].name == member_name
+                        && resolved.declaration.associated_types.len() == 1
                         && resolved.functional_dependencies.len() == 1
                         && resolved.functional_dependencies[0].determinants
                             == resolved.parameters[..2]
@@ -2531,7 +2532,7 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     Span::Compiler,
                     format!(
-                        "standard library must declare public trait `{trait_name}` with three parameters, the required functional dependency, and one `{member_name}` member"
+                        "standard library must declare public trait `{trait_name}` with two parameters, one associated type, and one `{member_name}` member"
                     ),
                 ));
             }
@@ -2547,6 +2548,7 @@ impl TypeChecker {
                         && resolved.parameters.len() == 2
                         && resolved.declaration.members.len() == 1
                         && resolved.declaration.members[0].name == member_name
+                        && resolved.declaration.associated_types.len() == 1
                         && resolved.functional_dependencies.len() == 1
                         && resolved.functional_dependencies[0].determinants
                             == resolved.parameters[..1]
@@ -2556,7 +2558,7 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     Span::Compiler,
                     format!(
-                        "standard library must declare public trait `{trait_name}` with two parameters, the required functional dependency, and one `{member_name}` member"
+                        "standard library must declare public trait `{trait_name}` with one parameter, one associated type, and one `{member_name}` member"
                     ),
                 ));
             }
@@ -2600,7 +2602,7 @@ impl TypeChecker {
             if self.bounds_violate_functional_dependencies(&prerequisites) {
                 self.diagnostics.push(Diagnostic::new(
                     resolved_trait.declaration.syntax.span.clone(),
-                    "trait prerequisites conflict with a functional dependency",
+                    "trait prerequisites conflict with an associated type",
                 ));
             }
         }
@@ -2758,6 +2760,7 @@ impl TypeChecker {
                 module,
                 implementation.trait_id,
                 &implementation.arguments,
+                &implementation.associated_arguments,
                 span.clone(),
                 false,
             ) else {
@@ -2935,7 +2938,7 @@ impl TypeChecker {
             if conflict {
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
-                    "conflicting trait implementations violate a functional dependency",
+                    "conflicting trait implementations bind different associated types",
                 ));
                 continue;
             }
@@ -3152,10 +3155,18 @@ impl TypeChecker {
         module: &ResolvedModule,
         trait_id: TraitId,
         source_arguments: &[Type],
+        associated_arguments: &[Type],
         span: Span,
         allow_inference: bool,
     ) -> Option<(Vec<CheckedType>, HashMap<TypeParameterId, CheckedType>)> {
         let resolved_trait = &module.traits()[&trait_id];
+        // Associated types are hidden trailing parameters: they are bound by
+        // `type Name = T` in implementations and otherwise inferred.
+        let expected_arity = resolved_trait
+            .declaration
+            .type_parameters
+            .len()
+            .saturating_sub(resolved_trait.declaration.associated_types.len());
         // Before traits had arity, a unary trait target such as `Box I32` was
         // stored as one applied type. Preserve that source form by rejoining
         // the application spine when the resolved trait is unary.
@@ -3176,15 +3187,21 @@ impl TypeChecker {
         } else {
             source_arguments
         };
-        let expected_arity = resolved_trait.declaration.type_parameters.len();
-        if source_arguments.len() > expected_arity {
+        // Bounds may also name associated types positionally after the
+        // explicit parameters (`Iterator Iter Item`), constraining them.
+        let max_arity = if allow_inference {
+            resolved_trait.declaration.type_parameters.len()
+        } else {
+            expected_arity
+        };
+        if source_arguments.len() > max_arity {
             self.diagnostics.push(Diagnostic::new(
                 span,
                 format!(
                     "trait `{}` expects {} compile-time argument{}, found {}",
                     resolved_trait.declaration.name,
-                    expected_arity,
-                    if expected_arity == 1 { "" } else { "s" },
+                    max_arity,
+                    if max_arity == 1 { "" } else { "s" },
                     source_arguments.len()
                 ),
             ));
@@ -3205,7 +3222,8 @@ impl TypeChecker {
             }
         };
         let arity_satisfied = source_arguments.len() >= expected_arity
-            || resolved_trait.declaration.type_parameters[source_arguments.len()..]
+            || resolved_trait.declaration.type_parameters
+                [source_arguments.len()..expected_arity]
                 .iter()
                 .all(has_default);
         if !allow_inference && !arity_satisfied {
@@ -3222,7 +3240,7 @@ impl TypeChecker {
             return None;
         }
         let mut default_substitutions: HashMap<TypeParameterId, CheckedType> = HashMap::new();
-        let mut arguments = Vec::with_capacity(expected_arity);
+        let mut arguments = Vec::with_capacity(resolved_trait.declaration.type_parameters.len());
         for (index, pattern) in resolved_trait
             .declaration
             .type_parameters
@@ -3231,6 +3249,11 @@ impl TypeChecker {
         {
             let value = if index < source_arguments.len() {
                 self.resolve_source_type(module, &source_arguments[index])
+            } else if let Some(source) = index
+                .checked_sub(expected_arity)
+                .and_then(|offset| associated_arguments.get(offset))
+            {
+                self.resolve_source_type(module, source)
             } else if let TypeParameterPattern::Binding(binding) = pattern
                 && let Some(param_id) = module.type_parameter_for(binding.syntax.id)
                 && let Some(default) = trait_defaults.get(&param_id)
@@ -3305,7 +3328,7 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     format!(
-                        "trait argument for `{name}` cannot be inferred from functional dependencies"
+                        "trait argument for `{name}` cannot be inferred from associated types"
                     ),
                 ));
                 return None;
@@ -3324,6 +3347,7 @@ impl TypeChecker {
             module,
             trait_id,
             &bound.arguments,
+            &[],
             bound.syntax.span.clone(),
             true,
         )?;
@@ -4162,7 +4186,7 @@ impl TypeChecker {
             if self.bounds_violate_functional_dependencies(&bounds) {
                 self.diagnostics.push(Diagnostic::new(
                     function.pattern.syntax().span.clone(),
-                    "trait bounds conflict with a functional dependency",
+                    "trait bounds conflict with an associated type",
                 ));
             }
             if !bounds.is_empty() {
@@ -12458,7 +12482,7 @@ impl TypeChecker {
         if self.bounds_violate_functional_dependencies(&declaration_bounds) {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
-                "type declaration bounds conflict with a functional dependency",
+                "type declaration bounds conflict with an associated type",
             ));
         }
         let mut declaration_subtype_bounds = Vec::new();

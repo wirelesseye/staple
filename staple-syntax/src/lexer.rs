@@ -285,7 +285,7 @@ fn lex_identifier(source: &str, offset: usize) -> Option<usize> {
 fn lex_fixed_operator(source: &str, offset: usize) -> Option<usize> {
     let tail = source.get(offset..)?;
     [
-        "..=", "&&", "||", "==", "!=", "<=", ">=", "..", "<:", "~>", "?", "|", "<", ">", "^",
+        "..=", "&&", "||", "==", "!=", "<=", ">=", "..", "<:", "?", "|", "<", ">", "^",
     ]
     .into_iter()
     .find(|operator| tail.starts_with(operator))

@@ -919,8 +919,9 @@ impl Grammar {
         if type_parameters.is_empty() {
             return Err(self.error("expected at least one trait type parameter"));
         }
-        let (prerequisites, subtype_bounds, functional_dependencies) =
-            self.parse_where_clause(&mut type_parameters, true)?;
+        let (mut prerequisites, mut subtype_bounds) =
+            self.parse_where_clause(&mut type_parameters)?;
+        let mut associated_types = Vec::new();
         self.expect(TokenKind::LBrace, "expected `{` before trait members")?;
         let mut members = Vec::new();
         while !self.at(TokenKind::RBrace) {
@@ -929,6 +930,43 @@ impl Grammar {
             }
             let member_start = self.position;
             let docs = self.parse_member_docs(member_start)?;
+            if self.at(TokenKind::Type) {
+                self.bump_token();
+                let associated_name = self
+                    .expect(TokenKind::Identifier, "expected associated type name")?
+                    .text;
+                // An associated type is a hidden trailing trait parameter
+                // determined by the explicit parameters; its `where` bounds
+                // become trait prerequisites.
+                let mut hidden = vec![TypeParameterPattern::Binding(TypeParameterBinding {
+                    syntax: self.syntax(member_start),
+                    name: associated_name.clone(),
+                    sized: true,
+                })];
+                let previous = self.newline_terminates_type;
+                let previous_any = self.any_newline_terminates_type;
+                self.newline_terminates_type = true;
+                self.any_newline_terminates_type = true;
+                let clause = self.parse_where_clause(&mut hidden);
+                self.newline_terminates_type = previous;
+                self.any_newline_terminates_type = previous_any;
+                let (bounds, subtypes) = clause?;
+                prerequisites.extend(bounds);
+                subtype_bounds.extend(subtypes);
+                let syntax = self.syntax(member_start);
+                let TypeParameterPattern::Binding(binding) = &mut hidden[0] else {
+                    unreachable!("hidden associated type parameter is a binding")
+                };
+                binding.syntax = syntax.clone();
+                type_parameters.push(hidden.remove(0));
+                associated_types.push(AssociatedTypeDeclaration {
+                    syntax,
+                    docs,
+                    name: associated_name,
+                });
+                self.eat(TokenKind::Semicolon);
+                continue;
+            }
             let member_name = self
                 .expect(TokenKind::Identifier, "expected trait member name")?
                 .text;
@@ -959,7 +997,7 @@ impl Grammar {
             visibility,
             name,
             type_parameters,
-            functional_dependencies,
+            associated_types,
             prerequisites,
             subtype_bounds,
             default_bounds,
@@ -969,34 +1007,22 @@ impl Grammar {
 
     /// Parses the unified `where` clause shared by every generic-parameter
     /// header: trait bounds, subtype bounds, `?Sized` relaxations, and
-    /// (trait declarations only) functional dependencies, all as one flat
-    /// comma-separated list in any order. Returns empty lists when no
+    /// all as one flat comma-separated list in any order. Returns empty lists when no
     /// `where` keyword is present. `parameters` is mutated in place for
     /// `?Sized` relaxations, which flip `sized` on an already-introduced
     /// parameter rather than producing a bound of their own.
     fn parse_where_clause(
         &mut self,
         parameters: &mut [TypeParameterPattern],
-        allow_functional_dependencies: bool,
-    ) -> Result<
-        (
-            Vec<TraitBound>,
-            Vec<SubtypeBound>,
-            Vec<FunctionalDependency>,
-        ),
-        ParseError,
-    > {
+    ) -> Result<(Vec<TraitBound>, Vec<SubtypeBound>), ParseError> {
         let mut trait_bounds = Vec::new();
         let mut subtype_bounds = Vec::new();
-        let mut functional_dependencies = Vec::new();
         if !self.eat(TokenKind::Where) {
-            return Ok((trait_bounds, subtype_bounds, functional_dependencies));
+            return Ok((trait_bounds, subtype_bounds));
         }
         loop {
             let start = self.position;
-            if allow_functional_dependencies && self.at(TokenKind::LBrace) {
-                functional_dependencies.push(self.parse_functional_dependency_set(start)?);
-            } else if self.eat_operator("?") {
+            if self.eat_operator("?") {
                 let bound = self
                     .expect(TokenKind::Identifier, "expected `Sized` after `?`")?
                     .text;
@@ -1024,10 +1050,7 @@ impl Grammar {
                 let first = self
                     .expect(TokenKind::Identifier, "expected constraint")?
                     .text;
-                if allow_functional_dependencies && self.at_operator("~>") {
-                    functional_dependencies
-                        .push(self.parse_functional_dependency_single(start, first)?);
-                } else if self.at_operator("<:") {
+                if self.at_operator("<:") {
                     self.eat_operator("<:");
                     let supertype = self.parse_type_union()?;
                     let syntax = self.syntax(start);
@@ -1063,94 +1086,7 @@ impl Grammar {
                 break;
             }
         }
-        Ok((trait_bounds, subtype_bounds, functional_dependencies))
-    }
-
-    /// Parses a set-determinant functional dependency, `{A, B} ~> C`.
-    fn parse_functional_dependency_set(
-        &mut self,
-        start: usize,
-    ) -> Result<FunctionalDependency, ParseError> {
-        self.expect(TokenKind::LBrace, "expected `{`")?;
-        let mut determinants = Vec::new();
-        if !self.at(TokenKind::RBrace) {
-            loop {
-                let determinant_start = self.position;
-                let name = self
-                    .expect(
-                        TokenKind::Identifier,
-                        "expected type parameter in functional dependency",
-                    )?
-                    .text;
-                determinants.push(NamedType {
-                    syntax: self.syntax(determinant_start),
-                    namespace: None,
-                    name,
-                });
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-            }
-        }
-        self.expect(
-            TokenKind::RBrace,
-            "expected `}` after functional dependency determinants",
-        )?;
-        if determinants.is_empty() {
-            return Err(self.error("functional dependency determinant set cannot be empty"));
-        }
-        if !self.eat_operator("~>") {
-            return Err(self.error("expected `~>` after functional dependency determinants"));
-        }
-        let dependent_start = self.position;
-        let dependent = self
-            .expect(
-                TokenKind::Identifier,
-                "expected dependent type parameter after `~>`",
-            )?
-            .text;
-        Ok(FunctionalDependency {
-            syntax: self.syntax(start),
-            determinants,
-            dependent: NamedType {
-                syntax: self.syntax(dependent_start),
-                namespace: None,
-                name: dependent,
-            },
-        })
-    }
-
-    /// Parses a single-determinant functional dependency, `A ~> C`, whose
-    /// determinant identifier has already been consumed by the caller.
-    fn parse_functional_dependency_single(
-        &mut self,
-        start: usize,
-        determinant_name: String,
-    ) -> Result<FunctionalDependency, ParseError> {
-        let determinant = NamedType {
-            syntax: self.syntax(start),
-            namespace: None,
-            name: determinant_name,
-        };
-        if !self.eat_operator("~>") {
-            return Err(self.error("expected `~>` after functional dependency determinant"));
-        }
-        let dependent_start = self.position;
-        let dependent = self
-            .expect(
-                TokenKind::Identifier,
-                "expected dependent type parameter after `~>`",
-            )?
-            .text;
-        Ok(FunctionalDependency {
-            syntax: self.syntax(start),
-            determinants: vec![determinant],
-            dependent: NamedType {
-                syntax: self.syntax(dependent_start),
-                namespace: None,
-                name: dependent,
-            },
-        })
+        Ok((trait_bounds, subtype_bounds))
     }
 
     fn parse_trait_implementation(
@@ -1182,12 +1118,38 @@ impl Grammar {
             "expected `{` before implementation members",
         )?;
         let mut members = Vec::new();
+        let mut associated_types = Vec::new();
         while !self.at(TokenKind::RBrace) {
             if self.peek().is_none() {
                 return Err(self.error("unterminated trait implementation"));
             }
             let member_start = self.position;
             let docs = self.parse_member_docs(member_start)?;
+            if self.at(TokenKind::Type) {
+                self.bump_token();
+                let associated_name = self
+                    .expect(TokenKind::Identifier, "expected associated type name")?
+                    .text;
+                self.expect(
+                    TokenKind::Equals,
+                    "expected `=` after associated type name",
+                )?;
+                let previous = self.newline_terminates_type;
+                let previous_any = self.any_newline_terminates_type;
+                self.newline_terminates_type = true;
+                self.any_newline_terminates_type = true;
+                let value = self.parse_type();
+                self.newline_terminates_type = previous;
+                self.any_newline_terminates_type = previous_any;
+                associated_types.push(AssociatedTypeBinding {
+                    syntax: self.syntax(member_start),
+                    docs,
+                    name: associated_name,
+                    value: value?,
+                });
+                self.eat(TokenKind::Semicolon);
+                continue;
+            }
             let name = self
                 .expect(TokenKind::Identifier, "expected implementation member name")?
                 .text;
@@ -1216,6 +1178,7 @@ impl Grammar {
             negative,
             trait_name,
             arguments,
+            associated_types,
             members,
         })
     }
@@ -1592,8 +1555,8 @@ impl Grammar {
         if self.at(TokenKind::LBrace) {
             return Err(self.error("effect parameter must appear immediately after the type name"));
         }
-        let (trait_bounds, subtype_bounds, _) =
-            self.parse_where_clause(&mut type_parameters, false)?;
+        let (trait_bounds, subtype_bounds) =
+            self.parse_where_clause(&mut type_parameters)?;
         let has_body = self.eat(TokenKind::Equals);
         if !has_body && !type_parameters.is_empty() {
             return Err(self.error("singleton types cannot have compile-time parameters"));
@@ -1823,7 +1786,7 @@ impl Grammar {
                 break;
             }
         }
-        let (trait_bounds, subtype_bounds, _) = self.parse_where_clause(&mut parameters, false)?;
+        let (trait_bounds, subtype_bounds) = self.parse_where_clause(&mut parameters)?;
         if !self.eat_operator(">") {
             return Err(self.error("expected `>` to close generic parameter list"));
         }

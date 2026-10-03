@@ -15532,7 +15532,8 @@ mod tests {
     fn trait_catalog_preserves_parameters_methods_and_defaults() {
         let module = checked_program(concat!(
             "trait TestBase T { test_base: T -> T }\n",
-            "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
+            "trait TestConvert Target Position {\n",
+            "  type Output\n",
             "  test_convert: (Target, Position) -> Output\n",
             "}\n",
             "trait TestOrdered T where TestBase T {\n",
@@ -19891,8 +19892,8 @@ mod tests {
         let module = checked_program(concat!(
             "use std.slice.Slice\n",
             "type Counter = wrap I32\n",
-            "impl Index Counter String I32 { index = (counter, key) => 0 }\n",
-            "impl MutateIndex Counter String I32 { mutate_index = (mut counter, key, move value) => () }\n",
+            "impl Index Counter String { type Output = I32; index = (counter, key) => 0 }\n",
+            "impl MutateIndex Counter String { type Value = I32; mutate_index = (mut counter, key, move value) => () }\n",
             "def make_counter = () => Counter 0\n",
             "let mut counter = Counter 0\n",
             "let read = counter[\"key\"]\n",

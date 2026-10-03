@@ -1369,17 +1369,17 @@ fn preserves_trait_prerequisites_across_modules() {
 }
 
 #[test]
-fn preserves_trait_functional_dependencies_across_modules() {
+fn preserves_trait_associated_types_across_modules() {
     let fixture = Fixture::new();
     fixture.write(
         "traits.sta",
-        "pub trait Iterator Iter Item where Iter ~> Item { next: Iter -> Item }\n",
+        "pub trait Iterator Iter { type Item; next: Iter -> Item }\n",
     );
     fixture.write(
         "implementations.sta",
         concat!(
             "use traits\n",
-            "impl traits.Iterator I32 String { next = value => \"next\" }\n",
+            "impl traits.Iterator I32 { type Item = String; next = value => \"next\" }\n",
         ),
     );
     fixture.write(

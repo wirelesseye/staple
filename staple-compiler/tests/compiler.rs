@@ -3091,8 +3091,8 @@ fn derives_trait_delegated_product_indexing() {
 fn delegates_brackets_to_explicit_indexing_implementations() {
     let source = concat!(
         "type Target = wrap I32\n",
-        "impl Index Target String Target { index = (target, position) => target }\n",
-        "impl MutateIndex Target String Target { mutate_index = (mut target, position, move value) => () }\n",
+        "impl Index Target String { type Output = Target; index = (target, position) => target }\n",
+        "impl MutateIndex Target String { type Value = Target; mutate_index = (mut target, position, move value) => () }\n",
         "let selected: Target = (Target 4)[\"key\"]\n",
         "(Target 4)[\"key\"] = Target 5\n",
     );
@@ -3160,7 +3160,7 @@ fn derives_mutate_index_for_move_only_homogeneous_products() {
 fn rejects_overlapping_structural_indexing_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "impl Index (I32; 2) USize I32 {\n",
+            "impl Index (I32; 2) USize { type Output = I32;\n",
             "  index = (values, position) => values.0\n",
             "}\n",
         )))
@@ -3183,7 +3183,7 @@ fn delegates_indexing_through_refs_to_the_payload() {
         "let values: Slice I32 = Slice.from_ref fixed\n",
         "def slice_at: (Ref (Slice I32), USize) -> I32 = (slice, position) => slice[position]\n",
         "type Keyed = wrap (key: String, value: I32)\n",
-        "impl Index Keyed String I32 { index = (entry, key) => entry.value }\n",
+        "impl Index Keyed String { type Output = I32; index = (entry, key) => entry.value }\n",
         "def keyed_at: (Ref Keyed, String) -> I32 = (entry, key) => entry[key]\n",
         "def nested_at: (Ref (Ref (I32; 3)), USize) -> I32 = (values, position) => values[position]\n",
         "def fixed_at: (Ref (I32; 3), USize) -> I32 = (values, position) => values[position]\n",
@@ -3208,7 +3208,7 @@ fn delegates_indexed_assignment_through_refs_to_the_payload() {
         "def set_nested = (mut values: Ref (Ref (I32; 2)), position: USize, value: I32) => { values[position] = value }\n",
         "def set_fixed = (mut values: Ref (I32; 2), position: USize, value: I32) => { values[position] = value }\n",
         "type Counter = wrap I32\n",
-        "impl MutateIndex Counter String I32 { mutate_index = (mut counter, key, move value) => () }\n",
+        "impl MutateIndex Counter String { type Value = I32; mutate_index = (mut counter, key, move value) => () }\n",
         "def set_keyed = (mut counter: Ref Counter, key: String, value: I32) => { counter[key] = value }\n",
         "let list = List.of (1, 2, 3)\n",
         "let operation: (mut Ref (List I32), USize, I32) -> () = MutateIndex.mutate_index\n",
@@ -3358,8 +3358,8 @@ fn rejects_explicit_indexing_implementations_for_ref_targets() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Target = wrap I32\n",
-            "impl Index Target String Target { index = (target, position) => target }\n",
-            "impl Index (Ref Target) String Target { index = (target, position) => target }\n",
+            "impl Index Target String { type Output = Target; index = (target, position) => target }\n",
+            "impl Index (Ref Target) String { type Output = Target; index = (target, position) => target }\n",
         )))
         .expect_err_diagnostics("Ref indexing is derived from the payload's implementation");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -3451,7 +3451,7 @@ fn rejects_structural_iteration_for_non_copy_products() {
 fn rejects_overlapping_structural_iterator_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "impl IntoIterator (I32; 2) ((I32; 2), USize) {\n",
+            "impl IntoIterator (I32; 2) { type Iter = ((I32; 2), USize);\n",
             "  into_iterator = move value => (value, USize :: 0)\n",
             "}\n",
         )))
@@ -5102,7 +5102,7 @@ fn macro_declared_inside_a_companion_resolves_as_type_dot_macro() {
 }
 
 #[test]
-fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_traits() {
+fn dispatches_generic_implementations_of_traits_with_associated_types() {
     // Regression test: a generic `impl<T where Bound T> Trait Source Target`
     // of a multi-parameter trait with a functional dependency used to fail
     // dispatch entirely, even at a fully concrete call site, because the
@@ -5111,9 +5111,9 @@ fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_t
     // equality instead of unification.
     let module = type_check(concat!(
         "trait Bound T { check: T -> Bool }\n",
-        "trait Convert Source Target where Source ~> Target { convert: move Source -> Target }\n",
+        "trait Convert Source { type Target; convert: move Source -> Target }\n",
         "impl Bound I32 { check = value => True }\n",
-        "impl <T where Bound T> Convert T T {\n",
+        "impl <T where Bound T> Convert T { type Target = T;\n",
         "    convert = move value => value\n",
         "}\n",
         "let result: I32 = Convert.convert (I32 :: 5)\n",
@@ -5121,7 +5121,7 @@ fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_t
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
-        .expect("a generic impl of a multi-parameter functional-dependency trait should dispatch and compile");
+        .expect("a generic impl of a trait with an associated type should dispatch and compile");
 }
 
 #[test]
@@ -5134,9 +5134,9 @@ fn rejects_inferred_trait_obligations_whose_impl_bounds_do_not_hold() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.cinterop.CString\n",
-            "trait Make T U where T ~> U { make: T -> U }\n",
+            "trait Make T { type U; make: T -> U }\n",
             "type Box T = wrap (value: T)\n",
-            "impl<T where Copy T> Make (Box T) T { make = Box (value) => value }\n",
+            "impl<T where Copy T> Make (Box T) { type U = T; make = Box (value) => value }\n",
             "def inferred: Box CString -> () = box => {\n",
             "    let value = Make.make box\n",
             "    ()\n",
@@ -7288,13 +7288,13 @@ fn generates_generic_conditional_trait_implementation_items() {
 }
 
 #[test]
-fn generates_traits_with_functional_dependencies() {
+fn generates_traits_with_associated_types() {
     let module = type_check(concat!(
         "macro define_trait = _: Expr => parse_quote {\n",
-        "    trait Generated Input Output where Input ~> Output { generate: Input -> Output }\n",
+        "    trait Generated Input { type Output; generate: Input -> Output }\n",
         "}\n",
         "define_trait ()\n",
-        "impl Generated I32 String { generate = value => \"generated\" }\n",
+        "impl Generated I32 { type Output = String; generate = value => \"generated\" }\n",
         "let generated = Generated.generate 1\n",
     ));
     let context = Context::create();
@@ -7836,13 +7836,13 @@ fn expands_standard_while_with_loop_control() {
 fn expands_standard_for_over_ranges_and_product_iterators() {
     let module = type_check(concat!(
         "pub type PairIterator = pub wrap (current: I32, end: I32)\n",
-        "impl Iterator PairIterator (I32, I32) {\n",
+        "impl Iterator PairIterator { type Item = (I32, I32);\n",
         "  next = move PairIterator (current, end) => match current < end {\n",
         "    True() => IterStep.Yield ((current, current + 10), PairIterator (current + 1, end)),\n",
         "    False() => IterStep.Done (PairIterator (current, end)),\n",
         "  }\n",
         "}\n",
-        "impl IntoIterator PairIterator PairIterator { into_iterator = move iterator => iterator }\n",
+        "impl IntoIterator PairIterator { type Iter = PairIterator; into_iterator = move iterator => iterator }\n",
         "def run = () => {\n",
         "  let mut total = 0\n",
         "  for value in (0 ..= 4) {\n",
@@ -9395,20 +9395,19 @@ fn type_checks_product_and_curried_multi_parameter_traits() {
 }
 
 #[test]
-fn infers_trait_functional_dependency_arguments() {
+fn infers_trait_associated_type_arguments() {
     let module = type_check(concat!(
-        "trait Iterator Iter Item where Iter ~> Item { next: Iter -> Item }\n",
-        "impl Iterator I32 String { next = value => \"next\" }\n",
-        "trait AddTo Left Right Output where {Left, Right} ~> Output { add_to: Left -> Right -> Output }\n",
-        "impl AddTo I32 I32 I32 { add_to = left => right => left + right }\n",
-        "trait Chain A B C where A ~> B, B ~> C { chained: A -> (B, C) }\n",
-        "impl Chain I32 String U8 { chained = value => (\"chain\", 7) }\n",
-        "trait ConvertPair (From, To) where From ~> To { convert_pair: From -> To }\n",
-        "impl ConvertPair (I32, String) { convert_pair = value => \"pair\" }\n",
+        "trait Iterator Iter { type Item; next: Iter -> Item }\n",
+        "impl Iterator I32 { type Item = String; next = value => \"next\" }\n",
+        "trait AddTo Left Right { type Output; add_to: Left -> Right -> Output }\n",
+        "impl AddTo I32 I32 { type Output = I32; add_to = left => right => left + right }\n",
+        "trait Chain A { type B; type C; chained: A -> (B, C) }\n",
+        "impl Chain I32 { type B = String; type C = U8; chained = value => (\"chain\", 7) }\n",
+        "trait ConvertPair From { type To; convert_pair: From -> To }\n",
+        "impl ConvertPair I32 { type To = String; convert_pair = value => \"pair\" }\n",
         "def requires_iterator: <T where Iterator T> T -> () = value => ()\n",
-        "def requires_iterator_explicit: <T where Iterator T _> T -> () = value => ()\n",
         "def requires_add: <T where AddTo T T> move T -> T = move value => value\n",
-        "def requires_pair: <T where ConvertPair (T, _)> T -> () = value => ()\n",
+        "def requires_pair: <T where ConvertPair T> T -> () = value => ()\n",
         "trait UsesIterator Iter where Iterator Iter { use_iterator: Iter -> Iter }\n",
         "impl UsesIterator I32 { use_iterator = value => value }\n",
         "let next_value = Iterator.next 1\n",
@@ -9416,96 +9415,81 @@ fn infers_trait_functional_dependency_arguments() {
         "let sum: I32 = AddTo.add_to 20 22\n",
         "let chained = Chain.chained 1\n",
         "let _: () = requires_iterator 1\n",
-        "let _: () = requires_iterator_explicit 1\n",
         "let _: I32 = requires_add 1\n",
         "let _: () = requires_pair 1\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
-        .expect("functional dependency dispatch should compile");
+        .expect("associated type dispatch should compile");
 }
 
 #[test]
-fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
+fn rejects_invalid_associated_type_uses_and_conflicting_impls() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Convert From To where From ~> To { convert: From -> To }\n",
-            "impl Convert I32 String { convert = value => \"one\" }\n",
-            "impl Convert I32 I32 { convert = value => value }\n",
+            "trait Convert From { type To; convert: From -> To }\n",
+            "impl Convert I32 { type To = String; convert = value => \"one\" }\n",
+            "impl Convert I32 { type To = I32; convert = value => value }\n",
         )))
-        .expect_err_diagnostics("functional dependencies must make implementations coherent");
+        .expect_err_diagnostics("associated types must make implementations coherent");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("violate a functional dependency")
+            .contains("conflicting trait implementations bind different associated types")
     }));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait AddTo Left Right Output where {Left, Right} ~> Output { add_to: Left -> Right -> Output }\n",
-            "def invalid: <T where AddTo T _ T> T -> T = value => value\n",
-        )))
-        .expect_err_diagnostics("non-dependent arguments cannot be inferred");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("cannot be inferred from functional dependencies")
-    }));
-
-    let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "trait Convert From To where From ~> To { convert: From -> To }\n",
-            "impl Convert I32 { convert = value => value }\n",
-        )))
-        .expect_err_diagnostics("implementation headers remain exact-arity");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("expects 2 compile-time arguments, found 1")
-    }));
-
-    let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "trait Iterator Iter Item where Iter ~> Item { next: Iter -> Item }\n",
+            "trait Iterator Iter { type Item; next: Iter -> Item }\n",
             "def invalid: <Iter, Item where Iterator Iter Item, Iterator Iter String> Iter -> Iter = value => value\n",
         )))
-        .expect_err_diagnostics("active bounds must respect functional dependencies");
+        .expect_err_diagnostics("active bounds must respect associated types");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("trait bounds conflict with a functional dependency")
+            .contains("trait bounds conflict with an associated type")
     }));
 }
 
 #[test]
-fn rejects_invalid_functional_dependency_declarations() {
+fn rejects_invalid_associated_type_declarations() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "trait Invalid A B where Missing ~> B { convert: A -> B }\n",
-            "unknown trait type parameter `Missing` in functional dependency",
+            concat!(
+                "trait Convert From { type To; convert: From -> To }\n",
+                "impl Convert I32 { convert = value => \"one\" }\n",
+            ),
+            "implementation is missing associated type `To`",
         ),
         (
-            "trait Invalid A B where {A, A} ~> B { convert: A -> B }\n",
-            "duplicate functional dependency determinant `A`",
+            concat!(
+                "trait Convert From { type To; convert: From -> To }\n",
+                "impl Convert I32 { type Other = I32; type To = String; convert = value => \"one\" }\n",
+            ),
+            "trait has no associated type named `Other`",
         ),
         (
-            "trait Invalid A where A ~> A { convert: A -> A }\n",
-            "functional dependency cannot determine one of its determinants",
+            concat!(
+                "trait Convert From { type To; convert: From -> To }\n",
+                "impl Convert I32 { type To = String; type To = I32; convert = value => \"one\" }\n",
+            ),
+            "duplicate associated type `To`",
         ),
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
             .load_source(source, root)
-            .expect("invalid dependency source should load");
+            .expect("invalid associated type source should load");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err_diagnostics("invalid functional dependency must not resolve");
+            .expect_err_diagnostics("invalid associated types must not resolve");
         assert!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains(expected))
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "missing `{expected}` in {diagnostics:?}"
         );
     }
 }
@@ -12529,7 +12513,7 @@ fn named_types_are_indexed_only_through_their_own_implementations() {
     let module = type_check(concat!(
         "type Triple = wrap (I32, I32, I32)\n",
         "type Cells = wrap (I32, I32)\n",
-        "impl Index Cells USize I32 { index = (Cells cells, position) => cells[position] }\n",
+        "impl Index Cells USize { type Output = I32; index = (Cells cells, position) => cells[position] }\n",
         "def run = () => {\n",
         "    let mut triple = Triple (1, 2, 3)\n",
         "    triple.*[1] = 20\n",

@@ -1276,10 +1276,11 @@ pub(crate) mod tests {
         assert_eq!(method.template, expected);
 
         let lowered = lower(concat!(
-            "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
+            "trait TestConvert Target Position {\n",
+            "  type Output\n",
             "  test_convert: (Target, Position) -> Output\n",
             "}\n",
-            "impl TestConvert I32 I32 I32 { test_convert = pair => pair.0 }\n",
+            "impl TestConvert I32 I32 { type Output = I32; test_convert = pair => pair.0 }\n",
             "def call_convert: (I32, I32) -> I32 = pair => test_convert pair\n",
             "let converted: I32 = call_convert (1, 2)\n",
         ));
@@ -2604,8 +2605,8 @@ pub(crate) mod tests {
             "impl Drop Holder { cleanup = Holder value => () }\n",
             "type Item = wrap I32\n",
             "impl Drop Item { cleanup = Item value => () }\n",
-            "impl Index Holder I32 Item { index = (holder, key) => Item 0 }\n",
-            "impl MutateIndex Holder I32 Item { mutate_index = (mut holder, key, move value) => () }\n",
+            "impl Index Holder I32 { type Output = Item; index = (holder, key) => Item 0 }\n",
+            "impl MutateIndex Holder I32 { type Value = Item; mutate_index = (mut holder, key, move value) => () }\n",
             "def make_holder: () -> Holder = () => Holder 0\n",
             "def assign_temp: () -> () = () => { (make_holder ())[0] = Item 1 }\n",
             "def assign_place: () -> () = () => {\n",

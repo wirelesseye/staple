@@ -4185,10 +4185,11 @@ mod tests {
     #[test]
     fn functional_dependencies_complete_inferred_arguments() {
         let (_, program) = lower(concat!(
-            "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
+            "trait TestConvert Target Position {\n",
+            "  type Output\n",
             "  test_convert: (Target, Position) -> Output\n",
             "}\n",
-            "impl TestConvert I32 I32 I32 { test_convert = pair => pair.0 }\n",
+            "impl TestConvert I32 I32 { type Output = I32; test_convert = pair => pair.0 }\n",
         ));
         let convert = trait_id_named(&program, "TestConvert");
         let method = program.traits.get(convert).expect("convert trait").methods[0];
@@ -4215,7 +4216,8 @@ mod tests {
     #[test]
     fn completion_ignores_bounds_with_different_known_arguments() {
         let (_, program) = lower(concat!(
-            "trait TestConvert Target Output where Target ~> Output {\n",
+            "trait TestConvert Target {\n",
+            "  type Output\n",
             "  test_convert: Target -> Output\n",
             "}\n",
         ));
@@ -4341,10 +4343,11 @@ mod tests {
     #[test]
     fn ambiguous_and_cyclic_obligations_are_rejected() {
         let (_, program) = lower(concat!(
-            "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
+            "trait TestConvert Target Position {\n",
+            "  type Output\n",
             "  test_convert: (Target, Position) -> Output\n",
             "}\n",
-            "impl TestConvert I32 I32 I32 { test_convert = pair => pair.0 }\n",
+            "impl TestConvert I32 I32 { type Output = I32; test_convert = pair => pair.0 }\n",
         ));
         let convert = trait_id_named(&program, "TestConvert");
         let method = program.traits.get(convert).expect("convert trait").methods[0];
