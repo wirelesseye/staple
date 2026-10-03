@@ -42,6 +42,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
             .or(comment)
             .or(block_comment)
             .or(string)
+            .or(tag("::").map(|_| TokenKind::DoubleColon))
             .or(tag("=>").map(|_| TokenKind::FatArrow))
             .or(tag("->").map(|_| TokenKind::Arrow))
             .or(tag("...").map(|_| TokenKind::Ellipsis))
@@ -68,7 +69,6 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
                 "use" => TokenKind::Use,
                 "package" => TokenKind::Package,
                 "as" => TokenKind::As,
-                "satisfies" => TokenKind::Satisfies,
                 "pub" => TokenKind::Pub,
                 "let" => TokenKind::Let,
                 "mut" => TokenKind::Mut,

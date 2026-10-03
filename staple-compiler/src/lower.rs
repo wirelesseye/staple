@@ -387,7 +387,7 @@ pub(crate) struct ExpressionKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OrdinaryExpressionFamily {
     Block,
-    Satisfies,
+    TypeAscription,
     Match,
     Loop,
     Product,
@@ -729,9 +729,9 @@ pub(crate) enum LoweredExpressionKind {
     Access(LoweredAccess),
     Product(LoweredProduct),
     RepeatedProduct(LoweredRepeatedProduct),
-    /// `value satisfies Type`: a transparent wrapper. The parent expression
+    /// `Type :: value`: a transparent wrapper. The parent expression
     /// header remains authoritative for the checked coercion.
-    Satisfies(LoweredSatisfies),
+    TypeAscription(LoweredTypeAscription),
     Logical(LoweredLogical),
     Loop(LoweredLoop),
     Match(LoweredMatch),
@@ -1695,7 +1695,7 @@ impl LoweredIndexOperands {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct LoweredSatisfies {
+pub(crate) struct LoweredTypeAscription {
     pub value: ExpressionId,
 }
 
@@ -4461,8 +4461,8 @@ impl LoweredProgram {
             Expression::Product(product) if product.elements.len() == 1 => {
                 self.provider_value_has_place(module, &product.elements[0].value)
             }
-            Expression::Satisfies(satisfies) => {
-                self.provider_value_has_place(module, &satisfies.value)
+            Expression::TypeAscription(ascription) => {
+                self.provider_value_has_place(module, &ascription.value)
             }
             Expression::Resource(resource) => module
                 .resource_for_expression(resource.syntax.id)
@@ -4593,8 +4593,8 @@ impl LoweredProgram {
             Expression::Product(product) if product.elements.len() == 1 => {
                 return self.lower_place(module, owner, context, &product.elements[0].value);
             }
-            Expression::Satisfies(satisfies) => {
-                return self.lower_place(module, owner, context, &satisfies.value);
+            Expression::TypeAscription(ascription) => {
+                return self.lower_place(module, owner, context, &ascription.value);
             }
             Expression::Resource(resource) => {
                 let use_ = self.lower_resource_use(
@@ -5016,9 +5016,11 @@ impl LoweredProgram {
             (OrdinaryExpressionFamily::Block, Expression::Block(block)) => Ok(
                 LoweredExpressionKind::Block(self.lower_block(module, owner, context, block)?),
             ),
-            (OrdinaryExpressionFamily::Satisfies, Expression::Satisfies(satisfies)) => {
-                let value = self.lower_expression(module, owner, context, &satisfies.value)?;
-                Ok(LoweredExpressionKind::Satisfies(LoweredSatisfies { value }))
+            (OrdinaryExpressionFamily::TypeAscription, Expression::TypeAscription(ascription)) => {
+                let value = self.lower_expression(module, owner, context, &ascription.value)?;
+                Ok(LoweredExpressionKind::TypeAscription(
+                    LoweredTypeAscription { value },
+                ))
             }
             (OrdinaryExpressionFamily::Match, Expression::Match(match_)) => self
                 .lower_match(module, owner, context, match_)
@@ -9686,13 +9688,13 @@ impl LoweredProgram {
                         .unwrap_or(&expression.value_type);
                     repeated.validate_shape(source_type, &expression.origin, &mut diagnostics);
                 }
-                LoweredExpressionKind::Satisfies(satisfies) => {
-                    if !self.expressions.contains(satisfies.value) {
+                LoweredExpressionKind::TypeAscription(ascription) => {
+                    if !self.expressions.contains(ascription.value) {
                         diagnostics.push(invalid_reference(
                             &expression.origin,
-                            "satisfies",
+                            "type_ascription",
                             "expression",
-                            satisfies.value.index(),
+                            ascription.value.index(),
                         ));
                     }
                 }
@@ -11096,8 +11098,8 @@ impl LoweredProgram {
         reached.owner = Some(key_owner);
         match &expression.kind {
             LoweredExpressionKind::Block(block) => self.visit_owned_block(*block, reached),
-            LoweredExpressionKind::Satisfies(satisfies) => {
-                self.visit_owned_expression(satisfies.value, reached);
+            LoweredExpressionKind::TypeAscription(ascription) => {
+                self.visit_owned_expression(ascription.value, reached);
             }
             LoweredExpressionKind::Logical(logical) => {
                 self.visit_owned_expression(logical.left, reached);
@@ -11609,8 +11611,8 @@ impl LoweredProgram {
         }
         // A block can be checked more than once while inference converges, so
         // a recorded coercion may target a type the final expression pass
-        // replaced. `satisfies` is single-pass, so its target is authoritative.
-        if let LoweredExpressionKind::Satisfies(_) = expression.kind
+        // replaced. type ascription is single-pass, so its target is authoritative.
+        if let LoweredExpressionKind::TypeAscription(_) = expression.kind
             && coercion.target != expression.value_type
         {
             diagnostics.push(Diagnostic::new(
@@ -11622,7 +11624,7 @@ impl LoweredProgram {
             ));
         }
         let coerced_child = match &expression.kind {
-            LoweredExpressionKind::Satisfies(satisfies) => Some(satisfies.value),
+            LoweredExpressionKind::TypeAscription(ascription) => Some(ascription.value),
             LoweredExpressionKind::Block(block) => {
                 self.blocks.get(*block).and_then(|block| block.result)
             }
@@ -11908,8 +11910,8 @@ impl LoweredProgram {
             LoweredExpressionKind::Block(block) => {
                 self.collect_loop_items(*block, depth, reached, diagnostics);
             }
-            LoweredExpressionKind::Satisfies(satisfies) => {
-                self.collect_loop_expression(satisfies.value, depth, reached, diagnostics);
+            LoweredExpressionKind::TypeAscription(ascription) => {
+                self.collect_loop_expression(ascription.value, depth, reached, diagnostics);
             }
             LoweredExpressionKind::Logical(logical) => {
                 self.collect_loop_expression(logical.left, depth, reached, diagnostics);
@@ -12741,7 +12743,7 @@ fn classify_expression(module: &TypedModule, expression: &Expression) -> Express
     match expression {
         Expression::Function(_) => Ordinary(Family::Function),
         Expression::Call(_) => Ordinary(Family::Call),
-        Expression::Satisfies(_) => Ordinary(Family::Satisfies),
+        Expression::TypeAscription(_) => Ordinary(Family::TypeAscription),
         Expression::Match(_) => Ordinary(Family::Match),
         Expression::Loop(_) => Ordinary(Family::Loop),
         Expression::Coro(_) => ResourceCoroutine(Route::CoroutineCreation),
@@ -12880,7 +12882,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
 fn family_name(family: OrdinaryExpressionFamily) -> &'static str {
     match family {
         OrdinaryExpressionFamily::Block => "Block",
-        OrdinaryExpressionFamily::Satisfies => "Satisfies",
+        OrdinaryExpressionFamily::TypeAscription => "TypeAscription",
         OrdinaryExpressionFamily::Match => "Match",
         OrdinaryExpressionFamily::Loop => "Loop",
         OrdinaryExpressionFamily::Product => "Product",
@@ -12906,7 +12908,7 @@ fn family_name(family: OrdinaryExpressionFamily) -> &'static str {
 fn expression_variant_name(expression: &Expression) -> &'static str {
     match expression {
         Expression::Function(_) => "Function",
-        Expression::Satisfies(_) => "Satisfies",
+        Expression::TypeAscription(_) => "TypeAscription",
         Expression::Match(_) => "Match",
         Expression::Loop(_) => "Loop",
         Expression::Coro(_) => "Coro",
@@ -13825,7 +13827,7 @@ impl<'a> SourceCoverage<'a> {
             Expression::Product(product) if product.elements.len() == 1 => {
                 self.visit_place_origin(&product.elements[0].value);
             }
-            Expression::Satisfies(satisfies) => self.visit_place_origin(&satisfies.value),
+            Expression::TypeAscription(ascription) => self.visit_place_origin(&ascription.value),
             other => {
                 let syntax = other.syntax();
                 if !self.lowered_places.contains(&syntax.id) {
@@ -13972,7 +13974,9 @@ impl<'a> SourceCoverage<'a> {
         }
         match expression {
             Expression::Block(block) => self.visit_block(owner, block),
-            Expression::Satisfies(satisfies) => self.visit_expression(owner, &satisfies.value),
+            Expression::TypeAscription(ascription) => {
+                self.visit_expression(owner, &ascription.value)
+            }
             Expression::Match(match_) => {
                 self.visit_expression(owner, &match_.subject);
                 if self.module.match_for(syntax.id).is_some() {
@@ -16429,8 +16433,8 @@ mod tests {
             })),
         ));
         expressions.push((
-            "Satisfies",
-            Expression::Satisfies(Box::new(SatisfiesExpression {
+            "TypeAscription",
+            Expression::TypeAscription(Box::new(TypeAscriptionExpression {
                 syntax: syntax.clone(),
                 value: Box::new(name_expression("value")),
                 ty: inferred_type(),
@@ -16667,7 +16671,7 @@ mod tests {
                 "Await" => ResourceCoroutine(Route::AwaitChildCoroutine),
                 "Unary" | "Binary" | "SyntaxArgument" | "VisibilityArgument" | "Quote"
                 | "Splice" => Rejected,
-                "Satisfies" => Ordinary(OrdinaryExpressionFamily::Satisfies),
+                "TypeAscription" => Ordinary(OrdinaryExpressionFamily::TypeAscription),
                 "Match" => Ordinary(OrdinaryExpressionFamily::Match),
                 "Loop" => Ordinary(OrdinaryExpressionFamily::Loop),
                 "Block" => Ordinary(OrdinaryExpressionFamily::Block),
@@ -16999,8 +17003,8 @@ mod tests {
             Expression::Function(function) => {
                 collect_call_routes(program, module, owner, &function.body, routes);
             }
-            Expression::Satisfies(satisfies) => {
-                collect_call_routes(program, module, owner, &satisfies.value, routes);
+            Expression::TypeAscription(ascription) => {
+                collect_call_routes(program, module, owner, &ascription.value, routes);
             }
             Expression::Match(match_) => {
                 collect_call_routes(program, module, owner, &match_.subject, routes);
@@ -18036,7 +18040,7 @@ mod tests {
         }
         match expression {
             Expression::Function(function) => collect_calls(&function.body, visit),
-            Expression::Satisfies(satisfies) => collect_calls(&satisfies.value, visit),
+            Expression::TypeAscription(ascription) => collect_calls(&ascription.value, visit),
             Expression::Match(match_) => {
                 collect_calls(&match_.subject, visit);
                 for arm in &match_.arms {
@@ -19300,10 +19304,10 @@ mod tests {
     }
 
     #[test]
-    fn satisfies_lowers_as_wrapper_and_keeps_checked_coercions() {
+    fn type_ascription_lowers_as_wrapper_and_keeps_checked_coercions() {
         let module = checked_program(concat!(
             "use std.slice.Slice\n",
-            "let widened = 42 satisfies I8\n",
+            "let widened = I8 :: 42\n",
             "let text: String = \"literal\"\n",
             "type Ok T = wrap T\n",
             "type IOError = wrap String\n",
@@ -19316,23 +19320,23 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert!(program.validate().is_empty());
 
-        let (expression, satisfies) = program
+        let (expression, ascription) = program
             .expressions
             .iter()
             .find_map(|(_, expression)| match &expression.kind {
-                LoweredExpressionKind::Satisfies(satisfies) => program
+                LoweredExpressionKind::TypeAscription(ascription) => program
                     .expressions
-                    .get(satisfies.value)
+                    .get(ascription.value)
                     .filter(|child| child.value_type == CheckedType::I8)
-                    .map(|_| (expression, satisfies)),
+                    .map(|_| (expression, ascription)),
                 _ => None,
             })
-            .expect("`42 satisfies I8` lowers as a wrapper");
+            .expect("`I8 :: 42` lowers as a wrapper");
         assert_eq!(expression.value_type, CheckedType::I8);
         let child = program
             .expressions
-            .get(satisfies.value)
-            .expect("satisfies child");
+            .get(ascription.value)
+            .expect("ascription child");
         assert_eq!(child.value_type, CheckedType::I8);
         assert_eq!(
             child.value_type,
@@ -20266,7 +20270,7 @@ mod tests {
             "  other => 0,\n",
             "}\n",
             "def blocked = () => { let local: I32 = 1; local }\n",
-            "let coerced: I8 = 42 satisfies I8\n",
+            "let coerced: I8 = I8 :: 42\n",
             "let repeated: (I32; 3) = (7; 3)\n",
             "let template: String = \"value=${integer}\"\n",
             "def callable = (value: I32) => value\n",
@@ -20296,7 +20300,7 @@ mod tests {
             LoweredExpressionKind::Access(_) => "access".to_owned(),
             LoweredExpressionKind::Product(_) => "product".to_owned(),
             LoweredExpressionKind::RepeatedProduct(_) => "repeated-product".to_owned(),
-            LoweredExpressionKind::Satisfies(_) => "satisfies".to_owned(),
+            LoweredExpressionKind::TypeAscription(_) => "type_ascription".to_owned(),
             LoweredExpressionKind::Logical(_) => "logical".to_owned(),
             LoweredExpressionKind::Loop(_) => "loop".to_owned(),
             LoweredExpressionKind::Match(_) => "match".to_owned(),
@@ -20341,7 +20345,7 @@ mod tests {
             "name",
             "product",
             "repeated-product",
-            "satisfies",
+            "type_ascription",
             "resource",
             "await",
             "coro",

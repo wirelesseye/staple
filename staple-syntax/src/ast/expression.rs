@@ -3,7 +3,7 @@ use super::{FunctionParameterStyle, Item, Pattern, Syntax, Type, VisibilitySynta
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
     Function(Box<FunctionExpression>),
-    Satisfies(Box<SatisfiesExpression>),
+    TypeAscription(Box<TypeAscriptionExpression>),
     Match(MatchExpression),
     Loop(LoopExpression),
     Coro(CoroExpression),
@@ -35,7 +35,7 @@ impl Expression {
     pub fn syntax(&self) -> &Syntax {
         match self {
             Self::Function(expression) => &expression.syntax,
-            Self::Satisfies(expression) => &expression.syntax,
+            Self::TypeAscription(expression) => &expression.syntax,
             Self::Match(expression) => &expression.syntax,
             Self::Loop(expression) => &expression.syntax,
             Self::Coro(expression) => &expression.syntax,
@@ -177,7 +177,7 @@ pub struct FunctionExpression {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SatisfiesExpression {
+pub struct TypeAscriptionExpression {
     pub syntax: Syntax,
     pub value: Box<Expression>,
     pub ty: Type,

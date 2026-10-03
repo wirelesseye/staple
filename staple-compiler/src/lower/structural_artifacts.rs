@@ -1179,7 +1179,7 @@ mod tests {
     #[test]
     fn structural_element_coercion_decisions_are_revalidated() {
         let (_, mut lowered) = lower(
-            "def pick: (U8, I32) -> (I32 | U8) = pair => pair[0]\nlet picked = pick ((1 satisfies U8), 2)\n",
+            "def pick: (U8, I32) -> (I32 | U8) = pair => pair[0]\nlet picked = pick ((U8 :: 1), 2)\n",
         );
         let mut changed = false;
         for (_, artifact) in lowered.program.artifacts.iter_mut() {
@@ -1212,7 +1212,7 @@ mod tests {
         let (_, lowered) = lower(concat!(
             "def index_mixed: (U8, I32) -> (I32 | U8) = pair => pair[0]\n",
             "def index_uniform: (I32, I32) -> I32 = pair => pair[0]\n",
-            "let mixed = index_mixed ((1 satisfies U8), 2)\n",
+            "let mixed = index_mixed ((U8 :: 1), 2)\n",
             "let uniform = index_uniform (1, 2)\n",
         ));
         let plans = structural_plans(&lowered, StructuralTraitMethod::Index);
@@ -1321,7 +1321,7 @@ mod tests {
             "  for item in pair { count = count + 1 }\n",
             "  count\n",
             "}\n",
-            "let counted = count_pair ((1 satisfies U8), 2)\n",
+            "let counted = count_pair ((U8 :: 1), 2)\n",
         ));
         let into_iterator = structural_plans(&lowered, StructuralTraitMethod::IntoIterator);
         assert_eq!(into_iterator.len(), 1);
@@ -1456,7 +1456,7 @@ mod tests {
     #[test]
     fn sum_debug_plans_one_delegate_per_alternative_without_literals() {
         let (_, lowered) = lower(concat!(
-            "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (1 satisfies U8) }\n",
+            "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (U8 :: 1) }\n",
             "def show_sum: (I32 | U8) -> String = value => \"${value:?}\"\n",
             "let chosen = show_sum (pick True)\n",
         ));
@@ -1489,7 +1489,7 @@ mod tests {
             "def deref_uniform: (Ref (I32, I32)) -> I32 = reference => reference[0]\n",
             "def deref_mixed: (Ref (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
             "let uniform = deref_uniform (Ref (1, 2))\n",
-            "let mixed = deref_mixed (Ref ((1 satisfies U8), 2))\n",
+            "let mixed = deref_mixed (Ref ((U8 :: 1), 2))\n",
         ));
         let plans = structural_plans(&lowered, StructuralTraitMethod::DerefIndex);
         assert_eq!(plans.len(), 2);
@@ -1797,7 +1797,7 @@ mod tests {
             "  last\n",
             "}\n",
             "let used_i32: I32 = use_pair (1, 2)\n",
-            "let used_u8: U8 = use_pair ((1 satisfies U8), (2 satisfies U8))\n",
+            "let used_u8: U8 = use_pair ((U8 :: 1), (U8 :: 2))\n",
         ));
         for kind in [
             StructuralTraitMethod::Index,

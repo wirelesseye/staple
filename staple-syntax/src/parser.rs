@@ -1962,33 +1962,36 @@ impl Grammar {
     }
 
     /// Parses an expression, including function expressions and builtin
-    /// operator expressions.
+    /// operator expressions and low-precedence `Type :: value` ascriptions.
     ///
-    /// Function parsing is attempted first and rewound on failure so an ordinary
-    /// expression can begin with the same tokens as a parameter pattern.
+    /// Type ascriptions and functions are attempted before ordinary expressions
+    /// because types, parameter patterns, and values can begin with the same tokens.
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
         let checkpoint = self.position;
+        let mut candidate = self.clone();
+        candidate.newline_terminates_type = true;
+        candidate.any_newline_terminates_type = true;
+        if let Ok(ty) = candidate.parse_type()
+            && candidate.eat(TokenKind::DoubleColon)
+        {
+            candidate.newline_terminates_type = self.newline_terminates_type;
+            candidate.any_newline_terminates_type = self.any_newline_terminates_type;
+            *self = candidate;
+            let value = Box::new(self.parse_expression()?);
+            return Ok(Expression::TypeAscription(Box::new(
+                crate::TypeAscriptionExpression {
+                    syntax: self.syntax(checkpoint),
+                    value,
+                    ty,
+                },
+            )));
+        }
         let function_error = match self.parse_function_expression() {
             Ok(function) => return Ok(Expression::Function(Box::new(function))),
             Err(error) => error,
         };
         self.position = checkpoint;
-        let mut expression = self.parse_or_expression()?;
-        while self.eat(TokenKind::Satisfies) {
-            let previous = self.newline_terminates_type;
-            let previous_any = self.any_newline_terminates_type;
-            self.newline_terminates_type = true;
-            self.any_newline_terminates_type = true;
-            let ty = self.parse_type();
-            self.newline_terminates_type = previous;
-            self.any_newline_terminates_type = previous_any;
-            let ty = ty?;
-            expression = Expression::Satisfies(Box::new(crate::SatisfiesExpression {
-                syntax: self.syntax(checkpoint),
-                value: Box::new(expression),
-                ty,
-            }));
-        }
+        let expression = self.parse_or_expression()?;
         if matches!(self.peek(), Some(TokenKind::Arrow | TokenKind::FatArrow)) {
             return Err(function_error);
         }
@@ -4259,12 +4262,12 @@ fn parameter_has_nested_move(pattern: &Pattern) -> bool {
 
 /// Whether a macro body's tail position is a bare function expression, which
 /// signals the removed curried `a => b => body` spelling rather than the
-/// juxtaposed `[a, b] => body` form. Looks through a trailing `satisfies` so the
-/// diagnostic still fires on `a => b => body satisfies T`.
+/// juxtaposed `[a, b] => body` form. Looks through a type ascription so the
+/// diagnostic still fires on `a => b => T :: body`.
 fn macro_body_is_bare_function(expression: &Expression) -> bool {
     match expression {
         Expression::Function(_) => true,
-        Expression::Satisfies(satisfies) => macro_body_is_bare_function(&satisfies.value),
+        Expression::TypeAscription(ascription) => macro_body_is_bare_function(&ascription.value),
         _ => false,
     }
 }

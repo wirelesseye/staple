@@ -1112,8 +1112,8 @@ impl<'a> WorklistBuilder<'a> {
             LoweredExpressionKind::RepeatedProduct(product) => {
                 self.traverse_expression(product.expression, owner, enclosing);
             }
-            LoweredExpressionKind::Satisfies(satisfies) => {
-                self.traverse_expression(satisfies.value, owner, enclosing);
+            LoweredExpressionKind::TypeAscription(ascription) => {
+                self.traverse_expression(ascription.value, owner, enclosing);
             }
             LoweredExpressionKind::Logical(logical) => {
                 self.traverse_expression(logical.left, owner, enclosing);
@@ -2663,7 +2663,7 @@ mod tests {
             "def identity: <T where Copy T> T -> T = value => value\n",
             "let first: I32 = identity 1\n",
             "let second: I32 = identity 1\n",
-            "let third: U8 = identity (1 satisfies U8)\n",
+            "let third: U8 = identity (U8 :: 1)\n",
         ));
         let identity = function_id(&program, "identity");
         let instances = instances_of(&program, identity);
@@ -2975,7 +2975,7 @@ mod tests {
             "impl TestShow U8 { test_show = _ => True }\n",
             "def use_other: <T where TestShow T> T -> Bool = value => test_other value\n",
             "let applied: Bool = use_other 1\n",
-            "let other: Bool = use_other (1 satisfies U8)\n",
+            "let other: Bool = use_other (U8 :: 1)\n",
         ));
         let use_other = function_id(&program, "use_other");
         assert_eq!(instances_of(&program, use_other).len(), 2);
@@ -3399,7 +3399,7 @@ mod tests {
             "def identity: <T where Copy T> T -> T = value => value\n",
             "def constant: <T where Copy T> T -> I32 -> T = value => ignored => value\n",
             "let first: I32 = identity 1\n",
-            "let second: U8 = identity (1 satisfies U8)\n",
+            "let second: U8 = identity (U8 :: 1)\n",
             "let held = constant \"x\"\n",
         );
         let (_, first) = lower(source);

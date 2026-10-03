@@ -1633,8 +1633,8 @@ fn parses_product_parameter_and_expression_body() {
 }
 
 #[test]
-fn parses_low_precedence_satisfies_expression() {
-    let source = "let add = (a: I32, b: I32) => a + b satisfies I32\n";
+fn parses_low_precedence_type_ascription_expression() {
+    let source = "let add = (a: I32, b: I32) => I32 :: a + b\n";
     let root = parse(source).expect("function should parse");
     let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding");
@@ -1643,14 +1643,69 @@ fn parses_low_precedence_satisfies_expression() {
         panic!("expected function");
     };
 
-    let Expression::Satisfies(satisfies) = function.body.as_ref() else {
-        panic!("expected satisfies expression");
+    let Expression::TypeAscription(ascription) = function.body.as_ref() else {
+        panic!("expected type ascription expression");
     };
-    assert!(matches!(satisfies.ty, Type::Named(ref named) if named.name == "I32"));
+    assert!(matches!(ascription.ty, Type::Named(ref named) if named.name == "I32"));
     assert!(
-        matches!(satisfies.value.as_ref(), Expression::Binary(binary) if binary.operator == BinaryOperator::Add)
+        matches!(ascription.value.as_ref(), Expression::Binary(binary) if binary.operator == BinaryOperator::Add)
     );
     assert_eq!(root.text(), source);
+}
+
+#[test]
+fn parses_type_ascriptions_with_full_types_and_expressions() {
+    for (source, expected_type, expected_value) in [
+        ("I32 :: a + b", "I32", "a + b"),
+        ("I32 :: f a + b", "I32", "f a + b"),
+        (
+            "I32 -> I32 :: value => value",
+            "I32 -> I32",
+            "value => value",
+        ),
+        ("I32 | String :: value", "I32 | String", "value"),
+        ("List I32 :: values", "List I32", "values"),
+        ("(I32, I32) :: (1, 2)", "(I32, I32)", "(1, 2)"),
+        ("I32 :: I8 :: 42", "I32", "I8 :: 42"),
+        ("I32 ::\n    a + b", "I32", "a + b"),
+    ] {
+        let module = parse(source).expect("type ascription should parse");
+        let Item::Expression(Expression::TypeAscription(annotation)) = &module.items[0] else {
+            panic!("expected type ascription for {source}");
+        };
+        assert_eq!(annotation.ty.syntax().text().trim(), expected_type);
+        assert_eq!(annotation.value.syntax().text().trim(), expected_value);
+        assert_eq!(annotation.syntax.text(), source);
+    }
+
+    let module = parse("(I32 :: a) + b").expect("grouped ascription should parse");
+    let Item::Expression(Expression::Binary(binary)) = &module.items[0] else {
+        panic!("expected sum outside the ascription");
+    };
+    let Expression::Product(group) = binary.left.as_ref() else {
+        panic!("expected grouped ascription");
+    };
+    assert!(matches!(
+        group.elements[0].value,
+        Expression::TypeAscription(_)
+    ));
+
+    assert!(parse("let value = I32 ::").is_err());
+    assert!(parse("let value = :: 42").is_err());
+    assert!(parse("let value = I32 : : 42").is_err());
+}
+
+#[test]
+fn type_ascription_does_not_consume_the_next_binding() {
+    let source = "let first = I32 :: 1\nlet second = U8 :: 2\n";
+    let module = parse(source).expect("separate annotated bindings should parse");
+    assert_eq!(module.items.len(), 2);
+    assert_eq!(module.syntax.text(), source);
+    assert_eq!(
+        staple_syntax::lex("satisfies")[0].kind,
+        TokenKind::Identifier
+    );
+    assert_eq!(staple_syntax::lex("::")[0].kind, TokenKind::DoubleColon);
 }
 
 #[test]
@@ -2851,5 +2906,5 @@ fn rejects_invalid_parameter_product_syntax_with_migration_hints() {
 fn unspaced_comparisons_are_not_type_arguments() {
     let program = parse("let ok = (a<b, c>a)\n").expect("comparisons parse");
     let text = format!("{program:?}");
-    assert!(!text.contains("Satisfies"), "{text}");
+    assert!(!text.contains("TypeAscription"), "{text}");
 }

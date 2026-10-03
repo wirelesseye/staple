@@ -651,7 +651,6 @@ fn is_keyword(value: &str) -> bool {
         value,
         "use"
             | "as"
-            | "satisfies"
             | "pub"
             | "let"
             | "mut"

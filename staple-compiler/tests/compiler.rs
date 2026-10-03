@@ -3454,7 +3454,7 @@ fn rejects_overlapping_structural_iterator_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "impl IntoIterator (I32; 2) ((I32; 2), USize) {\n",
-            "  into_iterator = move value => (value, 0 satisfies USize)\n",
+            "  into_iterator = move value => (value, USize :: 0)\n",
             "}\n",
         )))
         .expect_err_diagnostics("structural product IntoIterator cannot be overridden");
@@ -3681,7 +3681,7 @@ fn compiler_diagnostics_report_line_and_column() {
 fn infers_and_checks_function_return_types() {
     let module = type_check(concat!(
         "let first = (a: I32, b: I32) => a\n",
-        "let second = (a: I32, b: I32) => b satisfies I32\n",
+        "let second = (a: I32, b: I32) => I32 :: b\n",
         "first (1, second (3, 2))\n",
     ));
 
@@ -3698,14 +3698,16 @@ fn infers_and_checks_function_return_types() {
 }
 
 #[test]
-fn checks_general_satisfies_expressions_and_contextually_types_functions() {
+fn checks_type_ascriptions_and_contextually_types_functions() {
     type_check(concat!(
-        "let small = 42 satisfies I8\n",
-        "let identity = (value => value) satisfies I32 -> I32\n",
+        "let small = I8 :: 42\n",
+        "let identity = I32 -> I32 :: (value => value)\n",
         "let result: I32 = identity 42\n",
+        "let left: I8 = 1\nlet right: I8 = 2\nlet sum = I8 :: left + right\n",
+        "let applied = I32 :: identity 1 + identity 2\n",
     ));
 
-    let module = resolve("let invalid = \"text\" satisfies I32\n");
+    let module = resolve("let invalid = I32 :: \"text\"\n");
     let diagnostics = TypeChecker::new()
         .check(module)
         .expect_err_diagnostics("an expression must satisfy its asserted type");
@@ -4274,7 +4276,7 @@ fn does_not_add_state_metadata_to_safe_bindings() {
 
 #[test]
 fn rejects_an_incorrect_function_result_type() {
-    let module = resolve("use std.cinterop.*\nlet answer = () => 42 satisfies CString\n");
+    let module = resolve("use std.cinterop.*\nlet answer = () => CString :: 42\n");
     let diagnostics = TypeChecker::new()
         .check(module)
         .expect_err_diagnostics("incorrect return type should fail");
@@ -4502,8 +4504,8 @@ fn compares_all_standard_library_integer_types() {
 fn supports_contextual_float_literals_arithmetic_and_partial_ordering() {
     let module = type_check(concat!(
         "extern \"c\" { scale_float: F64 -> F64 }\n",
-        "def single = () => { let a: F32 = 1.5; let b: F32 = .5; (a + b) * b - a / b; } satisfies F32\n",
-        "def double = () => { let a: F64 = 1e3; let b: F64 = 2.; (a + b) / b; } satisfies F64\n",
+        "def single = () => F32 :: { let a: F32 = 1.5; let b: F32 = .5; (a + b) * b - a / b; }\n",
+        "def double = () => F64 :: { let a: F64 = 1e3; let b: F64 = 2.; (a + b) / b; }\n",
         "def defaulted = () => 1.25\n",
         "let less: Bool = 1.0 < 2.0\n",
         "let equal: Bool = 2.0 == 2.0\n",
@@ -4838,12 +4840,12 @@ fn buffer_intrinsics_type_check_and_compile() {
     let module = type_check(concat!(
         "use std.buffer.Buffer\nuse std.slice.Slice\n",
         "def exercise: () -> () = () => {\n",
-        "let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+        "let mut values: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
         "let empty_length: USize = Buffer.length values\n",
         "let capacity: USize = Buffer.capacity values\n",
         "Buffer.push values 10\n",
         "Buffer.push values 20\n",
-        "let first: Ref I32 = Buffer.get_ref values (0 satisfies USize)\n",
+        "let first: Ref I32 = Buffer.get_ref values (USize :: 0)\n",
         "let popped: Option I32 = Buffer.pop values\n",
         "let frozen: Slice I32 = Buffer.freeze values\n",
         "let frozen_length: USize = Slice.length frozen\n",
@@ -4864,7 +4866,7 @@ fn buffer_intrinsics_type_check_and_compile() {
         "use std.buffer.Buffer\n",
         "use std.cinterop.*\n",
         "def exercise: () -> () = () => {\n",
-        "let mut owned: Buffer CString = Buffer.with_capacity (1 satisfies USize)\n",
+        "let mut owned: Buffer CString = Buffer.with_capacity (USize :: 1)\n",
         "Buffer.push owned (c_string \"owned\")\n",
         "()\n",
         "}\n",
@@ -4884,12 +4886,12 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
         "impl !Copy Resource {}\n",
         "impl Clone Resource { clone = Resource value => Resource value }\n",
         "def exercise: () -> () = () => {\n",
-        "let mut buffer: Buffer Resource = Buffer.with_capacity (4 satisfies USize)\n",
+        "let mut buffer: Buffer Resource = Buffer.with_capacity (USize :: 4)\n",
         "Buffer.push buffer (Resource 7)\n",
         "let mut cloned_buffer: Buffer Resource = Clone.clone buffer\n",
         "Buffer.push cloned_buffer (Resource 8)\n",
         "let buffer_capacity: USize = Buffer.capacity cloned_buffer\n",
-        "let mut list: List Resource = List.with_capacity (4 satisfies USize)\n",
+        "let mut list: List Resource = List.with_capacity (USize :: 4)\n",
         "List.push list (Resource 9)\n",
         "let mut cloned_list: List Resource = Clone.clone list\n",
         "List.push cloned_list (Resource 10)\n",
@@ -4909,7 +4911,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
         concat!(
             "use std.buffer.Buffer\n",
             "def invalid: () -> USize = () => {\n",
-            "let buffer: Buffer I32 = Buffer.with_capacity (1 satisfies USize)\n",
+            "let buffer: Buffer I32 = Buffer.with_capacity (USize :: 1)\n",
             "let moved = buffer\n",
             "Buffer.length buffer\n",
             "}\n",
@@ -4925,7 +4927,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
         concat!(
             "use std.buffer.Buffer\nuse std.slice.Slice\n",
             "def invalid: () -> USize = () => {\n",
-            "let buffer: Buffer I32 = Buffer.with_capacity (1 satisfies USize)\n",
+            "let buffer: Buffer I32 = Buffer.with_capacity (USize :: 1)\n",
             "let frozen: Slice I32 = Buffer.freeze buffer\n",
             "Buffer.length buffer\n",
             "}\n",
@@ -4960,10 +4962,10 @@ fn buffer_transfer_type_checks_and_compiles() {
     let module = type_check(concat!(
         "use std.buffer.Buffer\n",
         "def exercise: () -> () = () => {\n",
-        "let mut source: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+        "let mut source: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
         "Buffer.push source 1\n",
         "Buffer.push source 2\n",
-        "let mut destination: Buffer I32 = Buffer.with_capacity (5 satisfies USize)\n",
+        "let mut destination: Buffer I32 = Buffer.with_capacity (USize :: 5)\n",
         "Buffer.push destination 0\n",
         "Buffer.transfer source destination\n",
         "let moved_length: USize = Buffer.length destination\n",
@@ -4992,12 +4994,12 @@ fn list_grows_past_initial_capacity_and_type_checks() {
         "List.push values 5\n",
         "let length: USize = List.length values\n",
         "let capacity: USize = List.capacity values\n",
-        "let first: Option I32 = List.get values (0 satisfies USize)\n",
-        "let last: I32 = List.get_unchecked values (4 satisfies USize)\n",
-        "let last_ref: Option (Ref I32) = List.get_ref values (4 satisfies USize)\n",
-        "let last_ref_unchecked: Ref I32 = List.get_ref_unchecked values (4 satisfies USize)\n",
+        "let first: Option I32 = List.get values (USize :: 0)\n",
+        "let last: I32 = List.get_unchecked values (USize :: 4)\n",
+        "let last_ref: Option (Ref I32) = List.get_ref values (USize :: 4)\n",
+        "let last_ref_unchecked: Ref I32 = List.get_ref_unchecked values (USize :: 4)\n",
         "let popped: Option I32 = List.pop values\n",
-        "let sized: List I32 = List.with_capacity (10 satisfies USize)\n",
+        "let sized: List I32 = List.with_capacity (USize :: 10)\n",
         "()\n}\n",
     ));
     let context = Context::create();
@@ -5016,10 +5018,10 @@ fn migrated_stdlib_methods_accept_caret_method_call_syntax() {
         "let mut values: List I32 = List.new ()\n",
         "values^push 1\n",
         "values^push 2\n",
-        "let first: Option I32 = values^get (0 satisfies USize)\n",
-        "let first_unchecked: I32 = values^get_unchecked (0 satisfies USize)\n",
-        "let first_ref: Option (Ref I32) = values^get_ref (0 satisfies USize)\n",
-        "let last_ref_unchecked: Ref I32 = values^get_ref_unchecked (0 satisfies USize)\n",
+        "let first: Option I32 = values^get (USize :: 0)\n",
+        "let first_unchecked: I32 = values^get_unchecked (USize :: 0)\n",
+        "let first_ref: Option (Ref I32) = values^get_ref (USize :: 0)\n",
+        "let last_ref_unchecked: Ref I32 = values^get_ref_unchecked (USize :: 0)\n",
         "()\n}\n",
     ));
     let context = Context::create();
@@ -5034,7 +5036,7 @@ fn list_get_requires_copy_element_type() {
         "use std.cinterop.*\n",
         "let mut values: List CString = List.new ()\n",
         "List.push values (c_string \"a\")\n",
-        "let first: CString = List.get values (0 satisfies USize)\n",
+        "let first: CString = List.get values (USize :: 0)\n",
     ));
     let result = TypeChecker::new().check(resolved);
     assert!(
@@ -5114,7 +5116,7 @@ fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_t
         "impl <T where Bound T> Convert T T {\n",
         "    convert = move value => value\n",
         "}\n",
-        "let result: I32 = Convert.convert (5 satisfies I32)\n",
+        "let result: I32 = Convert.convert (I32 :: 5)\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -5156,7 +5158,7 @@ fn list_supports_bracket_indexing_mutation_and_iteration() {
         "List.push values 10\n",
         "List.push values 20\n",
         "List.push values 30\n",
-        "let index: USize = 1 satisfies USize\n",
+        "let index: USize = USize :: 1\n",
         "let read: I32 = values[index]\n",
         "values[index] = 99\n",
         "let mut sum: I32 = 0\n",
@@ -5201,7 +5203,7 @@ fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
         "  Buffer.push buffer value\n",
         "}\n",
         "def exercise: () -> () = () => {\n",
-        "let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+        "let mut values: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
         "push_value (values, 10)\n",
         "push_value (values, 20)\n",
         "let length: USize = Buffer.length values\n",
@@ -6863,7 +6865,7 @@ fn accepts_product_type_and_pattern_macro_inputs_without_extra_grouping() {
         "macro for = [pattern: Pattern, _: Ident \"in\", value: Expr, body: Expr] => parse_quote {\n",
         "    { let $pattern = $value; $body }\n",
         "}\n",
-        "macro ascribe = [ty: Type, value: Expr] => parse_quote { $value satisfies $ty }\n",
+        "macro ascribe = [ty: Type, value: Expr] => parse_quote { $ty :: $value }\n",
         "let direct: I32 = for (left, right) in (40, 2) { left + right }\n",
         "let legacy: I32 = for ((left, right)) in (40, 2) { left + right }\n",
         "let empty: () = for () in () { () }\n",
@@ -6878,9 +6880,9 @@ fn accepts_product_type_and_pattern_macro_inputs_without_extra_grouping() {
 #[test]
 fn splices_types_and_patterns_through_expression_quotation_contexts() {
     let module = type_check(concat!(
-        "macro typed_identity = ty: Type => parse_quote { (value => value) satisfies ($ty -> $ty) }\n",
+        "macro typed_identity = ty: Type => parse_quote { ($ty -> $ty) :: (value => value) }\n",
         "macro parameter_function = pattern: Pattern => parse_quote { $pattern => 42 }\n",
-        "macro matching = pattern: Pattern => parse_quote { match (True satisfies Bool) { $pattern => 1, _ => 0 } }\n",
+        "macro matching = pattern: Pattern => parse_quote { match (Bool :: True) { $pattern => 1, _ => 0 } }\n",
         "let identity: I32 -> I32 = typed_identity I32\n",
         "let constant: I32 -> I32 = parameter_function (_)\n",
         "let matched: I32 = matching True\n",
@@ -6897,7 +6899,7 @@ fn quote_uses_contextual_results_and_reinterprets_opaque_fragments() {
     let module = type_check(concat!(
         "macro delayed: Expr -> Expr = value => {\n",
         "    let fragment: Syntax = quote { $value + 1 }\n",
-        "    parse_quote { $fragment } satisfies Expr\n",
+        "    Expr :: parse_quote { $fragment }\n",
         "}\n",
         "macro raw: Expr -> Syntax = value => quote { $value }\n",
         "macro pattern_result: Expr -> Expr = value => {\n",
@@ -6922,7 +6924,7 @@ fn quote_never_validates_or_reinterprets_its_result_unlike_parse_quote() {
         .load_source(
             &with_syntax_imports(concat!(
                 "macro invalid: Expr -> Expr = _: Expr => {\n",
-                "    parse_quote { let generated = 1 } satisfies Expr\n",
+                "    Expr :: parse_quote { let generated = 1 }\n",
                 "}\n",
                 "let result = invalid ()\n",
             )),
@@ -6940,7 +6942,7 @@ fn quote_never_validates_or_reinterprets_its_result_unlike_parse_quote() {
 
     resolve(concat!(
         "macro always_syntax: Expr -> Expr = _: Expr => {\n",
-        "    let fragment: Syntax = quote { let generated = 1 } satisfies Expr\n",
+        "    let fragment: Syntax = Expr :: quote { let generated = 1 }\n",
         "    parse_quote { 0 }\n",
         "}\n",
         "let result = always_syntax ()\n",
@@ -6955,12 +6957,12 @@ fn quote_result_excludes_syntax_which_remains_quotes_alone() {
         concat!(
             "macro invalid: Expr -> Expr = value => {\n",
             "    let fragment: Syntax = parse_quote { $value }\n",
-            "    parse_quote { $fragment } satisfies Expr\n",
+            "    Expr :: parse_quote { $fragment }\n",
             "}\n",
             "let result = invalid (1)\n",
         ),
         concat!(
-            "macro invalid = value => parse_quote { $value } satisfies Syntax\n",
+            "macro invalid = value => Syntax :: parse_quote { $value }\n",
             "let result = invalid (1)\n",
         ),
     ] {
@@ -7044,7 +7046,7 @@ fn an_unannotated_macro_ending_in_bare_quote_infers_syntax_not_its_contents_shap
 fn opaque_syntax_captures_whole_delimiter_contents_and_is_the_broadest_overload() {
     let module = type_check(concat!(
         "macro capture: Braced Syntax -> Expr = body => match body {\n",
-        "    Braced fragment => parse_quote { $fragment } satisfies Expr,\n",
+        "    Braced fragment => Expr :: parse_quote { $fragment },\n",
         "}\n",
         "macro choose: Syntax -> Expr = _: Syntax => parse_quote { 1 }\n",
         "macro choose: SyntaxNode -> Expr = _: SyntaxNode => parse_quote { 2 }\n",
@@ -7877,17 +7879,17 @@ fn expands_standard_for_over_ranges_and_product_iterators() {
 #[test]
 fn provides_integer_range_iterator_implementations() {
     type_check(concat!(
-        "let i8: IterStep (Range I8, I8) = Iterator.next ((0 satisfies I8) .. (1 satisfies I8))\n",
-        "let i16: IterStep (Range I16, I16) = Iterator.next ((0 satisfies I16) .. (1 satisfies I16))\n",
+        "let i8: IterStep (Range I8, I8) = Iterator.next ((I8 :: 0) .. (I8 :: 1))\n",
+        "let i16: IterStep (Range I16, I16) = Iterator.next ((I16 :: 0) .. (I16 :: 1))\n",
         "let i32: IterStep (Range I32, I32) = Iterator.next (0 .. 1)\n",
-        "let i64: IterStep (Range I64, I64) = Iterator.next ((0 satisfies I64) .. (1 satisfies I64))\n",
-        "let u8: IterStep (Range U8, U8) = Iterator.next ((0 satisfies U8) .. (1 satisfies U8))\n",
-        "let u16: IterStep (Range U16, U16) = Iterator.next ((0 satisfies U16) .. (1 satisfies U16))\n",
-        "let u32: IterStep (Range U32, U32) = Iterator.next ((0 satisfies U32) .. (1 satisfies U32))\n",
-        "let u64: IterStep (Range U64, U64) = Iterator.next ((0 satisfies U64) .. (1 satisfies U64))\n",
-        "let isize: IterStep (Range ISize, ISize) = Iterator.next ((0 satisfies ISize) .. (1 satisfies ISize))\n",
-        "let usize: IterStep (Range USize, USize) = Iterator.next ((0 satisfies USize) .. (1 satisfies USize))\n",
-        "let inclusive: IterStep (RangeInclusive U8, U8) = Iterator.next ((255 satisfies U8) ..= (255 satisfies U8))\n",
+        "let i64: IterStep (Range I64, I64) = Iterator.next ((I64 :: 0) .. (I64 :: 1))\n",
+        "let u8: IterStep (Range U8, U8) = Iterator.next ((U8 :: 0) .. (U8 :: 1))\n",
+        "let u16: IterStep (Range U16, U16) = Iterator.next ((U16 :: 0) .. (U16 :: 1))\n",
+        "let u32: IterStep (Range U32, U32) = Iterator.next ((U32 :: 0) .. (U32 :: 1))\n",
+        "let u64: IterStep (Range U64, U64) = Iterator.next ((U64 :: 0) .. (U64 :: 1))\n",
+        "let isize: IterStep (Range ISize, ISize) = Iterator.next ((ISize :: 0) .. (ISize :: 1))\n",
+        "let usize: IterStep (Range USize, USize) = Iterator.next ((USize :: 0) .. (USize :: 1))\n",
+        "let inclusive: IterStep (RangeInclusive U8, U8) = Iterator.next ((U8 :: 255) ..= (U8 :: 255))\n",
     ));
 }
 
@@ -8984,7 +8986,7 @@ fn folds_const_prefix_negation_at_compile_time() {
 #[test]
 fn rejects_arithmetic_negation_of_unsigned_integers() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("let bad: U32 = -(1 satisfies U32)\n"))
+        .check(resolve("let bad: U32 = -(U32 :: 1)\n"))
         .expect_err_diagnostics("unsigned integers have no `Neg` implementation");
     assert!(
         diagnostics
@@ -9067,12 +9069,12 @@ fn type_checks_static_traits_and_bounded_generic_functions() {
 fn provides_to_string_for_prelude_scalar_types() {
     let module = type_check(concat!(
         "def render: <T where ToString T> T -> String = value => to_string value\n",
-        "let a = render (1 satisfies I8)\nlet b = render (1 satisfies I16)\n",
-        "let c = render (1 satisfies I32)\nlet d = render (1 satisfies I64)\n",
-        "let e = render (1 satisfies U8)\nlet f = render (1 satisfies U16)\n",
-        "let g = render (1 satisfies U32)\nlet h = render (1 satisfies U64)\n",
-        "let i = render (1 satisfies ISize)\nlet j = render (1 satisfies USize)\n",
-        "let k = render (1.5 satisfies F32)\nlet l = render (1.5 satisfies F64)\n",
+        "let a = render (I8 :: 1)\nlet b = render (I16 :: 1)\n",
+        "let c = render (I32 :: 1)\nlet d = render (I64 :: 1)\n",
+        "let e = render (U8 :: 1)\nlet f = render (U16 :: 1)\n",
+        "let g = render (U32 :: 1)\nlet h = render (U64 :: 1)\n",
+        "let i = render (ISize :: 1)\nlet j = render (USize :: 1)\n",
+        "let k = render (F32 :: 1.5)\nlet l = render (F64 :: 1.5)\n",
         "let boolean: Bool = True\nlet m = render boolean\n",
         "let string: String = \"text\"\nlet n = render string\n",
     ));
@@ -9141,7 +9143,7 @@ fn derives_debug_for_nominal_representations() {
         "@derive_debug\ntype Choice = wrap I32 | String\n",
         "@derive_debug\ntype Box T = wrap T\n",
         "let point_debug: String = Formatter.debug (Point (x: 3, y: 4))\n",
-        "let choice_debug: String = Formatter.debug (Choice (42 satisfies I32 | String))\n",
+        "let choice_debug: String = Formatter.debug (Choice (I32 | String :: 42))\n",
         "let box_debug: String = Formatter.debug (Box 7)\n",
     ));
     let context = Context::create();
@@ -9161,7 +9163,7 @@ fn derives_debug_for_bodyless_singleton_types() {
         "@derive_debug\npub type Disabled\n",
         "let enabled_debug: String = Formatter.debug Enabled\n",
         "let disabled_debug: String = Formatter.debug Disabled\n",
-        "let choice_debug: String = Formatter.debug (Enabled satisfies Enabled | Disabled)\n",
+        "let choice_debug: String = Formatter.debug (Enabled | Disabled :: Enabled)\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
@@ -10312,7 +10314,7 @@ fn rejects_returns_outside_functions_and_incompatible_return_values() {
             .contains("only allowed inside a function")
     }));
 
-    let module = resolve("def invalid = () => { return 42; } satisfies String\n");
+    let module = resolve("def invalid = () => String :: { return 42; }\n");
     let diagnostics = TypeChecker::new()
         .check(module)
         .expect_err_diagnostics("return value should match the function result");
@@ -10326,16 +10328,16 @@ fn rejects_returns_outside_functions_and_incompatible_return_values() {
 #[test]
 fn supports_contextual_literals_and_arithmetic_for_all_integer_types() {
     let source = concat!(
-        "def i8_value = () => { let a: I8 = 8; let b: I8 = 4; (a + b) * b - a / b; } satisfies I8\n",
-        "def i16_value = () => { let a: I16 = 8; let b: I16 = 4; (a + b) * b - a / b; } satisfies I16\n",
-        "def i32_value = () => { let a: I32 = 8; let b: I32 = 4; (a + b) * b - a / b; } satisfies I32\n",
-        "def i64_value = () => { let a: I64 = 8; let b: I64 = 4; (a + b) * b - a / b; } satisfies I64\n",
-        "def u8_value = () => { let a: U8 = 8; let b: U8 = 4; (a + b) * b - a / b; } satisfies U8\n",
-        "def u16_value = () => { let a: U16 = 8; let b: U16 = 4; (a + b) * b - a / b; } satisfies U16\n",
-        "def u32_value = () => { let a: U32 = 8; let b: U32 = 4; (a + b) * b - a / b; } satisfies U32\n",
-        "def u64_value = () => { let a: U64 = 8; let b: U64 = 4; (a + b) * b - a / b; } satisfies U64\n",
-        "def isize_value = () => { let a: ISize = 8; let b: ISize = 4; (a + b) * b - a / b; } satisfies ISize\n",
-        "def usize_value = () => { let a: USize = 8; let b: USize = 4; (a + b) * b - a / b; } satisfies USize\n",
+        "def i8_value = () => I8 :: { let a: I8 = 8; let b: I8 = 4; (a + b) * b - a / b; }\n",
+        "def i16_value = () => I16 :: { let a: I16 = 8; let b: I16 = 4; (a + b) * b - a / b; }\n",
+        "def i32_value = () => I32 :: { let a: I32 = 8; let b: I32 = 4; (a + b) * b - a / b; }\n",
+        "def i64_value = () => I64 :: { let a: I64 = 8; let b: I64 = 4; (a + b) * b - a / b; }\n",
+        "def u8_value = () => U8 :: { let a: U8 = 8; let b: U8 = 4; (a + b) * b - a / b; }\n",
+        "def u16_value = () => U16 :: { let a: U16 = 8; let b: U16 = 4; (a + b) * b - a / b; }\n",
+        "def u32_value = () => U32 :: { let a: U32 = 8; let b: U32 = 4; (a + b) * b - a / b; }\n",
+        "def u64_value = () => U64 :: { let a: U64 = 8; let b: U64 = 4; (a + b) * b - a / b; }\n",
+        "def isize_value = () => ISize :: { let a: ISize = 8; let b: ISize = 4; (a + b) * b - a / b; }\n",
+        "def usize_value = () => USize :: { let a: USize = 8; let b: USize = 4; (a + b) * b - a / b; }\n",
         "i8_value ()\n",
     );
     let module = type_check(source);
@@ -10796,7 +10798,7 @@ fn rejects_moving_a_move_only_global_out_of_top_level_statements() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.buffer.Buffer\nuse std.slice.Slice\n",
-            "let mut data: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
+            "let mut data: Buffer I32 = Buffer.with_capacity (USize :: 4)\n",
             "let frozen: Slice I32 = Buffer.freeze data\n",
         )))
         .expect_err_diagnostics("moving a global out at top level should be rejected");
@@ -10812,7 +10814,7 @@ fn rejects_moving_a_move_only_global_out_of_a_function() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.buffer.Buffer\n",
-            "let mut data: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
+            "let mut data: Buffer I32 = Buffer.with_capacity (USize :: 4)\n",
             "def take = () => Buffer.freeze data\n",
         )))
         .expect_err_diagnostics("moving a global out of a function should be rejected");

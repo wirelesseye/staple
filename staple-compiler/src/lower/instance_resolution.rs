@@ -105,7 +105,7 @@ pub(crate) const PARAMETER_RECORD_FAMILIES: &[&str] = &[
     "expression.access",
     "expression.product",
     "expression.repeated-product",
-    "expression.satisfies",
+    "expression.type_ascription",
     "expression.logical",
     "expression.loop",
     "expression.match",
@@ -2472,9 +2472,9 @@ impl<'a> ParameterCollector<'a> {
                     self.collect_type(count);
                 }
             }
-            LoweredExpressionKind::Satisfies(satisfies) => {
-                self.family("expression.satisfies");
-                self.collect_expression(satisfies.value);
+            LoweredExpressionKind::TypeAscription(ascription) => {
+                self.family("expression.type_ascription");
+                self.collect_expression(ascription.value);
             }
             LoweredExpressionKind::Logical(logical) => {
                 self.family("expression.logical");
@@ -3239,7 +3239,7 @@ mod tests {
             "def blocked = () => { let local: I32 = 1; local }\n",
             "def repeat = () => { let repeated: (I32; 3) = (7; 3); repeated }\n",
             "def templated = () => { let rendered: String = \"value=${integer}\"; rendered }\n",
-            "let coerced: I8 = 42 satisfies I8\n",
+            "let coerced: I8 = I8 :: 42\n",
             "let repeated: (I32; 3) = (7; 3)\n",
             "let template: String = \"value=${integer}\"\n",
             "let applied = callable 1\n",

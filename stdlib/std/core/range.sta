@@ -26,7 +26,7 @@ pub def range : <T where Copy T> T -> T -> Range T = start => end => Range (
 pub def range_inclusive : <T where Copy T> T -> T -> RangeInclusive T = start => end => RangeInclusive (
     current: start,
     end: end,
-    finished: False satisfies Bool,
+    finished: False,
 )
 
 impl Iterator (Range I8) I8 {
@@ -55,14 +55,14 @@ impl Iterator (RangeInclusive I8) I8 {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
         current < end => Yield (
             current,
             RangeInclusive (
                 current: current + 1,
                 end: end,
-                finished: False satisfies Bool,
+                finished: False,
             ),
         ),
         current == end => Yield (
@@ -70,13 +70,13 @@ impl Iterator (RangeInclusive I8) I8 {
             RangeInclusive (
                 current: current,
                 end: end,
-                finished: True satisfies Bool,
+                finished: True,
             ),
         ),
         else => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
     }
 }
@@ -111,14 +111,14 @@ impl Iterator (RangeInclusive I16) I16 {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
         current < end => Yield (
             current,
             RangeInclusive (
                 current: current + 1,
                 end: end,
-                finished: False satisfies Bool,
+                finished: False,
             ),
         ),
         current == end => Yield (
@@ -126,13 +126,13 @@ impl Iterator (RangeInclusive I16) I16 {
             RangeInclusive (
                 current: current,
                 end: end,
-                finished: True satisfies Bool,
+                finished: True,
             ),
         ),
         else => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
     }
 }
@@ -167,14 +167,14 @@ impl Iterator (RangeInclusive I32) I32 {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
         current < end => Yield (
             current,
             RangeInclusive (
                 current: current + 1,
                 end: end,
-                finished: False satisfies Bool,
+                finished: False,
             ),
         ),
         current == end => Yield (
@@ -182,13 +182,13 @@ impl Iterator (RangeInclusive I32) I32 {
             RangeInclusive (
                 current: current,
                 end: end,
-                finished: True satisfies Bool,
+                finished: True,
             ),
         ),
         else => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
     }
 }
@@ -223,14 +223,14 @@ impl Iterator (RangeInclusive I64) I64 {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
         current < end => Yield (
             current,
             RangeInclusive (
                 current: current + 1,
                 end: end,
-                finished: False satisfies Bool,
+                finished: False,
             ),
         ),
         current == end => Yield (
@@ -238,13 +238,13 @@ impl Iterator (RangeInclusive I64) I64 {
             RangeInclusive (
                 current: current,
                 end: end,
-                finished: True satisfies Bool,
+                finished: True,
             ),
         ),
         else => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
     }
 }
@@ -279,14 +279,14 @@ impl Iterator (RangeInclusive U8) U8 {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
         current < end => Yield (
             current,
             RangeInclusive (
                 current: current + 1,
                 end: end,
-                finished: False satisfies Bool,
+                finished: False,
             ),
         ),
         current == end => Yield (
@@ -294,13 +294,13 @@ impl Iterator (RangeInclusive U8) U8 {
             RangeInclusive (
                 current: current,
                 end: end,
-                finished: True satisfies Bool,
+                finished: True,
             ),
         ),
         else => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
     }
 }
@@ -335,14 +335,14 @@ impl Iterator (RangeInclusive U16) U16 {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
         current < end => Yield (
             current,
             RangeInclusive (
                 current: current + 1,
                 end: end,
-                finished: False satisfies Bool,
+                finished: False,
             ),
         ),
         current == end => Yield (
@@ -350,13 +350,13 @@ impl Iterator (RangeInclusive U16) U16 {
             RangeInclusive (
                 current: current,
                 end: end,
-                finished: True satisfies Bool,
+                finished: True,
             ),
         ),
         else => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
     }
 }
@@ -391,14 +391,14 @@ impl Iterator (RangeInclusive U32) U32 {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
         current < end => Yield (
             current,
             RangeInclusive (
                 current: current + 1,
                 end: end,
-                finished: False satisfies Bool,
+                finished: False,
             ),
         ),
         current == end => Yield (
@@ -406,13 +406,13 @@ impl Iterator (RangeInclusive U32) U32 {
             RangeInclusive (
                 current: current,
                 end: end,
-                finished: True satisfies Bool,
+                finished: True,
             ),
         ),
         else => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
     }
 }
@@ -447,14 +447,14 @@ impl Iterator (RangeInclusive U64) U64 {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
         current < end => Yield (
             current,
             RangeInclusive (
                 current: current + 1,
                 end: end,
-                finished: False satisfies Bool,
+                finished: False,
             ),
         ),
         current == end => Yield (
@@ -462,13 +462,13 @@ impl Iterator (RangeInclusive U64) U64 {
             RangeInclusive (
                 current: current,
                 end: end,
-                finished: True satisfies Bool,
+                finished: True,
             ),
         ),
         else => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
     }
 }
@@ -503,14 +503,14 @@ impl Iterator (RangeInclusive ISize) ISize {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
         current < end => Yield (
             current,
             RangeInclusive (
                 current: current + 1,
                 end: end,
-                finished: False satisfies Bool,
+                finished: False,
             ),
         ),
         current == end => Yield (
@@ -518,13 +518,13 @@ impl Iterator (RangeInclusive ISize) ISize {
             RangeInclusive (
                 current: current,
                 end: end,
-                finished: True satisfies Bool,
+                finished: True,
             ),
         ),
         else => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
     }
 }
@@ -559,14 +559,14 @@ impl Iterator (RangeInclusive USize) USize {
         finished => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
         current < end => Yield (
             current,
             RangeInclusive (
                 current: current + 1,
                 end: end,
-                finished: False satisfies Bool,
+                finished: False,
             ),
         ),
         current == end => Yield (
@@ -574,13 +574,13 @@ impl Iterator (RangeInclusive USize) USize {
             RangeInclusive (
                 current: current,
                 end: end,
-                finished: True satisfies Bool,
+                finished: True,
             ),
         ),
         else => Done (RangeInclusive (
             current: current,
             end: end,
-            finished: True satisfies Bool,
+            finished: True,
         )),
     }
 }

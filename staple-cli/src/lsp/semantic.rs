@@ -138,6 +138,7 @@ fn lexical_kind(kind: TokenKind) -> Option<u32> {
         // Leaving them to the grammar keeps syntax and semantic highlighting
         // in agreement.
         TokenKind::Operator
+        | TokenKind::DoubleColon
         | TokenKind::Equals
         | TokenKind::Arrow
         | TokenKind::FatArrow
@@ -673,7 +674,7 @@ impl<'a> Classifier<'a> {
                 self.pattern(&value.pattern, PARAMETER, resolved);
                 self.expression(&value.body, resolved);
             }
-            Expression::Satisfies(value) => {
+            Expression::TypeAscription(value) => {
                 self.expression(&value.value, resolved);
                 self.ty(&value.ty, resolved);
             }

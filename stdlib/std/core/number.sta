@@ -309,9 +309,9 @@ impl Eq I8 {
 
 impl PartialOrd I8 {
     partial_cmp = (left, right) => when {
-        __i8_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __i8_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        else => Some (Ordering.Equal satisfies Ordering),
+        __i8_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __i8_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        else => Some (Ordering :: Ordering.Equal),
     }
 }
 
@@ -330,9 +330,9 @@ impl Eq I16 {
 
 impl PartialOrd I16 {
     partial_cmp = (left, right) => when {
-        __i16_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __i16_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        else => Some (Ordering.Equal satisfies Ordering),
+        __i16_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __i16_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        else => Some (Ordering :: Ordering.Equal),
     }
 }
 
@@ -351,9 +351,9 @@ impl Eq I32 {
 
 impl PartialOrd I32 {
     partial_cmp = (left, right) => when {
-        __i32_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __i32_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        else => Some (Ordering.Equal satisfies Ordering),
+        __i32_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __i32_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        else => Some (Ordering :: Ordering.Equal),
     }
 }
 
@@ -372,9 +372,9 @@ impl Eq I64 {
 
 impl PartialOrd I64 {
     partial_cmp = (left, right) => when {
-        __i64_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __i64_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        else => Some (Ordering.Equal satisfies Ordering),
+        __i64_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __i64_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        else => Some (Ordering :: Ordering.Equal),
     }
 }
 
@@ -393,9 +393,9 @@ impl Eq U8 {
 
 impl PartialOrd U8 {
     partial_cmp = (left, right) => when {
-        __u8_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __u8_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        else => Some (Ordering.Equal satisfies Ordering),
+        __u8_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __u8_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        else => Some (Ordering :: Ordering.Equal),
     }
 }
 
@@ -414,9 +414,9 @@ impl Eq U16 {
 
 impl PartialOrd U16 {
     partial_cmp = (left, right) => when {
-        __u16_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __u16_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        else => Some (Ordering.Equal satisfies Ordering),
+        __u16_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __u16_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        else => Some (Ordering :: Ordering.Equal),
     }
 }
 
@@ -435,9 +435,9 @@ impl Eq U32 {
 
 impl PartialOrd U32 {
     partial_cmp = (left, right) => when {
-        __u32_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __u32_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        else => Some (Ordering.Equal satisfies Ordering),
+        __u32_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __u32_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        else => Some (Ordering :: Ordering.Equal),
     }
 }
 
@@ -456,9 +456,9 @@ impl Eq U64 {
 
 impl PartialOrd U64 {
     partial_cmp = (left, right) => when {
-        __u64_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __u64_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        else => Some (Ordering.Equal satisfies Ordering),
+        __u64_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __u64_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        else => Some (Ordering :: Ordering.Equal),
     }
 }
 
@@ -477,9 +477,9 @@ impl Eq ISize {
 
 impl PartialOrd ISize {
     partial_cmp = (left, right) => when {
-        __isize_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __isize_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        else => Some (Ordering.Equal satisfies Ordering),
+        __isize_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __isize_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        else => Some (Ordering :: Ordering.Equal),
     }
 }
 
@@ -498,9 +498,9 @@ impl Eq USize {
 
 impl PartialOrd USize {
     partial_cmp = (left, right) => when {
-        __usize_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __usize_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        else => Some (Ordering.Equal satisfies Ordering),
+        __usize_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __usize_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        else => Some (Ordering :: Ordering.Equal),
     }
 }
 
@@ -535,9 +535,9 @@ impl Eq F32 {
 
 impl PartialOrd F32 {
     partial_cmp = (left, right) => when {
-        __f32_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __f32_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        __f32_equal (left, right) => Some (Ordering.Equal satisfies Ordering),
+        __f32_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __f32_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        __f32_equal (left, right) => Some (Ordering :: Ordering.Equal),
         else => None,
     }
 }
@@ -565,9 +565,9 @@ impl Eq F64 {
 
 impl PartialOrd F64 {
     partial_cmp = (left, right) => when {
-        __f64_lt (left, right) => Some (Ordering.Less satisfies Ordering),
-        __f64_gt (left, right) => Some (Ordering.Greater satisfies Ordering),
-        __f64_equal (left, right) => Some (Ordering.Equal satisfies Ordering),
+        __f64_lt (left, right) => Some (Ordering :: Ordering.Less),
+        __f64_gt (left, right) => Some (Ordering :: Ordering.Greater),
+        __f64_equal (left, right) => Some (Ordering :: Ordering.Equal),
         else => None,
     }
 }

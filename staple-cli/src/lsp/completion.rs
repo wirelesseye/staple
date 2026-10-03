@@ -38,7 +38,6 @@ const KEYWORDS: &[&str] = &[
     "quote",
     "resource",
     "return",
-    "satisfies",
     "trait",
     "type",
     "use",
@@ -742,7 +741,7 @@ impl Collector<'_> {
                 self.block(&value.body, module_index);
             }
             Expression::Block(value) => self.block(value, module_index),
-            Expression::Satisfies(value) => self.expression(&value.value, module_index),
+            Expression::TypeAscription(value) => self.expression(&value.value, module_index),
             Expression::Product(value) => {
                 for element in &value.elements {
                     self.expression(&element.value, module_index);

@@ -251,7 +251,7 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 true
             }
-            Expression::Satisfies(value) => self.check_expression(&value.value, consume),
+            Expression::TypeAscription(value) => self.check_expression(&value.value, consume),
             Expression::Match(value) => {
                 self.check_expression(&value.subject, true);
                 let outer = self.states.clone();
@@ -612,7 +612,7 @@ impl<'a> OwnershipChecker<'a> {
 
     fn borrow_origins(&self, expression: &Expression) -> Option<Vec<BorrowOrigin>> {
         match expression {
-            Expression::Satisfies(value) => return self.borrow_origins(&value.value),
+            Expression::TypeAscription(value) => return self.borrow_origins(&value.value),
             Expression::Block(block) => {
                 return match block.items.last()? {
                     Item::Expression(value) => self.borrow_origins(value),
@@ -1091,7 +1091,7 @@ fn returned_closure_ids(module: &TypedModule, expression: &Expression) -> Option
         Expression::Function(function) => module
             .function_for(function.syntax.id)
             .map(|function| vec![function]),
-        Expression::Satisfies(value) => returned_closure_ids(module, &value.value),
+        Expression::TypeAscription(value) => returned_closure_ids(module, &value.value),
         Expression::Block(block) => match block.items.last()? {
             Item::Expression(expression) => returned_closure_ids(module, expression),
             Item::Return(value) => returned_closure_ids(module, &value.value),

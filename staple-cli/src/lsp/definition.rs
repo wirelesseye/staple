@@ -272,7 +272,7 @@ impl DeclarationCollector<'_> {
                 self.pattern(&value.pattern);
                 self.expression(&value.body);
             }
-            Expression::Satisfies(value) => self.expression(&value.value),
+            Expression::TypeAscription(value) => self.expression(&value.value),
             Expression::Match(value) => {
                 self.expression(&value.subject);
                 for arm in &value.arms {
@@ -850,7 +850,7 @@ impl Collector<'_> {
                 self.pattern(&value.pattern);
                 self.expression(&value.body);
             }
-            Expression::Satisfies(value) => {
+            Expression::TypeAscription(value) => {
                 self.expression(&value.value);
                 self.ty(&value.ty);
             }

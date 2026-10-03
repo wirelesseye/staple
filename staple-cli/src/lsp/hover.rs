@@ -261,8 +261,8 @@ impl Collector<'_> {
                 self.collect_pattern_declarations(&function.pattern, false);
                 self.collect_expression_declarations(&function.body);
             }
-            Expression::Satisfies(satisfies) => {
-                self.collect_expression_declarations(&satisfies.value)
+            Expression::TypeAscription(ascription) => {
+                self.collect_expression_declarations(&ascription.value)
             }
             Expression::Match(match_) => {
                 self.collect_expression_declarations(&match_.subject);
@@ -1437,9 +1437,9 @@ impl Collector<'_> {
                 self.pattern(&function.pattern);
                 self.expression(&function.body);
             }
-            Expression::Satisfies(satisfies) => {
-                self.expression(&satisfies.value);
-                self.ty(&satisfies.ty);
+            Expression::TypeAscription(ascription) => {
+                self.expression(&ascription.value);
+                self.ty(&ascription.ty);
             }
             Expression::Match(match_) => {
                 self.expression(&match_.subject);
@@ -2939,7 +2939,7 @@ mod tests {
             "macro choose: Expr -> Expr = _: Expr => parse_quote { 1 }\n",
             "macro choose: CallExpr -> Expr = _: CallExpr => parse_quote { 2 }\n",
             "macro inferred = value => parse_quote { $value }\n",
-            "macro satisfied = expr: Expr => parse_quote { $expr } satisfies Expr\n",
+            "macro satisfied = expr: Expr => Expr :: parse_quote { $expr }\n",
             "macro @identity: Item -> Item = item: Item => item\n",
             "let selected = choose (discarded 0)\n",
             "let inferred_value = inferred 4\n",

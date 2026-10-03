@@ -1669,7 +1669,7 @@ mod tests {
             "// A generic enclosing function instantiated at two types.\n",
             "def generic: <T where Copy T> T -> Coroutine{} T = value => coro { value }\n",
             "let a: Coroutine{} I32 = generic 1\n",
-            "let b: Coroutine{} U8 = generic (1 satisfies U8)\n",
+            "let b: Coroutine{} U8 = generic (U8 :: 1)\n",
             "let c = outer ()\n",
         );
         let (_module, lowered) = lower(source);
@@ -2462,11 +2462,11 @@ mod tests {
             "  local\n",
             "}\n",
             "let r1 = with Reactive = reactive_scope () { generic_reaction 1 }\n",
-            "let r2 = with Reactive = reactive_scope () { generic_reaction (1 satisfies U8) }\n",
+            "let r2 = with Reactive = reactive_scope () { generic_reaction (U8 :: 1) }\n",
             "let u1 = with Reactive = reactive_scope () { generic_until 1 }\n",
-            "let u2 = with Reactive = reactive_scope () { generic_until (1 satisfies U8) }\n",
+            "let u2 = with Reactive = reactive_scope () { generic_until (U8 :: 1) }\n",
             "let d1 = generic_derived 1\n",
-            "let d2 = generic_derived (1 satisfies U8)\n",
+            "let d2 = generic_derived (U8 :: 1)\n",
         );
         let (_module, lowered) = lower(source);
         let program = &lowered.program;

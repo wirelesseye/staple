@@ -151,7 +151,7 @@
         },
         {
           "name": "keyword.operator.expression.staple",
-          "match": "\\b(?:resource|satisfies)\\b"
+          "match": "\\b(?:resource)\\b"
         },
         {
           "name": "variable.language.wildcard.staple",
@@ -191,7 +191,7 @@
         },
         {
           "name": "keyword.operator.symbolic.staple",
-          "match": "[!#$%&*+/<=>?@\\\\^|~:-]+|\\.{2,}"
+          "match": "::|[!#$%&*+/<=>?@\\\\^|~:-]+|\\.{2,}"
         }
       ]
     },

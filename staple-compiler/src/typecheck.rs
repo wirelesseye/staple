@@ -4378,7 +4378,7 @@ impl TypeChecker {
         };
         match expression {
             Expression::Function(_) => CheckedEffectSet::default(),
-            Expression::Satisfies(value) => {
+            Expression::TypeAscription(value) => {
                 self.expression_effects_now(module, &value.value, target_parameters)
             }
             Expression::Match(value) => {
@@ -5141,7 +5141,9 @@ impl TypeChecker {
                 .function_for(function.syntax.id)
                 .and_then(|id| self.function_types.get(&id).cloned())
                 .map(CheckedType::Function),
-            Expression::Satisfies(_) => self.expression_types.get(&expression.syntax().id).cloned(),
+            Expression::TypeAscription(_) => {
+                self.expression_types.get(&expression.syntax().id).cloned()
+            }
             Expression::With(with) => self.refreshed_block_type(module, &with.body),
             Expression::Block(block) => self.refreshed_block_type(module, block),
             Expression::Call(call) if self.curried_default_plans.contains_key(&call.syntax.id) => {
@@ -5306,7 +5308,7 @@ impl TypeChecker {
             Expression::Function(function) => {
                 self.refresh_expression_function_types(module, &function.body)
             }
-            Expression::Satisfies(value) => {
+            Expression::TypeAscription(value) => {
                 self.refresh_expression_function_types(module, &value.value)
             }
             Expression::Match(value) => {
@@ -5489,7 +5491,7 @@ impl TypeChecker {
                 target_parameters,
                 current_module,
             ),
-            Expression::Satisfies(value) => self.record_expression_effects(
+            Expression::TypeAscription(value) => self.record_expression_effects(
                 module,
                 &value.value,
                 target_parameters,
@@ -6190,7 +6192,7 @@ impl TypeChecker {
                 Expression::Resource(_) => true,
                 Expression::Access(value) => contains_resource(&value.value),
                 Expression::Index(value) => contains_resource(&value.value),
-                Expression::Satisfies(value) => contains_resource(&value.value),
+                Expression::TypeAscription(value) => contains_resource(&value.value),
                 Expression::Product(value) => value
                     .elements
                     .iter()
@@ -7005,9 +7007,9 @@ impl TypeChecker {
                     .map(CheckedType::Function)
                     .unwrap_or(CheckedType::Error)
             }
-            Expression::Satisfies(satisfies) => {
-                let annotation = self.resolve_source_type(module, &satisfies.ty);
-                self.check_expression_expected(module, &satisfies.value, Some(&annotation))
+            Expression::TypeAscription(ascription) => {
+                let annotation = self.resolve_source_type(module, &ascription.ty);
+                self.check_expression_expected(module, &ascription.value, Some(&annotation))
             }
             Expression::Match(match_) => self.check_match_expression(module, match_, expected),
             Expression::Logical(logical) => self.check_logical_expression(module, logical),
@@ -15099,7 +15101,9 @@ fn expression_reads_reactive(
                     .any(|value| item(module, value, derived))
         }
         Expression::Function(value) => expression_reads_reactive(module, &value.body, derived),
-        Expression::Satisfies(value) => expression_reads_reactive(module, &value.value, derived),
+        Expression::TypeAscription(value) => {
+            expression_reads_reactive(module, &value.value, derived)
+        }
         Expression::Match(value) => {
             expression_reads_reactive(module, &value.subject, derived)
                 || value
@@ -15138,7 +15142,7 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
     fn expression(value: &Expression, bindings: &mut Vec<Binding>) {
         match value {
             Expression::Function(value) => expression(&value.body, bindings),
-            Expression::Satisfies(value) => expression(&value.value, bindings),
+            Expression::TypeAscription(value) => expression(&value.value, bindings),
             Expression::Match(value) => {
                 expression(&value.subject, bindings);
                 for arm in &value.arms {
@@ -15301,7 +15305,9 @@ fn expression_mentions_symbols(
     }
     match expression {
         Expression::Function(value) => expression_mentions_symbols(module, &value.body, symbols),
-        Expression::Satisfies(value) => expression_mentions_symbols(module, &value.value, symbols),
+        Expression::TypeAscription(value) => {
+            expression_mentions_symbols(module, &value.value, symbols)
+        }
         Expression::Match(value) => {
             expression_mentions_symbols(module, &value.subject, symbols)
                 || value
@@ -15394,7 +15400,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
     }
     match expression {
         Expression::Function(value) => expression_contains_assignment(&value.body),
-        Expression::Satisfies(value) => expression_contains_assignment(&value.value),
+        Expression::TypeAscription(value) => expression_contains_assignment(&value.value),
         Expression::Match(value) => {
             expression_contains_assignment(&value.subject)
                 || value
@@ -15568,7 +15574,7 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
                     }
                 }
             }
-            Expression::Satisfies(value) => visit(module, &value.value, &declared, captures),
+            Expression::TypeAscription(value) => visit(module, &value.value, &declared, captures),
             Expression::Match(value) => {
                 visit(module, &value.subject, &declared, captures);
                 for arm in &value.arms {

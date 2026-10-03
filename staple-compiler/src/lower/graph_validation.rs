@@ -595,7 +595,7 @@ pub(crate) mod tests {
     const TWO_SUBSTITUTIONS: &str = concat!(
         "def identity: <T where Copy T> T -> T = value => value\n",
         "let first: I32 = identity 1\n",
-        "let second: U8 = identity (1 satisfies U8)\n",
+        "let second: U8 = identity (U8 :: 1)\n",
     );
 
     #[test]
@@ -1037,7 +1037,7 @@ pub(crate) mod tests {
         let lowered = lower(concat!(
             "def show_thunk: <T where Copy T, Display T> move T -> (() -> String) = move value => () => \"value=$value\"\n",
             "let shown_number = show_thunk 1\n",
-            "let shown_byte = show_thunk (1 satisfies U8)\n",
+            "let shown_byte = show_thunk (U8 :: 1)\n",
         ));
         let program = &lowered.program;
         let template = function_id(program, "show_thunk");
@@ -1090,7 +1090,7 @@ pub(crate) mod tests {
             "type Point = wrap (I32, I32)\n",
             "let make: () -> ((I32, I32) -> Point) = () => Point\n",
             "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
-            "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (1 satisfies U8) }\n",
+            "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (U8 :: 1) }\n",
             "def show_sum: (I32 | U8) -> String = value => \"${value:?}\"\n",
             "def index_mixed: (U8, I32) -> (I32 | U8) = pair => pair[0]\n",
             "def count_pair: (U8, I32) -> I32 = pair => {\n",
@@ -1101,9 +1101,9 @@ pub(crate) mod tests {
             "def deref_mixed: (Ref (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
             "let shown = show_pair (1, 2)\n",
             "let sum = show_sum (pick True)\n",
-            "let picked = index_mixed ((1 satisfies U8), 2)\n",
-            "let counted = count_pair ((1 satisfies U8), 2)\n",
-            "let dereferenced = deref_mixed (Ref ((1 satisfies U8), 2))\n",
+            "let picked = index_mixed ((U8 :: 1), 2)\n",
+            "let counted = count_pair ((U8 :: 1), 2)\n",
+            "let dereferenced = deref_mixed (Ref ((U8 :: 1), 2))\n",
             "let p = (1, 2)\n",
             "let text = \"${p:?}\"\n",
         ));
@@ -2002,7 +2002,7 @@ pub(crate) mod tests {
             concat!(
                 "use std.buffer.*\n",
                 "use std.clone.Clone\n",
-                "let mut values: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
+                "let mut values: Buffer I32 = Buffer.with_capacity (USize :: 4)\n",
                 "Buffer.push values 1\n",
                 "let copied = Clone.clone values\n",
             ),

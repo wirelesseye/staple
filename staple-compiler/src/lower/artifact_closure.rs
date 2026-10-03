@@ -2692,7 +2692,7 @@ mod tests {
         let source = concat!(
             "def identity: <T where Copy T> T -> T = value => value\n",
             "let first: I32 = identity 1\n",
-            "let second: U8 = identity (1 satisfies U8)\n",
+            "let second: U8 = identity (U8 :: 1)\n",
         );
         let mut program = lowered_fixture(source);
         let first = identity_instance(&program, 0);
@@ -2760,7 +2760,7 @@ mod tests {
         let source = concat!(
             "def identity: <T where Copy T> T -> T = value => value\n",
             "let first: I32 = identity 1\n",
-            "let second: U8 = identity (1 satisfies U8)\n",
+            "let second: U8 = identity (U8 :: 1)\n",
         );
         let mut program = lowered_fixture(source);
         let first = identity_instance(&program, 0);
@@ -2966,7 +2966,7 @@ mod tests {
         let source = concat!(
             "def identity: <T where Copy T> T -> T = value => value\n",
             "let first: I32 = identity 1\n",
-            "let second: U8 = identity (1 satisfies U8)\n",
+            "let second: U8 = identity (U8 :: 1)\n",
         );
         let run = || {
             let mut program = lowered_fixture(source);

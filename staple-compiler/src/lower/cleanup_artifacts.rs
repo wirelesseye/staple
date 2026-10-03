@@ -886,8 +886,8 @@ impl<'a> LoweredWalker<'a> {
             super::LoweredExpressionKind::RepeatedProduct(product) => {
                 self.walk_expression(product.expression)?;
             }
-            super::LoweredExpressionKind::Satisfies(satisfies) => {
-                self.walk_expression(satisfies.value)?;
+            super::LoweredExpressionKind::TypeAscription(ascription) => {
+                self.walk_expression(ascription.value)?;
             }
             super::LoweredExpressionKind::Logical(logical) => {
                 self.walk_expression(logical.left)?;

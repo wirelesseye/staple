@@ -18,7 +18,7 @@ clauses => match clauses {
         (condition, _, branch) => {
             let otherwise = when_clauses rest
             parse_quote {
-                match $condition satisfies Bool {
+                match Bool :: $condition {
                     True() => $branch,
                     False() => $otherwise,
                 }
@@ -82,7 +82,7 @@ def if_branches: (Expr, Expr, Sequence Expr) -> Expr = (condition, consequent, r
         },
     }
     parse_quote {
-        match $condition satisfies Bool {
+        match Bool :: $condition {
             True() => $consequent,
             False() => $otherwise,
         }
@@ -111,7 +111,7 @@ pub macro while =
     [condition: Expr, body: Expr] =>
     parse_quote {
         loop {
-            match $condition satisfies Bool {
+            match Bool :: $condition {
                 True() => $body,
                 False() => { break },
             }

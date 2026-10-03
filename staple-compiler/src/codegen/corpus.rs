@@ -259,7 +259,7 @@ static CORPUS: [CorpusProgram; 89] = [
             "census_structural_methods",
             concat!(
                 "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
-                "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (1 satisfies U8) }\n",
+                "def pick: Bool -> (I32 | U8) = condition => when { condition => 1, else => (U8 :: 1) }\n",
                 "def show_sum: (I32 | U8) -> String = value => \"${value:?}\"\n",
                 "def index_mixed: (U8, I32) -> (I32 | U8) = pair => pair[0]\n",
                 "def count_pair: (U8, I32) -> I32 = pair => {\n",
@@ -270,9 +270,9 @@ static CORPUS: [CorpusProgram; 89] = [
                 "def deref_mixed: (Ref (U8, I32)) -> (I32 | U8) = reference => reference[0]\n",
                 "let a = show_pair (1, 2)\n",
                 "let b = show_sum (pick True)\n",
-                "let c = index_mixed ((1 satisfies U8), 2)\n",
-                "let d = count_pair ((1 satisfies U8), 2)\n",
-                "let e = deref_mixed (Ref ((1 satisfies U8), 2))\n",
+                "let c = index_mixed ((U8 :: 1), 2)\n",
+                "let d = count_pair ((U8 :: 1), 2)\n",
+                "let e = deref_mixed (Ref ((U8 :: 1), 2))\n",
             ),
             "core",
         )),
@@ -291,7 +291,7 @@ static CORPUS: [CorpusProgram; 89] = [
             "  let bump = () => { total = total + 1 }\n",
             "  total\n",
             "}\n",
-            "let mut strings: Buffer CString = Buffer.with_capacity (2 satisfies USize)\n",
+            "let mut strings: Buffer CString = Buffer.with_capacity (USize :: 2)\n",
             "let run = capture (c_string \"x\")\n",
             "let absolute = abs\n",
             "let counted = counter ()\n",
@@ -316,7 +316,7 @@ static CORPUS: [CorpusProgram; 89] = [
             "let a = task ()\n",
             "let b = owning (c_string \"x\")\n",
             "let c: Coroutine{} I32 = generic 1\n",
-            "let d: Coroutine{} I32 = generic (1 satisfies U8)\n",
+            "let d: Coroutine{} I32 = generic (U8 :: 1)\n",
             "let e = with Reactive = reactive_scope () { waiting () }\n",
             "let f = with Reactive = reactive_scope () { reaction { () } }\n",
             "let doubled = flag + flag\n",
@@ -344,7 +344,7 @@ static CORPUS: [CorpusProgram; 89] = [
             "  let bump = () => { total = total + 1 }\n",
             "  total\n",
             "}\n",
-            "let mut strings: Buffer CString = Buffer.with_capacity (1 satisfies USize)\n",
+            "let mut strings: Buffer CString = Buffer.with_capacity (USize :: 1)\n",
             "let run = capture (c_string \"x\")\n",
             "let counted = counter ()\n",
             "let absolute = abs\n",
@@ -1079,7 +1079,7 @@ static CORPUS: [CorpusProgram; 89] = [
                     "}\n",
                     "\n",
                     "def recursive: () -> () = () => {\n",
-                    "    let value: Chain = Chain (1, Ref ((Empty ()) satisfies (Empty | Chain)))\n",
+                    "    let value: Chain = Chain (1, Ref ((Empty | Chain) :: (Empty ())))\n",
                     "    ()\n",
                     "}\n",
                     "\n",
@@ -1138,42 +1138,42 @@ static CORPUS: [CorpusProgram; 89] = [
                     "impl Clone Tag { clone = Tag text => Tag (c_string \"clone\") }\n",
                     "\n",
                     "def basics: () -> USize = () => {\n",
-                    "    let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+                    "    let mut values: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
                     "    Buffer.push values 1\n",
                     "    Buffer.push values 2\n",
                     "    let length: USize = Buffer.length values\n",
                     "    let capacity: USize = Buffer.capacity values\n",
-                    "    let first: Ref I32 = Buffer.get_ref values (0 satisfies USize)\n",
+                    "    let first: Ref I32 = Buffer.get_ref values (USize :: 0)\n",
                     "    let popped: Option I32 = Buffer.pop values\n",
                     "    length + capacity\n",
                     "}\n",
                     "\n",
                     "def transfer: () -> USize = () => {\n",
-                    "    let mut source: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+                    "    let mut source: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
                     "    Buffer.push source 1\n",
                     "    Buffer.push source 2\n",
-                    "    let mut destination: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
+                    "    let mut destination: Buffer I32 = Buffer.with_capacity (USize :: 4)\n",
                     "    Buffer.transfer source destination\n",
                     "    Buffer.length destination\n",
                     "}\n",
                     "\n",
                     "def clone_tags: () -> USize = () => {\n",
-                    "    let mut tags: Buffer Tag = Buffer.with_capacity (2 satisfies USize)\n",
+                    "    let mut tags: Buffer Tag = Buffer.with_capacity (USize :: 2)\n",
                     "    Buffer.push tags (Tag (c_string \"tag one\\n\"))\n",
                     "    let cloned: Buffer Tag = Clone.clone tags\n",
                     "    Buffer.length cloned\n",
                     "}\n",
                     "\n",
                     "def freeze: () -> USize = () => {\n",
-                    "    let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+                    "    let mut values: Buffer I32 = Buffer.with_capacity (USize :: 2)\n",
                     "    Buffer.push values 1\n",
                     "    let frozen: Slice I32 = Buffer.freeze values\n",
                     "    Slice.length frozen\n",
                     "}\n",
                     "\n",
                     "def trapped: () -> USize = () => {\n",
-                    "    let values: Buffer I32 = Buffer.with_capacity (1 satisfies USize)\n",
-                    "    let out: Ref I32 = Buffer.get_ref values (4 satisfies USize)\n",
+                    "    let values: Buffer I32 = Buffer.with_capacity (USize :: 1)\n",
+                    "    let out: Ref I32 = Buffer.get_ref values (USize :: 4)\n",
                     "    0\n",
                     "}\n",
                     "\n",
@@ -1263,13 +1263,13 @@ def generic: (Held I32, I32) -> String = pair => "${pair:?}"
 def template: I32 -> String = value => "display=${value} debug=${value:?}"
 puts (CString.from_string (nested ((1, 2), (3, 4))))
 puts (CString.from_string (named (5, 6)))
-puts (CString.from_string (sum (7 satisfies (I32 | U8))))
-puts (CString.from_string (sum ((8 satisfies U8) satisfies (I32 | U8))))
+puts (CString.from_string (sum ((I32 | U8) :: 7)))
+puts (CString.from_string (sum ((I32 | U8) :: (U8 :: 8))))
 puts (CString.from_string (generic (Held 9, 10)))
 puts (CString.from_string (template 11))
 def nested_sum: ((I32, I32) | U8) -> String = value => "${value:?}"
-puts (CString.from_string (nested_sum ((12, 13) satisfies ((I32, I32) | U8))))
-puts (CString.from_string (nested_sum ((14 satisfies U8) satisfies ((I32, I32) | U8))))
+puts (CString.from_string (nested_sum (((I32, I32) | U8) :: (12, 13))))
+puts (CString.from_string (nested_sum (((I32, I32) | U8) :: (U8 :: 14))))
 "#,
                 "structural",
             ),
@@ -1299,9 +1299,9 @@ def ref_uniform: Ref (I32, I32) -> I32 = reference => reference[1]
 def ref_mixed: Ref (U8, I32) -> (I32 | U8) = reference => reference[0]
 def ref_row: Ref Row -> I32 = reference => reference[0]
 def ref_replace: move (Ref (I32, I32)) -> Ref (I32, I32) = move reference => { let mut own = reference; own[0] = 8; own }
-puts (CString.from_string "mixed=${mixed ((1 satisfies U8), 2):?} uniform=${uniform (4, 5)}")
+puts (CString.from_string "mixed=${mixed ((U8 :: 1), 2):?} uniform=${uniform (4, 5)}")
 puts (CString.from_string "replace=${replace (1, 2):?}")
-puts (CString.from_string "refs=${ref_uniform (Ref (5, 6))} ${ref_mixed (Ref ((9 satisfies U8), 10)):?} ${ref_row (Ref (Row (1, 2)))}")
+puts (CString.from_string "refs=${ref_uniform (Ref (5, 6))} ${ref_mixed (Ref ((U8 :: 9), 10)):?} ${ref_row (Ref (Row (1, 2)))}")
 let replaced = ref_replace (Ref (1, 2))
 puts (CString.from_string "ref_replace=${replaced[0]} ${replaced[1]}")
 "#,
@@ -1327,7 +1327,7 @@ puts (CString.from_string "ref_replace=${replaced[0]} ${replaced[1]}")
 extern "c" { puts: CString -> I32 }
 def walk_mixed: (U8, I32) -> () = pair => { for item in pair { puts (CString.from_string "${item:?}") }; () }
 def walk_uniform: (I32, I32) -> () = pair => { for item in pair { puts (CString.from_string "${item}") }; () }
-walk_mixed ((1 satisfies U8), 2)
+walk_mixed ((U8 :: 1), 2)
 walk_uniform (3, 4)
 "#,
                 "structural",
@@ -1385,7 +1385,7 @@ ref_mutate (Ref (Tag (c_string "ref old"), Tag (c_string "ref second")))
             inline(
                 "structural_switch_trap",
                 r#"def at: ((U8, I32), USize) -> (I32 | U8) = (pair, position) => pair[position]
-let value = at (((1 satisfies U8), 2), (5 satisfies USize))
+let value = at (((U8 :: 1), 2), (USize :: 5))
 "#,
                 "structural",
             ),
@@ -1398,7 +1398,7 @@ let value = at (((1 satisfies U8), 2), (5 satisfies USize))
             inline(
                 "structural_deref_trap",
                 r#"def at: (Ref (I32, I32), USize) -> I32 = (reference, position) => reference[position]
-let value = at (Ref (1, 2), (5 satisfies USize))
+let value = at (Ref (1, 2), (USize :: 5))
 "#,
                 "structural",
             ),
@@ -1417,7 +1417,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "use std.io.(IO, println)\n",
                     "def generic: <T where Copy T> T -> Coroutine{} T = value => coro { value }\n",
                     "let a: Coroutine{} I32 = generic 7\n",
-                    "let b: Coroutine{} U8 = generic (1 satisfies U8)\n",
+                    "let b: Coroutine{} U8 = generic (U8 :: 1)\n",
                     "let x = block_on a\n",
                     "let y = block_on b\n",
                     "println \"a=${x:?} b=${y:?}\"\n",
@@ -1442,8 +1442,8 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "    println \"${value:?}\"\n",
                     "    0\n",
                     "}\n",
-                    "let a = generic (7 satisfies I32)\n",
-                    "let b = generic ((1 satisfies U8), (2 satisfies U8))\n",
+                    "let a = generic (I32 :: 7)\n",
+                    "let b = generic ((U8 :: 1), (U8 :: 2))\n",
                     "let x = block_on a\n",
                     "let y = block_on b\n",
                 ),
@@ -1464,7 +1464,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "  value => reaction { println \"reaction ${value:?}\"; () }\n",
                     "with Reactive = reactive_scope () {\n",
                     "  generic_reaction 7\n",
-                    "  generic_reaction (1 satisfies U8)\n",
+                    "  generic_reaction (U8 :: 1)\n",
                     "}\n",
                 ),
                 "coroutines",
@@ -1490,7 +1490,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "count = 1\n",
                     "with Reactive = reactive_scope () {\n",
                     "  let a: Coroutine{Reactive, IO} () = generic_until 7\n",
-                    "  let b: Coroutine{Reactive, IO} () = generic_until (1 satisfies U8)\n",
+                    "  let b: Coroutine{Reactive, IO} () = generic_until (U8 :: 1)\n",
                     "  let _ = block_on a\n",
                     "  let _ = block_on b\n",
                     "}\n",
@@ -1517,7 +1517,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "    local\n",
                     "  }\n",
                     "let a = generic_derived 7\n",
-                    "let b = generic_derived (1 satisfies U8)\n",
+                    "let b = generic_derived (U8 :: 1)\n",
                     "println \"results ${a:?} ${b:?}\"\n",
                 ),
                 "coroutines",

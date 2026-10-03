@@ -824,8 +824,8 @@ fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
             *expression = lower_unary_expression(unary, next_syntax_id);
         }
         Expression::Function(function) => desugar_expression(&mut function.body, next_syntax_id),
-        Expression::Satisfies(satisfies) => {
-            desugar_expression(&mut satisfies.value, next_syntax_id)
+        Expression::TypeAscription(ascription) => {
+            desugar_expression(&mut ascription.value, next_syntax_id)
         }
         Expression::Match(match_) => {
             desugar_expression(&mut match_.subject, next_syntax_id);
@@ -1943,7 +1943,7 @@ impl MacroExpander {
                     self.check_compile_expression(module, &function.body, &mut nested, result);
                 CompileType::Function(Box::new(parameter), Box::new(body))
             }
-            Expression::Satisfies(value) => {
+            Expression::TypeAscription(value) => {
                 let annotation = compile_type(&value.ty);
                 self.check_compile_expression(module, &value.value, environment, Some(&annotation))
             }
@@ -2564,7 +2564,7 @@ impl MacroExpander {
             Expression::Function(value) => {
                 self.check_quoted_expression(module, &value.body, environment)
             }
-            Expression::Satisfies(value) => {
+            Expression::TypeAscription(value) => {
                 self.check_quoted_expression(module, &value.value, environment)
             }
             Expression::Match(value) => {
@@ -4270,9 +4270,10 @@ impl MacroExpander {
                 function.body = Box::new(self.expand_expression(module, *function.body, depth));
                 Expression::Function(function)
             }
-            Expression::Satisfies(mut satisfies) => {
-                satisfies.value = Box::new(self.expand_expression(module, *satisfies.value, depth));
-                Expression::Satisfies(satisfies)
+            Expression::TypeAscription(mut ascription) => {
+                ascription.value =
+                    Box::new(self.expand_expression(module, *ascription.value, depth));
+                Expression::TypeAscription(ascription)
             }
             Expression::Match(mut match_) => {
                 match_.subject = Box::new(self.expand_expression(module, *match_.subject, depth));
@@ -4874,14 +4875,14 @@ impl MacroExpander {
                 environment: environment.clone(),
                 quote_result: self.quote_context.clone(),
             }),
-            Expression::Satisfies(satisfies) => {
-                if let Some(expected) = meta_type(&satisfies.ty)
-                    && let Expression::Quote(quote) = satisfies.value.as_ref()
+            Expression::TypeAscription(ascription) => {
+                if let Some(expected) = meta_type(&ascription.ty)
+                    && let Expression::Quote(quote) = ascription.value.as_ref()
                     && quote.kind == staple_syntax::QuoteKind::ParseQuote
                 {
                     if !quote_result_type(&expected) {
                         self.diagnostics.push(Diagnostic::new(
-                            satisfies.ty.syntax().span.clone(),
+                            ascription.ty.syntax().span.clone(),
                             format!(
                                 "{} is not a supported `parse_quote` context",
                                 format_meta_type(&expected)
@@ -4896,7 +4897,7 @@ impl MacroExpander {
                         &expected,
                     );
                 }
-                self.eval_expression(module, &satisfies.value, environment)
+                self.eval_expression(module, &ascription.value, environment)
             }
             Expression::Binary(binary) => self.eval_binary_expression(module, binary, environment),
             Expression::Unary(unary) => self.eval_unary_expression(module, unary, environment),
@@ -4908,7 +4909,7 @@ impl MacroExpander {
                         None => {
                             self.diagnostics.push(Diagnostic::new(
                                 quote.syntax.span.clone(),
-                                "`parse_quote` requires a contextual syntax type; annotate the binding, use `satisfies`, or declare the macro's result type",
+                                "`parse_quote` requires a contextual syntax type; annotate the binding, use `T :: expression`, or declare the macro's result type",
                             ));
                             return None;
                         }
@@ -5180,7 +5181,7 @@ impl MacroExpander {
                         };
                     }
                     // During compile-time evaluation, a control-flow macro such
-                    // as `if`/`when` expands to a `match … satisfies Bool { … }`
+                    // as `if`/`when` expands to a `match Bool :: … { … }`
                     // over compile-time-known operands. Evaluate that expansion
                     // in place so the macro selects a branch inside compile-time
                     // helper and macro bodies, instead of yielding the `match`
@@ -5192,7 +5193,10 @@ impl MacroExpander {
                     if arguments[consumed_count..].is_empty()
                         && matches!(definition.kind, MacroKind::User(_))
                         && let Some(expanded) = result.as_ref().and_then(SyntaxValue::to_expression)
-                        && matches!(expanded, Expression::Match(_) | Expression::Satisfies(_))
+                        && matches!(
+                            expanded,
+                            Expression::Match(_) | Expression::TypeAscription(_)
+                        )
                     {
                         let expanded = expanded.clone();
                         let evaluated = self.eval_expression(module, &expanded, environment);
@@ -6994,9 +6998,9 @@ impl MacroExpander {
                 freshen_pattern(self, &mut function.pattern, module, mark);
                 self.freshen_expression(&mut function.body, module, mark);
             }
-            Expression::Satisfies(satisfies) => {
-                self.freshen_expression(&mut satisfies.value, module, mark);
-                freshen_type(self, &mut satisfies.ty, module, mark);
+            Expression::TypeAscription(ascription) => {
+                self.freshen_expression(&mut ascription.value, module, mark);
+                freshen_type(self, &mut ascription.ty, module, mark);
             }
             Expression::Match(match_) => {
                 self.freshen_expression(&mut match_.subject, module, mark);
@@ -9621,12 +9625,11 @@ fn inferred_result_meta_type(expression: &Expression) -> MetaType {
             .first()
             .map(|arm| inferred_result_meta_type(&arm.body))
             .unwrap_or(MetaType::SyntaxNode),
-        // A `satisfies` annotation asserts the result type of the quoted
+        // A type ascription asserts the result type of the quoted
         // template, so infer from it directly when it names a meta type;
         // otherwise fall back to the annotated value's own shape.
-        Expression::Satisfies(satisfies) => {
-            meta_type(&satisfies.ty).unwrap_or_else(|| inferred_result_meta_type(&satisfies.value))
-        }
+        Expression::TypeAscription(ascription) => meta_type(&ascription.ty)
+            .unwrap_or_else(|| inferred_result_meta_type(&ascription.value)),
         _ => MetaType::SyntaxNode,
     }
 }
@@ -9874,8 +9877,8 @@ fn type_contains_named(ty: &Type, expected: &str) -> bool {
 }
 
 fn expression_parameter_contains_syntax(expression: &Expression) -> bool {
-    if let Expression::Satisfies(satisfies) = expression {
-        return expression_parameter_contains_syntax(&satisfies.value);
+    if let Expression::TypeAscription(ascription) = expression {
+        return expression_parameter_contains_syntax(&ascription.value);
     }
     let Expression::Function(function) = expression else {
         return false;
@@ -9901,7 +9904,9 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
     if arity > 0 {
         return match expression {
             Expression::Function(function) => obviously_not_syntax(&function.body, arity - 1),
-            Expression::Satisfies(satisfies) => obviously_not_syntax(&satisfies.value, arity),
+            Expression::TypeAscription(ascription) => {
+                obviously_not_syntax(&ascription.value, arity)
+            }
             _ => true,
         };
     }
@@ -9914,7 +9919,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         | Expression::Call(_)
         | Expression::Access(_)
         | Expression::Index(_) => false,
-        Expression::Satisfies(satisfies) => obviously_not_syntax(&satisfies.value, 0),
+        Expression::TypeAscription(ascription) => obviously_not_syntax(&ascription.value, 0),
         Expression::Match(match_) => match_
             .arms
             .iter()
@@ -9954,20 +9959,20 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
 }
 
 /// True when a macro body's tail position — through curried parameters,
-/// `satisfies`, `match` arms, and a block's trailing expression — is a bare
+/// type ascriptions, `match` arms, and a block's trailing expression — is a bare
 /// `quote { ... }`. `quote` always produces opaque `Syntax`, so it can never
 /// satisfy a concrete syntax result type such as `Expr`.
 fn quote_at_tail(expression: &Expression, arity: usize) -> bool {
     if arity > 0 {
         return match expression {
             Expression::Function(function) => quote_at_tail(&function.body, arity - 1),
-            Expression::Satisfies(satisfies) => quote_at_tail(&satisfies.value, arity),
+            Expression::TypeAscription(ascription) => quote_at_tail(&ascription.value, arity),
             _ => false,
         };
     }
     match expression {
         Expression::Quote(quote) => quote.kind == staple_syntax::QuoteKind::Quote,
-        Expression::Satisfies(satisfies) => quote_at_tail(&satisfies.value, 0),
+        Expression::TypeAscription(ascription) => quote_at_tail(&ascription.value, 0),
         Expression::Match(match_) => match_.arms.iter().any(|arm| quote_at_tail(&arm.body, 0)),
         Expression::Block(block) => block.items.last().is_some_and(|item| match item {
             Item::Expression(expression) => quote_at_tail(expression, 0),
@@ -9984,15 +9989,15 @@ fn directly_evaluates_resource(expression: &Expression, arity: usize) -> bool {
             Expression::Function(function) => {
                 directly_evaluates_resource(&function.body, arity - 1)
             }
-            Expression::Satisfies(satisfies) => {
-                directly_evaluates_resource(&satisfies.value, arity)
+            Expression::TypeAscription(ascription) => {
+                directly_evaluates_resource(&ascription.value, arity)
             }
             _ => false,
         };
     }
     match expression {
         Expression::Resource(_) | Expression::With(_) => true,
-        Expression::Satisfies(satisfies) => directly_evaluates_resource(&satisfies.value, 0),
+        Expression::TypeAscription(ascription) => directly_evaluates_resource(&ascription.value, 0),
         _ => false,
     }
 }
@@ -10710,9 +10715,9 @@ fn substitute_splices(
             substitute_pattern(&mut function.pattern, environment, diagnostics)?;
             *function.body = substitute_splices(&function.body, environment, diagnostics)?
         }
-        Expression::Satisfies(satisfies) => {
-            *satisfies.value = substitute_splices(&satisfies.value, environment, diagnostics)?;
-            substitute_type(&mut satisfies.ty, environment, diagnostics)?;
+        Expression::TypeAscription(ascription) => {
+            *ascription.value = substitute_splices(&ascription.value, environment, diagnostics)?;
+            substitute_type(&mut ascription.ty, environment, diagnostics)?;
         }
         Expression::Match(match_) => {
             *match_.subject = substitute_splices(&match_.subject, environment, diagnostics)?;
@@ -11790,8 +11795,8 @@ fn alpha_rename_expression(
             alpha_rename_expression(&mut function.body, mark, scopes);
             scopes.pop();
         }
-        Expression::Satisfies(satisfies) => {
-            alpha_rename_expression(&mut satisfies.value, mark, scopes)
+        Expression::TypeAscription(ascription) => {
+            alpha_rename_expression(&mut ascription.value, mark, scopes)
         }
         Expression::Match(match_) => {
             alpha_rename_expression(&mut match_.subject, mark, scopes);
@@ -11920,7 +11925,7 @@ fn alpha_rename_block(
 fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
     match expression {
         Expression::Function(value) => &mut value.syntax,
-        Expression::Satisfies(value) => &mut value.syntax,
+        Expression::TypeAscription(value) => &mut value.syntax,
         Expression::Match(value) => &mut value.syntax,
         Expression::Loop(value) => &mut value.syntax,
         Expression::Coro(value) => &mut value.syntax,

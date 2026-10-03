@@ -3908,7 +3908,7 @@ impl NameResolver {
                 self.resolve_pattern_types_lenient(&value.pattern);
                 self.resolve_compile_time_expression_annotations(&value.body);
             }
-            Expression::Satisfies(value) => {
+            Expression::TypeAscription(value) => {
                 self.resolve_compile_time_expression_annotations(&value.value);
                 self.resolve_type_lenient(&value.ty);
             }
@@ -4106,7 +4106,9 @@ impl NameResolver {
                 }
                 scopes.pop();
             }
-            Expression::Satisfies(value) => self.resolve_quoted_expression(&value.value, scopes),
+            Expression::TypeAscription(value) => {
+                self.resolve_quoted_expression(&value.value, scopes)
+            }
             Expression::Product(value) => {
                 for element in &value.elements {
                     self.resolve_quoted_expression(&element.value, scopes);
@@ -4493,7 +4495,7 @@ impl NameResolver {
                     binding_syntax: suggested_function.map(|(_, syntax)| syntax),
                     pattern: function.pattern.clone(),
                     result_annotation: match function.body.as_ref() {
-                        Expression::Satisfies(satisfies) => Some(satisfies.ty.clone()),
+                        Expression::TypeAscription(ascription) => Some(ascription.ty.clone()),
                         _ => None,
                     },
                     binding_annotation: expected_type.cloned(),
@@ -4513,9 +4515,13 @@ impl NameResolver {
                     body: (*function.body).clone(),
                 });
             }
-            Expression::Satisfies(satisfies) => {
-                self.resolve_type(&satisfies.ty);
-                self.resolve_expression(&satisfies.value, Some(&satisfies.ty), suggested_function);
+            Expression::TypeAscription(ascription) => {
+                self.resolve_type(&ascription.ty);
+                self.resolve_expression(
+                    &ascription.value,
+                    Some(&ascription.ty),
+                    suggested_function,
+                );
             }
             Expression::Match(match_) => {
                 self.resolve_expression(&match_.subject, None, None);
@@ -5965,7 +5971,7 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
         Expression::String(_) => Some("String".to_owned()),
         Expression::Integer(_) => Some("Integer".to_owned()),
         Expression::Float(_) => Some("Float".to_owned()),
-        Expression::Satisfies(value) => Some(value.ty.to_string()),
+        Expression::TypeAscription(value) => Some(value.ty.to_string()),
         Expression::Product(product) => Some(format!(
             "({})",
             product
@@ -6066,7 +6072,7 @@ fn analyze_compile_expression(
                 );
             }
         }
-        Expression::Satisfies(value) => {
+        Expression::TypeAscription(value) => {
             analyze_compile_expression(&value.value, scope, parameter_kind, quoted)
         }
         Expression::Product(value) => {
@@ -6342,7 +6348,9 @@ impl<'a> InitializationAnalyzer<'a> {
                 );
                 self.expression(&function.body, &mut function_local, &snapshot);
             }
-            Expression::Satisfies(satisfies) => self.expression(&satisfies.value, local, outer),
+            Expression::TypeAscription(ascription) => {
+                self.expression(&ascription.value, local, outer)
+            }
             Expression::Match(match_) => {
                 self.expression(&match_.subject, local, outer);
                 for arm in &match_.arms {
@@ -6597,8 +6605,8 @@ fn find_block_type_declarations_in_expression<'a>(
         Expression::Function(function) => {
             find_block_type_declarations_in_expression(&function.body, out)
         }
-        Expression::Satisfies(satisfies) => {
-            find_block_type_declarations_in_expression(&satisfies.value, out)
+        Expression::TypeAscription(ascription) => {
+            find_block_type_declarations_in_expression(&ascription.value, out)
         }
         Expression::Match(match_) => {
             find_block_type_declarations_in_expression(&match_.subject, out);

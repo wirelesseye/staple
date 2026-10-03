@@ -974,6 +974,23 @@ mod tests {
     }
 
     #[test]
+    fn expand_preserves_type_ascription_around_generated_expressions() {
+        let expanded = expand_source(
+            "type_ascription",
+            concat!(
+                "use std.syntax.(quote, Expr)\n",
+                "macro double = value: Expr => quote { ($value) + ($value) }\n",
+                "let result = I32 :: double 21\n",
+            ),
+        );
+        assert!(
+            expanded.contains("let result = I32 :: (21) + (21)"),
+            "expected the expanded expression to retain its annotation, got:\n{expanded}"
+        );
+        staple_syntax::parse(&expanded).expect("expanded ascription should parse");
+    }
+
+    #[test]
     fn expand_rewrites_a_top_level_item_macro() {
         let expanded = expand_source(
             "item",
@@ -4359,7 +4376,7 @@ mod tests {
                 "let less_score = match (Ord.cmp (1, 2)) { Ordering.Less() => 0, _ => 1, }\n",
                 "let equal_score = match (Ord.cmp (2, 2)) { Ordering.Equal() => 0, _ => 1, }\n",
                 "let greater_score = match (Ord.cmp (3, 2)) { Ordering.Greater() => 0, _ => 1, }\n",
-                "let single: F32 = (1.5 satisfies F32) + .5\n",
+                "let single: F32 = (F32 :: 1.5) + .5\n",
                 "exit (partial_score + less_score + equal_score + greater_score + score_bool (nan < 1.0) + score_bool (nan == nan) + (score_bool (nan != nan) - 1) + (score_bool (single == 2.0) - 1))\n",
             ),
         )
@@ -4413,14 +4430,14 @@ mod tests {
                 "  (classify (to_string integer_i16) - 2) +\n",
                 "  (classify (to_string integer) - 2) +\n",
                 "  (classify (to_string integer_i64) - 2) +\n",
-                "  (classify (to_string (42 satisfies U8)) - 2) +\n",
-                "  (classify (to_string (42 satisfies U16)) - 2) +\n",
-                "  (classify (to_string (42 satisfies U32)) - 2) +\n",
-                "  (classify (to_string (42 satisfies U64)) - 2) +\n",
+                "  (classify (to_string (U8 :: 42)) - 2) +\n",
+                "  (classify (to_string (U16 :: 42)) - 2) +\n",
+                "  (classify (to_string (U32 :: 42)) - 2) +\n",
+                "  (classify (to_string (U64 :: 42)) - 2) +\n",
                 "  (classify (to_string integer_isize) - 2) +\n",
                 "  (classify (to_string 42) - 2) +\n",
-                "  (classify (to_string (1.5 satisfies F32)) - 3) +\n",
-                "  (classify (to_string (1.5 satisfies F64)) - 3) +\n",
+                "  (classify (to_string (F32 :: 1.5)) - 3) +\n",
+                "  (classify (to_string (F64 :: 1.5)) - 3) +\n",
                 "  (classify (to_string boolean_true) - 4) +\n",
                 "  (classify (to_string boolean_false) - 5) +\n",
                 "  (classify (to_string text) - 6)\n",

@@ -518,11 +518,11 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             },
             render_expr(program, &logical.right),
         ),
-        Expression::Satisfies(satisfies) => {
+        Expression::TypeAscription(ascription) => {
             format!(
-                "{} satisfies {}",
-                render_expr(program, &satisfies.value),
-                satisfies.ty
+                "{} :: {}",
+                ascription.ty,
+                render_expr(program, &ascription.value)
             )
         }
         _ => expression.syntax().text().trim().to_owned(),
@@ -714,7 +714,7 @@ fn expr_has_generated(expression: &Expression) -> bool {
     }
     match expression {
         Expression::Function(function) => expr_has_generated(&function.body),
-        Expression::Satisfies(satisfies) => expr_has_generated(&satisfies.value),
+        Expression::TypeAscription(ascription) => expr_has_generated(&ascription.value),
         Expression::Match(match_) => {
             expr_has_generated(&match_.subject)
                 || match_

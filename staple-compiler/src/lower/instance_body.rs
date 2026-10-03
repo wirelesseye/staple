@@ -1144,9 +1144,9 @@ impl<'a> BodyCloner<'a> {
                 product.collapsed = product.count == super::LoweredRepeatCount::Fixed(1);
                 LoweredExpressionKind::RepeatedProduct(product)
             }
-            LoweredExpressionKind::Satisfies(mut satisfies) => {
-                satisfies.value = self.clone_expression(satisfies.value);
-                LoweredExpressionKind::Satisfies(satisfies)
+            LoweredExpressionKind::TypeAscription(mut ascription) => {
+                ascription.value = self.clone_expression(ascription.value);
+                LoweredExpressionKind::TypeAscription(ascription)
             }
             LoweredExpressionKind::Logical(mut logical) => {
                 logical.left = self.clone_expression(logical.left);
@@ -1878,8 +1878,8 @@ impl<'a> BodyCloner<'a> {
         };
         match &expression.kind {
             LoweredExpressionKind::Name(_) => true,
-            LoweredExpressionKind::Satisfies(satisfies) => {
-                self.body_value_has_place(satisfies.value)
+            LoweredExpressionKind::TypeAscription(ascription) => {
+                self.body_value_has_place(ascription.value)
             }
             LoweredExpressionKind::Product(product) if product.fields.len() == 1 => {
                 self.body_value_has_place(product.fields[0])
@@ -3665,8 +3665,8 @@ impl<'a> BodyValidator<'a> {
                     .unwrap_or(&expression.value_type);
                 product.validate_shape(source_type, &origin, &mut self.diagnostics);
             }
-            LoweredExpressionKind::Satisfies(satisfies) => {
-                self.visit_expression(satisfies.value);
+            LoweredExpressionKind::TypeAscription(ascription) => {
+                self.visit_expression(ascription.value);
             }
             LoweredExpressionKind::Logical(logical) => {
                 self.check_concrete_type(&origin, &logical.bool_type, "logical type");
@@ -5013,7 +5013,7 @@ mod tests {
         let (_, mut program) = lower_with_worklist(concat!(
             "def identity: <T where Copy T> T -> T = value => value\n",
             "let first: I32 = identity 1\n",
-            "let second: U8 = identity (1 satisfies U8)\n",
+            "let second: U8 = identity (U8 :: 1)\n",
         ));
         materialize(&mut program);
         let identity = function_id(&program, "identity");
@@ -5541,7 +5541,7 @@ mod tests {
             "def identity: <T where Copy T> T -> T = value => value\n",
             "def discard: <T> move T -> () = move value => { value; () }\n",
             "let first: I32 = identity 1\n",
-            "let second: U8 = identity (1 satisfies U8)\n",
+            "let second: U8 = identity (U8 :: 1)\n",
             "let third: () = discard 2\n",
         );
         let (_, mut first) = lower_with_worklist(source);
@@ -5803,8 +5803,8 @@ mod tests {
         };
         match &expression.kind {
             LoweredExpressionKind::Block(block) => walk_blocks(body, *block, found),
-            LoweredExpressionKind::Satisfies(satisfies) => {
-                walk_expressions(body, satisfies.value, found)
+            LoweredExpressionKind::TypeAscription(ascription) => {
+                walk_expressions(body, ascription.value, found)
             }
             LoweredExpressionKind::Logical(logical) => {
                 walk_expressions(body, logical.left, found);
@@ -5865,7 +5865,7 @@ mod tests {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.buffer.Buffer\n",
             "def take: <T> mut Buffer T -> Option T = mut values => Buffer.pop values\n",
-            "let mut values: Buffer I32 = Buffer.with_capacity (1 satisfies USize)\n",
+            "let mut values: Buffer I32 = Buffer.with_capacity (USize :: 1)\n",
             "let popped = take values\n",
         ));
         materialize(&mut program);
@@ -5901,7 +5901,7 @@ mod tests {
             "def make: <T> Scheduler -> (Wait T, Resolver T) = sched => completion sched\n",
             "def finish: <T> [Resolver T, T] -> () = [resolver, value] => resolver^complete value\n",
             "def worker_io: () -> Coroutine{IO} I32 = () => coro { println \"work\"; 7 }\n",
-            "def worker_pure: () -> Coroutine{} U8 = () => coro { 8 satisfies U8 }\n",
+            "def worker_pure: () -> Coroutine{} U8 = () => coro { U8 :: 8 }\n",
             "def launch: () -> Coroutine{Tasks, IO} () = () => coro {\n",
             "  println \"launch\"\n",
             "  let _ = spawn (worker_io ())\n",
@@ -5915,7 +5915,7 @@ mod tests {
             "let pair8: (Wait U8, Resolver U8) = make sched\n",
             "let (wait8, resolver8) = pair8\n",
             "finish resolver32 7\n",
-            "finish resolver8 (8 satisfies U8)\n",
+            "finish resolver8 (U8 :: 8)\n",
             "() }\n",
             "let plain = block_on (coro { 9 })\n",
             "with Tasks = task_scope (sched) { let _ = spawn (launch ()) }\n",

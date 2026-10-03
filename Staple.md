@@ -229,13 +229,13 @@ node `parse_quote` can construct contextually.
 `SyntaxNode` requires exactly one shortest
 structural node. The grammatical categories parse the complete fragment in
 their respective contexts, while `Sequence Item` parses zero or more complete
-items in source order. Annotations, `satisfies`, declared helper or macro
+items in source order. Annotations, type ascriptions, declared helper or macro
 result types, and other typed compile-time boundaries provide `parse_quote`'s
 contextual construction type; requesting `Syntax` through any of them is rejected. A
 `parse_quote` reached with no contextual type at all — for example inside an
 untyped compile-time helper — is rejected the same way. This contextual
 selection is specific to `parse_quote`: wrapping a `quote` fragment in
-`satisfies` or a typed binding does not reinterpret it, since `quote` always
+a type ascription or a typed binding does not reinterpret it, since `quote` always
 returns opaque `Syntax`.
 
 A macro's declared or inferred result is also checked against its body: when
@@ -449,11 +449,11 @@ Quotations may contain multiple items and return `Sequence Item`. Such a
 sequence can replace a top-level macro invocation or be inserted into an inline
 module with `$items...`. Identifier syntax may be spliced into generated module
 and type names. `parse_quote` type quotations are selected contextually by an
-annotated compile-time binding or `satisfies Type`:
+annotated compile-time binding or `Type :: expression`:
 
 ```staple
 let alternative: Type = parse_quote { $group.$variant }
-parse_quote { $left | $right } satisfies Type
+Type :: parse_quote { $left | $right }
 ```
 
 
@@ -1471,7 +1471,7 @@ single representation value of a wrapper type when that representation is
 visible.
 
 `=>` introduces the body of the abstraction. The compiler infers the result
-type from the body unless a surrounding function type or a `satisfies`
+type from the body unless a surrounding function type or a type ascription
 expression constrains it.
 
 A function whose result type is `Never` has no normal-return path. Calling it
@@ -1571,21 +1571,21 @@ or a surrounding function annotation.
 A singleton product pattern is equivalent to its contained pattern, so
 `(value: T)` matches the same values as `value: T`.
 
-A function body may explicitly constrain its result with `satisfies`:
+A function body may explicitly constrain its result with a type ascription:
 
 ```staple
-let get_number = () => {
+let get_number = () => I32 :: {
     42
-} satisfies I32
+}
 ```
 
-`<expression> satisfies <type>` is a general type-ascription expression, not a
+`<type> :: <expression>` is a general type-ascription expression, not a
 runtime conversion. It checks the expression with the given expected type and
-evaluates to the expression's value. `satisfies` has lower precedence than
-function application and infix operators, so `a + b satisfies I32` means
-`(a + b) satisfies I32`. Parentheses may constrain a smaller expression.
+evaluates to the expression's value. `::` has lower precedence than
+function application and infix operators, so `I32 :: a + b` means
+`I32 :: (a + b)`. Parentheses may constrain a smaller expression.
 
-When a `satisfies` expression is a function body, its type constrains the
+When a type-ascription expression is a function body, its type constrains the
 function result, including values produced by explicit `return` statements.
 For named bindings, a complete binding annotation is the canonical way to
 write both the parameter and result types:
@@ -3764,7 +3764,7 @@ nominal pattern, subject to representation visibility.
 
 The conversion is contextual. It applies only when an expression is checked
 against an expected `Meters`, for example in an annotated binding, an argument
-position, a function result, or `satisfies Meters`, and it never changes
+position, a function result, or `Meters :: expression`, and it never changes
 bottom-up inference. A value is accepted when it can be checked as the
 representation by the ordinary rules, including literals, sum injection, and
 sum widening; the conversion then wraps it. When a sum is expected, an exact
@@ -3920,7 +3920,7 @@ representation-visibility rules.
 When the function result is omitted, the compiler joins its trailing value,
 reachable explicit returns, and every propagated alternative. The example
 therefore infers `Ok Tree | IOError | ParseError`. With an explicit binding
-annotation or `satisfies` constraint on the body, every normal and propagated
+annotation or type-ascription constraint on the body, every normal and propagated
 result must be contained in that type.
 
 Sum types use Staple's internal tagged inline representation and may not appear

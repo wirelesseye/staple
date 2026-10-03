@@ -3175,10 +3175,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::RepeatedProduct(repeated) => {
                 self.emit_repeated_product(owner, expression, repeated, environment)
             }
-            // `satisfies` is transparent: emit the operand and let this
+            // Type ascription is transparent: emit the operand and let this
             // expression's own header coercion apply in `emit_expression`.
-            LoweredExpressionKind::Satisfies(satisfies) => {
-                self.emit_expression(owner, satisfies.value, environment)
+            LoweredExpressionKind::TypeAscription(ascription) => {
+                self.emit_expression(owner, ascription.value, environment)
             }
             LoweredExpressionKind::Logical(logical) => {
                 self.emit_logical(owner, expression, logical, environment)

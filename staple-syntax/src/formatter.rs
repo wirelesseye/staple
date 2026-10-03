@@ -160,6 +160,7 @@ impl<'a> Formatter<'a> {
                     self.space();
                 }
                 TokenKind::Operator
+                | TokenKind::DoubleColon
                 | TokenKind::Equals
                 | TokenKind::Arrow
                 | TokenKind::FatArrow => {
@@ -356,6 +357,17 @@ fn needs_space(previous: Option<TokenKind>, current: TokenKind) -> bool {
 mod tests {
     use super::{format_source, format_token_stream};
     use crate::{TokenKind, lex};
+
+    #[test]
+    fn formats_type_ascriptions_as_low_precedence_operators() {
+        let source = "let value=I32::a+b\nlet identity=I32 -> I32::value=>value\n";
+        let formatted = format_source(source).expect("type ascriptions should format");
+        assert_eq!(
+            formatted,
+            "let value = I32 :: a + b\nlet identity = I32 -> I32 :: value => value\n"
+        );
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
 
     #[test]
     fn formats_uniform_macro_applications_without_resolving_them() {

@@ -94,7 +94,7 @@ def typegroup_sum:
                 Sequence () => head,
                 _ => {
                     let tail = typegroup_sum (group, rest)
-                    parse_quote { $head | $tail } satisfies Type
+                    parse_quote { $head | $tail }
                 },
             }
         },
@@ -176,9 +176,9 @@ pub macro typegroup:
                 // The group is a `from` type over its variants' sum, exposing
                 // its representation as widely as the group itself.
                 let base: Item = match visibility {
-                    Private => parse_quote { $visibility type $group = from $sum } satisfies Item,
-                    Package => parse_quote { $visibility type $group = pub(package) from $sum } satisfies Item,
-                    Public => parse_quote { $visibility type $group = pub from $sum } satisfies Item,
+                    Private => Item :: parse_quote { $visibility type $group = from $sum },
+                    Package => Item :: parse_quote { $visibility type $group = pub(package) from $sum },
+                    Public => Item :: parse_quote { $visibility type $group = pub from $sum },
                 }
                 let group_item = typegroup_apply_modifiers (modifiers, base)
                 let companion_item: Item = parse_quote {
@@ -196,15 +196,15 @@ pub macro typegroup:
                 let items = typegroup_generic_items (parameter_syntax, elements)
                 let sum = typegroup_generic_sum_syntax (group, parameter_syntax, elements)
                 let base: Item = match visibility {
-                    Private => parse_quote {
+                    Private => Item :: parse_quote {
                         $visibility type $group $parameter_syntax = from $sum
-                    } satisfies Item,
-                    Package => parse_quote {
+                    },
+                    Package => Item :: parse_quote {
                         $visibility type $group $parameter_syntax = pub(package) from $sum
-                    } satisfies Item,
-                    Public => parse_quote {
+                    },
+                    Public => Item :: parse_quote {
                         $visibility type $group $parameter_syntax = pub from $sum
-                    } satisfies Item,
+                    },
                 }
                 let group_item = typegroup_apply_modifiers (modifiers, base)
                 let companion_item: Item = parse_quote {

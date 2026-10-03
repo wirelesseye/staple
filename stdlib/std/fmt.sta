@@ -42,7 +42,7 @@ def derived_debug_implementation:
                         Debug.fmt ($inner_name, formatter)
                     }
                 }
-            } satisfies Item
+            }
         },
         _ => {
             parse_quote {
@@ -53,7 +53,7 @@ def derived_debug_implementation:
                         Debug.fmt ($inner_name, formatter)
                     }
                 }
-            } satisfies Item
+            }
         },
     }
 }
@@ -67,7 +67,7 @@ def derived_singleton_debug_implementation: (String, Type) -> Item = (name, targ
         impl Debug $target {
             fmt = (_, mut formatter) => formatter^write $name_expression
         }
-    } satisfies Item
+    }
 }
 
 /// Derives `Debug` for a nominal type.
@@ -163,7 +163,7 @@ def formatter_finish: move Formatter -> String = move formatter => {
     String.from_utf8_unchecked (Buffer.freeze buffer)
 }
 
-def formatter_new: () -> Formatter = () => Formatter (Buffer.with_capacity (16 satisfies USize))
+def formatter_new: () -> Formatter = () => Formatter (Buffer.with_capacity 16)
 
 companion Formatter {
     /// Creates an empty formatter.
