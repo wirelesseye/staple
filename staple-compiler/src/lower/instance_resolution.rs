@@ -340,6 +340,11 @@ fn collect_referenced_parameters(value_type: &CheckedType, out: &mut BTreeSet<Ty
                 collect_referenced_parameters(argument, out);
             }
         }
+        CheckedType::ParameterProduct(product) => {
+            for element in &product.elements {
+                collect_referenced_parameters(&element.value_type, out);
+            }
+        }
         CheckedType::Product(product) => {
             for element in &product.elements {
                 collect_referenced_parameters(&element.value_type, out);
@@ -2271,6 +2276,11 @@ impl<'a> ParameterCollector<'a> {
                     self.collect_type(argument);
                 }
             }
+            CheckedType::ParameterProduct(product) => {
+                for element in &product.elements {
+                    self.collect_type(&element.value_type);
+                }
+            }
             CheckedType::Product(product) => {
                 for element in &product.elements {
                     self.collect_type(&element.value_type);
@@ -3275,6 +3285,7 @@ mod tests {
             id: TypeParameterId(id),
             name: name.to_owned(),
             sized: true,
+            parameter_product_capable: false,
         }
     }
 
@@ -4936,6 +4947,7 @@ mod tests {
                 id: child_only,
                 name: "ChildOnly".to_owned(),
                 sized: true,
+                parameter_product_capable: false,
             });
         let outer = relevance(&program, "make_task");
         assert!(!outer.contains_type(child_only));

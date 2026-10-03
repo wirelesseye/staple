@@ -164,6 +164,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         value_type: &CheckedType,
     ) -> CodeGenerationResult<BasicTypeEnum<'context>> {
         match value_type {
+            CheckedType::ParameterProduct(_) => {
+                unreachable!("parameter products have no value layout")
+            }
             CheckedType::Inferred => Err(Diagnostic::new(
                 Span::Compiler,
                 "cannot generate code for an inferred type before type checking",

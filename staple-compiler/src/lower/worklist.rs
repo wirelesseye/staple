@@ -2048,7 +2048,7 @@ impl LoweredProgram {
     /// function and global the runtime modules define or declare (the emitter
     /// installs them first, so a clashing source function is renamed, as a
     /// standard-library `write` method is by `reactive.ll`'s libc `write`),
-    /// every non-intrinsic extern symbol with the emitter's overload arity suffix
+    /// every non-intrinsic extern symbol under its declared name
     /// (declared next), and the fixed helpers the backend declares by name
     /// (`main`, the UTF-8 validator, and the lazily declared libc and LLVM
     /// functions, which the backend looks up by name and must never resolve
@@ -2347,24 +2347,9 @@ impl LoweredProgram {
     }
 }
 
-/// The LLVM name the emitter gives one extern symbol: the declared name, with an
-/// `.arity{N}` suffix when the symbol is in an arity-overload set.
+/// The declared external symbol name.
 fn external_symbol_name(symbol: &super::LoweredSymbol) -> String {
-    if !symbol.overloaded {
-        return symbol.name.clone();
-    }
-    let arity = match &symbol.value_type {
-        CheckedType::Function(function)
-            if function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed =>
-        {
-            match function.parameter.as_ref() {
-                CheckedType::Product(product) => product.elements.len(),
-                _ => 1,
-            }
-        }
-        _ => 1,
-    };
-    format!("{}.arity{arity}", symbol.name)
+    symbol.name.clone()
 }
 
 /// Every function and global name the runtime modules define or declare,
@@ -2728,6 +2713,7 @@ mod tests {
             id: parameter_id,
             name: "T".to_owned(),
             sized: true,
+            parameter_product_capable: false,
         };
         program
             .trait_implementations

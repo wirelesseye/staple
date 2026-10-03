@@ -742,6 +742,7 @@ pub(crate) mod tests {
                     id: TypeParameterId(0),
                     name: "T".to_owned(),
                     sized: true,
+                    parameter_product_capable: false,
                 },
             });
         let diagnostics = program.validate_specialization_graph();
@@ -786,6 +787,7 @@ pub(crate) mod tests {
             id: TypeParameterId(999),
             name: "Unresolved".to_owned(),
             sized: true,
+            parameter_product_capable: false,
         });
         let diagnostics = program.validate_specialization_graph();
         assert!(
@@ -850,6 +852,7 @@ pub(crate) mod tests {
             id: TypeParameterId(999),
             name: "Unresolved".to_owned(),
             sized: true,
+            parameter_product_capable: false,
         });
         let diagnostics = program.validate_specialization_graph();
         assert!(

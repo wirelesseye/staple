@@ -348,6 +348,7 @@ pub struct ResolvedFunction {
     pub pattern: Pattern,
     pub result_annotation: Option<Type>,
     pub binding_annotation: Option<Type>,
+    pub companion_target: Option<Type>,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<staple_syntax::TraitBound>,
     pub subtype_bounds: Vec<staple_syntax::SubtypeBound>,
@@ -374,9 +375,6 @@ pub struct ResolvedModule {
     program: Program,
     functions: Vec<ResolvedFunction>,
     symbols: HashMap<SyntaxId, SymbolId>,
-    /// Synthetic value symbols used as compile-time-only handles for an
-    /// arity-overload set. Members always name real declared symbols.
-    overload_sets: HashMap<SymbolId, Vec<SymbolId>>,
     namespace_references: HashMap<SyntaxId, ModuleId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     named_types: HashMap<SyntaxId, TypeId>,
@@ -510,33 +508,6 @@ impl ResolvedModule {
         self.symbols.get(&syntax_id).copied()
     }
 
-    pub fn overload_candidates(&self, syntax_id: SyntaxId) -> Vec<SymbolId> {
-        let Some(symbol) = self.symbol_for(syntax_id) else {
-            return Vec::new();
-        };
-        self.overload_sets
-            .get(&symbol)
-            .cloned()
-            .unwrap_or_else(|| vec![symbol])
-    }
-
-    pub fn overload_members(&self, symbol: SymbolId) -> Vec<SymbolId> {
-        self.overload_sets
-            .get(&symbol)
-            .cloned()
-            .unwrap_or_else(|| vec![symbol])
-    }
-
-    pub(crate) fn overload_sets(&self) -> impl Iterator<Item = &[SymbolId]> {
-        self.overload_sets.values().map(Vec::as_slice)
-    }
-
-    pub(crate) fn symbol_is_overloaded(&self, symbol: SymbolId) -> bool {
-        self.overload_sets
-            .values()
-            .any(|members| members.len() > 1 && members.contains(&symbol))
-    }
-
     /// The module a segment of a qualified access chain refers to, e.g. the
     /// `std`/`io` segments of `std.io.println` or the `List` segment of
     /// `List.push` (where `List`'s companion block is registered as a
@@ -599,15 +570,13 @@ impl ResolvedModule {
     pub fn definitions_for(&self, syntax_id: SyntaxId) -> Vec<DefinitionId> {
         let mut definitions = Vec::new();
         if let Some(symbol) = self.symbol_for(syntax_id) {
-            for symbol in self.overload_members(symbol) {
-                if let Some(ty) = self
-                    .constructor_type(symbol)
-                    .or_else(|| self.singleton_type(symbol))
-                {
-                    definitions.push(DefinitionId::Type(ty));
-                } else {
-                    definitions.push(DefinitionId::Symbol(symbol));
-                }
+            if let Some(ty) = self
+                .constructor_type(symbol)
+                .or_else(|| self.singleton_type(symbol))
+            {
+                definitions.push(DefinitionId::Type(ty));
+            } else {
+                definitions.push(DefinitionId::Symbol(symbol));
             }
         }
         if let Some(ty) = self
@@ -1144,10 +1113,6 @@ pub struct NameResolver {
     prelude_traits: HashMap<String, TraitId>,
     prelude_namespaces: HashMap<String, ModuleId>,
     symbols: HashMap<SyntaxId, SymbolId>,
-    overload_sets: HashMap<SymbolId, Vec<SymbolId>>,
-    overloadable_symbols: HashSet<SymbolId>,
-    function_candidate_symbols: HashSet<SymbolId>,
-    local_overload_roots: HashMap<SymbolId, usize>,
     namespace_references: HashMap<SyntaxId, ModuleId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
@@ -1180,7 +1145,7 @@ pub struct NameResolver {
     traits: HashMap<TraitId, ResolvedTrait>,
     trait_methods: HashMap<TraitMethodId, staple_syntax::TraitMember>,
     trait_method_traits: HashMap<TraitMethodId, TraitId>,
-    trait_member_ids: HashMap<(TraitId, String, usize), TraitMethodId>,
+    trait_member_ids: HashMap<(TraitId, String), TraitMethodId>,
     trait_modules: HashMap<TraitId, ModuleId>,
     trait_references: HashMap<SyntaxId, TraitId>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
@@ -1206,6 +1171,7 @@ pub struct NameResolver {
     definition_context_values: Vec<HashMap<String, SymbolId>>,
     definition_context_types: Vec<HashMap<String, TypeId>>,
     definition_context_namespaces: Vec<HashMap<String, ModuleId>>,
+    binding_companion_targets: HashMap<SyntaxId, Type>,
     binding_type_parameters: HashMap<SyntaxId, Vec<TypeParameterPattern>>,
     binding_trait_bounds: HashMap<SyntaxId, Vec<staple_syntax::TraitBound>>,
     binding_subtype_bounds: HashMap<SyntaxId, Vec<staple_syntax::SubtypeBound>>,
@@ -1468,14 +1434,10 @@ impl NameResolver {
             .map(|interface| {
                 let mut definitions = HashMap::<String, Vec<DefinitionId>>::new();
                 for (name, symbol) in &interface.values {
-                    definitions.entry(name.clone()).or_default().extend(
-                        self.overload_sets
-                            .get(symbol)
-                            .cloned()
-                            .unwrap_or_else(|| vec![*symbol])
-                            .into_iter()
-                            .map(DefinitionId::Symbol),
-                    );
+                    definitions
+                        .entry(name.clone())
+                        .or_default()
+                        .extend(vec![*symbol].into_iter().map(DefinitionId::Symbol));
                 }
                 for (name, ty) in &interface.types {
                     definitions
@@ -1508,7 +1470,6 @@ impl NameResolver {
             program,
             functions: self.functions,
             symbols: self.symbols,
-            overload_sets: self.overload_sets,
             namespace_references: self.namespace_references,
             function_expressions: self.function_expressions,
             named_types: self.named_types,
@@ -2233,11 +2194,8 @@ impl NameResolver {
                     Item::ExternBlock(block) => {
                         for binding in &block.bindings {
                             let symbol = self.allocate_symbol(binding);
-                            let previous =
-                                self.module_values[source_module.id.0].remove(&binding.name);
-                            let root = self.grouped_value_symbol(previous, symbol);
                             self.module_values[source_module.id.0]
-                                .insert(binding.name.clone(), root);
+                                .insert(binding.name.clone(), symbol);
                             if block.visibility != Visibility::Private {
                                 self.insert_visible_value(
                                     source_module.id,
@@ -2297,11 +2255,9 @@ impl NameResolver {
                         for member in &declaration.members {
                             let method = TraitMethodId(self.next_trait_method_id);
                             self.next_trait_method_id += 1;
-                            let arity =
-                                source_function_outer_arity(&member.annotation).unwrap_or(0);
                             if self
                                 .trait_member_ids
-                                .insert((id, member.name.clone(), arity), method)
+                                .insert((id, member.name.clone()), method)
                                 .is_some()
                             {
                                 self.diagnostics.push(Diagnostic::new(
@@ -2338,13 +2294,7 @@ impl NameResolver {
                     Item::TraitImplementation(_) => {}
                     Item::Binding(binding) => {
                         let symbol = self.allocate_symbol(binding);
-                        let previous = self.module_values[source_module.id.0].remove(&binding.name);
-                        let root = if binding.kind == BindingKind::Def {
-                            self.grouped_value_symbol(previous, symbol)
-                        } else {
-                            previous.map_or(symbol, |_| symbol)
-                        };
-                        self.module_values[source_module.id.0].insert(binding.name.clone(), root);
+                        self.module_values[source_module.id.0].insert(binding.name.clone(), symbol);
                         if binding.visibility != Visibility::Private {
                             self.insert_visible_value(
                                 source_module.id,
@@ -2646,41 +2596,7 @@ impl NameResolver {
         if binding.kind == BindingKind::Const {
             self.const_symbols.insert(symbol);
         }
-        if matches!(binding.kind, BindingKind::Def | BindingKind::Extern) {
-            self.overloadable_symbols.insert(symbol);
-            if binding.is_extern() || binding_declares_function(binding) {
-                self.function_candidate_symbols.insert(symbol);
-            }
-        }
         symbol
-    }
-
-    fn allocate_overload_set(&mut self, members: Vec<SymbolId>) -> SymbolId {
-        let symbol = SymbolId(self.next_symbol_id);
-        self.next_symbol_id += 1;
-        self.symbol_owners.insert(symbol, None);
-        self.symbol_modules.insert(symbol, self.current_module);
-        self.overload_sets.insert(symbol, members);
-        symbol
-    }
-
-    fn append_overload_member(&mut self, root: SymbolId, member: SymbolId) {
-        self.overload_sets
-            .get_mut(&root)
-            .expect("overload root")
-            .push(member);
-    }
-
-    fn grouped_value_symbol(&mut self, previous: Option<SymbolId>, member: SymbolId) -> SymbolId {
-        let Some(previous) = previous else {
-            return member;
-        };
-        if self.overload_sets.contains_key(&previous) {
-            self.append_overload_member(previous, member);
-            previous
-        } else {
-            self.allocate_overload_set(vec![previous, member])
-        }
     }
 
     fn allocate_pattern_symbols(&mut self, pattern: &Pattern) {
@@ -2735,11 +2651,9 @@ impl NameResolver {
         visibility: Visibility,
         span: Span,
     ) {
-        let previous = self.package_interfaces[module.0].values.remove(name);
-        let root = self.grouped_value_symbol(previous, symbol);
         self.package_interfaces[module.0]
             .values
-            .insert(name.to_owned(), root);
+            .insert(name.to_owned(), symbol);
         if visibility != Visibility::Public {
             return;
         }
@@ -2747,12 +2661,15 @@ impl NameResolver {
     }
 
     fn insert_public_value(&mut self, module: ModuleId, name: &str, symbol: SymbolId, span: Span) {
-        let previous = self.interfaces[module.0].values.remove(name);
-        let root = self.grouped_value_symbol(previous, symbol);
-        self.interfaces[module.0]
+        let previous = self.interfaces[module.0]
             .values
-            .insert(name.to_owned(), root);
-        let _ = span;
+            .insert(name.to_owned(), symbol);
+        if previous.is_some() {
+            self.diagnostics.push(Diagnostic::new(
+                span.clone(),
+                format!("duplicate definition of `{name}`"),
+            ));
+        }
     }
 
     fn install_imports(&mut self, program: &Program, module: ModuleId) {
@@ -2955,12 +2872,7 @@ impl NameResolver {
     ) {
         let mut definitions = Vec::new();
         if let Some(symbol) = interface.values.get(item).copied() {
-            for member in self
-                .overload_sets
-                .get(&symbol)
-                .cloned()
-                .unwrap_or_else(|| vec![symbol])
-            {
+            for member in vec![symbol] {
                 if let Some(ty) = self
                     .constructors
                     .get(&member)
@@ -3310,12 +3222,7 @@ impl NameResolver {
             .iter()
             .chain(self.prelude_values.iter())
         {
-            for member in self
-                .overload_sets
-                .get(symbol)
-                .cloned()
-                .unwrap_or_else(|| vec![*symbol])
-            {
+            for member in vec![*symbol] {
                 insert(name, DefinitionId::Symbol(member));
             }
         }
@@ -3577,8 +3484,7 @@ impl NameResolver {
                         Some(&member.annotation),
                         Some((&function_name, member.syntax.id)),
                     );
-                    let arity = source_function_outer_arity(&member.annotation).unwrap_or(0);
-                    let method = self.trait_member_ids[&(trait_id, member.name.clone(), arity)];
+                    let method = self.trait_member_ids[&(trait_id, member.name.clone())];
                     if let Some(function) =
                         self.function_expressions.get(&default.syntax().id).copied()
                     {
@@ -3634,19 +3540,15 @@ impl NameResolver {
                 }
                 let mut methods = HashMap::new();
                 for member in &implementation.members {
-                    let arity = expression_function_outer_arity(&member.value).unwrap_or(0);
                     let method = trait_id.and_then(|trait_id| {
                         self.trait_member_ids
-                            .get(&(trait_id, member.name.clone(), arity))
+                            .get(&(trait_id, member.name.clone()))
                             .copied()
                     });
                     if trait_id.is_some() && method.is_none() {
                         self.diagnostics.push(Diagnostic::new(
                             member.syntax.span.clone(),
-                            format!(
-                                "trait has no member named `{}` with arity {arity}",
-                                member.name
-                            ),
+                            format!("trait has no member named `{}`", member.name),
                         ));
                     }
                     if let Some(method) = method {
@@ -3804,6 +3706,11 @@ impl NameResolver {
         self.push_type_parameter_scope();
         for parameter in &binding.type_parameters {
             self.declare_type_parameter_pattern(parameter);
+        }
+        if let Some(target) = &binding.companion_target {
+            self.resolve_type(target);
+            self.binding_companion_targets
+                .insert(binding.syntax.id, target.clone());
         }
         if let Some(annotation) = &binding.annotation {
             self.resolve_type(annotation);
@@ -4133,7 +4040,7 @@ impl NameResolver {
                     let methods = self
                         .trait_member_ids
                         .iter()
-                        .filter_map(|((owner, member, _), method)| {
+                        .filter_map(|((owner, member), method)| {
                             (*owner == trait_id && member == name).then_some(*method)
                         })
                         .collect::<Vec<_>>();
@@ -4474,18 +4381,6 @@ impl NameResolver {
                 let base_name = suggested_function
                     .map(|(name, _)| name.to_owned())
                     .unwrap_or_else(|| format!("function.{}", function_id.0));
-                let overloaded = suggested_function
-                    .and_then(|(_, syntax)| self.symbols.get(&syntax).copied())
-                    .is_some_and(|symbol| {
-                        self.overload_sets
-                            .values()
-                            .any(|members| members.len() > 1 && members.contains(&symbol))
-                    });
-                let base_name = if overloaded {
-                    format!("{base_name}.overload.{}", function_id.0)
-                } else {
-                    base_name
-                };
                 let base_name = mangle_function_name(&base_name);
                 let name = if self.multiple_modules
                     || base_name == "main"
@@ -4516,6 +4411,9 @@ impl NameResolver {
                         _ => None,
                     },
                     binding_annotation: expected_type.cloned(),
+                    companion_target: suggested_function.and_then(|(_, syntax)| {
+                        self.binding_companion_targets.get(&syntax).cloned()
+                    }),
                     type_parameters: suggested_function
                         .and_then(|(_, syntax)| self.binding_type_parameters.get(&syntax).cloned())
                         .unwrap_or_default(),
@@ -4610,7 +4508,7 @@ impl NameResolver {
                     let methods = self
                         .trait_member_ids
                         .iter()
-                        .filter_map(|((owner, name, _), method)| {
+                        .filter_map(|((owner, name), method)| {
                             (*owner == trait_id && name == member_name).then_some(*method)
                         })
                         .collect::<Vec<_>>();
@@ -4713,7 +4611,8 @@ impl NameResolver {
             ) {
                 (Some(symbol), methods)
                     if !methods.is_empty()
-                        && self.symbol_owners.get(&symbol).is_some_and(Option::is_some) =>
+                        && (self.symbol_owners.get(&symbol).is_some_and(Option::is_some)
+                            || self.symbol_modules.get(&symbol) == Some(&self.current_module)) =>
                 {
                     self.symbols.insert(name.syntax.id, symbol);
                     self.record_capture(symbol);
@@ -4892,7 +4791,7 @@ impl NameResolver {
                         .push(Diagnostic::new(named.syntax.span.clone(), message));
                 }
             }
-            Type::Product(product) => {
+            Type::Product(product) | Type::ParameterProduct(product) => {
                 for element in &product.elements {
                     self.resolve_type_with(&element.ty, strict);
                     if let Some(default) = &element.default {
@@ -5089,7 +4988,7 @@ impl NameResolver {
                     ));
                 }
             }
-            Type::Product(product) => {
+            Type::Product(product) | Type::ParameterProduct(product) => {
                 for element in &product.elements {
                     self.validate_representation(&element.ty, required);
                 }
@@ -5346,49 +5245,13 @@ impl NameResolver {
                     .insert(symbol, binding.syntax.span.clone());
                 symbol
             });
-        let overloadable = matches!(binding.kind, BindingKind::Def | BindingKind::Extern);
-        if overloadable {
-            self.overloadable_symbols.insert(symbol);
-            if binding.is_extern() || binding_declares_function(binding) {
-                self.function_candidate_symbols.insert(symbol);
-            }
-        }
-        if overloadable
-            && self.function_candidate_symbols.contains(&symbol)
-            && !self
-                .namespaces
-                .iter()
-                .any(|frame| frame.contains_key(&binding.name))
-            && let Some(existing) = self.current_scope().get(&binding.name).copied()
-            && self.local_overload_roots.get(&existing) == Some(&self.scopes.len())
-            && self.overload_sets.get(&existing).map_or_else(
-                || self.function_candidate_symbols.contains(&existing),
-                |members| {
-                    members
-                        .iter()
-                        .all(|member| self.function_candidate_symbols.contains(member))
-                },
-            )
-        {
-            let root = self.grouped_value_symbol(Some(existing), symbol);
-            self.current_scope_mut().insert(binding.name.clone(), root);
-            self.local_overload_roots.remove(&existing);
-            self.local_overload_roots.insert(root, self.scopes.len());
-            self.symbols.insert(binding.syntax.id, symbol);
-            self.syntax_modules
-                .insert(binding.syntax.id, self.current_module);
-        } else {
-            self.declare_symbol(
-                &binding.name,
-                binding.syntax.id,
-                binding.syntax.span.clone(),
-                symbol,
-                shadow,
-            );
-            if overloadable && self.current_scope().get(&binding.name) == Some(&symbol) {
-                self.local_overload_roots.insert(symbol, self.scopes.len());
-            }
-        }
+        self.declare_symbol(
+            &binding.name,
+            binding.syntax.id,
+            binding.syntax.span.clone(),
+            symbol,
+            shadow,
+        );
         if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
             if binding.mutable {
                 self.mutable_symbols.insert(symbol);
@@ -5418,12 +5281,6 @@ impl NameResolver {
     }
 
     fn record_capture(&mut self, symbol: SymbolId) {
-        if let Some(members) = self.overload_sets.get(&symbol).cloned() {
-            for member in members {
-                self.record_capture(member);
-            }
-            return;
-        }
         let Some(mut function) = self.function_stack.last().copied() else {
             return;
         };
@@ -6697,48 +6554,4 @@ fn mangle_function_name(name: &str) -> String {
             .collect::<String>();
         format!("operator.{encoded}")
     }
-}
-
-fn source_function_outer_arity(ty: &Type) -> Option<usize> {
-    let Type::Function(function) = ty else {
-        return None;
-    };
-    if function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed {
-        let Type::Product(product) = function.parameter.as_ref() else {
-            return None;
-        };
-        Some(product.elements.len())
-    } else {
-        Some(1)
-    }
-}
-
-fn expression_function_outer_arity(expression: &Expression) -> Option<usize> {
-    match expression {
-        Expression::Function(function) => {
-            if function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed {
-                let Pattern::Product(product) = &function.pattern else {
-                    return None;
-                };
-                Some(product.elements.len())
-            } else {
-                Some(1)
-            }
-        }
-        Expression::Satisfies(satisfies) => expression_function_outer_arity(&satisfies.value),
-        _ => None,
-    }
-}
-
-fn binding_declares_function(binding: &Binding) -> bool {
-    binding
-        .annotation
-        .as_ref()
-        .and_then(source_function_outer_arity)
-        .is_some()
-        || binding
-            .value
-            .as_ref()
-            .and_then(expression_function_outer_arity)
-            .is_some()
 }

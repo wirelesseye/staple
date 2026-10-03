@@ -147,15 +147,9 @@ def typegroup_generic_sum_syntax:
 /// }
 /// ```
 pub macro typegroup:
-    MacroCallMetadata *
-    Ident String *
-    Sequence Type *
-    Braced (Separated (Sequence Modifier, Ident String, Optional (Equals, TypeBody)) Comma) ->
+    [MacroCallMetadata, Ident String, Sequence Type, Braced (Separated (Sequence Modifier, Ident String, Optional (Equals, TypeBody)) Comma)] ->
     Sequence Item =
-(modifiers, visibility) *
-group *
-parameters *
-body => {
+    [(modifiers, visibility), group, parameters, body] => {
     match body {
     Braced (Separated (
         separator,

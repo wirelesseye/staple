@@ -5896,7 +5896,7 @@ mod tests {
             "use std.coroutine.*\n",
             "use std.io.(IO, println)\n",
             "def make: <T> Scheduler -> (Wait T, Resolver T) = sched => completion sched\n",
-            "def finish: <T> Resolver T * T -> () = resolver * value => resolver^complete value\n",
+            "def finish: <T> [Resolver T, T] -> () = [resolver, value] => resolver^complete value\n",
             "def worker_io: () -> Coroutine{IO} I32 = () => coro { println \"work\"; 7 }\n",
             "def worker_pure: () -> Coroutine{} U8 = () => coro { 8 satisfies U8 }\n",
             "def launch: () -> Coroutine{Tasks, IO} () = () => coro {\n",
@@ -6107,7 +6107,7 @@ mod tests {
     fn external_await_outcomes_are_recorded_and_revalidated() {
         let (_, mut program) = lower_with_worklist(concat!(
             "use std.coroutine.*\n",
-            "def waiter: <T> move Wait T -> Coroutine{} () = move pending => coro {\n",
+            "def waiter: <T> move Wait [T] -> Coroutine{} () = move pending => coro {\n",
             "  let _ = await pending\n",
             "  ()\n",
             "}\n",

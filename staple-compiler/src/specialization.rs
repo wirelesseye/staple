@@ -60,6 +60,11 @@ pub(crate) enum CanonicalType {
         elements: Vec<CanonicalProductElement>,
         variadic: bool,
     },
+    ParameterProduct {
+        elements: Vec<CanonicalProductElement>,
+        mutations: Vec<usize>,
+        moves: Vec<usize>,
+    },
     Sum {
         alternatives: Vec<CanonicalType>,
     },
@@ -204,6 +209,20 @@ impl CanonicalType {
             },
             CheckedType::CPointer { pointee } => CanonicalType::CPointer {
                 pointee: Box::new(Self::convert(pointee, origin)?),
+            },
+            CheckedType::ParameterProduct(product) => CanonicalType::ParameterProduct {
+                elements: product
+                    .elements
+                    .iter()
+                    .map(|element| {
+                        Ok(CanonicalProductElement {
+                            name: element.name.clone(),
+                            value_type: Self::convert(&element.value_type, origin)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?,
+                mutations: product.mutations.clone(),
+                moves: product.moves.clone(),
             },
             CheckedType::Product(product) => CanonicalType::Product {
                 elements: product
@@ -1461,6 +1480,7 @@ mod tests {
             id: TypeParameterId(5),
             name: "First".to_owned(),
             sized: false,
+            parameter_product_capable: false,
         };
         let diagnostic = CanonicalType::concrete(&first, &requesting_origin())
             .expect_err("an unresolved parameter never forms a concrete key");
@@ -1472,6 +1492,7 @@ mod tests {
                     id: TypeParameterId(6),
                     name: "Nested".to_owned(),
                     sized: false,
+                    parameter_product_capable: false,
                 })),
                 &requesting_origin(),
             )
@@ -1741,6 +1762,7 @@ mod tests {
                 id: TypeParameterId(4),
                 name: "T".to_owned(),
                 sized: false,
+                parameter_product_capable: false,
             },
             FunctionParameterStyle::Single,
             Vec::new(),
@@ -1769,6 +1791,7 @@ mod tests {
                     id: TypeParameterId(5),
                     name: "K".to_owned(),
                     sized: false,
+                    parameter_product_capable: false,
                 }],
                 &callable,
                 &requesting_origin(),

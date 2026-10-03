@@ -7,10 +7,10 @@ use std::{
 
 use crate::{ModuleId, Program, ResolvedMacro};
 use staple_syntax::{
-    Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression,
-    FunctionParameterStyle, Item, LogicalOperator, MacroDeclaration, ModifierArgument,
-    ModifierInvocation, Pattern, SelectedImport, Span, Syntax, SyntaxId, Type, UseDeclaration,
-    UseKind, Visibility, VisibilityKind, VisibilitySyntax,
+    Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
+    LogicalOperator, MacroDeclaration, ModifierArgument, ModifierInvocation, Pattern,
+    SelectedImport, Span, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility,
+    VisibilityKind, VisibilitySyntax,
 };
 
 const MAX_EXPANSION_DEPTH: usize = 128;
@@ -7181,8 +7181,8 @@ fn expression_arity(expression: &Expression) -> usize {
 fn macro_annotation_arity(annotation: &Type) -> usize {
     match annotation {
         Type::Function(function) => {
-            let this = if function.parameter_style == FunctionParameterStyle::Juxtaposed
-                && let Type::Product(product) = function.parameter.as_ref()
+            let this = if matches!(function.parameter.as_ref(), Type::ParameterProduct(_))
+                && let Type::ParameterProduct(product) = function.parameter.as_ref()
             {
                 product.elements.len()
             } else {
@@ -8405,7 +8405,7 @@ fn effective_signature_more_specific(
 }
 
 fn format_meta_signature(parameters: &[MetaType]) -> String {
-    parameters
+    let rendered = parameters
         .iter()
         .map(|parameter| match parameter {
             MetaType::Syntax => "Syntax".to_owned(),
@@ -8437,7 +8437,12 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Delimited(_, _) => format_meta_type(parameter),
         })
         .collect::<Vec<_>>()
-        .join(" * ")
+        .join(", ");
+    if parameters.len() > 1 {
+        format!("[{rendered}]")
+    } else {
+        rendered
+    }
 }
 
 fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
@@ -8576,7 +8581,7 @@ fn compile_type(ty: &Type) -> CompileType {
         Type::NumberLiteral(_) => CompileType::Integer,
         Type::StringLiteral(_) => CompileType::String,
         Type::Inferred(_) | Type::Splice(_) => CompileType::Unknown,
-        Type::Product(product) => CompileType::Product(
+        Type::Product(product) | Type::ParameterProduct(product) => CompileType::Product(
             product
                 .elements
                 .iter()
@@ -9520,7 +9525,7 @@ fn specialize_compile_coverage_row(
 }
 
 /// Reads a macro annotation's parameter list and result. Multiple
-/// parameters are written juxtaposed (`A * B -> C`), a single
+/// parameters are written juxtaposed (`[A, B] -> C`), a single
 /// `Type::Function` whose parameter is a product; a curried chain of nested
 /// `Type::Function`s (the removed `A -> B -> C` spelling) is rejected by
 /// `meta_type` failing on the nested `Type::Function` result, same as any
@@ -9538,17 +9543,17 @@ fn macro_signature(annotation: &Type) -> Option<(Vec<MetaType>, MetaType)> {
 /// parameter list becomes one entry per element, and a single parameter
 /// (including a genuine, non-juxtaposed product) becomes one entry.
 fn juxtaposed_meta_types(function: &staple_syntax::FunctionType) -> Option<Vec<MetaType>> {
-    if function.parameter_style != FunctionParameterStyle::Juxtaposed {
+    if !matches!(function.parameter.as_ref(), Type::ParameterProduct(_)) {
         return Some(vec![meta_type(&function.parameter)?]);
     }
-    let Type::Product(product) = function.parameter.as_ref() else {
+    let Type::ParameterProduct(product) = function.parameter.as_ref() else {
         return None;
     };
     product
         .elements
         .iter()
         .map(|element| {
-            (element.name.is_none() && !element.spread && !element.mutable && !element.moved)
+            (!element.spread && !element.mutable && !element.moved)
                 .then(|| meta_type(&element.ty))
                 .flatten()
         })
@@ -9696,7 +9701,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
                     .any(|resource| type_contains_syntax(&resource.value_type))
                 || type_contains_syntax(&function.result)
         }
-        Type::Product(product) => product
+        Type::Product(product) | Type::ParameterProduct(product) => product
             .elements
             .iter()
             .any(|element| type_contains_syntax(&element.ty)),
@@ -9742,7 +9747,7 @@ fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashS
                     .any(|resource| type_contains_unshadowed_syntax(&resource.value_type, declared))
                 || type_contains_unshadowed_syntax(&function.result, declared)
         }
-        Type::Product(product) => product
+        Type::Product(product) | Type::ParameterProduct(product) => product
             .elements
             .iter()
             .any(|element| type_contains_unshadowed_syntax(&element.ty, declared)),
@@ -9830,7 +9835,7 @@ fn type_contains_named(ty: &Type, expected: &str) -> bool {
                     .any(|resource| type_contains_named(&resource.value_type, expected))
                 || type_contains_named(&function.result, expected)
         }
-        Type::Product(product) => product
+        Type::Product(product) | Type::ParameterProduct(product) => product
             .elements
             .iter()
             .any(|element| type_contains_named(&element.ty, expected)),
@@ -11007,6 +11012,9 @@ fn substitute_binding(
     for bound in &mut binding.subtype_bounds {
         substitute_subtype_bound(bound, environment, diagnostics)?;
     }
+    if let Some(target) = &mut binding.companion_target {
+        substitute_type(target, environment, diagnostics)?;
+    }
     if let Some(annotation) = &mut binding.annotation {
         substitute_type(annotation, environment, diagnostics)?;
     }
@@ -11179,7 +11187,7 @@ fn substitute_type(
         };
     }
     match ty {
-        Type::Product(product) => {
+        Type::Product(product) | Type::ParameterProduct(product) => {
             for element in &mut product.elements {
                 substitute_type(&mut element.ty, environment, diagnostics)?;
             }
@@ -12054,6 +12062,9 @@ fn freshen_binding(
     for bound in &mut binding.subtype_bounds {
         freshen_subtype_bound(expander, bound, module, mark);
     }
+    if let Some(target) = &mut binding.companion_target {
+        freshen_type(expander, target, module, mark);
+    }
     if let Some(annotation) = &mut binding.annotation {
         freshen_type(expander, annotation, module, mark);
     }
@@ -12270,7 +12281,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         Type::NumberLiteral(ty) => &mut ty.syntax,
         Type::StringLiteral(ty) => &mut ty.syntax,
         Type::Named(ty) => &mut ty.syntax,
-        Type::Product(ty) => &mut ty.syntax,
+        Type::Product(ty) | Type::ParameterProduct(ty) => &mut ty.syntax,
         Type::Sum(ty) => &mut ty.syntax,
         Type::Function(ty) => &mut ty.syntax,
         Type::Application(ty) => &mut ty.syntax,
@@ -12280,7 +12291,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
     };
     expander.freshen_syntax(syntax, module, mark);
     match ty {
-        Type::Product(product) => {
+        Type::Product(product) | Type::ParameterProduct(product) => {
             for element in &mut product.elements {
                 expander.freshen_syntax(&mut element.syntax, module, mark);
                 freshen_type(expander, &mut element.ty, module, mark);

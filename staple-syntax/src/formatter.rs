@@ -369,10 +369,10 @@ mod tests {
 
     #[test]
     fn formats_juxtaposed_macro_parameters() {
-        let source = "macro choose=condition: Expr*when_true: Expr*_: Ident \"else\"*when_false: Expr=>quote {}\n";
+        let source = "macro choose=[condition: Expr,when_true: Expr,_: Ident \"else\",when_false: Expr]=>quote {}\n";
         let formatted = format_source(source).unwrap();
         assert!(formatted.contains(
-            "macro choose = condition: Expr * when_true: Expr * _: Ident \"else\" * when_false: Expr => quote {}"
+            "macro choose = [condition: Expr, when_true: Expr, _: Ident \"else\", when_false: Expr] => quote {}"
         ));
         assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
@@ -417,5 +417,18 @@ mod tests {
         assert_eq!(before, after);
         assert_eq!(formatted, "type $name = alias $ty\n");
         assert!(before.iter().any(|(kind, _)| *kind == TokenKind::Dollar));
+    }
+}
+
+#[cfg(test)]
+mod parameter_product_tests {
+    use super::format_source;
+    #[test]
+    fn preserves_bracket_type_arguments_and_tight_indices() {
+        let source = "type Add=alias Callable [I32,I32] I32\ndef add:[I32,I32]->I32=[x,y]=>x+y\nlet value=values[index]\n";
+        let formatted = format_source(source).expect("brackets format");
+        assert!(formatted.contains("Callable [I32, I32] I32"), "{formatted}");
+        assert!(formatted.contains("values[index]"), "{formatted}");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 }

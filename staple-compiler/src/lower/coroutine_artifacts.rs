@@ -2454,7 +2454,7 @@ mod tests {
         let source = concat!(
             "use std.coroutine.*\n",
             "let signal count = 0\n",
-            "def peek: <T> T -> I32 = _ => 0\n",
+            "def peek: <T> [T] -> I32 = _ => 0\n",
             "def generic_reaction: <T where Copy T> T ->{Reactive} () = value => reaction { peek value; () }\n",
             "def generic_until: <T where Copy T> T -> Coroutine{Reactive} () = value => coro {\n",
             "  let _ = await (until { count + peek value > 0 })\n",

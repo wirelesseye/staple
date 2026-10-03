@@ -96,8 +96,8 @@ fn adapter_indirect_parameters(
         .collect()
 }
 
-/// The adapter's declared arity, mirroring the emitter's overloaded `name.arityN`
-/// spelling: a juxtaposed parameter product counts its elements, everything
+/// The adapter's declared arity, used to adapt the declared native signature.
+/// A juxtaposed parameter product counts its elements; everything
 /// else is one parameter.
 fn declared_arity(plan: &ExternAdapterPlan) -> usize {
     if plan.callable_type.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed {

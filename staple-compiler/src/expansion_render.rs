@@ -420,7 +420,22 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
         }
         Expression::Function(function) => format!(
             "{} => {}",
-            render_pattern(&function.pattern),
+            if function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed {
+                let Pattern::Product(product) = &function.pattern else {
+                    unreachable!()
+                };
+                format!(
+                    "[{}]",
+                    product
+                        .elements
+                        .iter()
+                        .map(render_pattern)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                render_pattern(&function.pattern)
+            },
             render_expr(program, &function.body),
         ),
         Expression::Loop(loop_) => format!("loop {}", render_block(program, &loop_.body)),

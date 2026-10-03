@@ -1311,8 +1311,7 @@ pub(crate) struct ExternAdapterPlan {
 /// body only for a reachable artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExternDeclaration {
-    /// The C symbol's declared arity, which the emitter embeds in the overloaded
-    /// `name.arityN` spelling.
+    /// The C symbol's declared arity, used by its callable adapter.
     pub arity: usize,
     /// The emitter declares the foreign symbol and creates this adapter eagerly for
     /// every non-variadic extern binding, used or not. The artifact records

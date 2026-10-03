@@ -161,7 +161,7 @@ companion Formatter {
     pub def new: () -> Formatter = () => formatter_new ()
 
     /// Appends a UTF-8 string to the formatter.
-    pub def write: mut Formatter * String -> () = mut formatter * value => formatter_write (formatter, value)
+    pub def write: [mut Formatter, String] -> () = [mut formatter, value] => formatter_write (formatter, value)
 
     /// Finishes formatting and returns the accumulated string.
     pub def finish: move Formatter -> String = move formatter => formatter_finish formatter

@@ -378,21 +378,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ));
             };
             let llvm_type = self.backend.compile_native_function_type(signature)?;
-            let name = if symbol.overloaded {
-                let arity = if signature.parameter_style
-                    == staple_syntax::FunctionParameterStyle::Juxtaposed
-                {
-                    match signature.parameter.as_ref() {
-                        CheckedType::Product(product) => product.elements.len(),
-                        _ => 1,
-                    }
-                } else {
-                    1
-                };
-                format!("{}.arity{arity}", symbol.name)
-            } else {
-                symbol.name.clone()
-            };
+            let name = symbol.name.clone();
             let function = match self.backend.llvm_module.get_function(&name) {
                 Some(existing) if existing.get_type() == llvm_type => existing,
                 Some(_) => {
@@ -550,11 +536,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 continue;
             }
             let prefix = self.module_prefix(symbol.module)?;
-            let binding_name = if symbol.overloaded {
-                format!("{}.overload.{}", symbol.name, id.0)
-            } else {
-                symbol.name.clone()
-            };
+            let binding_name = symbol.name.clone();
             let base = format!("__staple_m{prefix}.{binding_name}");
             if symbol.requires_initialization_check {
                 let name = self.unique_global_name(format!("{base}_state"), id);

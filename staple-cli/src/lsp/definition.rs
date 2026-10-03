@@ -1001,7 +1001,7 @@ impl Collector<'_> {
     fn ty(&mut self, ty: &Type) {
         match ty {
             Type::Named(value) => self.named_type(value),
-            Type::Product(value) => {
+            Type::Product(value) | Type::ParameterProduct(value) => {
                 for element in &value.elements {
                     self.ty(&element.ty);
                 }

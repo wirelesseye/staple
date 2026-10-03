@@ -13,6 +13,7 @@ pub enum Type {
     StringLiteral(StringLiteralType),
     Named(NamedType),
     Product(ProductType),
+    ParameterProduct(ParameterProductType),
     Sum(SumType),
     Function(FunctionType),
     Application(TypeApplication),
@@ -28,7 +29,7 @@ impl Type {
             Self::NumberLiteral(ty) => &ty.syntax,
             Self::StringLiteral(ty) => &ty.syntax,
             Self::Named(ty) => &ty.syntax,
-            Self::Product(ty) => &ty.syntax,
+            Self::Product(ty) | Self::ParameterProduct(ty) => &ty.syntax,
             Self::Sum(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
             Self::Application(ty) => &ty.syntax,
@@ -70,6 +71,27 @@ impl fmt::Display for Type {
                 }
                 formatter.write_str(")")
             }
+            Self::ParameterProduct(product) => {
+                formatter.write_str("[")?;
+                for (index, element) in product.elements.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    if element.mutable {
+                        formatter.write_str("mut ")?;
+                    }
+                    if element.moved {
+                        formatter.write_str("move ")?;
+                    }
+                    if element.spread {
+                        formatter.write_str("...")?;
+                    } else if let Some(name) = &element.name {
+                        write!(formatter, "{name}: ")?;
+                    }
+                    write!(formatter, "{}", element.ty)?;
+                }
+                formatter.write_str("]")
+            }
             Self::Sum(sum) => {
                 for (index, alternative) in sum.alternatives.iter().enumerate() {
                     if index > 0 {
@@ -80,19 +102,11 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Self::Function(function) => {
-                let parameter = if function.parameter_style == FunctionParameterStyle::Juxtaposed {
-                    format_juxtaposed_parameter(
-                        &function.parameter,
-                        &function.mutations,
-                        &function.moves,
-                    )
-                } else {
-                    format_mutable_parameter(
-                        &function.parameter,
-                        &function.mutations,
-                        &function.moves,
-                    )
-                };
+                let parameter = format_mutable_parameter(
+                    &function.parameter,
+                    &function.mutations,
+                    &function.moves,
+                );
                 if function.effects.is_empty() {
                     write!(formatter, "{parameter} -> {}", function.result)
                 } else {
@@ -127,42 +141,6 @@ impl fmt::Display for Type {
             }
         }
     }
-}
-
-fn format_juxtaposed_parameter(
-    parameter: &Type,
-    mutations: &[MutationTarget],
-    moves: &[MutationTarget],
-) -> String {
-    let Type::Product(product) = parameter else {
-        return parameter.to_string();
-    };
-    product
-        .elements
-        .iter()
-        .enumerate()
-        .map(|(index, element)| {
-            let mut text = String::new();
-            if mutations
-                .iter()
-                .any(|mutation| mutation.target == MutationTargetKind::Element(index))
-            {
-                text.push_str("mut ");
-            } else if moves
-                .iter()
-                .any(|target| target.target == MutationTargetKind::Element(index))
-            {
-                text.push_str("move ");
-            }
-            if let Some(name) = &element.name {
-                text.push_str(name);
-                text.push_str(": ");
-            }
-            text.push_str(&element.ty.to_string());
-            text
-        })
-        .collect::<Vec<_>>()
-        .join(" * ")
 }
 
 fn format_mutable_parameter(
@@ -372,7 +350,6 @@ pub struct ArrayType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionType {
     pub syntax: Syntax,
-    pub parameter_style: FunctionParameterStyle,
     pub parameter: Box<Type>,
     pub mutations: Vec<MutationTarget>,
     pub moves: Vec<MutationTarget>,
@@ -500,3 +477,6 @@ pub struct DefaultTypeBound {
     pub parameter: NamedType,
     pub default: Type,
 }
+
+/// Slots of a juxtaposed function, retained as a type before alias expansion.
+pub type ParameterProductType = ProductType;

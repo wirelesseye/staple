@@ -2510,7 +2510,7 @@ mod tests {
         "  callback\n",
         "}\n",
         "def use_borrowed = (value: BorrowedValue) => { let callback = () => inspect (value.*); callback () }\n",
-        "def peek: <T> T -> I32 = _ => 0\n",
+        "def peek: <T> [T] -> I32 = _ => 0\n",
         "def make_generic: <T> move T -> (() -> I32) = move value => () => peek value\n",
         "def use_derived = () => {\n",
         "  let signal count = 1\n",

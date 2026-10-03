@@ -435,6 +435,8 @@ pub struct Binding {
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
     pub annotation: Option<Type>,
+    /// Fresh per-member companion header for capability analysis.
+    pub companion_target: Option<Type>,
     pub value: Option<Expression>,
 }
 

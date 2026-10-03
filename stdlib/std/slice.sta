@@ -16,7 +16,7 @@ companion<T> Slice T {
     /// Makes a slice from a fixed reference to a homogeneous array.
     pub def from_ref: <N where Natural N> Ref (T; N) -> Slice T = value => value
     /// Borrows an element by position, trapping if out of bounds.
-    pub def get_ref: Slice T * USize -> Ref T = slice * position => __slice_get_ref (slice, position)
+    pub def get_ref: [Slice T, USize] -> Ref T = [slice, position] => __slice_get_ref (slice, position)
 }
 
 impl<T where Copy T> Index (Slice T) USize T {

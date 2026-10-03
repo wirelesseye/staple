@@ -370,7 +370,7 @@ mod tests {
         }
         for (_, id, symbol) in program.symbols.iter() {
             out.push_str(&format!(
-                "symbol {} name={} storage={:?} module={} module_symbol={} has_global={} global_root={} overloaded={} flags=[mut={} captured={} non_owning={} derived={} signal={} mutated_param={} captured_cell={} external={}]\n",
+                "symbol {} name={} storage={:?} module={} module_symbol={} has_global={} global_root={} flags=[mut={} captured={} non_owning={} derived={} signal={} mutated_param={} captured_cell={} external={}]\n",
                 id.0,
                 symbol.name,
                 symbol.storage,
@@ -378,7 +378,6 @@ mod tests {
                 symbol.module_symbol,
                 symbol.has_global,
                 symbol.global_root,
-                symbol.overloaded,
                 symbol.mutable_storage,
                 symbol.captured,
                 symbol.non_owning,
@@ -412,7 +411,7 @@ mod tests {
             "def show_pair: (I32, I32) -> String = pair => \"${pair:?}\"\n",
             "def pick: Bool -> (CString | I32) = condition => when { condition => c_string \"a\", else => 1 }\n",
             "def capture: move CString -> (() -> I32) = move value => () => inspect value\n",
-            "def peek: <T> T -> I32 = _ => 1\n",
+            "def peek: <T> [T] -> I32 = _ => 1\n",
             "def generic: <T where Copy T> T -> Coroutine{} I32 = value => coro { peek value; 1 }\n",
             "let signal flag = 0\n",
             "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",

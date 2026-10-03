@@ -75,13 +75,13 @@ the three delimited syntax types. `Expr` is currently the sum of `Ident String`,
 `CallExpr` exposes `callee: Expr` and
 `argument: Expr`; `UnstructuredExpr` preserves every other expression form
 without exposing its fields yet. A macro body is a compile-time Staple function
-whose parameters are juxtaposed with `*`, followed by a single `=>` before the
+whose parameters use a bracketed list, followed by a single `=>` before the
 body — never a curried `a => b => body` chain. Every parameter consumes one
 atomic syntax unit; an omitted parameter type means `SyntaxNode`, not opaque
 `Syntax`:
 
 ```staple
-macro choose = condition * then * else => parse_quote {
+macro choose = [condition, then, else] => parse_quote {
     match $condition {
         True => $then,
         False => $else,
@@ -257,7 +257,7 @@ Identifiers and calls may also be inspected, constructed, and changed as
 compile-time values:
 
 ```staple
-macro replace_argument = value: CallExpr * replacement: Expr => {
+macro replace_argument = [value: CallExpr, replacement: Expr] => {
     let original = value
     let mut changed = value
     changed.argument = replacement
@@ -303,8 +303,8 @@ and applied immediately before a resolver-safe definition:
 ```staple
 macro @identity: Item -> Item = item => item
 
-macro @replace: Parenthesized Expr * Item -> Item =
-    value * item => parse_quote { let generated = $value }
+macro @replace: [Parenthesized Expr, Item] -> Item =
+    [value, item] => parse_quote { let generated = $value }
 
 @identity
 @replace(42)
@@ -460,11 +460,13 @@ parse_quote { $left | $right } satisfies Type
 Macros are hygienic. Names and bindings written in a quotation retain the
 definition module's environment and receive a fresh expansion identity, while
 spliced expressions retain their caller environment. A macro normally consumes
-the number of arguments described by its curried syntax-node parameter types;
+the number of arguments described by its syntax-node parameter slots;
 a top-level `Sequence` instead consumes as many matching arguments as possible
 while preserving a match for any following parameters. When it is the final
 parameter it has no such suffix and consumes the whole remaining run. Further
 call arguments apply to the expanded expression.
+
+Macro signatures with multiple parameters must spell the parameter product literally (`[Expr, Item] -> Item`); macro signatures are read before alias expansion, so an alias counts as one parameter. Macro overloading is unaffected by the removal of function overloading.
 
 Macros may be overloaded by declaring the same name more than once in one
 module. An invocation selects the complete matching overload that consumes the
@@ -769,7 +771,7 @@ chain, exactly as for a direct juxtaposed call:
 
 ```staple
 companion Animal {
-    pub def teleport: Animal * F32 * F32 -> Animal = animal * x * y => animal
+    pub def teleport: [Animal, F32, F32] -> Animal = [animal, x, y] => animal
 }
 
 let hopped = animal^teleport 1.0 2.0
@@ -1082,8 +1084,7 @@ environment, including private helpers used by generated syntax.
 
 Operators are fixed grammar with fixed precedence and associativity; there is
 no user-definable operator or infix-function syntax. Each operator desugars
-directly to a call against a standard prelude trait, and arithmetic is not
-implemented with function overloading:
+directly to a call against a standard prelude trait:
 
 | Operator(s) | Precedence | Associativity | Desugars to |
 |---|---|---|---|
@@ -2417,57 +2418,176 @@ Both calls produce `3`. `add 1` returns a function that captures the value of
 stored or passed like other values. Product-parameter functions remain the
 ordinary choice when all arguments should be supplied together.
 
-### Juxtaposed parameters
+### Parameter products
 
-Two or more parameters separated by `*` form one non-curried function:
-
-```staple
-let add = x: I32 * y: I32 => x + y
-// add: x: I32 * y: I32 -> I32
-
-add 1 2 // valid
-add 1   // error: the call is incomplete
-```
-
-Unlike `x => y => ...`, supplying the first argument never creates a partial
-closure. This form is also distinct from `(x, y) => ...`, which accepts one
-product value and is called as `add (1, 2)`. 
-
-Juxtaposed functions may be overloaded by defining the same name at distinct
-outer arities in one module and lexical scope:
+A function that takes several arguments without currying lists its parameters
+in brackets. The bracketed list is a **parameter product**:
 
 ```staple
-def convert: I32 -> String = value => to_string value
-def convert: I32 * I32 -> String = value * radix => format_radix (value, radix)
+def add: [I32, I32] -> I32 = [x, y] => x + y
 
-convert 10       // selects arity 1
-convert 10 16    // selects arity 2
+add 1 2 // 3
+add 1   // error: incomplete juxtaposed function call
 ```
 
-An ordinary function arrow has outer arity 1, even when its parameter is a
-product. A juxtaposed function's outer arity is its number of slots. Parameter
-and result types never distinguish overloads, so two definitions of the same
-name and arity are an error.
+Supplying the first argument never creates a partial closure. This form is
+also distinct from `(x, y) => ...`, which accepts one product value and is
+called as `add (1, 2)`. A function with a single parameter is written
+`x => …` / `T -> R`.
 
-For a contiguous application chain, the compiler selects the greatest declared
-arity no larger than the number of supplied arguments. The selected function
-consumes exactly that many arguments; any arguments left over are applied to
-its result. Thus, given overloads at arities 1 and 2, `f a c d` selects arity 2
-and then applies `d` to the result. Supplying fewer arguments than every
-available arity is an incomplete call and never creates a partial juxtaposed
-closure.
+#### Slots
 
-An overload set is compile-time-only. A bare overloaded name requires an
-expected function type whose outer arity selects one member. Overloads may be
-declared at module level or by `def`s in the same local scope. Imports and
-re-exports preserve an overload set declared by one module, but same-named
-functions imported from different modules do not merge and remain a duplicate
-import error.
+Each element of a parameter product is a **slot**:
 
-Juxtaposed slots always have exact arity: they cannot declare defaults, be
-skipped by an incompatible argument, or use `_` as an omission placeholder.
-Defaults on fields of a product type nested inside a slot remain ordinary
-product-construction defaults.
+* A slot may be named (`[x: I32, y: I32]`) and may be marked `mut` or `move`
+  (`[mut List T, move T] -> ()`), but not both.
+* A slot cannot declare a default, and a parameter product cannot be variadic
+  (`[I32, ...]`). Defaults on fields of a product type nested inside a slot
+  remain ordinary product-construction defaults.
+* `...P` inside the brackets spreads a parameter product or a fixed value
+  product into slots: `type More = alias [...Inputs, String]`. A parameter
+  product cannot be spread into a value product (`(...Inputs)`).
+* A parameter product has at least one slot after spreads are expanded; `[]` is
+  an error (a function without arguments takes `()`).
+* A one-slot parameter product is the value it contains: `[T]` is `T`,
+  `[x: T]` is `T` (the slot name is dropped), and `[mut T] -> R` is
+  `mut T -> R`. So `[I32] -> I32` and `I32 -> I32` are the same type, and the
+  function expression `[x] => body` is the same as `x => body`.
+* A whole-parameter `mut` or `move` marker cannot apply to a parameter product,
+  whether it is written literally or reached through an alias; mark the
+  individual slots instead.
+
+Bracketed patterns are only allowed as a function's whole parameter. A slot
+that holds a product is destructured with parentheses:
+`[(a, b), c] => …`.
+
+Calls have exact arity: arguments are supplied as an application chain, a call
+with fewer arguments than slots is an error, and any extra arguments are
+applied to the result. Slots cannot be skipped by an incompatible argument or
+filled with an `_` placeholder. Through `^`, the receiver fills the first slot
+(see the companion section). Slot names and markers are part of the function
+type.
+
+#### Where a parameter product may appear
+
+A parameter product is a type, but not a value type. It may appear:
+
+1. as the parameter of a function type, written directly or reached through an
+   alias;
+2. as the body of a `type … = alias …` declaration;
+3. as a type argument for a *capable* parameter of an `alias` or `ctor`
+   declaration, or for any parameter of an `= opaque` declaration;
+4. as a spread inside another parameter product;
+5. as the inferred binding of a capable type parameter of a generic function or
+   of a `companion<…>` / `impl<…>` block.
+
+```staple
+type Inputs = alias [I32, I32]
+type Callable Arg Result = alias Arg -> Result
+type Handler Args = ctor (callback: Args -> (), label: String)
+
+type Add = alias Callable Inputs I32     // [I32, I32] -> I32
+def add: Add = [x, y] => x + y
+
+let handler: Handler Inputs = Handler (callback: [a, b] => println a, label: "sum")
+handler.callback 1 2                     // the field's type is [I32, I32] -> ()
+
+type Box T = ctor (value: T)
+type Bad = alias Box Inputs              // error: `T` is used as a value type in `Box`
+type Nested = alias (Inputs, Inputs) -> () // error: a product element
+def numbers: [I32, I32] = 1 2            // error: a binding's type
+```
+
+Everywhere else — binding annotations, value-product elements, slots of
+another parameter product, sum alternatives, function results, `ctor`
+payloads, `Ref`/`Slice`/`Buffer`/array element types, effect resources,
+`impl` and `companion` targets, trait arguments, and subtype bounds — a
+parameter product is rejected with
+`` parameter product type `[I32, I32]` can only be used as a function's parameter type ``.
+A compile-time product binder (`type Pair (A, B) = …`) cannot destructure a
+parameter product.
+
+#### Capable type parameters
+
+A compile-time parameter `P` is **capable**, meaning it may be instantiated
+with a parameter product, when every occurrence of `P` in the relevant
+signature is one of:
+
+* the whole parameter of a function type (`P -> R`; not `mut P -> R`,
+  `move P -> R`, or a slot such as `[P] -> R` or `[P, I32] -> R`);
+* a spread inside a parameter product (`[...P, String]`);
+* a type argument for another declaration's capable parameter.
+
+Each occurrence is classified by its innermost context: in
+`ctor (callbacks: List (P -> ()))`, `P` is the whole parameter of `P -> ()`,
+so it is allowed even though that function type is itself a value inside
+`List`. Any other occurrence is a **value occurrence** and makes `P`
+single-value. Capability of mutually dependent declarations is the largest
+consistent assignment: every parameter starts capable and loses that status
+when one of its occurrences is a value occurrence.
+
+The signature that is inspected depends on the declaration:
+
+* **`alias` and `ctor` declarations:** the alias target or the `ctor`
+  representation. A parameter that never occurs is capable.
+* **`= opaque` declarations:** there is no body, so every parameter is capable.
+  This includes standard-library opaque types such as `Task T`,
+  `Coroutine{E} T` and `CPointer P`. Their operations are generic functions
+  whose `T` is single-value, so no value of a parameter-product type can be
+  produced from them.
+* **Generic functions:** the annotation, including its `where` clause. A trait
+  or subtype bound on a parameter is a value occurrence.
+* **`companion<…>` members:** each member separately, together with the
+  companion's target type. One method may therefore accept `Handler Inputs`
+  while another, which uses the parameter as a value, does not.
+* **`impl<…>` blocks:** the impl header (target, trait arguments and `where`
+  clause).
+* Trait parameters, singleton types and the compiler built-ins (`Ref`,
+  `Slice`, `Buffer`, `Syntax`, …) are never capable.
+
+Capability depends only on signatures, never on bodies, so editing a body
+cannot change which arguments a caller may pass. Supplying a parameter product
+to a single-value parameter is an error that names the offending occurrence,
+for example
+`` parameter product `[I32, I32]` cannot instantiate `T` of `Box`: `T` is used as a value type here ``.
+
+Most generic functions are single-value without any extra annotation, because
+their signatures already use the parameter as a value:
+
+```staple
+def map: <T, U> [List T, T -> U] -> List U = …  // `List T` is a value occurrence
+def apply: <A, R> [A -> R, A] -> R = …          // `A` is a slot
+def keep: <A> [Registry A, A -> ()] -> () = …   // `A` is only a function parameter: capable
+
+keep registry add   // A := [I32, I32]
+apply add 1         // error: `A` of `apply` requires a single value
+```
+
+Type inference binds a capable parameter to a parameter product when it unifies
+`A -> R` with a function that takes several slots; a single-value parameter
+never binds to one.
+
+Inside a generic body, a capable parameter may only appear where the rules
+above allow it. No expression, binding or pattern may have type `A` or a type
+that uses `A` as a value, so a value `f: A -> R` cannot be called — its arity is
+unknown. It may be passed on, stored in a capable `ctor` field, or returned.
+Binding another function's type parameter to a capable `A` requires that
+parameter to be capable as well. When a signature leaves a parameter capable but
+the body needs a value of it, write the slot form `[A]`, which makes `A`
+single-value:
+
+```staple
+def compose: <A, B, C> [[A] -> B, B -> C] -> A -> C = [f, g] => a => g (f a)
+```
+
+#### Function names are not overloaded
+
+A function name refers to exactly one definition. Defining two `def`s with the
+same name in one module or lexical scope is a duplicate definition error,
+whatever their arities, and the same applies to trait members, `impl` members,
+companion items and `extern` members. Extern symbols are emitted under their
+declared names. Macros may still be overloaded (see
+[Metaprogramming](#metaprogramming)).
 
 ## Block expressions
 
@@ -3083,7 +3203,7 @@ point.x = 30
 let Ref (captured_x, captured_y) = point
 ```
 
-The companion method `Ref.replace: <T> mut Ref T * move T -> T` replaces a whole
+The companion method `Ref.replace: <T> [mut Ref T, move T] -> T` replaces a whole
 fixed payload and returns the previous value:
 
 ```staple
@@ -3122,7 +3242,7 @@ implicit conversion, a singleton `Ref T` (a `(T; 1)`, normalized to `T`) becomes
 a length-1 slice, and an empty `Ref ()` becomes a length-0 slice, requiring an
 expected `Slice` type to infer its element type. Literal and variable indexing
 perform runtime bounds checks.
-`Slice.get_ref: <T> Slice T * USize -> Ref T` borrows an element by position,
+`Slice.get_ref: <T> [Slice T, USize] -> Ref T` borrows an element by position,
 trapping when out of bounds; it is the primitive behind the standard library's
 `Index`/`MutateIndex` implementations for slices. Where `Copy T`, the standard
 library also implements `IntoIterator`/`Iterator` for `Slice T` through

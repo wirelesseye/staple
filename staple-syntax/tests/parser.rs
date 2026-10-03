@@ -1154,7 +1154,7 @@ fn parses_the_opaque_parse_quote_signature() {
 #[test]
 fn parses_macro_bodies_quotes_and_splices_losslessly() {
     let source = concat!(
-        "macro choose = condition * then * else => quote {\n",
+        "macro choose = [condition, then, else] => quote {\n",
         "    match $condition { True() => $then, False() => $else, }\n",
         "}\n",
     );
@@ -1170,8 +1170,8 @@ fn parses_macro_bodies_quotes_and_splices_losslessly() {
 #[test]
 fn parses_typed_macro_parameters_and_literal_identifiers() {
     let source = concat!(
-        "macro conditional = condition: Expr * then_branch: Expr * ",
-        "_: Ident \"else\" * else_branch: Expr => quote { $else_branch }\n",
+        "macro conditional = [condition: Expr, then_branch: Expr, ",
+        "_: Ident \"else\", else_branch: Expr] => quote { $else_branch }\n",
     );
     let root = parse(source).expect("typed macro parameters should parse");
     assert_eq!(root.text(), source);
@@ -1198,7 +1198,7 @@ fn rejects_curried_macro_parameter_chains() {
     let error = parse("macro choose = condition => when_true => quote { $when_true }\n")
         .expect_err("a curried macro parameter chain should be rejected");
     assert!(
-        error.message.contains("juxtaposed with `*`"),
+        error.message.contains("write `[a, b] => body`"),
         "unexpected error: {error:?}"
     );
 }
@@ -1283,7 +1283,7 @@ fn parses_expression_and_single_item_quotations_losslessly() {
 fn parses_modifier_macro_definitions_and_item_modifiers_losslessly() {
     let source = concat!(
         "macro @identity: Item -> Item = item => item\n",
-        "macro @replace: Parenthesized (Expr) * Item -> Item = value * item => quote { let generated = $value }\n",
+        "macro @replace: [Parenthesized (Expr), Item] -> Item = [value, item] => quote { let generated = $value }\n",
         "@identity\n",
         "@replace(42)\n",
         "def original = () => 0\n",
@@ -1342,7 +1342,7 @@ fn parses_triple_slash_docs_on_named_declarations_and_members() {
 #[test]
 fn parses_metadata_aware_macro_calls_losslessly() {
     let source = concat!(
-        "macro define = metadata: MacroCallMetadata * ty: Type => quote { type Generated = alias $ty }\n",
+        "macro define = [metadata: MacroCallMetadata, ty: Type] => quote { type Generated = alias $ty }\n",
         "pub define I32\n",
         "pub(package) define I32\n",
         "configure value pub I32\n",
@@ -1620,7 +1620,7 @@ fn parses_contextually_typed_curried_parameters() {
 
 #[test]
 fn parses_juxtaposed_function_parameters_and_types() {
-    let root = parse("let add: x: I32 * y: I32 -> I32 = x: I32 * y: I32 => x + y\n")
+    let root = parse("let add: [x: I32, y: I32] -> I32 = [x: I32, y: I32] => x + y\n")
         .expect("juxtaposed function should parse");
     let staple_syntax::Item::Binding(binding) = &root.items[0] else {
         panic!("expected binding");
@@ -1628,10 +1628,10 @@ fn parses_juxtaposed_function_parameters_and_types() {
     let Some(staple_syntax::Type::Function(annotation)) = &binding.annotation else {
         panic!("expected function annotation");
     };
-    assert_eq!(
-        annotation.parameter_style,
-        staple_syntax::FunctionParameterStyle::Juxtaposed
-    );
+    assert!(matches!(
+        annotation.parameter.as_ref(),
+        staple_syntax::Type::ParameterProduct(_)
+    ));
     let Some(staple_syntax::Expression::Function(function)) = &binding.value else {
         panic!("expected function expression");
     };
@@ -1648,11 +1648,11 @@ fn parses_juxtaposed_function_parameters_and_types() {
 #[test]
 fn rejects_defaults_on_juxtaposed_parameter_slots() {
     let error =
-        parse("def render: (width: I32 = 800) * body: (() -> ()) -> () = width * body => ()\n")
+        parse("def render: [width: I32 = 800, body: (() -> ())] -> () = [width, body] => ()\n")
             .expect_err("juxtaposed slots must have exact arity");
     assert!(error.message.contains("exact arity"), "{}", error.message);
 
-    parse("def render: ((width: I32 = 800)) * body: (() -> ()) -> () = width * body => ()\n")
+    parse("def render: [((width: I32 = 800)), body: (() -> ())] -> () = [width, body] => ()\n")
         .expect("a nested product parameter may retain its own field defaults");
 }
 
@@ -2739,4 +2739,52 @@ fn negative_implementations_accept_effect_parameters() {
         matches!(&implementation.type_parameters[1], staple_syntax::TypeParameterPattern::Effect(binding) if binding.name == "E")
     );
     assert!(parse("impl<effect E> Trait (Coroutine{E} I32) {}\n").is_err());
+}
+
+#[test]
+fn parses_parameter_product_type_atoms_and_single_slots() {
+    for source in [
+        "def f: [I32, I32] -> I32 = [x, y] => x + y\n",
+        "def f: <T> [Ref T, T] -> ()\n",
+        "def f: [mut x: I32, move y: I32,] -> () = [mut x, move y] => ()\n",
+        "def f: [(I32, I32), I32] -> I32 = [(a, b), c] => a\n",
+        "type Inputs = alias [...Pair, String]\n",
+        "type Add = alias Callable [I32, I32] I32\n",
+        "def f: [I32] -> I32 = [x: I32] => x\n",
+        "def f: [mut I32] -> () = [mut x] => ()\n",
+        "def f: <A> ([A] -> ()) -> () = f => ()\n",
+        "m [a b]\n",
+        "m [one, two]\n",
+    ] {
+        parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+#[test]
+fn rejects_invalid_parameter_product_syntax_with_migration_hints() {
+    for (source, hint) in [
+        ("def f: I32 * I32 -> I32\n", "`[A, B] -> R`"),
+        ("def f = x * y => x\n", "`[a, b] => body`"),
+        ("macro f = x * y => x\n", "`[a, b] => body`"),
+        ("type Empty = alias []\n", "at least one slot"),
+        ("def f = [] => ()\n", "at least one slot"),
+        ("def f: [x: I32 = 1, I32] -> I32\n", "exact arity"),
+        ("def f: [I32, ...] -> I32\n", "cannot be variadic"),
+        ("def f: mut [I32, I32] -> ()\n", "mark individual slots"),
+        ("type Invalid = alias I32[2]\n", "array types"),
+        ("def f = [[a, b], c] => a\n", "cannot be nested"),
+        ("def f = [a, [b, c]] => a\n", "cannot be nested"),
+        ("def identity<T> = value: T => value\n", "belong to the annotation"),
+        ("def keep<A>: (A -> ()) -> () = f => ()\n", "belong to the annotation"),
+    ] {
+        let error = parse(source).expect_err("invalid parameter product");
+        assert!(error.message.contains(hint), "{source}: {error}");
+    }
+}
+
+#[test]
+fn unspaced_comparisons_are_not_type_arguments() {
+    let program = parse("let ok = (a<b, c>a)\n").expect("comparisons parse");
+    let text = format!("{program:?}");
+    assert!(!text.contains("Satisfies"), "{text}");
 }

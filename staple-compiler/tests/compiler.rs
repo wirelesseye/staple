@@ -987,7 +987,7 @@ fn coro_moves_owned_non_copy_captures() {
         .check(resolve(concat!(
             "use std.coroutine.*\n",
             "def get_task: () -> Task I32\n",
-            "def drop_it: <T> T -> () = _ => ()\n",
+            "def drop_it: <T> [T] -> () = _ => ()\n",
             "def bad: () -> () =\n",
             "    () => {\n",
             "        let handle = get_task ()\n",
@@ -2008,38 +2008,18 @@ fn fills_anonymous_product_field_defaults_at_calls_and_construction() {
 }
 
 #[test]
-fn selects_function_overloads_by_juxtaposed_arity() {
-    let declaration = type_check(concat!(
-        "def app: I32 -> I32 = value => value + 1\n",
-        "def app: I32 * I32 -> I32 = left * right => left + right\n",
-    ));
-    let app = declaration
-        .functions()
-        .iter()
-        .find(|function| {
-            function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed
-        })
-        .expect("app declaration");
-    assert_eq!(
-        declaration
-            .type_of_function(app.id)
-            .expect("app type")
-            .parameter_style,
-        staple_syntax::FunctionParameterStyle::Juxtaposed
+fn rejects_same_name_functions_at_different_arities() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("def app: I32 -> I32 = value => value\ndef app: [I32, I32] -> I32 = [left, right] => left\n", root).expect("source loads");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("duplicate names must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("duplicate definition of `app`")),
+        "{diagnostics:?}"
     );
-    let source = concat!(
-        "def app: I32 -> I32 = value => value + 1\n",
-        "def app: I32 * I32 -> I32 = left * right => left + right\n",
-        "let unary: I32 = app 5\n",
-        "let binary: I32 = app 5 7\n",
-        "let selected: I32 -> I32 = app\n",
-        "let contextual: I32 = selected 9\n",
-    );
-    let module = type_check(source);
-    let context = Context::create();
-    CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
-        .expect("arity-overloaded calls should generate LLVM");
 }
 
 #[test]
@@ -2057,20 +2037,18 @@ fn rejects_a_default_on_a_curried_parameter() {
 }
 
 #[test]
-fn overloaded_functions_apply_extra_arguments_to_the_selected_result() {
+fn juxtaposed_functions_apply_extra_arguments_to_the_result() {
     let source = concat!(
         "def apply: I32 -> I32 -> I32 = first => second => first + second\n",
-        "def apply: I32 * I32 * I32 -> I32 = first * second * third => first + second + third\n",
         "let through_unary: I32 = apply 1 2\n",
-        "def extend: I32 -> I32 = value => value + 1\n",
-        "def extend: I32 * I32 -> I32 -> I32 = first * second => third => first + second + third\n",
+        "def extend: [I32, I32] -> I32 -> I32 = [first, second] => third => first + second + third\n",
         "let through_binary: I32 = extend 1 2 3\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
-        .expect("arguments after the selected overload should apply to its result");
+        .expect("arguments after juxtaposed parameters should apply to its result");
 }
 
 #[test]
@@ -2086,75 +2064,69 @@ fn rejects_an_inference_placeholder_as_a_value() {
 }
 
 #[test]
-fn supports_same_scope_local_arity_overloads() {
-    let source = concat!(
-        "def run = () => {\n",
-        "  def local: I32 -> I32 = value => value\n",
-        "  def local: I32 * I32 -> I32 = left * right => left + right\n",
-        "  local 1 + local 2 3\n",
-        "}\n",
-        "let value: I32 = run ()\n",
-    );
-    let module = type_check(source);
-    let context = Context::create();
-    CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
-        .expect("same-scope local overloads should generate LLVM");
-}
-
-#[test]
-fn rejects_an_uncontextualized_bare_overload_set() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "def choose: I32 -> I32 = value => value\n",
-            "def choose: I32 * I32 -> I32 = left * right => left\n",
-            "let ambiguous = choose\n",
-        )))
-        .expect_err_diagnostics("a bare overload set needs an expected function type");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
+fn rejects_same_scope_local_function_overloads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("def run = () => {\n def local = value: I32 => value\n def local = [left: I32, right: I32] => left\n local 1\n}\n", root).expect("source loads");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("duplicate names must be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
             .message
-            .contains("ambiguous overloaded function `choose`")
-    }));
+            .contains("duplicate definition of `local`")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
-fn applies_arity_overloads_on_trait_methods() {
-    let source = concat!(
-        "trait Render T {\n",
-        "  render: T -> T\n",
-        "  render: T * T -> T\n",
-        "}\n",
-        "impl Render I32 {\n",
-        "  render = value => value\n",
-        "  render = left * right => left + right\n",
-        "}\n",
-        "let unary: I32 = Render.render 2\n",
-        "let binary: I32 = Render.render 2 3\n",
+fn rejects_duplicate_functions_before_bare_name_use() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("def choose = value: I32 => value\ndef choose = [left: I32, right: I32] => left\nlet ambiguous = choose\n", root).expect("source loads");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("duplicate names must be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("duplicate definition of `choose`")),
+        "{diagnostics:?}"
     );
-    let module = type_check(source);
-    let context = Context::create();
-    CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
-        .expect("trait arity overloads should generate LLVM");
 }
 
 #[test]
-fn applies_arity_overloads_on_companion_items() {
-    let source = concat!(
-        "type Box = ctor I32\n",
-        "companion Box {\n",
-        "  pub def make: I32 -> Box = value => Box value\n",
-        "  pub def make: I32 * I32 -> Box = left * right => Box (left + right)\n",
-        "}\n",
-        "let unary: Box = Box.make 2\n",
-        "let binary: Box = Box.make 2 3\n",
+fn rejects_trait_member_overloads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "trait Render T { render: T -> T\n render: [T, T] -> T\n}\n",
+            root,
+        )
+        .expect("source loads");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("duplicate names must be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("duplicate trait member `render`")),
+        "{diagnostics:?}"
     );
-    let module = type_check(source);
-    let context = Context::create();
-    CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
-        .expect("companion arity overloads should generate LLVM");
+}
+
+#[test]
+fn rejects_companion_item_overloads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("type Box = ctor I32\ncompanion Box {\n pub def make: I32 -> Box = value => Box value\n pub def make: [I32, I32] -> Box = [left, right] => Box left\n}\n", root).expect("source loads");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("duplicate names must be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("duplicate definition of `make`")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
@@ -5376,14 +5348,14 @@ fn diagnostics_in_macro_generated_syntax_point_at_the_macro_definition() {
     // line/column inside the internal reconstruction.
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "macro pick = condition: Expr * body: Expr =>\n", // line 1
-            "    quote {\n",                                  // line 2
-            "        match $condition {\n",                   // line 3
-            "            True => $body,\n",                   // line 4
-            "        }\n",                                    // line 5
-            "    }\n",                                        // line 6
-            "let flag: Bool = True\n",                        // line 7
-            "pick flag (0)\n",                                // line 8
+            "macro pick = [condition: Expr, body: Expr] =>\n", // line 1
+            "    quote {\n",                                   // line 2
+            "        match $condition {\n",                    // line 3
+            "            True => $body,\n",                    // line 4
+            "        }\n",                                     // line 5
+            "    }\n",                                         // line 6
+            "let flag: Bool = True\n",                         // line 7
+            "pick flag (0)\n",                                 // line 8
         )))
         .expect_err_diagnostics("a macro expanding to a non-exhaustive match should fail");
 
@@ -5437,7 +5409,7 @@ fn inspects_identifier_and_call_syntax() {
 fn constructs_identifier_and_call_syntax() {
     let module = type_check(concat!(
         "macro generated_name = _: Expr => Ident \"answer\"\n",
-        "macro generated_call = callee: Expr * argument: Expr =>\n",
+        "macro generated_call = [callee: Expr, argument: Expr] =>\n",
         "    CallExpr (callee: callee, argument: argument)\n",
         "def identity = (value: I32) => value\n",
         "let answer: I32 = 40\n",
@@ -5511,7 +5483,7 @@ fn structured_syntax_overloads_use_leaf_specificity() {
 fn constructed_identifiers_use_definition_hygiene_and_children_keep_caller_hygiene() {
     let module = type_check(concat!(
         "macro definition_name = _: Expr => Ident \"captured\"\n",
-        "macro apply = callee: Expr * argument: Expr =>\n",
+        "macro apply = [callee: Expr, argument: Expr] =>\n",
         "    CallExpr (callee: callee, argument: argument)\n",
         "let captured: I32 = 7\n",
         "def definition_site = (captured: String) => definition_name ()\n",
@@ -5528,13 +5500,13 @@ fn constructed_identifiers_use_definition_hygiene_and_children_keep_caller_hygie
 #[test]
 fn mutates_call_syntax_with_value_semantics_and_shared_capture_cells() {
     let module = type_check(concat!(
-        "macro replace_call = value: CallExpr * replacement: Expr => {\n",
+        "macro replace_call = [value: CallExpr, replacement: Expr] => {\n",
         "    let original = value\n",
         "    let mut changed = value\n",
         "    changed.argument = replacement\n",
         "    parse_quote { ($original, $changed) }\n",
         "}\n",
-        "macro replace_from_closure = value: CallExpr * replacement: Expr => {\n",
+        "macro replace_from_closure = [value: CallExpr, replacement: Expr] => {\n",
         "    let mut changed = value\n",
         "    let update = () => { changed.argument = replacement; () }\n",
         "    update ()\n",
@@ -5709,9 +5681,9 @@ fn expands_item_modifier_macros_with_nearest_modifier_first() {
 #[test]
 fn modifier_arguments_support_expression_type_and_pattern_syntax() {
     let module = type_check(concat!(
-        "macro @value = value * _ => parse_quote { let generated: I32 = $value }\n",
-        "macro @typed: Parenthesized (Type) * Item -> Item = ty * _ => parse_quote { let typed: $ty = 1 }\n",
-        "macro @bind: Parenthesized (Pattern) * Item -> Item = pattern * _ => parse_quote { let $pattern = (40, 2) }\n",
+        "macro @value = [value, _] => parse_quote { let generated: I32 = $value }\n",
+        "macro @typed: [Parenthesized (Type), Item] -> Item = [ty, _] => parse_quote { let typed: $ty = 1 }\n",
+        "macro @bind: [Parenthesized (Pattern), Item] -> Item = [pattern, _] => parse_quote { let $pattern = (40, 2) }\n",
         "@value(42)\n",
         "let replaced = 0\n",
         "@typed(I32)\n",
@@ -5957,7 +5929,7 @@ fn modified_item_can_be_destructured_and_reconstructed_losslessly() {
         "    ModifiedItem (modifiers, inner) => ModifiedItem (modifiers: modifiers, item: inner),\n",
         "    _ => panic \"outer item is unsupported\",\n",
         "}\n",
-        "macro @inner: Parenthesized (Expr) * Item -> Item = value * _ => parse_quote { let reconstructed: I32 = $value }\n",
+        "macro @inner: [Parenthesized (Expr), Item] -> Item = [value, _] => parse_quote { let reconstructed: I32 = $value }\n",
         "@outer\n",
         "@inner(1)\n",
         "let original: I32 = 0\n",
@@ -5978,17 +5950,17 @@ fn expands_metadata_aware_macros_and_contextual_visibility_splices() {
         "    Package => parse_quote { 2 },\n",
         "    Public => parse_quote { 3 },\n",
         "}\n",
-        "macro define_alias = metadata: MacroCallMetadata * ty: Type => {\n",
+        "macro define_alias = [metadata: MacroCallMetadata, ty: Type] => {\n",
         "    let actual = normalize_visibility metadata.visibility\n",
         "    parse_quote { $actual type Generated = alias $ty }\n",
         "}\n",
-        "macro classify = before: Expr * vis: Visibility * after: Expr => {\n",
+        "macro classify = [before: Expr, vis: Visibility, after: Expr] => {\n",
         "    let number = visibility_number vis\n",
         "    number\n",
         "}\n",
         "macro call_visibility = metadata: MacroCallMetadata => visibility_number metadata.visibility\n",
-        "macro first_visibility = vis: Visibility * value: Expr => visibility_number vis\n",
-        "macro final_visibility = value: Expr * vis: Visibility => visibility_number vis\n",
+        "macro first_visibility = [vis: Visibility, value: Expr] => visibility_number vis\n",
+        "macro final_visibility = [value: Expr, vis: Visibility] => visibility_number vis\n",
         "pub define_alias I32\n",
         "let implicit: I32 = classify 10 20\n",
         "let public: I32 = classify 10 pub 20\n",
@@ -6183,8 +6155,8 @@ fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
     let module = type_check(concat!(
         "type Animal = alias I32\n",
         "companion Animal {\n",
-        "    pub def move_to: Animal * (F32, F32) -> Animal = animal * _ => animal\n",
-        "    pub def teleport: Animal * F32 * F32 -> Animal = animal * _ * _ => animal\n",
+        "    pub def move_to: [Animal, (F32, F32)] -> Animal = [animal, _] => animal\n",
+        "    pub def teleport: [Animal, F32, F32] -> Animal = [animal, _, _] => animal\n",
         "}\n",
         "let animal: Animal = 1\n",
         "let moved: Animal = animal^move_to (1.0, 1.0)\n",
@@ -6192,7 +6164,7 @@ fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
         "def relocate: Animal -> Animal = value => value^move_to (1.0, 1.0)\n",
         "def make: () -> Animal = () => animal\n",
         "let moved_from_call: Animal = (make ())^teleport 1.0 2.0\n",
-        "companion Animal { pub def tag: <T> Animal * T -> Animal = animal * _ => animal }\n",
+        "companion Animal { pub def tag: <T> [Animal, T] -> Animal = [animal, _] => animal }\n",
         "let tagged: Animal = animal^tag 7\n",
     ));
     let context = Context::create();
@@ -6207,7 +6179,7 @@ fn rejects_incomplete_method_call_on_a_juxtaposed_companion_method() {
         .check(resolve(concat!(
             "type Animal = alias I32\n",
             "companion Animal {\n",
-            "    pub def move_to: Animal * (F32, F32) -> Animal = animal * _ => animal\n",
+            "    pub def move_to: [Animal, (F32, F32)] -> Animal = [animal, _] => animal\n",
             "}\n",
             "let animal: Animal = 1\n",
             "let incomplete = animal^move_to\n",
@@ -6301,7 +6273,7 @@ fn typegroup_rejects_opaque_variants() {
 #[test]
 fn equals_and_fat_arrow_are_structured_syntax_nodes() {
     let module = type_check(concat!(
-        "macro punctuation = _: Ident String * equal: Equals * _: Ident String * arrow: FatArrow * _: Braced (Sequence SyntaxNode) =>\n",
+        "macro punctuation = [_: Ident String, equal: Equals, _: Ident String, arrow: FatArrow, _: Braced (Sequence SyntaxNode)] =>\n",
         "    match (equal, arrow, Equals, FatArrow) {\n",
         "        (Equals, FatArrow, Equals, FatArrow) => parse_quote { let punctuated: I32 = 42 },\n",
         "    }\n",
@@ -6619,7 +6591,7 @@ fn diagnoses_invalid_metadata_macro_uses() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro invalid: Expr * MacroCallMetadata -> Expr = left * metadata => left\n",
+            "macro invalid: [Expr, MacroCallMetadata] -> Expr = [left, metadata] => left\n",
             "macro `invalid` may use `MacroCallMetadata` only as its first parameter",
         ),
         (
@@ -6668,7 +6640,7 @@ fn implicit_macro_call_metadata_can_make_overloads_ambiguous() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let source = concat!(
         "macro choose: Expr -> Expr = value => parse_quote { $value }\n",
-        "macro choose: MacroCallMetadata * Expr -> Expr = metadata * value => parse_quote { $value }\n",
+        "macro choose: [MacroCallMetadata, Expr] -> Expr = [metadata, value] => parse_quote { $value }\n",
         "let result = choose 1\n",
     );
     let program = ProgramLoader::new()
@@ -6690,11 +6662,11 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro @invalid: SyntaxNode * Item -> Item = value * item => item\n",
+            "macro @invalid: [SyntaxNode, Item] -> Item = [value, item] => item\n",
             "modifier macro `@invalid` must have signature `Item -> Item`, `Item -> Sequence Item`, or `Item -> Syntax`, optionally with a leading `Parenthesized (Expr | Type | Pattern) ->` argument",
         ),
         (
-            "macro @required: Parenthesized (Expr) * Item -> Item = value * item => item\n@required\nlet value = 1\n",
+            "macro @required: [Parenthesized (Expr), Item] -> Item = [value, item] => item\n@required\nlet value = 1\n",
             "modifier macro `@required` requires a parenthesized argument",
         ),
         (
@@ -6784,11 +6756,11 @@ fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
     let module = type_check(concat!(
         "def type_identity: Type -> Type = value => value\n",
         "def pattern_identity: Pattern -> Pattern = value => value\n",
-        "macro define_value = ty: Type * value: Expr => {\n",
+        "macro define_value = [ty: Type, value: Expr] => {\n",
         "    let actual = type_identity ty\n",
         "    parse_quote { let generated: $actual = $value }\n",
         "}\n",
-        "macro destructure = pattern: Pattern * value: Expr => {\n",
+        "macro destructure = [pattern: Pattern, value: Expr] => {\n",
         "    let actual = pattern_identity pattern\n",
         "    parse_quote { let $actual = $value }\n",
         "}\n",
@@ -6805,10 +6777,10 @@ fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
 #[test]
 fn accepts_product_type_and_pattern_macro_inputs_without_extra_grouping() {
     let module = type_check(concat!(
-        "macro for = pattern: Pattern * _: Ident \"in\" * value: Expr * body: Expr => parse_quote {\n",
+        "macro for = [pattern: Pattern, _: Ident \"in\", value: Expr, body: Expr] => parse_quote {\n",
         "    { let $pattern = $value; $body }\n",
         "}\n",
-        "macro ascribe = ty: Type * value: Expr => parse_quote { $value satisfies $ty }\n",
+        "macro ascribe = [ty: Type, value: Expr] => parse_quote { $value satisfies $ty }\n",
         "let direct: I32 = for (left, right) in (40, 2) { left + right }\n",
         "let legacy: I32 = for ((left, right)) in (40, 2) { left + right }\n",
         "let empty: () = for () in () { () }\n",
@@ -7307,7 +7279,7 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
 fn evaluates_pure_syntax_helpers_and_conditional_macros() {
     let module = type_check(concat!(
         "def syntax_identity: SyntaxNode -> SyntaxNode = value => value\n",
-        "macro choose = condition * then * else => parse_quote {\n",
+        "macro choose = [condition, then, else] => parse_quote {\n",
         "    match $condition { True => $then, False => $else, }\n",
         "}\n",
         "macro passthrough = value => syntax_identity value\n",
@@ -7324,10 +7296,10 @@ fn evaluates_pure_syntax_helpers_and_conditional_macros() {
 fn expands_typed_macros_with_literal_identifier_parameters() {
     let module = type_check(concat!(
         "macro conditional =\n",
-        "    condition: Expr *\n",
-        "    then_branch: Expr *\n",
-        "    _: Ident \"else\" *\n",
-        "    else_branch: Expr => parse_quote {\n",
+        "    [condition: Expr,\n",
+        "    then_branch: Expr,\n",
+        "    _: Ident \"else\",\n",
+        "    else_branch: Expr] => parse_quote {\n",
         "        match $condition {\n",
         "            True() => $then_branch,\n",
         "            False() => $else_branch,\n",
@@ -7440,7 +7412,7 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
 #[test]
 fn top_level_macro_sequences_capture_zero_one_and_many_arguments() {
     let module = type_check(concat!(
-        "macro count = _: Ident \"marker\" * values: Sequence (Ident String) * _: Equals * name: Ident String * _: FatArrow * _: Braced Syntax => match values {\n",
+        "macro count = [_: Ident \"marker\", values: Sequence (Ident String), _: Equals, name: Ident String, _: FatArrow, _: Braced Syntax] => match values {\n",
         "    Sequence () => quote { let $name: I32 = 0 },\n",
         "    Sequence (first: Ident String, rest: Sequence Ident String) => match rest {\n",
         "        Sequence () => quote { let $name: I32 = 1 },\n",
@@ -7460,11 +7432,11 @@ fn top_level_macro_sequences_capture_zero_one_and_many_arguments() {
 #[test]
 fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
     let module = type_check(concat!(
-        "macro classify = _: Ident \"marker\" *\n",
-        "    values: Sequence (Ident String) *\n",
-        "    visibility: Visibility *\n",
-        "    _: Equals *\n",
-        "    name: Ident String * _: FatArrow * _: Braced Syntax => match (values, visibility) {\n",
+        "macro classify = [_: Ident \"marker\",\n",
+        "    values: Sequence (Ident String),\n",
+        "    visibility: Visibility,\n",
+        "    _: Equals,\n",
+        "    name: Ident String, _: FatArrow, _: Braced Syntax] => match (values, visibility) {\n",
         "        (Sequence (), Private) => quote { let $name: I32 = 40 },\n",
         "        (Sequence (first: Ident String, rest: Sequence Ident String), Public) => quote { let $name: I32 = 41 },\n",
         "        (Sequence (first: Ident String, rest: Sequence Ident String), Package) => quote { let $name: I32 = 42 },\n",
@@ -7483,7 +7455,7 @@ fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
 #[test]
 fn top_level_macro_sequence_may_be_the_final_parameter() {
     let module = type_check(concat!(
-        "macro tail = _: Ident \"marker\" * name: Ident String * values: Sequence (Ident String) => match values {\n",
+        "macro tail = [_: Ident \"marker\", name: Ident String, values: Sequence (Ident String)] => match values {\n",
         "    Sequence () => quote { let $name: I32 = 0 },\n",
         "    Sequence (first: Ident String, rest: Sequence Ident String) => match rest {\n",
         "        Sequence () => quote { let $name: I32 = 1 },\n",
@@ -7503,8 +7475,8 @@ fn top_level_macro_sequence_may_be_the_final_parameter() {
 #[test]
 fn longer_complete_overload_still_beats_a_trailing_sequence_overload() {
     let module = type_check(concat!(
-        "macro pick = value: Ident String * _: Sequence (Ident String) => quote { let $value: I32 = 0 }\n",
-        "macro pick = value: Ident String * _: Sequence (Ident String) * _: Equals * _: Braced Syntax => quote { let $value: I32 = 1 }\n",
+        "macro pick = [value: Ident String, _: Sequence (Ident String)] => quote { let $value: I32 = 0 }\n",
+        "macro pick = [value: Ident String, _: Sequence (Ident String), _: Equals, _: Braced Syntax] => quote { let $value: I32 = 1 }\n",
         "pick alpha one two\n",
         "pick beta one two = {}\n",
     ));
@@ -7517,9 +7489,9 @@ fn longer_complete_overload_still_beats_a_trailing_sequence_overload() {
 #[test]
 fn fixed_and_more_specific_overloads_beat_top_level_sequences() {
     let module = type_check(concat!(
-        "macro choose = _: Sequence Expr * _: Equals * name: Ident String * _: FatArrow * _: Braced Syntax => quote { let $name: String = \"wrong\" }\n",
-        "macro choose = _: Sequence (Ident String) * _: Equals * name: Ident String * _: FatArrow * _: Braced Syntax => quote { let $name: I32 = 1 }\n",
-        "macro choose = _: Ident String * _: Equals * name: Ident String * _: FatArrow * _: Braced Syntax => quote { let $name: I32 = 2 }\n",
+        "macro choose = [_: Sequence Expr, _: Equals, name: Ident String, _: FatArrow, _: Braced Syntax] => quote { let $name: String = \"wrong\" }\n",
+        "macro choose = [_: Sequence (Ident String), _: Equals, name: Ident String, _: FatArrow, _: Braced Syntax] => quote { let $name: I32 = 1 }\n",
+        "macro choose = [_: Ident String, _: Equals, name: Ident String, _: FatArrow, _: Braced Syntax] => quote { let $name: I32 = 2 }\n",
         "choose value = fixed => {}\n",
         "choose left right = repeated => {}\n",
     ));
@@ -7532,8 +7504,8 @@ fn fixed_and_more_specific_overloads_beat_top_level_sequences() {
 #[test]
 fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguous() {
     let module = type_check(concat!(
-        "macro annotated: Sequence (Ident String) * Equals * Ident String * FatArrow * Braced Syntax -> Syntax =\n",
-        "    values: Sequence (Ident String) * _: Equals * name: Ident String * _: FatArrow * _: Braced Syntax => quote { let $name: I32 = 42 }\n",
+        "macro annotated: [Sequence (Ident String), Equals, Ident String, FatArrow, Braced Syntax] -> Syntax =\n",
+        "    [values: Sequence (Ident String), _: Equals, name: Ident String, _: FatArrow, _: Braced Syntax] => quote { let $name: I32 = 42 }\n",
         "annotated first second = generated => {}\n",
     ));
     let context = Context::create();
@@ -7546,8 +7518,8 @@ fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguou
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             &with_syntax_imports(concat!(
-                "macro clash = _: Sequence Type * _: Equals * _: Ident String * _: FatArrow * _: Braced Syntax => quote { let generated: I32 = 1 }\n",
-                "macro clash = _: Sequence Pattern * _: Equals * _: Ident String * _: FatArrow * _: Braced Syntax => quote { let generated: I32 = 2 }\n",
+                "macro clash = [_: Sequence Type, _: Equals, _: Ident String, _: FatArrow, _: Braced Syntax] => quote { let generated: I32 = 1 }\n",
+                "macro clash = [_: Sequence Pattern, _: Equals, _: Ident String, _: FatArrow, _: Braced Syntax] => quote { let generated: I32 = 2 }\n",
                 "clash Value = output => {}\n",
             )),
             root,
@@ -7568,15 +7540,15 @@ fn rejects_invalid_top_level_macro_sequence_signatures() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro invalid = first: Sequence (Ident String) * second: Sequence Expr * _: Equals => parse_quote { 0 }\n",
+            "macro invalid = [first: Sequence (Ident String), second: Sequence Expr, _: Equals] => parse_quote { 0 }\n",
             "a macro signature may contain at most one top-level `Sequence` parameter",
         ),
         (
-            "macro @invalid: Sequence (Ident String) * Item -> Item = values * item => item\n",
+            "macro @invalid: [Sequence (Ident String), Item] -> Item = [values, item] => item\n",
             "top-level `Sequence` parameters are not supported by modifier macros",
         ),
         (
-            "macro invalid = values: Sequence (Sequence (Ident String)) * _: Equals => parse_quote { 0 }\n",
+            "macro invalid = [values: Sequence (Sequence (Ident String)), _: Equals] => parse_quote { 0 }\n",
             "a top-level `Sequence` element must be a single syntax category, found `Sequence Ident String`",
         ),
     ] {
@@ -7603,7 +7575,7 @@ fn rejects_curried_macro_annotations() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             &with_syntax_imports(
-                "macro invalid: Expr -> Expr -> Item = left * right => parse_quote { $left }\n",
+                "macro invalid: Expr -> Expr -> Item = [left, right] => parse_quote { $left }\n",
             ),
             root,
         )
@@ -7840,7 +7812,7 @@ fn provides_integer_range_iterator_implementations() {
 fn macro_overloads_choose_longest_then_most_specific() {
     let module = type_check(concat!(
         "macro select = value: Expr => parse_quote { 10 }\n",
-        "macro select = value: Expr * _: Ident \"with\" * replacement: Expr => parse_quote { $replacement }\n",
+        "macro select = [value: Expr, _: Ident \"with\", replacement: Expr] => parse_quote { $replacement }\n",
         "macro classify = value: SyntaxNode => parse_quote { 1 }\n",
         "macro classify = value: Expr => parse_quote { 2 }\n",
         "macro classify = value: Ident String => parse_quote { 3 }\n",
@@ -7901,8 +7873,8 @@ fn diagnoses_duplicate_and_ambiguous_macro_overloads() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "macro crossed = left: Ident String * right: Expr => parse_quote { 1 }\n",
-                "macro crossed = left: Expr * right: Ident String => parse_quote { 2 }\n",
+                "macro crossed = [left: Ident String, right: Expr] => parse_quote { 1 }\n",
+                "macro crossed = [left: Expr, right: Ident String] => parse_quote { 2 }\n",
                 "crossed first second\n",
             ),
             root,
@@ -7925,7 +7897,7 @@ fn rejects_a_mismatched_literal_identifier_macro_argument() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "macro conditional = value: Expr * _: Ident \"else\" => parse_quote { $value }\n",
+                "macro conditional = [value: Expr, _: Ident \"else\"] => parse_quote { $value }\n",
                 "conditional 1 otherwise\n",
             ),
             root,
@@ -7947,7 +7919,7 @@ fn rejects_bare_literal_identifier_macro_parameters() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "macro conditional = value: Expr * Ident \"else\" => parse_quote { $value }\n",
+            "macro conditional = [value: Expr, Ident \"else\"] => parse_quote { $value }\n",
             root,
         )
         .expect("source should parse");
@@ -8240,7 +8212,7 @@ fn diagnoses_incomplete_and_non_syntax_macros() {
     let incomplete = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "macro pair = left * right => parse_quote { ($left, $right) }\npair 1\n",
+            "macro pair = [left, right] => parse_quote { ($left, $right) }\npair 1\n",
             root,
         )
         .expect("source should parse");
@@ -8693,7 +8665,7 @@ fn type_checks_and_generates_curried_functions() {
 #[test]
 fn type_checks_and_generates_non_curried_juxtaposed_functions() {
     let source = concat!(
-        "let pair_add: x: I32 * y: I32 -> I32 = x: I32 * y: I32 => x + y\n",
+        "let pair_add: [x: I32, y: I32] -> I32 = [x: I32, y: I32] => x + y\n",
         "let result: I32 = pair_add 1 2\n",
     );
     let module = type_check(source);
@@ -8707,7 +8679,7 @@ fn type_checks_and_generates_non_curried_juxtaposed_functions() {
 fn rejects_incomplete_juxtaposed_calls() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "let pair_add: x: I32 * y: I32 -> I32 = x * y => x + y\n",
+            "let pair_add: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
             "let partial = pair_add 1\n",
         )))
         .expect_err_diagnostics("juxtaposed calls cannot be partial");
@@ -8721,7 +8693,7 @@ fn rejects_incomplete_juxtaposed_calls() {
 #[test]
 fn completes_a_juxtaposed_call_before_calling_its_result() {
     let source = concat!(
-        "let choose: x: I32 * y: I32 -> I32 -> I32 = x * y => z => x + y + z\n",
+        "let choose: [x: I32, y: I32] -> I32 -> I32 = [x, y] => z => x + y + z\n",
         "let result: I32 = choose 1 2 3\n",
     );
     let module = type_check(source);
@@ -8735,7 +8707,7 @@ fn completes_a_juxtaposed_call_before_calling_its_result() {
 fn keeps_product_and_juxtaposed_function_types_distinct() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "let juxtaposed: x: I32 * y: I32 -> I32 = x * y => x + y\n",
+            "let juxtaposed: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
             "let product: (I32, I32) -> I32 = juxtaposed\n",
         )))
         .expect_err_diagnostics("function parameter styles must remain distinct");
@@ -8749,7 +8721,7 @@ fn keeps_product_and_juxtaposed_function_types_distinct() {
 #[test]
 fn supports_patterns_in_juxtaposed_parameter_slots() {
     let source = concat!(
-        "let combine: (I32, I32) * I32 -> I32 = (left, right) * _ => left + right\n",
+        "let combine: [(I32, I32), I32] -> I32 = [(left, right), _] => left + right\n",
         "let result: I32 = combine (1, 2) 3\n",
     );
     let module = type_check(source);
@@ -8762,7 +8734,7 @@ fn supports_patterns_in_juxtaposed_parameter_slots() {
 #[test]
 fn lowers_mutation_markers_on_juxtaposed_parameter_slots() {
     let source = concat!(
-        "let replace: mut target: I32 * value: I32 -> () = mut target * value => { target = value }\n",
+        "let replace: [mut target: I32, value: I32] -> () = [mut target, value] => { target = value }\n",
         "let mut number = 1\n",
         "replace number 9\n",
     );
@@ -8774,18 +8746,18 @@ fn lowers_mutation_markers_on_juxtaposed_parameter_slots() {
 }
 
 #[test]
-fn rejects_duplicate_function_overload_arities() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "def duplicate: I32 -> I32 = value => value\n",
-            "def duplicate: String -> String = value => value\n",
-        )))
-        .expect_err_diagnostics("parameter types do not distinguish overloads");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
+fn rejects_duplicate_functions_at_the_same_arity() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new().with_standard_library_root(root.join("stdlib")).load_source("def duplicate: I32 -> I32 = value => value\ndef duplicate: String -> String = value => value\n", root).expect("source loads");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("duplicate names must be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
             .message
-            .contains("duplicate function overload with arity 1")
-    }));
+            .contains("duplicate definition of `duplicate`")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
@@ -10055,7 +10027,7 @@ fn monomorphizes_nested_and_recursive_generic_calls() {
 fn monomorphizes_generic_closures_with_captures() {
     let module = type_check(concat!(
         "def outer: I32 -> I32 = y => {\n",
-        "  def inner: <T> T -> I32 = x => y\n",
+        "  def inner: <T> [T] -> I32 = x => y\n",
         "  inner \"ignored\"\n",
         "}\n",
         "let answer: I32 = outer 42\n",
@@ -10084,7 +10056,7 @@ fn infers_product_and_result_only_compile_time_parameters() {
 #[test]
 fn monomorphizes_curried_generic_function_layers() {
     let module = type_check(concat!(
-        "def keep_first: <A, B where Copy A> A -> B -> A = a => b => a\n",
+        "def keep_first: <A, B where Copy A> A -> [B] -> A = a => b => a\n",
         "let answer: I32 = keep_first 42 \"ignored\"\n",
     ));
     let context = Context::create();
@@ -11160,21 +11132,24 @@ fn deduplicates_matching_extern_declarations_across_modules() {
 }
 
 #[test]
-fn supports_external_function_arity_overloads() {
-    let module = type_check(concat!(
-        "extern \"c\" {\n",
-        "  foreign: I32 -> I32\n",
-        "  foreign: I32 * I32 -> I32\n",
-        "}\n",
-        "let unary: I32 = foreign 1\n",
-        "let binary: I32 = foreign 1 2\n",
-    ));
-    let context = Context::create();
-    let llvm = CodeGenerator::new(&context)
-        .compile_module(&lower(&module))
-        .expect("external overloads should generate distinct declarations");
-    assert!(llvm.contains("@foreign.arity1"), "{llvm}");
-    assert!(llvm.contains("@foreign.arity2"), "{llvm}");
+fn rejects_external_function_overloads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "extern \"c\" { foreign: I32 -> I32\n foreign: [I32, I32] -> I32\n}\n",
+            root,
+        )
+        .expect("source loads");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("duplicate names must be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("duplicate definition of `foreign`")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
@@ -11853,4 +11828,334 @@ fn stdlib_opaque_copy_policy_uses_explicit_negative_implementations() {
         assert!(checked.parameter.is_sized(), "{name}");
         assert_eq!(module.is_copy_type(&checked.parameter), *copy, "{name}");
     }
+}
+
+#[test]
+fn parameter_product_aliases_normalize_function_parameters() {
+    let module = type_check(concat!(
+        "type Callable Arg Result = alias Arg -> Result\n",
+        "type Inputs = alias [I32, I32]\n",
+        "type Add = alias Callable Inputs I32\n",
+        "def add: Add = [x, y] => x + y\n",
+        "let answer: I32 = add 1 2\n",
+        "type One = alias [I32]\n",
+        "def increment: [value: One] -> I32 = [value] => value + 1\n",
+        "let plain: I32 -> I32 = increment\n",
+        "let bracketed: [I32] -> I32 = x => x + 1\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("aliases generate LLVM");
+}
+
+#[test]
+fn parameter_products_survive_nominal_type_arguments_and_specialization() {
+    let module = type_check(concat!(
+        "type Inputs = alias [I32, I32]\n",
+        "type Handler Args = ctor (callback: Args -> I32, label: String)\n",
+        "type Wrapped Args = ctor Args -> I32\n",
+        "type Tag P = ctor I32\n",
+        "def add: Inputs -> I32 = [x, y] => x + y\n",
+        "def identity: Handler Inputs -> Handler Inputs = h => h\n",
+        "let handler: Handler Inputs = Handler (callback: add, label: \"sum\")\n",
+        "let result: I32 = (identity handler).callback 1 2\n",
+        "let wrapped: Wrapped Inputs = Wrapped add\n",
+        "let tag: Tag Inputs = Tag 1\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("nominal parameter products specialize");
+}
+
+#[test]
+fn parameter_product_spreads_preserve_slots() {
+    let module = type_check(concat!(
+        "type Inputs = alias [I32, I32]\n",
+        "type More = alias [...Inputs, I32]\n",
+        "def add: More -> I32 = [a, b, c] => a + b + c\n",
+        "let result: I32 = add 1 2 3\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("spreads compile");
+}
+
+#[test]
+fn rejects_parameter_products_in_value_positions() {
+    for suffix in [
+        "let invalid: Inputs = 1\n",
+        "type Nested = alias (Inputs, Inputs) -> ()\n",
+        "type Payload = ctor Inputs\n",
+        "type Bad = alias (Inputs, I32)\nlet invalid: Bad = (1, 2)\n",
+        "def invalid: I32 -> Inputs = x => x\n",
+        "let invalid: Inputs | I32 = 1\n",
+        "def invalid: [Inputs, I32] -> I32 = [x, y] => y\n",
+        "let invalid: (...Inputs) = (1, 2)\n",
+        "def invalid: mut Inputs -> () = mut x => ()\n",
+        "type Box T = ctor (value: T)\nlet invalid: Box Inputs = Box 1\n",
+        "type Bad A = alias (A, I32)\nlet invalid: Bad Inputs = (1, 2)\n",
+    ] {
+        let source = format!("type Inputs = alias [I32, I32]\n{suffix}");
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&source))
+            .expect_err_diagnostics("parameter products are not values");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("parameter product")
+                    || d.message.contains("mark individual slots")),
+            "{source}\n{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn capable_generic_signatures_accept_juxtaposed_callbacks() {
+    let module = type_check(concat!(
+        "type Registry A = ctor (callback: A -> (), label: String)\n",
+        "def keep: <A> [Registry A, A -> ()] -> Registry A = [registry, callback] => registry\n",
+        "def add: [I32, I32] -> () = [a, b] => ()\n",
+        "let registry: Registry [I32, I32] = Registry (callback: add, label: \"sum\")\n",
+        "let result = keep registry add\n",
+        "result.callback 1 2\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("capable generics specialize");
+}
+
+#[test]
+fn capable_generic_bodies_cannot_call_unknown_arity_parameters() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            concat!("def bad: <A> (A -> ()) -> () = f => f 1\n",),
+        ))
+        .expect_err_diagnostics("unknown arity cannot be called");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("write `[A] -> R`")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn capable_generic_expected_types_and_forwarding_work() {
+    let module = type_check(concat!(
+        "def keep: <A> (A -> ()) -> A -> () = f => f\n",
+        "def forward: <A> (A -> ()) -> A -> () = f => keep f\n",
+        "def callback: [I32, I32] -> () = [a, b] => ()\n",
+        "let explicit: [I32, I32] -> () = keep callback\n",
+        "let inferred = forward callback\n",
+        "explicit 1 2\n",
+        "inferred 1 2\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("expected-type and forwarded generics specialize");
+}
+
+#[test]
+fn single_value_generic_signatures_reject_juxtaposed_callbacks() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def apply: <A, R> [A -> R, A] -> R = [f, a] => f a\n",
+            "def callback: [I32, I32] -> I32 = [a, b] => a + b\n",
+            "let invalid = apply callback 1\n",
+        )))
+        .expect_err_diagnostics("a value slot forbids a parameter product");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("`A` of `apply` requires a single value")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn companion_capability_is_decided_per_member() {
+    let prefix = concat!(
+        "type Handler A = ctor (callback: A -> I32, label: String)\n",
+        "companion<A> Handler A {\n",
+        " pub def get_callback: Handler A -> A -> I32 = handler => handler.callback\n",
+        " pub def evaluate: [Handler A, A] -> I32 = [handler, value] => handler.callback value\n",
+        "}\n",
+        "def sum: [I32, I32] -> I32 = [a, b] => a + b\n",
+        "let handler: Handler [I32, I32] = Handler (callback: sum, label: \"sum\")\n",
+    );
+    let module = type_check(&format!(
+        "{prefix}let callback = Handler.get_callback handler\nlet result: I32 = callback 1 2\n"
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("capable companion specializes");
+    let diagnostics = TypeChecker::new()
+        .check(resolve(&format!("{prefix}Handler.evaluate handler 1\n")))
+        .expect_err_diagnostics("the value-using member is single-value");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("requires a single value")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn parameter_product_template_spreads_and_markers_normalize_after_substitution() {
+    let module = type_check(concat!(
+        "type Expand Args Result = alias [...Args] -> Result\n",
+        "type Inputs = alias [I32, I32]\n",
+        "def sum: Expand Inputs I32 = [a, b] => a + b\n",
+        "let result: I32 = sum 1 2\n",
+        "type In T = alias [mut List T, move T]\n",
+        "def push: In I32 -> () = [mut list, move value] => list^push value\n",
+        "let mut list: List I32 = List.new ()\n",
+        "push list 1\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("spread templates and markers compile");
+}
+
+#[test]
+fn opaque_and_phantom_parameters_accept_parameter_products() {
+    type_check(concat!(
+        "use std.cinterop.CPointer\n",
+        "use std.coroutine.Task\n",
+        "type Inputs = alias [I32, I32]\n",
+        "type Handle Args = opaque\n",
+        "def pointer: CPointer Inputs -> CPointer Inputs = value => value\n",
+        "def task: move Task Inputs -> Task Inputs = move value => value\n",
+        "type Outer P = ctor (handle: Ref (Handle P))\n",
+        "extern \"c\" { foreign: Ref (Handle Inputs) -> Outer Inputs }\n",
+    ));
+}
+
+#[test]
+fn parameter_product_capability_comes_from_signatures_only() {
+    for source in [
+        "def bad: <A> A -> I32 = _ => 1\n",
+        "def bad: <A> (A -> ()) -> () = f => { let invalid: A = 1; () }\n",
+        "def takes: <A> ([A] -> ()) -> () = g => ()\ndef bad: <B> (B -> ()) -> () = f => takes f\n",
+        "def bad: <A> ([...A] -> ()) -> () = f => f 1\n",
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("the body cannot use a capable parameter as a value");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("may be a parameter product")
+                    || d.message.contains("requires a single value")),
+            "{source}\n{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn single_slot_parameter_products_collapse_names_and_markers() {
+    let module = type_check(concat!(
+        "type One = alias [named: I32]\n",
+        "def identity: One -> I32 = [x] => x\n",
+        "let plain: I32 -> I32 = identity\n",
+        "type Borrow = alias [mut List I32]\n",
+        "def append_one: Borrow -> () = [mut list] => list^push 1\n",
+        "let plain_push: mut List I32 -> () = append_one\n",
+        "type Owned = alias [move String]\n",
+        "def take: Owned -> String = [move value] => value\n",
+        "let plain_take: move String -> String = take\n",
+        "let mut list: List I32 = List.new ()\n",
+        "plain_push list\n",
+        "let result: I32 = plain 1\n",
+        "let owned: String = plain_take \"hello\"\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("one-slot functions compile with plain ABI");
+}
+
+#[test]
+fn parameter_product_spreads_validate_after_substitution() {
+    for argument in ["()", "I32"] {
+        let source = format!(
+            "type Expand A = alias [...A] -> ()\ndef invalid: Expand {argument} = () => ()\n"
+        );
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&source))
+            .expect_err_diagnostics("a spread needs a nonempty product");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("at least one slot")
+                    || d.message.contains("cannot spread non-product")),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn parameter_products_pass_through_generic_impl_headers() {
+    let module = type_check(concat!(
+        "type Handler A = ctor (callback: A -> (), label: String)\n",
+        "trait Inspect T { inspect: T -> () }\n",
+        "impl<A> Inspect (Handler A) { inspect = handler => () }\n",
+        "def callback: [I32, I32] -> () = [a, b] => ()\n",
+        "let handler: Handler [I32, I32] = Handler (callback: callback, label: \"sum\")\n",
+        "Inspect.inspect handler\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("a capable impl specializes its header and members together");
+}
+
+#[test]
+fn parameter_products_are_rejected_by_map_and_trait_bounds() {
+    for source in [
+        concat!(
+            "def map: <T, U> [List T, T -> U] -> List U = [list, f] => List.new ()\n",
+            "def callback: [I32, I32] -> I32 = [a, b] => a + b\n",
+            "let list: List I32 = List.new ()\n",
+            "map list callback\n",
+        ),
+        concat!(
+            "def bounded: <A where Copy A> (A -> ()) -> () = f => ()\n",
+            "def callback: [I32, I32] -> () = [a, b] => ()\n",
+            "bounded callback\n",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("the signature requires a single value");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("requires a single value")),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn parameter_product_placement_errors_are_reported_once() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Inputs = alias [I32, I32]\n",
+            "type M A = alias mut A -> ()\n",
+            "def f: M Inputs = [a, b] => ()\n",
+        )))
+        .expect_err_diagnostics("a mutable alias parameter is single-value");
+    let matching = diagnostics
+        .iter()
+        .filter(|d| d.message.contains("cannot instantiate `A` of `M`"))
+        .count();
+    assert_eq!(matching, 1, "{diagnostics:?}");
 }

@@ -2539,10 +2539,6 @@ pub(crate) struct LoweredSymbol {
     pub singleton: Option<TypeId>,
     pub intrinsic: Option<crate::IntrinsicFunction>,
     pub external: bool,
-    /// The resolver assigned the symbol to an arity-overload set, so the
-    /// backend disambiguates its emitted name (external names get an arity
-    /// suffix, module globals get an overload suffix).
-    pub overloaded: bool,
     /// The symbol is declared at module scope, so a signal or derived symbol
     /// lives in a module global rather than a binding cell.
     pub module_symbol: bool,
@@ -3137,7 +3133,6 @@ impl LoweredProgram {
             singleton,
             intrinsic,
             external,
-            overloaded: resolved.symbol_is_overloaded(symbol),
             module_symbol,
             has_global,
             global_root,
@@ -14897,12 +14892,11 @@ mod tests {
     }
 
     #[test]
-    fn symbols_record_global_names_roots_and_arity_overloads() {
+    fn symbols_record_global_names_and_roots() {
         let program = snapshot(concat!(
             "let managed: Ref I32 = Ref 0\n",
             "let plain = 1\n",
             "def pick: () -> I32 = () => 1\n",
-            "def pick: I32 * I32 -> I32 = left * right => left\n",
         ));
         let symbol_named = |name: &str| {
             program
@@ -14923,9 +14917,8 @@ mod tests {
         assert!(plain.has_global && !plain.global_root);
 
         let picks = symbol_named("pick");
-        assert_eq!(picks.len(), 2, "both arity overloads lower");
+        assert_eq!(picks.len(), 1);
         for (_, pick) in &picks {
-            assert!(pick.overloaded, "an overload-set member is recorded");
             assert!(pick.has_global && pick.name == "pick");
         }
         assert!(
@@ -16810,7 +16803,7 @@ mod tests {
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = value => value\n",
-            "let juxtaposed: x: I32 * y: I32 -> I32 = x * y => x + y\n",
+            "let juxtaposed: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
             "type TestBox = ctor (value: I32)\n",
             "def sum_product: (I32, I32) -> I32 = pair => {\n",
             "  let mut total: I32 = 0\n",
@@ -17729,7 +17722,7 @@ mod tests {
     fn step4_fixture() -> &'static str {
         concat!(
             "use std.core.reference.(Ref)\n",
-            "let pair_add: x: I32 * y: I32 -> I32 = x * y => x + y\n",
+            "let pair_add: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
             "def defaulted: (String, x: I32 = 0, y: I32 = 0) -> I32 = (value, x, y) => x + y\n",
             "def juxtaposed_samples: () -> I32 = () => {\n",
             "  let chained: I32 = pair_add 1 2\n",
@@ -18233,7 +18226,7 @@ mod tests {
             "trait TestShow T { test_show: T -> Bool }\n",
             "impl TestShow I32 { test_show = _ => True }\n",
             "def generic_identity: <T where Copy T> T -> T = value => value\n",
-            "let pair_add: x: I32 * y: I32 -> I32 = x * y => x + y\n",
+            "let pair_add: [x: I32, y: I32] -> I32 = [x, y] => x + y\n",
             "def trait_sample: () -> Bool = () => test_show 1\n",
             "def transition_samples: () -> I32 = () => {\n",
             "  let closure = (value: I32) => value\n",

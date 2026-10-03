@@ -140,7 +140,30 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 87] = [
+static CORPUS: [CorpusProgram; 88] = [
+    expect_stdout(
+        must_run(inline(
+            "parameter_products",
+            concat!(
+                "use std.io.println\n",
+                "type Inputs = alias [I32, I32]\n",
+                "type Callable Args Result = alias Args -> Result\n",
+                "type Add = alias Callable Inputs I32\n",
+                "type Handler Args = ctor (callback: Args -> I32, label: String)\n",
+                "def add: Add = [a, b] => a + b\n",
+                "def keep: <A> [Handler A, A -> I32] -> Handler A = [handler, callback] => Handler (callback: callback, label: handler.label)\n",
+                "def forward: <A> (A -> I32) -> A -> I32 = f => f\n",
+                "let handler: Handler Inputs = Handler (callback: add, label: \"sum\")\n",
+                "let kept = keep handler add\n",
+                "let callback: Inputs -> I32 = forward add\n",
+                "println \"${add 1 2}\"\n",
+                "println \"${kept.callback 3 4}\"\n",
+                "println \"${callback 5 6}\"\n",
+            ),
+            "parameter-products",
+        )),
+        "3\n7\n11\n",
+    ),
     expect_stdout(must_run(inline("empty", "", "core")), ""),
     expect_stdout(
         must_run(inline(
@@ -242,7 +265,7 @@ static CORPUS: [CorpusProgram; 87] = [
             "let signal flag = 0\n",
             "def task: () -> Coroutine{} I32 = () => coro { 1 }\n",
             "def owning: move CString -> Coroutine{} I32 = move value => coro { inspect value; 1 }\n",
-            "def peek: <T> T -> I32 = _ => 1\n",
+            "def peek: <T> [T] -> I32 = _ => 1\n",
             "def generic: <T where Copy T> T -> Coroutine{} I32 = value => coro { peek value; 1 }\n",
             "def waiting: () -> Coroutine{Reactive} () = () => coro {\n",
             "  let _ = await (until { flag >= 1 })\n",
@@ -1412,7 +1435,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
                     "let signal count = 0\n",
-                    "def peek: <T> T -> I32 = _ => 0\n",
+                    "def peek: <T> [T] -> I32 = _ => 0\n",
                     "def generic_until: <T where Copy T, Debug T> T -> Coroutine{Reactive, IO} () =\n",
                     "  value => coro {\n",
                     "    let _ = await (until { count + peek value > 0 })\n",
@@ -1440,7 +1463,7 @@ let value = at (Ref (1, 2), (5 satisfies USize))
                     "use std.coroutine.*\n",
                     "use std.io.(IO, println)\n",
                     "let signal count = 0\n",
-                    "def peek: <T> T -> I32 = _ => 0\n",
+                    "def peek: <T> [T] -> I32 = _ => 0\n",
                     "def generic_derived: <T where Copy T, Debug T> T ->{state.read, IO} I32 =\n",
                     "  value => {\n",
                     "    let local = count + peek value\n",

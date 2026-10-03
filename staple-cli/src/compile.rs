@@ -1006,7 +1006,7 @@ mod tests {
             "declaration-splices",
             concat!(
                 "use std.syntax.(parse_quote, Ident, Type, Item)\n",
-                "macro make_alias: Ident String * Type -> Item = name * ty => parse_quote { type $name = alias $ty }\n",
+                "macro make_alias: [Ident String, Type] -> Item = [name, ty] => parse_quote { type $name = alias $ty }\n",
                 "make_alias Generated I32\n",
             ),
         );
