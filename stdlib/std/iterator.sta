@@ -6,7 +6,7 @@ companion IterStep {
 }
 
 /// One step of an iterator: either completion or an item and next iterator.
-pub type IterStep (Iter, Item) = alias
+pub type IterStep (Iter, Item) = pub from
     IterStep.Done Iter |
     IterStep.Yield (Item, Iter)
 

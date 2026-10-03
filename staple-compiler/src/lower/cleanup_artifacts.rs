@@ -2619,30 +2619,35 @@ mod tests {
             name: "Owned".to_string(),
             arguments: Vec::new(),
             representation: Box::new(CheckedType::CString),
+            introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
         let cell_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "CellValue"),
             name: "CellValue".to_string(),
             arguments: Vec::new(),
             representation: Box::new(CheckedType::CString),
+            introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
         let borrowed_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "BorrowedValue"),
             name: "BorrowedValue".to_string(),
             arguments: Vec::new(),
             representation: Box::new(CheckedType::CString),
+            introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
         let derived_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "DerivedValue"),
             name: "DerivedValue".to_string(),
             arguments: Vec::new(),
             representation: Box::new(CheckedType::CString),
+            introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
         let wrapped_capture = CheckedType::Wrapper {
             id: nominal_type_id(&program, "Wrapped"),
             name: "Wrapped".to_string(),
             arguments: Vec::new(),
             representation: Box::new(CheckedType::CString),
+            introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
 
         let owned_closure = closure_instance_capturing(&program, &owned_capture);

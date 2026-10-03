@@ -1094,6 +1094,62 @@ fn parses_type_declaration_bodies_into_structured_type_bodies() {
 }
 
 #[test]
+fn parses_from_type_bodies_with_representation_visibility() {
+    let source = concat!(
+        "type Meters = from F64\n",
+        "pub type Name = pub from String\n",
+        "pub type Id = pub(package) from I64\n",
+        "type Wrapped T = from (value: T)\n",
+    );
+    let root = parse(source).expect("from bodies should parse");
+    assert_eq!(root.text(), source);
+    let declarations = root
+        .items
+        .iter()
+        .map(|item| match item {
+            Item::TypeDeclaration(declaration) => declaration,
+            _ => panic!("expected type declaration"),
+        })
+        .collect::<Vec<_>>();
+    for declaration in &declarations {
+        assert_eq!(declaration.kind(), TypeDeclarationKind::From);
+        assert!(declaration.kind().is_wrapper());
+        let body = declaration.body.as_ref().expect("from body");
+        assert_eq!(body.kind, TypeBodyKind::From);
+        assert_eq!(body.marker_syntax.text().trim(), "from");
+        assert!(body.underlying.is_some());
+    }
+    assert_eq!(
+        declarations[0].representation_visibility(),
+        Visibility::Private
+    );
+    assert_eq!(
+        declarations[1].representation_visibility(),
+        Visibility::Public
+    );
+    assert_eq!(
+        declarations[2].representation_visibility(),
+        Visibility::Package
+    );
+    assert_eq!(declarations[3].type_parameters.len(), 1);
+
+    assert!(parse("type Bad = pub from\n").is_err());
+    assert!(parse("type Bad = pub(package) alias I32\n").is_err());
+}
+
+#[test]
+fn treats_from_as_a_contextual_marker() {
+    let source = "type from = from I32\nlet from = 1\n";
+    let root = parse(source).expect("`from` should remain an identifier");
+    assert_eq!(root.text(), source);
+    let Item::TypeDeclaration(declaration) = &root.items[0] else {
+        panic!("expected type declaration");
+    };
+    assert_eq!(declaration.name, "from");
+    assert_eq!(declaration.kind(), TypeDeclarationKind::From);
+}
+
+#[test]
 fn parses_bodyless_types_as_singletons() {
     let root = parse("pub type Foo\n").expect("singleton type should parse");
     assert!(matches!(

@@ -493,7 +493,7 @@ fn dotted_import_combines_a_type_with_its_companion() {
     let fixture = Fixture::new();
     fixture.write(
         "library.sta",
-        "pub type User = alias I32\ncompanion User { pub let id: I32 = 42 }\n",
+        "pub type User = from I32\ncompanion User { pub let id: I32 = 42 }\n",
     );
     fixture.write(
         "main.sta",
@@ -508,7 +508,7 @@ fn dotted_import_combines_a_type_with_its_companion() {
 #[test]
 fn discovers_companions_in_otherwise_unreachable_files() {
     let fixture = Fixture::new();
-    fixture.write("animals.sta", "pub type Animal = alias I32\n");
+    fixture.write("animals.sta", "pub type Animal = from I32\n");
     fixture.write(
         "animal_extensions.sta",
         "companion Animal { pub def move_to: Animal -> Animal = animal => animal }\n",
@@ -543,7 +543,7 @@ fn dotted_import_preserves_a_reexported_type_and_companion_pair() {
     let fixture = Fixture::new();
     fixture.write(
         "library.sta",
-        "pub type User = alias I32\ncompanion User { pub let id: I32 = 42 }\n",
+        "pub type User = from I32\ncompanion User { pub let id: I32 = 42 }\n",
     );
     fixture.write("facade.sta", "pub use library.User\n");
     fixture.write(
@@ -2862,4 +2862,113 @@ fn resolves_package_visible_modifiers_through_imports_and_qualified_names() {
         .check(resolved)
         .map_err(format_diagnostics)
         .expect("modifier outputs should type-check");
+}
+
+#[test]
+fn from_types_introduce_publicly_but_project_by_representation_visibility() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "units.sta",
+        concat!(
+            "pub type Meters = from F64\n",
+            "pub type Label = pub from String\n",
+            "pub type Pair = from (I32, I32)\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use units.*\n",
+            "let distance: Meters = 1.5\n",
+            "let explicit = Meters 2.5\n",
+            "let label: Label = \"route\"\n",
+            "let text: String = label.*\n",
+            "let pair: Pair = (1, 2)\n",
+        ),
+    );
+    fixture
+        .compile()
+        .expect("a public `from` type introduces its source everywhere");
+
+    for (source, reason) in [
+        (
+            "use units.*\nlet distance: Meters = 1.5\nlet raw: F64 = distance.*\n",
+            "a private `from` representation cannot be projected",
+        ),
+        (
+            "use units.*\nlet pair: Pair = (1, 2)\nlet first = pair[0]\n",
+            "a private `from` representation cannot be indexed",
+        ),
+        (
+            "use units.*\ndef first: Pair -> I32 = pair => match pair {\n    (left, _) => left,\n}\n",
+            "a private `from` representation cannot be matched",
+        ),
+    ] {
+        fixture.write("main.sta", source);
+        let error = fixture.compile().expect_err(reason);
+        assert!(
+            error.contains("is private") || error.contains("no `Index` implementation"),
+            "{reason}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_public_from_types_over_private_sources() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "type Hidden = wrap I32\n",
+            "pub type Exposed = from Hidden\n",
+        ),
+    );
+    let error = fixture
+        .compile()
+        .expect_err("a public introduction must not name a private source");
+    assert!(error.contains("public `from` source references private type `Hidden`"));
+}
+
+#[test]
+fn package_from_representation_is_projected_locally_but_not_by_a_dependency() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "app/src/main.sta",
+        "let shared: lib.Shared = 42\nlet raw: I32 = shared.*\n",
+    );
+    fixture.write(
+        "lib/src/root.sta",
+        "pub type Shared = pub(package) from I32\nlet local: Shared = 1\nlet raw: I32 = local.*\n",
+    );
+    fs::write(
+        fixture.root.join("app/staple.kdl"),
+        "package \"app\" { dependencies { lib path=\"../lib\" } }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("lib/staple.kdl"),
+        "package \"lib\" { kind \"library\" }\n",
+    )
+    .unwrap();
+    let graph = staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
+        .with_package_graph(graph)
+        .load_package_graph()
+        .unwrap();
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .unwrap_or_else(|diagnostics| panic!("{}", format_diagnostics(diagnostics)));
+    let Err(error) = TypeChecker::new().check(resolved) else {
+        panic!("a dependency must not project a package representation");
+    };
+    let message = format_diagnostics(error);
+    assert!(message.contains("main.sta"), "{message}");
+    assert!(message.contains("is private"), "{message}");
+    assert!(!message.contains("root.sta"), "{message}");
 }

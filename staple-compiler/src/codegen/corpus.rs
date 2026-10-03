@@ -140,7 +140,49 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 88] = [
+static CORPUS: [CorpusProgram; 89] = [
+    expect_stdout(
+        must_run(inline(
+            "from_types",
+            concat!(
+                "use std.io.println\n",
+                "type Meters = from F64\n",
+                "type Label = from String\n",
+                "type Triple = from (I32, I32, I32)\n",
+                "type Other\n",
+                "def show: Meters -> F64 = meters => meters.*\n",
+                "def kind: Meters | Other -> String = value => match value {\n",
+                "    meters: Meters => \"meters ${meters.*}\",\n",
+                "    _: Other => \"other\",\n",
+                "}\n",
+                "def describe: Bool | I32 -> String = value => match value {\n",
+                "    True => \"yes\",\n",
+                "    False => \"no\",\n",
+                "    number: I32 => \"${number}\",\n",
+                "}\n",
+                "def bump: Option I32 -> Option I32 = value => {\n",
+                "    let Some(number)? = value\n",
+                "    Some (number + 1)\n",
+                "}\n",
+                "def unwrap: Option I32 -> I32 = value => match value {\n",
+                "    Some number => number,\n",
+                "    None => 0,\n",
+                "}\n",
+                "def run = () => {\n",
+                "    let distance = 2.5\n",
+                "    let label: Label = \"route\"\n",
+                "    let mut triple: Triple = (1, 2, 3)\n",
+                "    triple[1] = 20\n",
+                "    println \"${show 1.5} ${show distance} ${label.*}\"\n",
+                "    println \"${kind 4.0} ${describe True} ${describe 7}\"\n",
+                "    println \"${unwrap (bump (Some 4))} ${unwrap (bump None)} ${triple[1]}\"\n",
+                "}\n",
+                "run ()\n",
+            ),
+            "types",
+        )),
+        "1.5 2.5 route\nmeters 4 yes 7\n5 0 20\n",
+    ),
     expect_stdout(
         must_run(inline(
             "parameter_products",

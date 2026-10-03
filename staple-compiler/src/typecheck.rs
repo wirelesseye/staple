@@ -51,9 +51,12 @@ fn place_expression_name(expression: &Expression) -> String {
     }
 }
 
+/// The companion-owning type a source type names; aliases are transparent.
 fn source_type_id(module: &ResolvedModule, ty: &Type) -> Option<TypeId> {
     match ty {
-        Type::Named(named) => module.type_for(named.syntax.id),
+        Type::Named(named) => module
+            .type_for(named.syntax.id)
+            .and_then(|id| module.companion_owner(id)),
         Type::Application(application) => source_type_id(module, &application.callee),
         _ => None,
     }
@@ -264,7 +267,29 @@ pub enum CheckedType {
         name: String,
         arguments: Vec<CheckedType>,
         representation: Box<CheckedType>,
+        introduction: WrapperIntroduction,
     },
+}
+
+/// How values of a nominal wrapper type are introduced from its
+/// representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WrapperIntroduction {
+    /// `wrap`: only an explicit constructor call introduces the wrapper.
+    Explicit,
+    /// `from`: a value checkable as the representation is also wrapped
+    /// implicitly wherever the wrapper is the expected type.
+    Implicit,
+}
+
+impl WrapperIntroduction {
+    fn of(kind: TypeDeclarationKind) -> Self {
+        if kind == TypeDeclarationKind::From {
+            Self::Implicit
+        } else {
+            Self::Explicit
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,6 +379,7 @@ fn compact_type_template(value_type: CheckedType) -> CheckedType {
             name,
             arguments,
             representation,
+            ..
         } => CheckedType::Opaque {
             sized: representation.is_sized(),
             id,
@@ -1260,6 +1286,7 @@ pub struct TypedModule {
     logicals: HashMap<SyntaxId, CheckedLogical>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
+    pattern_projections: HashMap<SyntaxId, TypeId>,
     string_formatting: CheckedStringFormatting,
     string_representation: Option<CheckedType>,
     ownership: crate::ownership::OwnershipInfo,
@@ -1551,6 +1578,13 @@ impl TypedModule {
 
     pub fn type_of_pattern(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
         self.pattern_types.get(&syntax_id)
+    }
+
+    /// The `from` type whose representation the pattern matches, as if
+    /// written inside that type's nominal pattern: the subject itself, or
+    /// the subject sum's alternative of that type.
+    pub(crate) fn pattern_projection(&self, syntax_id: SyntaxId) -> Option<TypeId> {
+        self.pattern_projections.get(&syntax_id).copied()
     }
 
     pub(crate) fn string_representation(&self) -> Option<&CheckedType> {
@@ -2058,6 +2092,9 @@ pub struct TypeChecker {
     logicals: HashMap<SyntaxId, CheckedLogical>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
+    /// Patterns matched against the representation of a `from` subject
+    /// rather than the subject itself.
+    pattern_projections: HashMap<SyntaxId, TypeId>,
     method_symbols: HashMap<SyntaxId, SymbolId>,
     symbol_companion_types: HashMap<SymbolId, TypeId>,
     function_result_companion_types: HashMap<FunctionId, TypeId>,
@@ -2335,6 +2372,7 @@ impl TypeChecker {
             logicals: self.logicals,
             accesses: self.accesses,
             pattern_types: self.pattern_types,
+            pattern_projections: self.pattern_projections,
             string_formatting: self.string_formatting,
             string_representation: self.string_representation,
             ownership: crate::ownership::OwnershipInfo::default(),
@@ -3618,8 +3656,8 @@ impl TypeChecker {
                     let result = self.symbol_types.get(symbol).and_then(|value| match value {
                         CheckedType::Function(function) => Some(function.result.as_ref().clone()),
                         _ => None,
-                    }).filter(|value| matches!(value,
-                        CheckedType::Sum(sum) if sum.alternatives.len() == 2
+                    }).filter(|value| sum_through_implicit_wrapper(value).is_some_and(|sum|
+                        sum.alternatives.len() == 2
                             && matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("True"))
                             && matches!(&sum.alternatives[1], CheckedType::Wrapper { name, .. } if name.ends_with("False"))
                     )).unwrap_or(CheckedType::Error);
@@ -3668,8 +3706,8 @@ impl TypeChecker {
                     let result = self.symbol_types.get(symbol).and_then(|value| match value {
                         CheckedType::Function(function) => Some(function.result.as_ref().clone()),
                         _ => None,
-                    }).filter(|value| matches!(value,
-                        CheckedType::Sum(sum) if sum.alternatives.len() == 2
+                    }).filter(|value| sum_through_implicit_wrapper(value).is_some_and(|sum|
+                        sum.alternatives.len() == 2
                             && matches!(&sum.alternatives[0], CheckedType::Wrapper { name, .. } if name.ends_with("True"))
                             && matches!(&sum.alternatives[1], CheckedType::Wrapper { name, .. } if name.ends_with("False"))
                     )).unwrap_or(CheckedType::Error);
@@ -5700,6 +5738,20 @@ impl TypeChecker {
         pattern: &Pattern,
         value_type: &CheckedType,
     ) {
+        match self.pattern_projection(module, pattern, value_type, false) {
+            Some(representation) => {
+                self.bind_unprojected_pattern_types(module, pattern, &representation)
+            }
+            None => self.bind_unprojected_pattern_types(module, pattern, value_type),
+        }
+    }
+
+    fn bind_unprojected_pattern_types(
+        &mut self,
+        module: &ResolvedModule,
+        pattern: &Pattern,
+        value_type: &CheckedType,
+    ) {
         self.pattern_types
             .insert(pattern.syntax().id, value_type.clone());
         match pattern {
@@ -5955,6 +6007,10 @@ impl TypeChecker {
                         );
                         partial[1] = position_type;
                         resolved = self.resolve_trait_obligation(trait_id, &partial);
+                    }
+                    if resolved.is_none() {
+                        resolved =
+                            self.project_index_target(module, trait_id, &index.value, &partial);
                     }
                     let Some(arguments) = resolved else {
                         self.diagnostics.push(Diagnostic::new(
@@ -6272,6 +6328,32 @@ impl TypeChecker {
         }
         let Pattern::Nominal(pattern) = root else {
             return;
+        };
+        // A `from` value propagates through its sum representation when that
+        // representation is visible here.
+        let projected;
+        let value_type = match value_type {
+            CheckedType::Wrapper {
+                id,
+                name,
+                representation,
+                introduction: WrapperIntroduction::Implicit,
+                ..
+            } if module.type_for_pattern(pattern.syntax.id) != Some(*id) => {
+                let current_module = module
+                    .module_for_syntax(pattern.syntax.id)
+                    .unwrap_or_else(|| module.program().entry());
+                if !module.representation_visible_from(*id, current_module) {
+                    self.diagnostics.push(Diagnostic::new(
+                        pattern.syntax.span.clone(),
+                        format!("the representation of `{name}` is private"),
+                    ));
+                    return;
+                }
+                projected = representation.as_ref().clone();
+                &projected
+            }
+            _ => value_type,
         };
         // The nominal root of a propagating binding is a runtime pattern;
         // record its checked source type for lowering.
@@ -8513,6 +8595,7 @@ impl TypeChecker {
                     }
                     if let Some(expected_result) = expected
                         && !matches!(expected_result, CheckedType::Sum(_))
+                        && implicit_wrapper_representation(expected_result).is_none()
                         && !matches!(expected_result, CheckedType::Slice(_))
                         && !checked_type_contains_slice(&raw_callee_type)
                     {
@@ -8819,6 +8902,9 @@ impl TypeChecker {
                     partial[1] = position_type;
                     resolved = self.resolve_trait_obligation(trait_id, &partial);
                 }
+                if resolved.is_none() {
+                    resolved = self.project_index_target(module, trait_id, &index.value, &partial);
+                }
                 let Some(arguments) = resolved else {
                     self.diagnostics.push(Diagnostic::new(
                         index.syntax.span.clone(),
@@ -8918,7 +9004,10 @@ impl TypeChecker {
                         return CheckedType::Error;
                     }
                 };
-                if expected.is_some_and(|expected| literal_is_admitted(expected, &decoded)) {
+                if expected
+                    .map(literal_expectation)
+                    .is_some_and(|expected| literal_is_admitted(expected, &decoded))
+                {
                     CheckedType::StringLiteralSet(vec![decoded])
                 } else {
                     CheckedType::String
@@ -8996,6 +9085,7 @@ impl TypeChecker {
                     CheckedType::NumberLiteral(value)
                 } else {
                     let integer_type = expected
+                        .map(literal_expectation)
                         .and_then(CheckedType::integer_type)
                         .unwrap_or(IntegerType::I32);
                     if let Some(width) = integer_type.fixed_width()
@@ -9022,6 +9112,7 @@ impl TypeChecker {
             }
             Expression::Float(float) => {
                 let float_type = expected
+                    .map(literal_expectation)
                     .and_then(CheckedType::float_type)
                     .unwrap_or(FloatType::F64);
                 let valid = match float_type {
@@ -9070,6 +9161,44 @@ impl TypeChecker {
             },
         );
         bool_type
+    }
+
+    /// Indexing a represented wrapper without its own `Index`/`MutateIndex`
+    /// implementation indexes its representation, one layer, where that
+    /// representation is visible: `a[i]` means `a.*[i]`. This is a shortcut
+    /// like `a.field`, not a derived implementation, so the wrapper never
+    /// satisfies an indexing bound. The projection is recorded as a
+    /// wrapper-to-representation coercion on the indexed value.
+    fn project_index_target(
+        &mut self,
+        module: &ResolvedModule,
+        trait_id: TraitId,
+        value: &Expression,
+        partial: &[CheckedType],
+    ) -> Option<Vec<CheckedType>> {
+        let CheckedType::Wrapper {
+            id, representation, ..
+        } = &partial[0]
+        else {
+            return None;
+        };
+        let current_module = module
+            .module_for_syntax(value.syntax().id)
+            .unwrap_or_else(|| module.program().entry());
+        if !module.representation_visible_from(*id, current_module) {
+            return None;
+        }
+        let mut projected = partial.to_vec();
+        projected[0] = representation.as_ref().clone();
+        let arguments = self.resolve_trait_obligation(trait_id, &projected)?;
+        self.expression_coercions.insert(
+            value.syntax().id,
+            CheckedCoercion {
+                source: partial[0].clone(),
+                target: projected[0].clone(),
+            },
+        );
+        Some(arguments)
     }
 
     fn check_match_expression(
@@ -9378,18 +9507,184 @@ impl TypeChecker {
                     name: "Completed".to_owned(),
                     arguments: vec![result.clone()],
                     representation: Box::new(result),
+                    introduction: WrapperIntroduction::Explicit,
                 },
                 CheckedType::Wrapper {
                     id: cancelled,
                     name: "Cancelled".to_owned(),
                     arguments: Vec::new(),
                     representation: Box::new(CheckedType::empty_product()),
+                    introduction: WrapperIntroduction::Explicit,
                 },
             ],
         }))
     }
 
+    /// Decides whether `pattern` sees through one `from` type to its
+    /// representation: either the subject itself, when the pattern selects
+    /// something other than that type, or the unique `from` alternative of
+    /// a subject sum whose representation the pattern selects from when the
+    /// sum itself offers no alternative. Only one layer is unwrapped. Records
+    /// the projection and returns the type the pattern is then checked
+    /// against; a hidden representation is reported and projects to `Error`.
+    /// Typed bindings select by type only in a match, where `refutable` is
+    /// set.
+    fn pattern_projection(
+        &mut self,
+        module: &ResolvedModule,
+        pattern: &Pattern,
+        value_type: &CheckedType,
+        refutable: bool,
+    ) -> Option<CheckedType> {
+        let target = match value_type {
+            CheckedType::Wrapper {
+                introduction: WrapperIntroduction::Implicit,
+                ..
+            } => (!self.pattern_selects_within(module, pattern, value_type, refutable)
+                && !matches!(pattern, Pattern::At(_) | Pattern::Splice(_))
+                && !matches!(pattern, Pattern::Product(product) if product.elements.len() == 1)
+                && !matches!(pattern, Pattern::Binding(binding)
+                    if module.type_for_pattern(binding.syntax.id).is_none()
+                        && (!refutable || matches!(binding.ty, Type::Inferred(_))))
+                && !matches!(pattern, Pattern::Wildcard(wildcard)
+                    if !refutable || matches!(wildcard.ty, Type::Inferred(_))))
+            .then_some(value_type),
+            CheckedType::Sum(sum)
+                if refutable
+                    && !self.pattern_selects_within(module, pattern, value_type, refutable) =>
+            {
+                let candidates = sum
+                    .alternatives
+                    .iter()
+                    .filter(|alternative| {
+                        implicit_wrapper_representation(alternative).is_some_and(|representation| {
+                            self.pattern_selects_within(module, pattern, representation, refutable)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                match candidates.as_slice() {
+                    [alternative] => Some(*alternative),
+                    [] => None,
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(
+                            pattern.syntax().span.clone(),
+                            format!(
+                                "pattern matches inside more than one alternative of `{value_type}`; use a typed pattern to disambiguate"
+                            ),
+                        ));
+                        return Some(CheckedType::Error);
+                    }
+                }
+            }
+            _ => None,
+        };
+        let Some(CheckedType::Wrapper {
+            id,
+            name,
+            representation,
+            ..
+        }) = target
+        else {
+            return None;
+        };
+        let current_module = module
+            .module_for_syntax(pattern.syntax().id)
+            .unwrap_or_else(|| module.program().entry());
+        if !module.representation_visible_from(*id, current_module) {
+            self.diagnostics.push(Diagnostic::new(
+                pattern.syntax().span.clone(),
+                format!("the representation of `{name}` is private"),
+            ));
+            return Some(CheckedType::Error);
+        }
+        self.pattern_projections.insert(pattern.syntax().id, *id);
+        Some(representation.as_ref().clone())
+    }
+
+    /// Whether a refutable pattern selects a value of `value_type` (or one
+    /// of its sum alternatives) directly, without seeing through a `from`
+    /// type. Bindings and wildcards without an annotation never select.
+    fn pattern_selects_within(
+        &mut self,
+        module: &ResolvedModule,
+        pattern: &Pattern,
+        value_type: &CheckedType,
+        refutable: bool,
+    ) -> bool {
+        let has_type = |value_type: &CheckedType, selected: &CheckedType| match value_type {
+            CheckedType::Sum(sum) => sum.alternatives.contains(selected),
+            other => other == selected,
+        };
+        let has_nominal = |value_type: &CheckedType, selected: TypeId| {
+            let is_selected =
+                |ty: &CheckedType| matches!(ty, CheckedType::Wrapper { id, .. } if *id == selected);
+            match value_type {
+                CheckedType::Sum(sum) => sum.alternatives.iter().any(is_selected),
+                other => is_selected(other),
+            }
+        };
+        match pattern {
+            Pattern::Binding(binding) => match module.type_for_pattern(binding.syntax.id) {
+                Some(selected) => has_nominal(value_type, selected),
+                None if refutable && !matches!(binding.ty, Type::Inferred(_)) => {
+                    let declared = self.resolve_source_type(module, &binding.ty);
+                    has_type(value_type, &declared)
+                }
+                None => false,
+            },
+            Pattern::Wildcard(wildcard)
+                if refutable && !matches!(wildcard.ty, Type::Inferred(_)) =>
+            {
+                let declared = self.resolve_source_type(module, &wildcard.ty);
+                has_type(value_type, &declared)
+            }
+            Pattern::Wildcard(_) => false,
+            Pattern::Nominal(nominal) => {
+                module
+                    .type_for_pattern(nominal.syntax.id)
+                    .is_some_and(|selected| {
+                        has_nominal(value_type, selected)
+                            || matches!(
+                                (module.builtin_type(selected), value_type),
+                                (Some(BuiltinType::String), CheckedType::String)
+                                    | (
+                                        Some(BuiltinType::Ref),
+                                        CheckedType::Ref(_) | CheckedType::Slice(_)
+                                    )
+                            )
+                    })
+            }
+            Pattern::Product(product) if product.elements.len() == 1 => {
+                self.pattern_selects_within(module, &product.elements[0], value_type, refutable)
+            }
+            Pattern::Product(_) => matches!(value_type, CheckedType::Product(_)),
+            Pattern::StringLiteral(literal) => {
+                staple_syntax::string_literal::decode(&literal.literal).is_ok_and(|value| {
+                    *value_type == CheckedType::String || literal_is_admitted(value_type, &value)
+                })
+            }
+            Pattern::At(at) => {
+                self.pattern_selects_within(module, &at.pattern, value_type, refutable)
+            }
+            Pattern::Splice(_) => false,
+        }
+    }
+
     fn check_match_pattern(
+        &mut self,
+        module: &ResolvedModule,
+        pattern: &Pattern,
+        value_type: &CheckedType,
+    ) {
+        match self.pattern_projection(module, pattern, value_type, true) {
+            Some(representation) => {
+                self.check_unprojected_match_pattern(module, pattern, &representation)
+            }
+            None => self.check_unprojected_match_pattern(module, pattern, value_type),
+        }
+    }
+
+    fn check_unprojected_match_pattern(
         &mut self,
         module: &ResolvedModule,
         pattern: &Pattern,
@@ -9626,7 +9921,21 @@ impl TypeChecker {
         let first = Self::canonical_coverage_pattern(candidate[0]);
         match &types[0] {
             CheckedType::Sum(sum) => {
+                let projected = match candidate[0] {
+                    CoveragePattern::Pattern(pattern) => {
+                        self.projected_coverage_pattern(pattern, &types[0])
+                    }
+                    CoveragePattern::Any => None,
+                };
                 let alternatives = match Self::structural_coverage_pattern(candidate[0]) {
+                    _ if let Some((_, projected_id)) = projected => sum
+                        .alternatives
+                        .iter()
+                        .position(|alternative| {
+                            matches!(alternative, CheckedType::Wrapper { id, .. } if *id == projected_id)
+                        })
+                        .into_iter()
+                        .collect(),
                     CoveragePattern::Pattern(Pattern::Binding(binding))
                         if module.type_for_pattern(binding.syntax.id).is_some() =>
                     {
@@ -9735,13 +10044,13 @@ impl TypeChecker {
                 id, representation, ..
             } => {
                 let Some(specialized_candidate) =
-                    Self::specialize_wrapper_row(module, candidate, *id)
+                    self.specialize_wrapper_row(module, candidate, *id, &types[0])
                 else {
                     return false;
                 };
                 let specialized_matrix = matrix
                     .iter()
-                    .filter_map(|row| Self::specialize_wrapper_row(module, row, *id))
+                    .filter_map(|row| self.specialize_wrapper_row(module, row, *id, &types[0]))
                     .collect::<Vec<_>>();
                 let mut specialized_types = vec![representation.as_ref().clone()];
                 specialized_types.extend_from_slice(&types[1..]);
@@ -9896,6 +10205,19 @@ impl TypeChecker {
         index: usize,
         sum: &CheckedSumType,
     ) -> Option<Vec<CoveragePattern<'a>>> {
+        let column = CheckedType::Sum(sum.clone());
+        if let CoveragePattern::Pattern(pattern) = row[0]
+            && let Some((projected, projected_id)) =
+                self.projected_coverage_pattern(pattern, &column)
+        {
+            if !matches!(&sum.alternatives[index], CheckedType::Wrapper { id, .. } if *id == projected_id)
+            {
+                return None;
+            }
+            let mut result = vec![CoveragePattern::Pattern(projected)];
+            result.extend_from_slice(&row[1..]);
+            return Some(result);
+        }
         let structural = Self::structural_coverage_pattern(row[0]);
         if let CoveragePattern::Pattern(Pattern::Binding(binding)) = structural
             && let Some(selected_id) = module.type_for_pattern(binding.syntax.id)
@@ -9978,10 +10300,19 @@ impl TypeChecker {
     }
 
     fn specialize_wrapper_row<'a>(
+        &self,
         module: &ResolvedModule,
         row: &[CoveragePattern<'a>],
         id: TypeId,
+        column: &CheckedType,
     ) -> Option<Vec<CoveragePattern<'a>>> {
+        if let CoveragePattern::Pattern(pattern) = row[0]
+            && let Some((projected, _)) = self.projected_coverage_pattern(pattern, column)
+        {
+            let mut result = vec![CoveragePattern::Pattern(projected)];
+            result.extend_from_slice(&row[1..]);
+            return Some(result);
+        }
         let structural = Self::structural_coverage_pattern(row[0]);
         if let CoveragePattern::Pattern(Pattern::Binding(binding)) = structural
             && let Some(selected_id) = module.type_for_pattern(binding.syntax.id)
@@ -10006,6 +10337,34 @@ impl TypeChecker {
         let mut result = vec![head];
         result.extend_from_slice(&row[1..]);
         Some(result)
+    }
+
+    /// The pattern, beneath any `@` bindings and parentheses, that was
+    /// checked against a `from` subject's representation.
+    ///
+    /// A projection applies only to a column of the `from` type itself or of
+    /// a sum containing it; the representation's own column sees the pattern
+    /// unprojected.
+    fn projected_coverage_pattern<'a>(
+        &self,
+        pattern: &'a Pattern,
+        column: &CheckedType,
+    ) -> Option<(&'a Pattern, TypeId)> {
+        if let Some(id) = self.pattern_projections.get(&pattern.syntax().id) {
+            let is_projected = |ty: &CheckedType| matches!(ty, CheckedType::Wrapper { id: wrapper, .. } if wrapper == id);
+            let applies = match column {
+                CheckedType::Sum(sum) => sum.alternatives.iter().any(is_projected),
+                other => is_projected(other),
+            };
+            return applies.then_some((pattern, *id));
+        }
+        match pattern {
+            Pattern::At(at) => self.projected_coverage_pattern(&at.pattern, column),
+            Pattern::Product(product) if product.elements.len() == 1 => {
+                self.projected_coverage_pattern(&product.elements[0], column)
+            }
+            _ => None,
+        }
     }
 
     fn specialize_ref_row<'a>(
@@ -10118,7 +10477,11 @@ impl TypeChecker {
             (CheckedType::Ref(_), CheckedType::Slice(_)) => {
                 slice_ref_coercion_is_valid(&actual, expected)
             }
-            _ => false,
+            (actual, expected) => {
+                implicit_wrapper_representation(expected).is_some_and(|representation| {
+                    can_coerce_type_with(actual, representation, FromCoercion::Forbidden)
+                })
+            }
         };
         if allowed {
             self.expression_coercions.insert(
@@ -11861,6 +12224,7 @@ impl TypeChecker {
                 name: display_name.to_owned(),
                 arguments: arguments.to_vec(),
             }),
+            introduction: WrapperIntroduction::Explicit,
         })
     }
 
@@ -11981,6 +12345,7 @@ impl TypeChecker {
                 name: display_name,
                 arguments,
                 representation: Box::new(CheckedType::empty_product()),
+                introduction: WrapperIntroduction::Explicit,
             };
         }
         if !self.resolving_named_types.insert(id) {
@@ -12036,7 +12401,7 @@ impl TypeChecker {
             declaration.kind() == TypeDeclarationKind::Alias,
             declaration.syntax.span.clone(),
         );
-        if declaration.kind() == TypeDeclarationKind::Wrapper && !representation.is_sized() {
+        if declaration.kind().is_wrapper() && !representation.is_sized() {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
                 "wrapper type representations must be sized",
@@ -12045,12 +12410,15 @@ impl TypeChecker {
         }
         match declaration.kind() {
             TypeDeclarationKind::Alias => representation,
-            TypeDeclarationKind::Wrapper => CheckedType::Wrapper {
-                id,
-                name: display_name,
-                arguments,
-                representation: Box::new(representation),
-            },
+            kind @ (TypeDeclarationKind::Wrapper | TypeDeclarationKind::From) => {
+                CheckedType::Wrapper {
+                    id,
+                    name: display_name,
+                    arguments,
+                    representation: Box::new(representation),
+                    introduction: WrapperIntroduction::of(kind),
+                }
+            }
             TypeDeclarationKind::Singleton => unreachable!(),
             TypeDeclarationKind::Opaque => unreachable!(),
         }
@@ -12511,6 +12879,7 @@ impl TypeChecker {
                     name: "Cancelled".to_owned(),
                     arguments: Vec::new(),
                     representation: Box::new(CheckedType::empty_product()),
+                    introduction: WrapperIntroduction::Explicit,
                 },
                 BuiltinType::Syntax => {
                     let declaration = &self.type_declarations[&id];
@@ -12559,6 +12928,7 @@ impl TypeChecker {
                 name: display_name,
                 arguments: Vec::new(),
                 representation: Box::new(CheckedType::empty_product()),
+                introduction: WrapperIntroduction::Explicit,
             };
             self.resolved_named_types.insert(id, value_type.clone());
             return value_type;
@@ -12584,7 +12954,7 @@ impl TypeChecker {
         );
         self.recursive_construction_depth = outer_recursive_depth;
         self.resolving_named_types.remove(&id);
-        if declaration.kind() == TypeDeclarationKind::Wrapper && !representation.is_sized() {
+        if declaration.kind().is_wrapper() && !representation.is_sized() {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
                 "wrapper type representations must be sized",
@@ -12593,12 +12963,15 @@ impl TypeChecker {
         }
         let value_type = match declaration.kind() {
             TypeDeclarationKind::Alias => representation,
-            TypeDeclarationKind::Wrapper => CheckedType::Wrapper {
-                id,
-                name: display_name,
-                arguments: Vec::new(),
-                representation: Box::new(representation),
-            },
+            kind @ (TypeDeclarationKind::Wrapper | TypeDeclarationKind::From) => {
+                CheckedType::Wrapper {
+                    id,
+                    name: display_name,
+                    arguments: Vec::new(),
+                    representation: Box::new(representation),
+                    introduction: WrapperIntroduction::of(kind),
+                }
+            }
             TypeDeclarationKind::Singleton => unreachable!(),
             TypeDeclarationKind::Opaque => unreachable!(),
         };
@@ -12883,12 +13256,14 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
                 name: actual_name,
                 arguments: actual_arguments,
                 representation: actual_representation,
+                introduction,
             },
             CheckedType::Wrapper {
                 id: expected_id,
                 name: _,
                 arguments: expected_arguments,
                 representation: expected_representation,
+                ..
             },
         ) if actual_id == expected_id && actual_arguments.len() == expected_arguments.len() => {
             let actual_inferred = actual_arguments.iter().any(contains_inferred_type);
@@ -12901,6 +13276,7 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
             Some(CheckedType::Wrapper {
                 id: actual_id,
                 name: actual_name,
+                introduction,
                 arguments,
                 representation: if expected_inferred && actual_representation.is_fully_known() {
                     actual_representation
@@ -12944,18 +13320,56 @@ fn reconcile_wrapper_representation(
 }
 
 fn can_coerce_type(actual: &CheckedType, expected: &CheckedType) -> bool {
+    can_coerce_type_with(actual, expected, FromCoercion::Allowed)
+}
+
+/// Whether an implicit `from` introduction may still be applied while
+/// checking a coercion. At most one is inserted per mismatch, so checking a
+/// value against a `from` type's representation forbids another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FromCoercion {
+    Allowed,
+    Forbidden,
+}
+
+/// A sum type, seen through at most one implicitly introduced (`from`)
+/// wrapper, such as the standard library's `Bool` and `Option T`.
+pub(crate) fn sum_through_implicit_wrapper(value_type: &CheckedType) -> Option<&CheckedSumType> {
+    match implicit_wrapper_representation(value_type).unwrap_or(value_type) {
+        CheckedType::Sum(sum) => Some(sum),
+        _ => None,
+    }
+}
+
+/// The representation of an implicitly introduced (`from`) wrapper type.
+pub(crate) fn implicit_wrapper_representation(value_type: &CheckedType) -> Option<&CheckedType> {
+    match value_type {
+        CheckedType::Wrapper {
+            representation,
+            introduction: WrapperIntroduction::Implicit,
+            ..
+        } => Some(representation),
+        _ => None,
+    }
+}
+
+pub(crate) fn can_coerce_type_with(
+    actual: &CheckedType,
+    expected: &CheckedType,
+    from: FromCoercion,
+) -> bool {
     if merge_types(actual.clone(), expected.clone()).is_some() {
         return true;
     }
     match (actual, expected) {
         (actual, CheckedType::Sum(sum)) if !matches!(actual, CheckedType::Sum(_)) => matches!(
-            select_sum_alternative(actual, &sum.alternatives),
+            select_sum_alternative_with(actual, &sum.alternatives, from),
             Ok(Some(_))
         ),
         (CheckedType::Sum(actual), CheckedType::Sum(expected)) => {
             actual.alternatives.iter().all(|actual| {
                 matches!(
-                    select_sum_alternative(actual, &expected.alternatives),
+                    select_sum_alternative_with(actual, &expected.alternatives, from),
                     Ok(Some(_))
                 )
             })
@@ -12963,8 +13377,19 @@ fn can_coerce_type(actual: &CheckedType, expected: &CheckedType) -> bool {
         (CheckedType::Ref(_), CheckedType::Slice(_)) => {
             slice_ref_coercion_is_valid(actual, expected)
         }
+        (actual, expected) if from == FromCoercion::Allowed => {
+            implicit_wrapper_representation(expected).is_some_and(|representation| {
+                can_coerce_type_with(actual, representation, FromCoercion::Forbidden)
+            })
+        }
         _ => false,
     }
+}
+
+/// The type a literal is checked against: an expected `from` type types its
+/// literal as the representation, which the implicit introduction wraps.
+fn literal_expectation(expected: &CheckedType) -> &CheckedType {
+    implicit_wrapper_representation(expected).unwrap_or(expected)
 }
 
 fn literal_is_admitted(value_type: &CheckedType, value: &str) -> bool {
@@ -13038,22 +13463,53 @@ pub(crate) fn select_sum_alternative(
     source: &CheckedType,
     alternatives: &[CheckedType],
 ) -> Result<Option<usize>, ()> {
+    select_sum_alternative_with(source, alternatives, FromCoercion::Allowed)
+}
+
+/// Selects the alternative a non-sum value is injected into: an exact
+/// alternative first, then the unique alternative reachable by an ordinary
+/// coercion, and only then the unique `from` alternative whose
+/// representation accepts the value. More than one candidate in the first
+/// non-empty tier is ambiguous.
+pub(crate) fn select_sum_alternative_with(
+    source: &CheckedType,
+    alternatives: &[CheckedType],
+    from: FromCoercion,
+) -> Result<Option<usize>, ()> {
     if let Some(index) = alternatives
         .iter()
         .position(|alternative| source == alternative)
     {
         return Ok(Some(index));
     }
-    let mut matches = alternatives
+    let unique = |matches: Vec<usize>| match matches.as_slice() {
+        [] => Ok(None),
+        [index] => Ok(Some(*index)),
+        _ => Err(()),
+    };
+    let ordinary = alternatives
         .iter()
         .enumerate()
-        .filter_map(|(index, alternative)| can_coerce_type(source, alternative).then_some(index));
-    let first = matches.next();
-    if first.is_some() && matches.next().is_some() {
-        Err(())
-    } else {
-        Ok(first)
+        .filter_map(|(index, alternative)| {
+            can_coerce_type_with(source, alternative, FromCoercion::Forbidden).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if !ordinary.is_empty() || from == FromCoercion::Forbidden {
+        return unique(ordinary);
     }
+    unique(
+        alternatives
+            .iter()
+            .enumerate()
+            .filter_map(|(index, alternative)| {
+                implicit_wrapper_representation(alternative)
+                    .is_some_and(|representation| {
+                        can_coerce_type_with(source, representation, FromCoercion::Forbidden)
+                    })
+                    .then_some(index)
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn effect_substitution_type(effects: CheckedEffectSet) -> CheckedType {
@@ -13323,9 +13779,11 @@ pub(crate) fn substitute_type(
             name,
             arguments,
             representation,
+            introduction,
         } => CheckedType::Wrapper {
             id,
             name,
+            introduction,
             arguments: arguments
                 .into_iter()
                 .map(|argument| substitute_type(argument, substitutions))
@@ -13436,9 +13894,11 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
             name,
             arguments,
             representation,
+            introduction,
         } => CheckedType::Wrapper {
             id: *id,
             name: name.clone(),
+            introduction: *introduction,
             arguments: arguments.iter().map(erase_type_parameters).collect(),
             representation: Box::new(erase_type_parameters(representation)),
         },
@@ -14304,6 +14764,16 @@ fn infer_type_parameters_for_expected(
                 &expected.result,
                 substitutions,
             );
+    }
+    // An expected `from` type also accepts results checkable as its
+    // representation, so inference falls back to the representation.
+    if let Some(representation) = implicit_wrapper_representation(expected) {
+        let mut candidate = substitutions.clone();
+        if infer_type_parameters(template, expected, &mut candidate) {
+            *substitutions = candidate;
+            return true;
+        }
+        return infer_type_parameters_for_expected(template, representation, substitutions);
     }
     if !matches!(template, CheckedType::Sum(_))
         && let CheckedType::Sum(sum) = expected
@@ -15640,7 +16110,7 @@ fn valid_buffer_intrinsic_type(
             let CheckedType::Buffer(element) = function.parameter.as_ref() else {
                 return false;
             };
-            let CheckedType::Sum(option) = function.result.as_ref() else {
+            let Some(option) = sum_through_implicit_wrapper(function.result.as_ref()) else {
                 return false;
             };
             let has_none = option.alternatives.iter().any(|alternative| matches!(

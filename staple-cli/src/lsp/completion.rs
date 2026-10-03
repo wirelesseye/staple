@@ -22,6 +22,7 @@ const KEYWORDS: &[&str] = &[
     "continue",
     "def",
     "extern",
+    "from",
     "impl",
     "let",
     "loop",

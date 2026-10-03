@@ -29,15 +29,17 @@ impl<T> ExpectErrDiagnostics for Result<T, Vec<Diagnostic>> {
 }
 
 fn resolve(source: &str) -> staple_compiler::ResolvedModule {
+    resolve_result(source).expect("source should resolve")
+}
+
+fn resolve_result(source: &str) -> Result<staple_compiler::ResolvedModule, Vec<Diagnostic>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let source = with_syntax_imports(source);
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(&source, root)
         .expect("source should load");
-    NameResolver::new()
-        .resolve_program(program)
-        .expect("source should resolve")
+    NameResolver::new().resolve_program(program)
 }
 
 #[test]
@@ -6090,18 +6092,59 @@ fn typegroup_alias_keeps_multi_line_doc_comment_order() {
 #[test]
 fn resolves_and_merges_type_companion_items() {
     type_check(concat!(
-        "type Animal = alias I32\n",
+        "type Animal = from I32\n",
         "let offset: I32 = 1\n",
-        "companion Animal { pub def move_to = animal: Animal => animal + offset }\n",
+        "companion Animal { pub def move_to = animal: Animal => animal.* + offset }\n",
         "companion Animal { pub def stop = animal: Animal => animal }\n",
         "let moved: Animal = Animal.move_to 1\n",
         "let stopped: Animal = Animal.stop moved\n",
     ));
     type_check(concat!(
-        "type Box T = alias (value: T)\n",
+        "type Box T = from (value: T)\n",
         "companion<T> Box T { pub def box_identity: move Box T -> Box T = move box => box }\n",
         "let identity: Box I32 -> Box I32 = Box.box_identity\n",
     ));
+}
+
+#[test]
+fn alias_companions_extend_the_aliased_type() {
+    // Aliases are transparent: `companion Pet` is `companion Animal`, so its
+    // members are reachable through either name and by method syntax.
+    type_check(concat!(
+        "type Animal = wrap I32\n",
+        "type Pet = alias Animal\n",
+        "companion Pet { pub def legs: Animal -> I32 = animal => 4 }\n",
+        "companion Animal { pub def name: Animal -> String = animal => \"animal\" }\n",
+        "let animal = Animal 1\n",
+        "let from_alias: I32 = Animal.legs animal\n",
+        "let from_type: String = Pet.name animal\n",
+        "let method: I32 = animal^legs\n",
+    ));
+}
+
+#[test]
+fn rejects_companions_on_aliases_of_types_without_companions() {
+    let diagnostics = resolve_result(concat!(
+        "type Either = alias I32 | String\n",
+        "companion Either { pub def zero = 0 }\n",
+        "type Pair T = alias (T, T)\n",
+        "companion<T> Pair T {}\n",
+        "type Number = alias I32\n",
+        "companion Number { pub def one = 1 }\n",
+    ))
+    .expect_err_diagnostics("alias companions need a nominal type declared alongside them");
+    let messages = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages,
+        [
+            "companion target `Either` is an alias of a type that cannot have companion items",
+            "companion target `Pair` is an alias of a type that cannot have companion items",
+            "companion target `Number` is an alias of `I32`, which is declared in another module; add companion items where `I32` is declared",
+        ]
+    );
 }
 
 #[test]
@@ -6135,7 +6178,7 @@ fn typegroup_companion_merges_with_a_hand_written_companion_block() {
 #[test]
 fn type_checks_companion_method_call_syntax() {
     let module = type_check(concat!(
-        "type Animal = alias I32\n",
+        "type Animal = from I32\n",
         "companion Animal { pub def move_to: Animal -> (F32, F32) -> Animal = animal => _ => animal }\n",
         "let animal: Animal = 1\n",
         "let moved: Animal = animal^move_to (1.0, 1.0)\n",
@@ -6153,7 +6196,7 @@ fn type_checks_companion_method_call_syntax() {
 #[test]
 fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
     let module = type_check(concat!(
-        "type Animal = alias I32\n",
+        "type Animal = from I32\n",
         "companion Animal {\n",
         "    pub def move_to: [Animal, (F32, F32)] -> Animal = [animal, _] => animal\n",
         "    pub def teleport: [Animal, F32, F32] -> Animal = [animal, _, _] => animal\n",
@@ -6177,7 +6220,7 @@ fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
 fn rejects_incomplete_method_call_on_a_juxtaposed_companion_method() {
     TypeChecker::new()
         .check(resolve(concat!(
-            "type Animal = alias I32\n",
+            "type Animal = from I32\n",
             "companion Animal {\n",
             "    pub def move_to: [Animal, (F32, F32)] -> Animal = [animal, _] => animal\n",
             "}\n",
@@ -11271,7 +11314,7 @@ fn rejects_non_bool_logical_operands() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("True | False"))
+            .any(|diagnostic| diagnostic.message.contains("expected `Bool`, found `I32`"))
     );
 }
 
@@ -12158,4 +12201,275 @@ fn parameter_product_placement_errors_are_reported_once() {
         .filter(|d| d.message.contains("cannot instantiate `A` of `M`"))
         .count();
     assert_eq!(matching, 1, "{diagnostics:?}");
+}
+
+fn type_check_errors(source: &str, reason: &str) -> Vec<String> {
+    TypeChecker::new()
+        .check(resolve(source))
+        .expect_err_diagnostics(reason)
+        .into_iter()
+        .map(|diagnostic| diagnostic.message)
+        .collect()
+}
+
+#[test]
+fn from_types_introduce_their_representation_contextually() {
+    let module = type_check(concat!(
+        "type Meters = from F64\n",
+        "type Id = from I64\n",
+        "type Name = from String\n",
+        "def show: Meters -> F64 = meters => meters.*\n",
+        "let literal: Meters = 1.5\n",
+        "let id: Id = 7\n",
+        "let name: Name = \"ada\"\n",
+        "let inferred = 2.5\n",
+        "let converted: Meters = inferred\n",
+        "let argument = show 3.0\n",
+        "let explicit = Meters inferred\n",
+        "let still_f64: F64 = inferred\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("implicit `from` introductions should compile");
+}
+
+#[test]
+fn from_coercion_prefers_exact_sum_alternatives_and_rejects_ambiguity() {
+    type_check(concat!(
+        "type B = wrap I32\n",
+        "type A = from B\n",
+        "type Other\n",
+        "def exact: A | B -> I32 = value => match value {\n",
+        "    a: A => 1,\n",
+        "    b: B => 2,\n",
+        "}\n",
+        "def injected: A | Other -> I32 = value => match value {\n",
+        "    a: A => 1,\n",
+        "    _: Other => 2,\n",
+        "}\n",
+        "let first = exact (B 1)\n",
+        "let second = injected (B 1)\n",
+    ));
+    let messages = type_check_errors(
+        concat!(
+            "type B = wrap I32\n",
+            "type A = from B\n",
+            "type C = from B\n",
+            "let ambiguous: A | C = B 1\n",
+        ),
+        "two `from B` alternatives are ambiguous",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("can be injected into more than one alternative")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn from_coercion_applies_once_to_the_whole_expression() {
+    let messages = type_check_errors(
+        concat!(
+            "type B = wrap I32\n",
+            "type A = from B\n",
+            "type C = from A\n",
+            "let chained: C = B 1\n",
+            "let pair = (B 1, B 2)\n",
+            "let lifted_pair: (A, A) = pair\n",
+            "let reference = Ref (B 1)\n",
+            "let lifted_reference: Ref A = reference\n",
+            "def make: () -> B = () => B 1\n",
+            "let lifted_function: () -> A = make\n",
+        ),
+        "`from` coercions neither chain nor lift",
+    );
+    for expected in [
+        "expected `C`, found `B`",
+        "expected `(A, A)`, found `(B, B)`",
+        "expected `Ref A`, found `Ref B`",
+        "expected `() -> A`, found `() -> B`",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "missing `{expected}` in {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn from_types_are_not_subtypes_and_do_not_share_traits_or_members() {
+    let messages = type_check_errors(
+        concat!(
+            "type B = wrap I32\n",
+            "type A = from B\n",
+            "trait Named T { name: T -> I32 }\n",
+            "impl Named A { name = value => 1 }\n",
+            "companion A { pub def legs: A -> I32 = value => 4 }\n",
+            "def named: <T where Named T> T -> I32 = value => Named.name value\n",
+            "def bounded: <T where T <: A> T -> () = value => ()\n",
+            "let by_trait = named (B 1)\n",
+            "let by_bound = bounded (B 1)\n",
+            "let by_member = (B 1)^legs\n",
+        ),
+        "`from` introductions stay out of traits, bounds, and members",
+    );
+    for expected in [
+        "trait bound is not satisfied for",
+        "is not a subtype of",
+        "no accessible companion method named `legs`",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "missing `{expected}` in {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn implicit_from_introduction_moves_its_source() {
+    let messages = type_check_errors(
+        concat!(
+            "type Resource = wrap (I32, String)\n",
+            "impl !Copy Resource {}\n",
+            "type Owner = from Resource\n",
+            "def own: Owner -> I32 = owner => 1\n",
+            "def inspect: Resource -> I32 = value => 2\n",
+            "def run = () => {\n",
+            "    let value = Resource (1, \"a\")\n",
+            "    let first = own value\n",
+            "    let second = inspect value\n",
+            "    second\n",
+            "}\n",
+        ),
+        "an implicit introduction consumes a non-Copy source",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "use of moved value"),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn patterns_see_through_one_from_layer() {
+    let module = type_check(concat!(
+        "type Choice = from I32 | String\n",
+        "def choose: Choice -> I32 = choice => match choice {\n",
+        "    number: I32 => number,\n",
+        "    \"one\" => 1,\n",
+        "    _: String => 0,\n",
+        "}\n",
+        "def flag: Bool | I32 -> I32 = value => match value {\n",
+        "    True => 1,\n",
+        "    False => 0,\n",
+        "    number: I32 => number,\n",
+        "}\n",
+        "def nested: Option Bool -> I32 = value => match value {\n",
+        "    Some True => 1,\n",
+        "    Some False => 2,\n",
+        "    None => 0,\n",
+        "}\n",
+        "def propagate: Option I32 -> Option I32 = value => {\n",
+        "    let Some(number)? = value\n",
+        "    Some (number + 1)\n",
+        "}\n",
+        "type Point = from (I32, I32)\n",
+        "def sum: Point -> I32 = point => {\n",
+        "    let (x, y) = point\n",
+        "    x + y\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("see-through patterns should compile");
+    let messages = type_check_errors(
+        concat!(
+            "def incomplete: Bool | I32 -> I32 = value => match value {\n",
+            "    True => 1,\n",
+            "    number: I32 => number,\n",
+            "}\n",
+        ),
+        "seeing through `Bool` still checks exhaustiveness",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("non-exhaustive match")),
+        "{messages:?}"
+    );
+    // Only one `from` layer is seen through.
+    let messages = type_check_errors(
+        concat!(
+            "type Choice = from Bool | I32\n",
+            "def choose: Choice -> I32 = choice => match choice {\n",
+            "    True => 1,\n",
+            "    _ => 0,\n",
+            "}\n",
+        ),
+        "patterns see through a single `from` layer",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("singleton pattern `True` cannot match")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn indexing_shortcuts_through_visible_wrapper_representations() {
+    let module = type_check(concat!(
+        "type Triple = wrap (I32, I32, I32)\n",
+        "type Names = from (String, String)\n",
+        "def run = () => {\n",
+        "    let mut triple = Triple (1, 2, 3)\n",
+        "    triple[1] = 20\n",
+        "    let names: Names = (\"ada\", \"grace\")\n",
+        "    let first: I32 = triple[0]\n",
+        "    let name: String = names[1]\n",
+        "    first\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("indexing through a wrapper should compile");
+    // A wrapper's own implementation wins over the shortcut, and the shortcut
+    // never satisfies an indexing bound.
+    type_check(concat!(
+        "type Cells = wrap (I32, I32)\n",
+        "impl Index Cells USize String { index = (cells, position) => \"cell\" }\n",
+        "let text: String = (Cells (1, 2))[0]\n",
+    ));
+    let messages = type_check_errors(
+        concat!(
+            "type Cells = wrap (I32, I32)\n",
+            "def first: <T where Index T USize I32> T -> I32 = value => value[0]\n",
+            "let value = first (Cells (1, 2))\n",
+        ),
+        "the indexing shortcut is not an implementation",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("trait bound is not satisfied")
+                && message.contains("Cells")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn from_types_reject_recursive_constructors() {
+    let diagnostics = resolve_result("@recursive_constructor\ntype Loop = from I32\n")
+        .expect_err_diagnostics("recursive constructors must use `wrap`");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("`@recursive_constructor` types must use `wrap`, not `from`")),
+        "{diagnostics:?}"
+    );
 }

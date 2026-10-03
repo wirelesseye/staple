@@ -4126,6 +4126,7 @@ mod tests {
             name: plain.name.clone(),
             arguments: Vec::new(),
             representation: Box::new(CheckedType::empty_product()),
+            introduction: crate::typecheck::WrapperIntroduction::Explicit,
         };
         let evidence = TraitEvidence::DeclaredBound {
             trait_id: trait_id_named(&program, "TestGuarded"),

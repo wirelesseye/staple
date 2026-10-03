@@ -2946,6 +2946,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         match plan {
             crate::LoweredCoercionPlan::Identity => Ok(value),
+            crate::LoweredCoercionPlan::Wrap { payload } => {
+                // A wrapper shares its representation's runtime value.
+                let Some(representation) =
+                    crate::typecheck::implicit_wrapper_representation(target)
+                else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "invalid `from` coercion target",
+                    ));
+                };
+                self.emit_coercion(value, source, representation, payload, span)
+            }
             crate::LoweredCoercionPlan::SliceRef { length } => {
                 let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(value) else {
                     return Err(Diagnostic::new(
@@ -4167,7 +4179,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "`Bool` value has an invalid representation",
             ));
         };
-        if !matches!(logical.bool_type, CheckedType::Sum(_)) {
+        if crate::typecheck::sum_through_implicit_wrapper(&logical.bool_type).is_none() {
             return Err(Diagnostic::new(
                 span.clone(),
                 "`&&`/`||` require `Bool` to be a sum type",
@@ -4301,7 +4313,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.builder.position_at_end(failure_block);
         let failure_value = if propagation.source == propagation.result {
             sum_value.as_any_value_enum()
-        } else if matches!(propagation.result, CheckedType::Sum(_)) {
+        } else if let Some(index) = binding.propagation_residual {
+            // Lowering records the residual alternative; emission never selects
+            // one by comparing types.
+            let residual = self
+                .backend
+                .extract_sum_alternative(sum_value, source_sum, index, span.clone())?
+                .as_any_value_enum();
+            match &binding.propagation_plan {
+                Some(plan) => self.emit_coercion(
+                    residual,
+                    &source_sum.alternatives[index],
+                    &propagation.result,
+                    plan,
+                    &span,
+                )?,
+                None => residual,
+            }
+        } else {
             let Some(plan) = &binding.propagation_plan else {
                 return Err(Diagnostic::new(
                     span.clone(),
@@ -4315,18 +4344,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 plan,
                 &span,
             )?
-        } else {
-            // Lowering records the residual alternative; emission never selects
-            // one by comparing types.
-            let index = binding.propagation_residual.ok_or_else(|| {
-                Diagnostic::new(
-                    span.clone(),
-                    "propagated result is missing its residual variant",
-                )
-            })?;
-            self.backend
-                .extract_sum_alternative(sum_value, source_sum, index, span.clone())?
-                .as_any_value_enum()
         };
         let failure_value = value_as_basic(failure_value)
             .ok_or_else(|| Diagnostic::new(span.clone(), "propagated result is not first-class"))?;
@@ -6619,7 +6636,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         result_type: &CheckedType,
         span: staple_syntax::Span,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let CheckedType::Sum(sum) = result_type else {
+        let Some(sum) = crate::typecheck::sum_through_implicit_wrapper(result_type) else {
             return Err(Diagnostic::new(span, "comparison result must be Bool"));
         };
         if sum.alternatives.len() != 2 {
@@ -7143,7 +7160,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Err(Diagnostic::new(span.clone(), "invalid Buffer handle"));
         };
         let element = intrinsic_buffer_element(call, 0, span)?;
-        let CheckedType::Sum(option) = &call.result_type else {
+        let Some(option) = crate::typecheck::sum_through_implicit_wrapper(&call.result_type) else {
             return Err(Diagnostic::new(
                 span.clone(),
                 "Buffer.pop must return Option T",

@@ -815,7 +815,7 @@ fn structural_next_body(
             "structural Iterator target does not contain a product".to_string(),
         ));
     };
-    let CheckedType::Sum(sum) = &result else {
+    let Some(sum) = crate::typecheck::sum_through_implicit_wrapper(&result) else {
         return Err(Diagnostic::new(
             origin.span.clone(),
             "structural Iterator result is not a sum".to_string(),
@@ -871,7 +871,8 @@ fn structural_next_body(
 }
 
 /// One resolved `IterStep` alternative with its recorded injection into the
-/// result sum, so the emitter never re-plans the coercion.
+/// result (a `from` type over the sum), so the emitter never re-plans the
+/// coercion.
 fn sum_alternative(
     sum: &crate::CheckedSumType,
     index: usize,
@@ -1142,12 +1143,18 @@ mod tests {
             if let Some(LoweredArtifactPlan::StructuralMethod(plan)) = &mut artifact.plan
                 && let StructuralBody::Next { done, yield_, .. } = &mut plan.body
             {
+                // Each step injects into the sum behind the `IterStep` `from`
+                // type and then introduces `IterStep` implicitly.
                 for step in [&*done, &*yield_] {
                     assert!(
                         matches!(
-                            step.coercion_plan,
-                            super::super::LoweredCoercionPlan::SumInject { alternative, .. }
-                                if alternative == step.index
+                            &step.coercion_plan,
+                            super::super::LoweredCoercionPlan::Wrap { payload }
+                                if matches!(
+                                    payload.as_ref(),
+                                    super::super::LoweredCoercionPlan::SumInject { alternative, .. }
+                                        if *alternative == step.index
+                                )
                         ),
                         "{step:?}"
                     );
@@ -1359,7 +1366,7 @@ mod tests {
             panic!("a mixed item coerces into a sum: {item:?}");
         };
         assert_eq!(sum.alternatives.len(), 2);
-        assert!(matches!(result, CheckedType::Sum(_)));
+        assert!(crate::typecheck::implicit_wrapper_representation(result).is_some());
         assert_eq!(elements.len(), 2);
         for element in elements {
             assert_eq!(
@@ -1369,9 +1376,9 @@ mod tests {
             );
         }
         // `Done` carries the iterator back and `Yield` carries `(item, iter)`.
-        let alternatives = match result {
-            CheckedType::Sum(sum) => sum.alternatives.clone(),
-            _ => unreachable!(),
+        let alternatives = match crate::typecheck::sum_through_implicit_wrapper(result) {
+            Some(sum) => sum.alternatives.clone(),
+            None => unreachable!(),
         };
         assert!(matches!(
             &alternatives[done.index],
@@ -1572,6 +1579,7 @@ mod tests {
                         CheckedType::I32,
                         CheckedType::I32
                     ])),
+                    introduction: crate::typecheck::WrapperIntroduction::Explicit,
                 })
                 .expect("Row metadata"),
             "the delegate names the payload type, not the reference"

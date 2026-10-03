@@ -14,6 +14,11 @@ def typegroup_body_item: (Ident String, TypeBody) -> Item = (variant, body) => m
         Package => parse_quote { pub type $variant = pub(package) wrap $underlying },
         Public => parse_quote { pub type $variant = pub wrap $underlying },
     },
+    FromBody (visibility, underlying) => match visibility {
+        Private => parse_quote { pub type $variant = from $underlying },
+        Package => parse_quote { pub type $variant = pub(package) from $underlying },
+        Public => parse_quote { pub type $variant = pub from $underlying },
+    },
     OpaqueBody => panic "opaque typegroup variants are unsupported",
 }
 
@@ -24,6 +29,11 @@ def typegroup_generic_body_item: (Ident String, Syntax, TypeBody) -> Item =
         Private => parse_quote { pub type $variant $parameters = wrap $underlying },
         Package => parse_quote { pub type $variant $parameters = pub(package) wrap $underlying },
         Public => parse_quote { pub type $variant $parameters = pub wrap $underlying },
+    },
+    FromBody (visibility, underlying) => match visibility {
+        Private => parse_quote { pub type $variant $parameters = from $underlying },
+        Package => parse_quote { pub type $variant $parameters = pub(package) from $underlying },
+        Public => parse_quote { pub type $variant $parameters = pub from $underlying },
     },
     OpaqueBody => panic "opaque typegroup variants are unsupported",
 }
@@ -125,12 +135,15 @@ def typegroup_generic_sum_syntax:
     _ => panic "empty generic typegroup is unsupported",
 }
 
-/// Declares a sum-type alias and companion variants from a compact definition.
+/// Declares a nominal type over a sum of variants, with the variants in its
+/// companion, from a compact definition.
 ///
 /// Every entry becomes a public declaration in the group's companion module.
-/// A bare name is a singleton variant; `wrap`, `alias`, and `opaque` bodies
-/// follow the ordinary type declaration body grammar. Every variant except an
-/// `opaque` one becomes an alternative of the group alias.
+/// A bare name is a singleton variant; `wrap`, `from`, `alias`, and `opaque`
+/// bodies follow the ordinary type declaration body grammar. The group is a
+/// `from` type over the sum of every variant except an `opaque` one, with its
+/// representation as visible as the group, so a variant converts to the group
+/// implicitly and patterns on the group see through to its variants.
 ///
 /// # Example
 ///
@@ -160,10 +173,14 @@ pub macro typegroup:
             Sequence () => {
                 let items = typegroup_items elements
                 let sum = typegroup_sum (group, elements)
-                let base: Item = parse_quote {
-                    $visibility type $group = alias $sum
+                // The group is a `from` type over its variants' sum, exposing
+                // its representation as widely as the group itself.
+                let base: Item = match visibility {
+                    Private => parse_quote { $visibility type $group = from $sum } satisfies Item,
+                    Package => parse_quote { $visibility type $group = pub(package) from $sum } satisfies Item,
+                    Public => parse_quote { $visibility type $group = pub from $sum } satisfies Item,
                 }
-                let alias_item = typegroup_apply_modifiers (modifiers, base)
+                let group_item = typegroup_apply_modifiers (modifiers, base)
                 let companion_item: Item = parse_quote {
                     companion $group {
                         $items...
@@ -171,17 +188,25 @@ pub macro typegroup:
                 }
                 Sequence (
                     first: companion_item,
-                    rest: Sequence (first: alias_item, rest: Sequence ()),
+                    rest: Sequence (first: group_item, rest: Sequence ()),
                 )
             },
             _ => {
                 let parameter_syntax = typegroup_parameter_syntax parameters
                 let items = typegroup_generic_items (parameter_syntax, elements)
                 let sum = typegroup_generic_sum_syntax (group, parameter_syntax, elements)
-                let base: Item = parse_quote {
-                    $visibility type $group $parameter_syntax = alias $sum
+                let base: Item = match visibility {
+                    Private => parse_quote {
+                        $visibility type $group $parameter_syntax = from $sum
+                    } satisfies Item,
+                    Package => parse_quote {
+                        $visibility type $group $parameter_syntax = pub(package) from $sum
+                    } satisfies Item,
+                    Public => parse_quote {
+                        $visibility type $group $parameter_syntax = pub from $sum
+                    } satisfies Item,
                 }
-                let alias_item = typegroup_apply_modifiers (modifiers, base)
+                let group_item = typegroup_apply_modifiers (modifiers, base)
                 let companion_item: Item = parse_quote {
                     companion $group {
                         $items...
@@ -189,7 +214,7 @@ pub macro typegroup:
                 }
                 Sequence (
                     first: companion_item,
-                    rest: Sequence (first: alias_item, rest: Sequence ()),
+                    rest: Sequence (first: group_item, rest: Sequence ()),
                 )
             },
         }

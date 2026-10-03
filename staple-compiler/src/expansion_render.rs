@@ -261,13 +261,19 @@ fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> Stri
                 out.push_str(&underlying.to_string());
             }
         }
-        staple_syntax::TypeDeclarationKind::Wrapper => {
+        kind @ (staple_syntax::TypeDeclarationKind::Wrapper
+        | staple_syntax::TypeDeclarationKind::From) => {
             if let Some(underlying) = declaration.underlying() {
                 out.push_str(" = ");
                 out.push_str(match declaration.representation_visibility() {
-                    Visibility::Public => "pub wrap ",
-                    Visibility::Package => "pub(package) wrap ",
-                    Visibility::Private => "wrap ",
+                    Visibility::Public => "pub ",
+                    Visibility::Package => "pub(package) ",
+                    Visibility::Private => "",
+                });
+                out.push_str(if kind == staple_syntax::TypeDeclarationKind::From {
+                    "from "
+                } else {
+                    "wrap "
                 });
                 out.push_str(&underlying.to_string());
             }

@@ -8900,10 +8900,12 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
         (CompileType::Meta(MetaType::TypeBody), "AliasBody") => {
             Some(CompileType::Meta(MetaType::Type))
         }
-        (CompileType::Meta(MetaType::TypeBody), "WrapperBody") => Some(CompileType::Product(vec![
-            CompileType::Meta(MetaType::Visibility),
-            CompileType::Meta(MetaType::Type),
-        ])),
+        (CompileType::Meta(MetaType::TypeBody), "WrapperBody" | "FromBody") => {
+            Some(CompileType::Product(vec![
+                CompileType::Meta(MetaType::Visibility),
+                CompileType::Meta(MetaType::Type),
+            ]))
+        }
         (CompileType::Meta(MetaType::TypeBody), "OpaqueBody") => {
             Some(CompileType::Product(Vec::new()))
         }
@@ -9023,7 +9025,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         CompileType::Meta(MetaType::Visibility) => ["Private", "Package", "Public"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
-        CompileType::Named(name) if name == "TypeDeclarationKind" => ["AliasDeclaration", "WrapperDeclaration", "SingletonDeclaration", "OpaqueDeclaration"]
+        CompileType::Named(name) if name == "TypeDeclarationKind" => ["AliasDeclaration", "WrapperDeclaration", "FromDeclaration", "SingletonDeclaration", "OpaqueDeclaration"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
         CompileType::Meta(MetaType::Item) => ["ModifiedItem", "TypeDeclarationItem", "UnstructuredItem"]
@@ -9058,7 +9060,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         }),
         CompileType::Meta(MetaType::ModifiedItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("ModifiedItem")),
         CompileType::Meta(MetaType::TypeDeclarationItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("TypeDeclarationItem")),
-        CompileType::Meta(MetaType::TypeBody) => ["AliasBody", "WrapperBody", "OpaqueBody"]
+        CompileType::Meta(MetaType::TypeBody) => ["AliasBody", "WrapperBody", "FromBody", "OpaqueBody"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
         CompileType::Meta(MetaType::UnstructuredItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("UnstructuredItem")),
@@ -9230,6 +9232,7 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
         CompileType::Named(name) if name == "TypeDeclarationKind" => vec![
             ("AliasDeclaration".to_owned(), Vec::new()),
             ("WrapperDeclaration".to_owned(), Vec::new()),
+            ("FromDeclaration".to_owned(), Vec::new()),
             ("SingletonDeclaration".to_owned(), Vec::new()),
             ("OpaqueDeclaration".to_owned(), Vec::new()),
         ],
@@ -9301,6 +9304,13 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
             ),
             (
                 "WrapperBody".to_owned(),
+                vec![
+                    CompileType::Meta(MetaType::Visibility),
+                    CompileType::Meta(MetaType::Type),
+                ],
+            ),
+            (
+                "FromBody".to_owned(),
                 vec![
                     CompileType::Meta(MetaType::Visibility),
                     CompileType::Meta(MetaType::Type),
@@ -10347,8 +10357,12 @@ fn type_body_value(body: &staple_syntax::TypeBody) -> Value {
                     .expect("alias body has an underlying type"),
             ))),
         ),
-        staple_syntax::TypeBodyKind::Wrapper => Value::Nominal(
-            "WrapperBody".to_owned(),
+        staple_syntax::TypeBodyKind::Wrapper | staple_syntax::TypeBodyKind::From => Value::Nominal(
+            if body.kind == staple_syntax::TypeBodyKind::From {
+                "FromBody".to_owned()
+            } else {
+                "WrapperBody".to_owned()
+            },
             Box::new(Value::Product(vec![
                 (
                     None,
@@ -10375,6 +10389,7 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
     let kind = match declaration.kind() {
         staple_syntax::TypeDeclarationKind::Alias => "AliasDeclaration",
         staple_syntax::TypeDeclarationKind::Wrapper => "WrapperDeclaration",
+        staple_syntax::TypeDeclarationKind::From => "FromDeclaration",
         staple_syntax::TypeDeclarationKind::Singleton => "SingletonDeclaration",
         staple_syntax::TypeDeclarationKind::Opaque => "OpaqueDeclaration",
     };
@@ -10549,7 +10564,10 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
             matches!(item.as_ref(), Item::TypeDeclaration(_))
         }
         (MetaType::TypeBody, Value::Nominal(name, _)) => {
-            matches!(name.as_str(), "AliasBody" | "WrapperBody" | "OpaqueBody")
+            matches!(
+                name.as_str(),
+                "AliasBody" | "WrapperBody" | "FromBody" | "OpaqueBody"
+            )
         }
         (MetaType::UnstructuredItem, Value::Syntax(SyntaxValue::Item(item))) => {
             !matches!(item.as_ref(), Item::Modified(_) | Item::TypeDeclaration(_))

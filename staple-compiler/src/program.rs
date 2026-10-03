@@ -182,7 +182,9 @@ impl Program {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        for declaration in declarations {
+        for mut declaration in declarations {
+            let alias =
+                canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
             if declaration.companion
                 && let Some(existing) = self.children[parent.0].get(&declaration.name).copied()
                 && self.modules[existing.0].companion
@@ -192,6 +194,9 @@ impl Program {
                     .items
                     .extend(declaration.module.items);
                 self.child_modules.insert(declaration.syntax.id, existing);
+                if let Some(alias) = alias {
+                    self.children[parent.0].insert(alias, existing);
+                }
                 self.collect_single_submodules(existing);
                 continue;
             }
@@ -214,6 +219,9 @@ impl Program {
             self.children.push(HashMap::new());
             self.children[parent.0].insert(declaration.name, id);
             self.child_modules.insert(declaration.syntax.id, id);
+            if let Some(alias) = alias {
+                self.children[parent.0].insert(alias, id);
+            }
             self.collect_single_submodules(id);
         }
 
@@ -350,7 +358,12 @@ impl Program {
             // A merge that folds items into an already-visited module; that
             // module needs to be rescanned so nested inline items land too.
             let mut rescan_from: Option<usize> = None;
-            for (declaration, top_level) in declarations {
+            for (mut declaration, top_level) in declarations {
+                let alias = if top_level {
+                    canonicalize_companion(&self.modules[parent].syntax.items, &mut declaration)
+                } else {
+                    None
+                };
                 // Mirror the companion merge in `collect_single_submodules` /
                 // `insert_submodules`: a generated `companion` block for a type
                 // that already has a companion module extends that module
@@ -365,6 +378,9 @@ impl Program {
                         .items
                         .extend(declaration.module.items);
                     self.child_modules.insert(declaration.syntax.id, existing);
+                    if let Some(alias) = alias {
+                        self.children[parent].insert(alias, existing);
+                    }
                     if existing.0 < parent {
                         rescan_from =
                             Some(rescan_from.map_or(existing.0, |from| from.min(existing.0)));
@@ -392,6 +408,9 @@ impl Program {
                     self.children[parent].insert(declaration.name, id);
                 }
                 self.child_modules.insert(declaration.syntax.id, id);
+                if let Some(alias) = alias {
+                    self.children[parent].insert(alias, id);
+                }
             }
             // Already-registered declarations are filtered out above, so a
             // rescan only picks up items the merge just introduced and always
@@ -1512,7 +1531,9 @@ impl ProgramLoader {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        for declaration in declarations {
+        for mut declaration in declarations {
+            let alias =
+                canonicalize_companion(&self.modules[parent.0].syntax.items, &mut declaration);
             if declaration.companion
                 && let Some(existing) = self.children[parent.0].get(&declaration.name).copied()
                 && self.modules[existing.0].companion
@@ -1522,6 +1543,9 @@ impl ProgramLoader {
                     .items
                     .extend(declaration.module.items);
                 self.child_modules.insert(declaration.syntax.id, existing);
+                if let Some(alias) = alias {
+                    self.children[parent.0].insert(alias, existing);
+                }
                 self.insert_submodules(
                     existing,
                     path.clone(),
@@ -1551,6 +1575,9 @@ impl ProgramLoader {
             self.children.push(HashMap::new());
             self.children[parent.0].insert(declaration.name, id);
             self.child_modules.insert(declaration.syntax.id, id);
+            if let Some(alias) = alias {
+                self.children[parent.0].insert(alias, id);
+            }
             self.insert_submodules(id, path.clone(), qualified_name)?;
         }
 
@@ -2911,4 +2938,47 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// Renames `companion A` to `companion B` when `A` is an alias, declared in
+/// the same module, whose underlying type is headed by a type `B` also
+/// declared there: aliases are transparent, so their companion items belong
+/// to `B`. Returns the alias name, which keeps naming the merged companion
+/// namespace. Other alias companions keep their own name and are rejected
+/// during resolution.
+fn canonicalize_companion(items: &[Item], declaration: &mut Submodule) -> Option<String> {
+    if !declaration.companion {
+        return None;
+    }
+    let target = companion_alias_target(items, &declaration.name)?;
+    Some(std::mem::replace(&mut declaration.name, target))
+}
+
+/// The type a same-module alias chain starting at `name` ends at, when every
+/// link is a top-level `type _ = alias Head ...` whose head is a bare name
+/// declared in `items` and the chain ends at a non-alias declaration there.
+fn companion_alias_target(items: &[Item], name: &str) -> Option<String> {
+    fn head(ty: &staple_syntax::Type) -> Option<&str> {
+        match ty {
+            staple_syntax::Type::Named(named) if named.namespace.is_none() => Some(&named.name),
+            staple_syntax::Type::Application(application) => head(&application.callee),
+            staple_syntax::Type::EffectApplication(application) => head(&application.callee),
+            _ => None,
+        }
+    }
+    let declaration = |name: &str| {
+        items.iter().find_map(|item| match item {
+            Item::TypeDeclaration(declaration) if declaration.name == name => Some(declaration),
+            _ => None,
+        })
+    };
+    let mut current = declaration(name)?;
+    let mut seen = HashSet::new();
+    while current.kind() == staple_syntax::TypeDeclarationKind::Alias {
+        if !seen.insert(current.name.as_str()) {
+            return None;
+        }
+        current = declaration(head(current.underlying()?)?)?;
+    }
+    (current.name != name).then(|| current.name.clone())
 }

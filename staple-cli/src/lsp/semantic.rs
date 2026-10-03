@@ -950,7 +950,7 @@ impl<'a> Classifier<'a> {
         // highlights; see the note in `lexical_kind`.
     }
 
-    /// Marks the contextual `alias`, `wrap`, or `opaque` marker of a type
+    /// Marks the contextual `alias`, `wrap`, `from`, or `opaque` marker of a type
     /// declaration body. These are ordinary identifiers, so they need an
     /// explicit semantic token to match the TextMate grammar's modifier
     /// highlighting.
@@ -961,6 +961,7 @@ impl<'a> Classifier<'a> {
         let text = match body.kind {
             TypeBodyKind::Alias => "alias",
             TypeBodyKind::Wrapper => "wrap",
+            TypeBodyKind::From => "from",
             TypeBodyKind::Opaque => "opaque",
         };
         self.mark_first(&body.marker_syntax, text, MODIFIER, 0, 1);

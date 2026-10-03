@@ -739,8 +739,8 @@ pub mod api {
 
 ### Type companions
 
-Named types and type aliases may have companion items. A companion behaves as
-the type's namespace, so its public members are selected through the type name:
+Named types may have companion items. A companion behaves as the type's
+namespace, so its public members are selected through the type name:
 
 ```staple
 type Animal = wrap ...
@@ -782,9 +782,13 @@ Juxtaposed slots keep their exact arity through `^`: a bare `animal^teleport`,
 or one supplied with fewer arguments than the method's slot count, is an
 incomplete call rather than a partial closure.
 
-Method lookup uses the receiver's static named type; aliases retain companion
-identity when introduced by an annotation or an explicitly typed function
-parameter or result.
+Method lookup uses the receiver's static named type. Type aliases are
+transparent, so `companion A` for `type A = alias B` is the same as
+`companion B`: its members belong to `B` and are reachable as both `A.member`
+and `B.member`, and by method syntax on any `B` value. `B` must be a nominal
+type declared in the same module as the alias, where `companion B` could be
+written directly. A companion for an alias of a structural type, such as a sum
+or product, is rejected, because those types cannot have companion items.
 
 More than one companion block may contribute to the same type. Companion
 blocks have no visibility of their own; visibility is declared on their items.
@@ -2627,7 +2631,9 @@ patterns available depend on the subject type; a binding or wildcard can match
 any value.
 
 A nominal pattern selects one sum alternative and may recursively destructure
-its representation with binding, product, nominal, and wildcard patterns. A
+its representation with binding, product, nominal, and wildcard patterns.
+Patterns also see through one [`from`](#from) layer, so a `Bool` or
+`Option T` subject is matched by its variants directly. A
 bare singleton name selects its unique alternative, including the
 standard-library boolean values:
 
@@ -3557,16 +3563,22 @@ The same form can select a singleton alternative in a propagating binding:
 let Ready()? = operation()
 ```
 
-The standard-library `Bool` type is defined entirely in these terms:
+The standard-library `Bool` type is defined entirely in these terms, using
+the `typegroup` macro described under [Sum types](#sum-types):
 
 ```staple
-pub type True
-pub type False
-pub type Bool = alias True | False
+pub typegroup Bool {
+    True,
+    False,
+}
+pub use Bool.*
 ```
 
-`True` and `False` are the two values of `Bool`; `Bool` itself adds no nominal
-wrapper or compiler-specific type identity.
+This declares the singletons `Bool.True` and `Bool.False` and
+`pub type Bool = pub from Bool.True | Bool.False`. `True` and `False` are the
+two values of `Bool`: each is introduced implicitly wherever a `Bool` is
+expected, and patterns such as `True` see through `Bool` to its
+representation. `Bool` has no compiler-specific type identity.
 
 #### `type`
 
@@ -3609,6 +3621,13 @@ unwrap nested nominal types; use one `.*` for each visible layer, as in
 `outer.*.*.name`. Both explicit and shortcut forms are rejected when the
 representation is private in the current scope.
 
+A represented type with a visible representation may also be indexed
+directly: `value[index]` means `value.*[index]`, and `value[index] = item`
+assigns through `value.*`, whenever the type has no `Index` or `MutateIndex`
+implementation of its own. Like field access, this unwraps exactly one layer.
+It is a shortcut rather than a derived implementation, so the wrapper does not
+satisfy `Index` or `MutateIndex` bounds through its representation.
+
 `= pub wrap T` exposes the representation and generated constructor as part of
 the module interface:
 
@@ -3620,7 +3639,7 @@ Importers may construct `Box` values and use `Box pattern` to destructure them,
 including through namespace, selected, renamed, or glob imports. Every named
 type directly referenced by a public representation must also be public.
 Representation visibility is rejected on aliases and opaque declarations, which
-have no constructor.
+have no constructor. It is also available on `from` bodies, described next.
 
 Packages add a middle visibility level between private and public:
 
@@ -3708,6 +3727,82 @@ accepted.
 
 Product types and values may have a trailing comma.
 
+#### `from`
+
+A body beginning with `from` declares a represented nominal type, exactly as
+`wrap` does, together with an implicit one-way conversion from its
+representation:
+
+```staple
+type Meters = from F64
+
+let distance: Meters = 1.5  // implicitly `Meters 1.5`
+let raw = 1.5               // still `F64`
+let converted: Meters = raw
+```
+
+`Meters` and `F64` remain different types; `from` is neither an alias nor a
+subtype relationship. Only the direction `F64 -> Meters` is implicit.
+Projection back to the representation still uses `.*`, field access, or a
+nominal pattern, subject to representation visibility.
+
+The conversion is contextual. It applies only when an expression is checked
+against an expected `Meters`, for example in an annotated binding, an argument
+position, a function result, or `satisfies Meters`, and it never changes
+bottom-up inference. A value is accepted when it can be checked as the
+representation by the ordinary rules, including literals, sum injection, and
+sum widening; the conversion then wraps it. When a sum is expected, an exact
+alternative always wins, then an alternative reached by an ordinary coercion,
+and only then a `from` alternative. If more than one `from` alternative accepts
+the value, the expression is ambiguous and rejected:
+
+```staple
+type A = from B
+
+let exact: A | B = b    // selects `B`, not `A`
+```
+
+At most one `from` conversion is inserted for a mismatch. Given
+`type A = from B` and `type C = from A`, both `B -> A` and `A -> C` are
+implicit, but `B -> C` is not. Conversions also do not lift through other
+types: `Ref B`, `(B, B)`, `List B`, and `() -> B` do not convert to the
+corresponding `A` forms. A literal written directly in such a position is
+still checked element by element, so `let pair: (A, A) = (b1, b2)` converts
+each element.
+
+`from` does not imply `B <: A`. Subtype bounds, trait implementations, and
+generic inference do not see a `B` as an `A`, and member or method lookup on a
+`B` value never converts the receiver. The implicit conversion has the same
+ownership behavior as calling the constructor: a non-`Copy` source is moved.
+
+The visibility before `from` controls *representation* visibility, not the
+visibility of the conversion. The conversion and constructor are usable
+wherever the type itself is visible; projection with `.*`, field and index
+shortcuts, and pattern matching through the representation follow the
+representation visibility:
+
+| Declaration | External `Bar -> Foo` | External representation access |
+| --- | :---: | :---: |
+| `type Foo = from Bar` | no, `Foo` is private | no |
+| `pub type Foo = from Bar` | yes | no |
+| `pub type Foo = pub(package) from Bar` | yes | package only |
+| `pub type Foo = pub from Bar` | yes | yes |
+
+Because a public conversion names its source, every named type directly
+referenced by the source of a public (or package-visible) `from` type must be
+at least as visible as the type. `@recursive_constructor` types must use
+`wrap`.
+
+Patterns see through one `from` layer. When a pattern does not select the
+`from` type itself, it is checked against the type's visible representation,
+so `match flag { True => ..., False => ... }` works on a `Bool`. Within a sum,
+a pattern that selects no alternative directly matches inside the unique
+`from` alternative whose representation it selects from, so `True` matches the
+`Bool` alternative of `Bool | I32`. Typed patterns, destructuring bindings,
+and propagating bindings (`let Some(value)? = option`) see through the same
+way. Exhaustiveness is checked against the representation, and the
+representation must be visible where the pattern is written.
+
 #### `alias`
 
 A body beginning with `alias` gives another name to an existing type without
@@ -3721,7 +3816,9 @@ type Person = alias (
 ```
 
 Here, `person` is exactly the named product type on the right-hand side. The alias
-does not create a separate nominal identity.
+does not create a separate nominal identity, and it has no companion of its
+own: `companion Person` would be `companion` of the underlying type (see [Type
+companions](#type-companions)).
 
 ### Sum types
 
@@ -3770,7 +3867,8 @@ A smaller sum is likewise widened implicitly to a sum containing all of its
 alternatives. Sums cannot be narrowed implicitly. Standalone values retain
 their ordinary representation; a value acquires a runtime tag only while stored
 in a sum. An exact alternative is preferred; otherwise the value must have
-exactly one alternative to which it can be coerced. A typed match binding
+exactly one alternative to which it can be coerced, considering `from`
+conversions only when no other coercion applies. A typed match binding
 selects and extracts an arbitrary variant:
 
 ```staple
@@ -3795,8 +3893,9 @@ def load = (path: String) => {
 }
 ```
 
-The right-hand expression must have a sum type containing exactly one
-alternative with the pattern's nominal constructor. It is evaluated once. On
+The right-hand expression must have a sum type, or a `from` type over a sum
+whose representation is visible, containing exactly one alternative with the
+pattern's nominal constructor. It is evaluated once. On
 the selected tag, the payload is destructured and execution continues. Any
 other tag returns immediately and is widened into the enclosing result type.
 The selected representation must be visible under the ordinary
@@ -3811,7 +3910,8 @@ result must be contained in that type.
 Sum types use Staple's internal tagged inline representation and may not appear
 anywhere inside an `extern` binding type.
 
-The prelude supplies a `typegroup` macro that conveniently generates sum types:
+The prelude supplies a `typegroup` macro that conveniently generates a
+nominal type over a sum of variants:
 
 ```staple
 pub typegroup Pattern {
@@ -3838,11 +3938,26 @@ pub typegroup Mixed A (B, C) D {
 
 Each entry becomes a public declaration in the group's companion module. A bare
 name is a singleton variant, and `= wrap T`, `= pub wrap T`,
-`= pub(package) wrap T`, and `= alias T` follow the ordinary type declaration
-body grammar. Every non-opaque variant is also an alternative of the generated
-group alias. `= opaque` entries are rejected, because an opaque type cannot be a
-sum alternative. The group's own visibility controls the alias, while
-representation visibility is written explicitly on each constructor variant.
+`= pub(package) wrap T`, `= from T` (with the same visibility forms), and
+`= alias T` follow the ordinary type declaration body grammar. `= opaque`
+entries are rejected, because an opaque type cannot be a sum alternative.
+Representation visibility is written explicitly on each constructor variant.
+
+The group itself is a [`from`](#from) type over the sum of its variants, whose
+representation is as visible as the group:
+`pub typegroup Pattern { ... }` declares
+`pub type Pattern = pub from Pattern.Literal | Pattern.Wildcard`. A variant
+value is therefore introduced implicitly wherever the group is expected, and
+patterns on a group value see through to its variants:
+
+```staple
+let pattern: Pattern = Pattern.Wildcard
+
+match pattern {
+    Pattern.Literal text => text,
+    Pattern.Wildcard => "*",
+}
+```
 
 ## Foreign declarations
 

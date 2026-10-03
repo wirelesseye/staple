@@ -73,9 +73,15 @@ pub type Pattern = alias BindingPattern | NominalPattern | UnstructuredPattern
 /// The kind of a type declaration.
 pub type AliasDeclaration
 pub type WrapperDeclaration
+pub type FromDeclaration
 pub type SingletonDeclaration
 pub type OpaqueDeclaration
-pub type TypeDeclarationKind = alias AliasDeclaration | WrapperDeclaration | SingletonDeclaration | OpaqueDeclaration
+pub type TypeDeclarationKind = alias
+    AliasDeclaration |
+    WrapperDeclaration |
+    FromDeclaration |
+    SingletonDeclaration |
+    OpaqueDeclaration
 /// An inspectable type declaration item. Type parameters are exposed by name;
 /// their original declaration syntax remains part of the lossless item value.
 @recursive_constructor
@@ -93,10 +99,17 @@ pub type AliasBody Element = wrap Element
 /// A `wrap` type declaration body with its representation visibility.
 @recursive_constructor
 pub type WrapperBody Representation Element = wrap (Representation, Element)
+/// A `from` type declaration body with its representation visibility.
+@recursive_constructor
+pub type FromBody Representation Element = wrap (Representation, Element)
 /// An `opaque` type declaration body.
 pub type OpaqueBody
 /// The body of a type declaration written after `=`.
-pub type TypeBody = alias AliasBody Type | WrapperBody Visibility Type | OpaqueBody
+pub type TypeBody = alias
+    AliasBody Type |
+    WrapperBody Visibility Type |
+    FromBody Visibility Type |
+    OpaqueBody
 /// An item whose structure is not exposed yet.
 @sized_opaque
 pub type UnstructuredItem = opaque

@@ -259,8 +259,19 @@ pub struct ExternBlock {
 pub enum TypeDeclarationKind {
     Alias,
     Wrapper,
+    /// A wrapper whose representation converts implicitly into the type
+    /// wherever the type is expected: `type A = from B`.
+    From,
     Singleton,
     Opaque,
+}
+
+impl TypeDeclarationKind {
+    /// Whether the declaration is a nominal wrapper with a represented
+    /// constructor, written with either `wrap` or `from`.
+    pub fn is_wrapper(self) -> bool {
+        matches!(self, Self::Wrapper | Self::From)
+    }
 }
 
 /// The kind of a type declaration body written after `=`.
@@ -268,22 +279,24 @@ pub enum TypeDeclarationKind {
 pub enum TypeBodyKind {
     Alias,
     Wrapper,
+    From,
     Opaque,
 }
 
 /// The body of a type declaration written after `=`: `alias T`, `wrap T`,
-/// `pub wrap T`, `pub(package) wrap T`, or `opaque`.
+/// `from T`, either optionally prefixed by `pub` or `pub(package)`, or
+/// `opaque`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeBody {
     /// The whole body, including any representation-visibility prefix.
     pub syntax: Syntax,
-    /// The contextual `alias`, `wrap`, or `opaque` marker.
+    /// The contextual `alias`, `wrap`, `from`, or `opaque` marker.
     pub marker_syntax: Syntax,
     pub kind: TypeBodyKind,
-    /// Representation visibility for `wrap` bodies, including the `pub` or
+    /// Representation visibility for `wrap` and `from` bodies, including the `pub` or
     /// `pub(package)` prefix syntax when one is written.
     pub representation: VisibilitySyntax,
-    /// The underlying type for `alias` and `wrap` bodies.
+    /// The underlying type for `alias`, `wrap`, and `from` bodies.
     pub underlying: Option<Type>,
 }
 
@@ -313,6 +326,7 @@ impl TypeDeclaration {
             Some(body) => match body.kind {
                 TypeBodyKind::Alias => TypeDeclarationKind::Alias,
                 TypeBodyKind::Wrapper => TypeDeclarationKind::Wrapper,
+                TypeBodyKind::From => TypeDeclarationKind::From,
                 TypeBodyKind::Opaque => TypeDeclarationKind::Opaque,
             },
         }

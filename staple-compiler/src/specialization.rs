@@ -1029,6 +1029,7 @@ mod tests {
             name: name.to_owned(),
             arguments,
             representation: Box::new(representation),
+            introduction: crate::typecheck::WrapperIntroduction::Explicit,
         }
     }
 

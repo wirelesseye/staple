@@ -905,27 +905,30 @@ impl<'a> BodyCloner<'a> {
             }
             LoweredItemKind::PatternBinding(mut binding) => {
                 binding.value = self.clone_expression(binding.value);
-                let subject = self
+                binding.propagation = binding.propagation.as_ref().map(|p| self.propagation(p));
+                let value_type = self
                     .body
                     .expressions
                     .get(binding.value)
                     .map(|value| value.value_type.clone())
                     .unwrap_or(CheckedType::Error);
+                // A propagating `from` value is matched as its sum
+                // representation, as in the template.
+                let subject = match &binding.propagation {
+                    Some(propagation)
+                        if crate::typecheck::implicit_wrapper_representation(&value_type)
+                            .is_some() =>
+                    {
+                        propagation.source.clone()
+                    }
+                    _ => value_type,
+                };
                 binding.pattern = self.clone_pattern(binding.pattern, &subject);
-                binding.propagation = binding.propagation.as_ref().map(|p| self.propagation(p));
-                binding.propagation_plan = binding.propagation.as_ref().and_then(|propagation| {
-                    (propagation.source != propagation.result
-                        && matches!(propagation.result, CheckedType::Sum(_)))
-                    .then(|| {
-                        super::LoweredCoercionPlan::plan(&propagation.source, &propagation.result)
-                            .ok()
-                    })
-                    .flatten()
-                });
-                binding.propagation_residual = binding
+                (binding.propagation_plan, binding.propagation_residual) = binding
                     .propagation
                     .as_ref()
-                    .and_then(super::LoweredPatternBindingItem::residual_alternative);
+                    .map(super::LoweredPatternBindingItem::failure_path)
+                    .unwrap_or_default();
                 LoweredItemKind::PatternBinding(binding)
             }
             LoweredItemKind::Assignment(mut assignment) => {

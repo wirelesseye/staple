@@ -95,6 +95,15 @@ pub macro @derive_debug: Item -> Sequence Item = item => match item {
         ),
     ),
     TypeDeclarationItem (
+        FromDeclaration(), name_syntax, name, target, parameters, Some representation,
+    ) => Sequence (
+        first: item,
+        rest: Sequence (
+            first: derived_debug_implementation (name_syntax, name, target, parameters, representation),
+            rest: Sequence (),
+        ),
+    ),
+    TypeDeclarationItem (
         SingletonDeclaration(), _, name, target, _, None,
     ) => Sequence (
         first: item,

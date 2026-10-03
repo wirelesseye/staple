@@ -29,11 +29,12 @@ use crate::specialization::SpecializationCatalog;
 use crate::{
     BuiltinType, CheckedAccess, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
     CheckedMutation, CheckedProductType, CheckedPropagation, CheckedResource, CheckedTraitBound,
-    CheckedTraitDispatch, CheckedType, DefinitionId, FloatType, FunctionId, IntegerType,
-    IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction, ResolvedModule,
-    SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId, TypeParameterId,
-    TypedModule, contains_type_parameter, infer_type_parameters, select_sum_alternative,
-    slice_ref_length,
+    CheckedTraitDispatch, CheckedType, DefinitionId, FloatType, FromCoercion, FunctionId,
+    IntegerType, IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction,
+    ResolvedModule, SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId,
+    TypeParameterId, TypedModule, contains_type_parameter, implicit_wrapper_representation,
+    infer_type_parameters, select_sum_alternative_with, slice_ref_length,
+    sum_through_implicit_wrapper,
 };
 
 mod artifact_closure;
@@ -564,7 +565,8 @@ pub(crate) struct LoweredExpression {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoweredCoercionPlan {
     /// The representation is unchanged: `source == target`, a string literal
-    /// set widened to `String` or another set, or `NumberLiteral` to `USize`.
+    /// set widened to `String` or another set, `NumberLiteral` to `USize`, or
+    /// a wrapper projected to its representation by an indexing shortcut.
     Identity,
     /// `Ref (T; N)` to `Slice T`: build the slice from the pointer and the
     /// checked element count `N`.
@@ -581,6 +583,9 @@ pub(crate) enum LoweredCoercionPlan {
     SumWiden {
         arms: Vec<Option<LoweredSumWidenArm>>,
     },
+    /// Implicitly introduce a `from` wrapper: coerce the value to the
+    /// wrapper's representation, which is also the wrapper's runtime value.
+    Wrap { payload: Box<LoweredCoercionPlan> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -593,7 +598,28 @@ pub(crate) struct LoweredSumWidenArm {
 impl LoweredCoercionPlan {
     /// Computes a coercion plan from source to target. Unsupported concrete pairs
     /// produce a diagnostic; unresolved templates defer the plan to materialization.
+    /// Whether the plan implicitly introduces a `from` wrapper anywhere.
+    pub(crate) fn introduces_wrapper(&self) -> bool {
+        match self {
+            LoweredCoercionPlan::Identity | LoweredCoercionPlan::SliceRef { .. } => false,
+            LoweredCoercionPlan::Wrap { .. } => true,
+            LoweredCoercionPlan::SumInject { payload, .. } => payload.introduces_wrapper(),
+            LoweredCoercionPlan::SumWiden { arms } => arms
+                .iter()
+                .flatten()
+                .any(|arm| arm.payload.introduces_wrapper()),
+        }
+    }
+
     pub(crate) fn plan(source: &CheckedType, target: &CheckedType) -> Result<Self, String> {
+        Self::plan_with(source, target, FromCoercion::Allowed)
+    }
+
+    fn plan_with(
+        source: &CheckedType,
+        target: &CheckedType,
+        from: FromCoercion,
+    ) -> Result<Self, String> {
         // Emission ends the block with `unreachable` for a `Never` source
         // before any coercion runs, so the plan is never executed.
         if source == &CheckedType::Never {
@@ -612,6 +638,12 @@ impl LoweredCoercionPlan {
         {
             return Ok(LoweredCoercionPlan::Identity);
         }
+        // Projecting a wrapper to its representation (an indexing shortcut)
+        // keeps the value: a wrapper shares its representation's layout.
+        if matches!(source, CheckedType::Wrapper { representation, .. } if representation.as_ref() == target)
+        {
+            return Ok(LoweredCoercionPlan::Identity);
+        }
         if matches!(
             (source, target),
             (CheckedType::Ref(_), CheckedType::Slice(_))
@@ -621,6 +653,17 @@ impl LoweredCoercionPlan {
             return Ok(LoweredCoercionPlan::SliceRef { length });
         }
         let CheckedType::Sum(target_sum) = target else {
+            if from == FromCoercion::Allowed
+                && let Some(representation) = implicit_wrapper_representation(target)
+            {
+                return Ok(LoweredCoercionPlan::Wrap {
+                    payload: Box::new(Self::plan_with(
+                        source,
+                        representation,
+                        FromCoercion::Forbidden,
+                    )?),
+                });
+            }
             return Err(format!(
                 "unsupported runtime coercion from `{source}` to `{target}`"
             ));
@@ -630,7 +673,7 @@ impl LoweredCoercionPlan {
                 let mut arms = Vec::with_capacity(source_sum.alternatives.len());
                 for alternative in &source_sum.alternatives {
                     let index =
-                        select_sum_alternative(alternative, &target_sum.alternatives).map_err(
+                        select_sum_alternative_with(alternative, &target_sum.alternatives, from).map_err(
                             |()| {
                                 format!(
                                     "coercion alternative `{alternative}` matches more than one alternative of `{target}`"
@@ -642,7 +685,11 @@ impl LoweredCoercionPlan {
                             let target_alternative = &target_sum.alternatives[index];
                             arms.push(Some(LoweredSumWidenArm {
                                 target: index,
-                                payload: Box::new(Self::plan(alternative, target_alternative)?),
+                                payload: Box::new(Self::plan_with(
+                                    alternative,
+                                    target_alternative,
+                                    from,
+                                )?),
                             }));
                         }
                         None => arms.push(None),
@@ -651,7 +698,7 @@ impl LoweredCoercionPlan {
                 Ok(LoweredCoercionPlan::SumWiden { arms })
             }
             _ => {
-                let index = select_sum_alternative(source, &target_sum.alternatives)
+                let index = select_sum_alternative_with(source, &target_sum.alternatives, from)
                     .map_err(|()| {
                         format!(
                             "coercion source `{source}` matches more than one alternative of `{target}`"
@@ -665,7 +712,7 @@ impl LoweredCoercionPlan {
                 let target_alternative = &target_sum.alternatives[index];
                 Ok(LoweredCoercionPlan::SumInject {
                     alternative: index,
-                    payload: Box::new(Self::plan(source, target_alternative)?),
+                    payload: Box::new(Self::plan_with(source, target_alternative, from)?),
                 })
             }
         }
@@ -1104,7 +1151,7 @@ impl LoweredOptionAlternatives {
         ) {
             return Ok(None);
         }
-        let CheckedType::Sum(option) = result else {
+        let Some(option) = sum_through_implicit_wrapper(result) else {
             return Err("Buffer.pop must return Option T".to_string());
         };
         let find = |suffix: &str| {
@@ -2122,6 +2169,19 @@ fn pattern_test_plan(
     Ok((plan, children))
 }
 
+/// The `from` wrapper of type `id` a projected pattern sees through: the
+/// subject itself, or the subject sum's alternative of that type.
+fn projected_wrapper(subject: &CheckedType, id: TypeId) -> Option<&CheckedType> {
+    let is_target = |ty: &&CheckedType| {
+        matches!(ty, CheckedType::Wrapper { id: wrapper, .. } if *wrapper == id)
+            && implicit_wrapper_representation(ty).is_some()
+    };
+    match subject {
+        CheckedType::Sum(sum) => sum.alternatives.iter().find(is_target),
+        other => Some(other).filter(is_target),
+    }
+}
+
 /// The plan-relevant shape of a lowered pattern, used when materialization
 /// recomputes a concrete plan from the instance-local kind.
 fn pattern_plan_shape_from_kind(kind: &LoweredPatternKind) -> PatternPlanShape {
@@ -2313,33 +2373,51 @@ pub(crate) struct LoweredPatternBindingItem {
     /// Checked propagation metadata, present exactly for propagating
     /// bindings.
     pub propagation: Option<CheckedPropagation>,
-    /// The failure value's coercion plan when the propagated result is itself a
-    /// sum. `None` when the source is returned unchanged or extracted as a
-    /// residual variant.
+    /// The failure value's coercion plan: from the whole source when the
+    /// propagated result is a sum (or a `from` type over one), otherwise from
+    /// the extracted residual variant. `None` when the failure value is
+    /// returned unchanged.
     pub propagation_plan: Option<LoweredCoercionPlan>,
     /// The source alternative returned as the failure value when the propagated
-    /// result is a single, non-sum residual variant (extracted with
-    /// `extract_sum_alternative`).
+    /// result is not sum-shaped (extracted with `extract_sum_alternative`).
     pub propagation_residual: Option<usize>,
 }
 
 impl LoweredPatternBindingItem {
-    /// The residual failure alternative of one propagation: the source sum's
-    /// alternative equal to a non-sum result. `None` when the source is
-    /// returned unchanged or widened through a coercion plan.
-    pub(crate) fn residual_alternative(propagation: &CheckedPropagation) -> Option<usize> {
-        if propagation.source == propagation.result
-            || matches!(propagation.result, CheckedType::Sum(_))
-        {
-            return None;
+    /// The failure path of one propagation: its coercion plan and, when the
+    /// result is not sum-shaped, the residual source alternative extracted
+    /// before that plan applies.
+    pub(crate) fn failure_path(
+        propagation: &CheckedPropagation,
+    ) -> (Option<LoweredCoercionPlan>, Option<usize>) {
+        if propagation.source == propagation.result {
+            return (None, None);
+        }
+        if sum_through_implicit_wrapper(&propagation.result).is_some() {
+            return (
+                LoweredCoercionPlan::plan(&propagation.source, &propagation.result).ok(),
+                None,
+            );
         }
         let CheckedType::Sum(source) = &propagation.source else {
-            return None;
+            return (None, None);
         };
-        source
+        let residual = source
             .alternatives
             .iter()
-            .position(|alternative| alternative == &propagation.result)
+            .enumerate()
+            .filter(|(index, _)| *index != propagation.success_index)
+            .find(|(_, alternative)| {
+                *alternative == &propagation.result
+                    || LoweredCoercionPlan::plan(alternative, &propagation.result).is_ok()
+            });
+        let Some((index, alternative)) = residual else {
+            return (None, None);
+        };
+        let plan = (alternative != &propagation.result)
+            .then(|| LoweredCoercionPlan::plan(alternative, &propagation.result).ok())
+            .flatten();
+        (plan, Some(index))
     }
 }
 
@@ -3702,25 +3780,27 @@ impl LoweredProgram {
             .get(value)
             .map(|value| value.value_type.clone())
             .unwrap_or(CheckedType::Never);
-        let pattern = self.lower_pattern(module, &binding.pattern, &value_type)?;
         let propagating = binding.kind == staple_syntax::PatternBindingKind::Propagating;
         let propagation = module.propagation_for(binding.syntax.id).cloned();
+        // A propagating `from` value is matched as its sum representation,
+        // which shares the value's runtime layout.
+        let subject = match &propagation {
+            Some(propagation) if implicit_wrapper_representation(&value_type).is_some() => {
+                propagation.source.clone()
+            }
+            _ => value_type,
+        };
+        let pattern = self.lower_pattern(module, &binding.pattern, &subject)?;
         if propagating && propagation.is_none() {
             return Err(Diagnostic::new(
                 binding.syntax.span.clone(),
                 "cannot lower a propagating binding without checked propagation metadata",
             ));
         }
-        // The failure path's sum coercion plan.
-        let propagation_plan = propagation.as_ref().and_then(|propagation| {
-            (propagation.source != propagation.result
-                && matches!(propagation.result, CheckedType::Sum(_)))
-            .then(|| LoweredCoercionPlan::plan(&propagation.source, &propagation.result).ok())
-            .flatten()
-        });
-        let propagation_residual = propagation
+        let (propagation_plan, propagation_residual) = propagation
             .as_ref()
-            .and_then(LoweredPatternBindingItem::residual_alternative);
+            .map(LoweredPatternBindingItem::failure_path)
+            .unwrap_or_default();
         Ok(LoweredPatternBindingItem {
             pattern,
             value,
@@ -4452,7 +4532,8 @@ impl LoweredProgram {
             ));
         };
         let base = if expression_has_place_root(module.resolved(), &index.value) {
-            self.lower_place(module, owner, context, &index.value)?
+            let place = self.lower_place(module, owner, context, &index.value)?;
+            self.project_index_base_place(module, &index.value, place)
         } else {
             let value_syntax = index.value.syntax();
             let Some(base_type) = module.type_of_expression(value_syntax.id).cloned() else {
@@ -4483,6 +4564,34 @@ impl LoweredProgram {
                 index: position,
             },
         }))
+    }
+
+    /// The place an index operates on: the indexed value's place, or, for an
+    /// indexing shortcut through a wrapper, that place's representation,
+    /// which shares the wrapper's storage.
+    fn project_index_base_place(
+        &mut self,
+        module: &TypedModule,
+        value: &Expression,
+        place: PlaceId,
+    ) -> PlaceId {
+        match module.coercion_for(value.syntax().id) {
+            Some(coercion)
+                if matches!(&coercion.source, CheckedType::Wrapper { representation, .. }
+                    if representation.as_ref() == &coercion.target) =>
+            {
+                let syntax = value.syntax();
+                self.places.push(LoweredPlace {
+                    origin: Origin {
+                        syntax: syntax.id,
+                        span: syntax.span.clone(),
+                    },
+                    value_type: coercion.target.clone(),
+                    kind: LoweredPlaceKind::Representation { base: place },
+                })
+            }
+            _ => place,
+        }
     }
 
     /// Lowers an assignment target into an explicit place tree.
@@ -4669,6 +4778,50 @@ impl LoweredProgram {
     /// singleton targets, and the emission test plan against the subject
     /// type the use site supplies.
     fn lower_pattern(
+        &mut self,
+        module: &TypedModule,
+        pattern: &Pattern,
+        subject: &CheckedType,
+    ) -> Result<PatternId, Diagnostic> {
+        let syntax = pattern.syntax();
+        // A pattern checked against a `from` subject's representation lowers
+        // exactly like the subject type's own nominal pattern around it.
+        if let Some(id) = module.pattern_projection(syntax.id)
+            && let Some(wrapper) = projected_wrapper(subject, id)
+        {
+            let CheckedType::Wrapper { name, .. } = wrapper else {
+                unreachable!("projected pattern target is a wrapper");
+            };
+            let shape = PatternPlanShape::Nominal { target: Some(id) };
+            let resolved = module.resolved();
+            let (test, children) = pattern_test_plan(
+                subject,
+                subject,
+                &shape,
+                &|id| resolved.builtin_type(id),
+                module.string_representation(),
+            )
+            .map_err(|message| Diagnostic::new(syntax.span.clone(), message))?;
+            let argument = self.lower_unprojected_pattern(module, pattern, &children[0])?;
+            return Ok(self.patterns.push(LoweredPattern {
+                origin: Origin {
+                    syntax: syntax.id,
+                    span: syntax.span.clone(),
+                },
+                value_type: subject.clone(),
+                kind: LoweredPatternKind::Nominal {
+                    target: Some(id),
+                    name: name.clone(),
+                    moved: false,
+                    argument,
+                },
+                test,
+            }));
+        }
+        self.lower_unprojected_pattern(module, pattern, subject)
+    }
+
+    fn lower_unprojected_pattern(
         &mut self,
         module: &TypedModule,
         pattern: &Pattern,
@@ -5828,8 +5981,8 @@ impl LoweredProgram {
                 .cloned()
                 .unwrap_or(CheckedType::Never),
         };
-        let true_index = match &bool_type {
-            CheckedType::Sum(sum) => sum
+        let true_index = match sum_through_implicit_wrapper(&bool_type) {
+            Some(sum) => sum
                 .alternatives
                 .iter()
                 .position(|alternative| {
@@ -5841,8 +5994,8 @@ impl LoweredProgram {
                         "`Bool` has no `True` alternative",
                     )
                 })?,
-            CheckedType::Never => 0,
-            _ => {
+            None if bool_type == CheckedType::Never => 0,
+            None => {
                 return Err(Diagnostic::new(
                     logical.syntax.span.clone(),
                     "`&&`/`||` require `Bool` to be a sum type",
@@ -6010,7 +6163,9 @@ impl LoweredProgram {
         // Record the operand places so emission can reuse them without
         // re-deriving `expression_has_place_root`.
         let base_place = if base_is_place {
-            self.lower_place(module, owner, context, &index.value).ok()
+            self.lower_place(module, owner, context, &index.value)
+                .ok()
+                .map(|place| self.project_index_base_place(module, &index.value, place))
         } else {
             None
         };
@@ -6033,7 +6188,13 @@ impl LoweredProgram {
                 let base_type = self
                     .expressions
                     .get(base)
-                    .map(|expression| expression.value_type.clone())
+                    .map(|expression| {
+                        expression
+                            .coercion
+                            .as_ref()
+                            .map_or(&expression.value_type, |coercion| &coercion.target)
+                            .clone()
+                    })
                     .unwrap_or(CheckedType::Error);
                 let position_type = self
                     .expressions
@@ -9728,10 +9889,13 @@ impl LoweredProgram {
                             "index evidence does not match its checked dispatch",
                         ));
                     }
-                    let base_type = self
-                        .expressions
-                        .get(index.base)
-                        .map(|base| &base.value_type);
+                    // An indexing shortcut through a wrapper coerces the base
+                    // to its representation.
+                    let base_type = self.expressions.get(index.base).map(|base| {
+                        base.coercion
+                            .as_ref()
+                            .map_or(&base.value_type, |coercion| &coercion.target)
+                    });
                     let position_type = self
                         .expressions
                         .get(index.index)
@@ -10076,11 +10240,9 @@ impl LoweredProgram {
                         binding.value.index(),
                         self.expressions.contains(binding.value),
                     );
-                    // A propagation whose residual result is a sum needs the
-                    // failure coercion plan.
+                    // The failure plan and residual must equal a fresh
+                    // computation from the checked propagation types.
                     if let Some(propagation) = &binding.propagation {
-                        let needs_plan = propagation.source != propagation.result
-                            && matches!(propagation.result, CheckedType::Sum(_));
                         let unresolved =
                             instance_resolution::unresolved_type_problem(&propagation.source)
                                 .is_some()
@@ -10088,29 +10250,21 @@ impl LoweredProgram {
                                     &propagation.result,
                                 )
                                 .is_some();
-                        match (&binding.propagation_plan, needs_plan) {
-                            (Some(plan), true) => {
-                                match LoweredCoercionPlan::plan(
-                                    &propagation.source,
-                                    &propagation.result,
-                                ) {
-                                    Ok(expected) if *plan == expected => {}
-                                    _ => diagnostics.push(Diagnostic::new(
-                                        item.origin.span.clone(),
-                                        "propagation coercion plan disagrees with its checked types",
-                                    )),
-                                }
-                            }
-                            (None, true) if !unresolved => diagnostics.push(Diagnostic::new(
+                        let (plan, residual) = LoweredPatternBindingItem::failure_path(propagation);
+                        let needs_plan = propagation.source != propagation.result
+                            && sum_through_implicit_wrapper(&propagation.result).is_some();
+                        if !unresolved && needs_plan && binding.propagation_plan.is_none() {
+                            diagnostics.push(Diagnostic::new(
                                 item.origin.span.clone(),
                                 "propagation coercion has no emission plan",
-                            )),
-                            _ => {}
+                            ));
+                        } else if !unresolved && binding.propagation_plan != plan {
+                            diagnostics.push(Diagnostic::new(
+                                item.origin.span.clone(),
+                                "propagation coercion plan disagrees with its checked types",
+                            ));
                         }
-                        if !unresolved
-                            && binding.propagation_residual
-                                != LoweredPatternBindingItem::residual_alternative(propagation)
-                        {
+                        if !unresolved && binding.propagation_residual != residual {
                             diagnostics.push(Diagnostic::new(
                                 item.origin.span.clone(),
                                 "propagation residual alternative disagrees with its checked types",
@@ -14560,7 +14714,7 @@ mod tests {
     #[test]
     fn companion_modules_keep_parent_and_companion_metadata() {
         let program =
-            snapshot("pub type User = alias I32\ncompanion User { pub let id: I32 = 42 }\n");
+            snapshot("pub type User = from I32\ncompanion User { pub let id: I32 = 42 }\n");
         let (entry_id, _) = entry_module(&program);
         let companion = program
             .modules
@@ -19370,8 +19524,8 @@ mod tests {
         assert_eq!(logical.operator, staple_syntax::LogicalOperator::And);
         assert!(program.expressions.contains(logical.left));
         assert!(program.expressions.contains(logical.right));
-        let CheckedType::Sum(sum) = &logical.bool_type else {
-            panic!("`Bool` is a sum type");
+        let Some(sum) = sum_through_implicit_wrapper(&logical.bool_type) else {
+            panic!("`Bool` is a `from` type over a sum");
         };
         let expected_true = sum
             .alternatives
@@ -19565,9 +19719,10 @@ mod tests {
         };
         assert_eq!(arms.len(), source_sum.alternatives.len());
         for (index, alternative) in source_sum.alternatives.iter().enumerate() {
-            let expected = select_sum_alternative(alternative, &target_sum.alternatives)
-                .expect("unique widening")
-                .expect("widen alternative");
+            let expected =
+                crate::typecheck::select_sum_alternative(alternative, &target_sum.alternatives)
+                    .expect("unique widening")
+                    .expect("widen alternative");
             let arm = arms[index].as_ref().expect("widen arm");
             assert_eq!(arm.target, expected);
             assert_eq!(*arm.payload, LoweredCoercionPlan::Identity);
@@ -19657,11 +19812,20 @@ mod tests {
         let LoweredExpressionKind::Match(match_) = &invert.kind else {
             panic!("invert should be a match");
         };
-        let CheckedType::Sum(bool_sum) = &match_.source else {
-            panic!("Bool should be a sum");
+        let Some(bool_sum) = sum_through_implicit_wrapper(&match_.source) else {
+            panic!("Bool should be a `from` type over a sum");
         };
         for arm in &match_.arms {
-            let pattern = lowered_pattern(&program, arm.pattern);
+            // `True`/`False` see through `Bool` as if written `Bool True`.
+            let projection = lowered_pattern(&program, arm.pattern);
+            assert_eq!(
+                projection.test.identity,
+                LoweredPatternIdentity::Representation
+            );
+            let LoweredPatternKind::Nominal { argument, .. } = &projection.kind else {
+                panic!("`True`/`False` should project through `Bool`");
+            };
+            let pattern = lowered_pattern(&program, *argument);
             let LoweredPatternKind::Binding {
                 singleton: Some(singleton),
                 ..

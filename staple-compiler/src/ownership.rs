@@ -224,6 +224,9 @@ impl<'a> OwnershipChecker<'a> {
 
     /// Returns whether control continues after the expression.
     fn check_expression(&mut self, expression: &Expression, consume: bool) -> bool {
+        // An implicit `from` introduction constructs the wrapper exactly as
+        // its constructor call would, so it consumes the source value.
+        let consume = consume || self.introduces_implicit_wrapper(expression);
         match expression {
             Expression::Function(value) => {
                 if let Some(function_id) = self.module.function_for(value.syntax.id) {
@@ -508,6 +511,15 @@ impl<'a> OwnershipChecker<'a> {
             Expression::Binary(_) => unreachable!("binary expression reached ownership checking"),
             Expression::Unary(_) => unreachable!("unary expression reached ownership checking"),
         }
+    }
+
+    fn introduces_implicit_wrapper(&self, expression: &Expression) -> bool {
+        self.module
+            .coercion_for(expression.syntax().id)
+            .is_some_and(|coercion| {
+                crate::lower::LoweredCoercionPlan::plan(&coercion.source, &coercion.target)
+                    .is_ok_and(|plan| plan.introduces_wrapper())
+            })
     }
 
     fn expression_continues(&self, expression: &Expression) -> bool {

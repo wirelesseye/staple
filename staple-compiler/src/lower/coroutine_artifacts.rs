@@ -2009,13 +2009,10 @@ mod tests {
             panic!("an `until` runner carries an until body")
         };
         assert!(
-            matches!(
-                predicate_type.result.as_ref(),
-                CheckedType::Sum(sum)
-                    if sum.alternatives.iter().any(|alternative| {
-                        matches!(alternative, CheckedType::Wrapper { name, .. } if name == "True")
-                    })
-            ),
+            crate::typecheck::sum_through_implicit_wrapper(predicate_type.result.as_ref())
+                .is_some_and(|sum| sum.alternatives.iter().any(|alternative| {
+                    matches!(alternative, CheckedType::Wrapper { name, .. } if name == "True")
+                })),
             "the predicate returns `Bool`: {predicate_type:?}"
         );
 

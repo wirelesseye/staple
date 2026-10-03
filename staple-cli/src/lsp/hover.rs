@@ -1037,8 +1037,12 @@ impl Collector<'_> {
         let from_module = resolved
             .module_for_syntax(from_syntax)
             .unwrap_or_else(|| resolved.program().entry());
-        let representation_is_visible = declaration.kind() == TypeDeclarationKind::Alias
-            || resolved.representation_visible_from(id, from_module);
+        // A `from` type's source is part of its public introduction
+        // relationship, so it is shown even where projection is private.
+        let representation_is_visible = matches!(
+            declaration.kind(),
+            TypeDeclarationKind::Alias | TypeDeclarationKind::From
+        ) || resolved.representation_visible_from(id, from_module);
         let (effect_parameter, ordinary_parameters) =
             match declaration.type_parameters.split_first() {
                 Some((TypeParameterPattern::Effect(binding), rest)) => {
@@ -1076,7 +1080,9 @@ impl Collector<'_> {
             .unwrap_or_else(|| match declaration.kind() {
                 TypeDeclarationKind::Opaque => "opaque".to_owned(),
                 TypeDeclarationKind::Singleton => "()".to_owned(),
-                TypeDeclarationKind::Alias | TypeDeclarationKind::Wrapper => "...".to_owned(),
+                TypeDeclarationKind::Alias
+                | TypeDeclarationKind::Wrapper
+                | TypeDeclarationKind::From => "...".to_owned(),
             });
         let marker = match declaration.kind() {
             TypeDeclarationKind::Alias => "alias ",
@@ -1084,6 +1090,11 @@ impl Collector<'_> {
                 Visibility::Public => "pub wrap ",
                 Visibility::Package => "pub(package) wrap ",
                 Visibility::Private => "wrap ",
+            },
+            TypeDeclarationKind::From => match declaration.representation_visibility() {
+                Visibility::Public => "pub from ",
+                Visibility::Package => "pub(package) from ",
+                Visibility::Private => "from ",
             },
             TypeDeclarationKind::Opaque | TypeDeclarationKind::Singleton => "",
         };
@@ -2502,7 +2513,7 @@ mod tests {
     }
 
     #[test]
-    fn use_glob_of_a_typegroup_hovers_the_generated_alias() {
+    fn use_glob_of_a_typegroup_hovers_the_generated_type() {
         let source = concat!(
             "typegroup Switch {\n",
             "    Enabled,\n",
@@ -2533,13 +2544,13 @@ mod tests {
                 panic!("no hover entry for `Switch` in `use Switch.*`: {entries:?}")
             });
         assert!(
-            entry.signature.starts_with("type Switch = alias "),
+            entry.signature.starts_with("type Switch = from "),
             "unexpected `use Switch.*` segment signature: {entry:?}"
         );
     }
 
     #[test]
-    fn hand_written_companion_header_alongside_typegroup_hovers_the_alias() {
+    fn hand_written_companion_header_alongside_typegroup_hovers_the_type() {
         let source = concat!(
             "typegroup Switch {\n",
             "    Enabled,\n",
@@ -2570,7 +2581,7 @@ mod tests {
                 panic!("no hover entry for the `companion Switch` header: {entries:?}")
             });
         assert!(
-            entry.signature.starts_with("type Switch = alias "),
+            entry.signature.starts_with("type Switch = from "),
             "unexpected companion header signature: {entry:?}"
         );
     }

@@ -711,6 +711,31 @@ impl ResolvedModule {
         self.named_types.get(&syntax_id).copied()
     }
 
+    /// The type whose companion items apply to `ty`: `ty` itself, or for an
+    /// alias the nominal type at the head of its underlying type. Aliases
+    /// are transparent, so they never own companion items themselves.
+    pub fn companion_owner(&self, ty: TypeId) -> Option<TypeId> {
+        fn head(module: &ResolvedModule, ty: &Type) -> Option<TypeId> {
+            match ty {
+                Type::Named(named) => module.type_for(named.syntax.id),
+                Type::Application(application) => head(module, &application.callee),
+                Type::EffectApplication(application) => head(module, &application.callee),
+                _ => None,
+            }
+        }
+        let mut current = ty;
+        let mut seen = HashSet::new();
+        while self.type_declarations.get(&current)?.kind()
+            == staple_syntax::TypeDeclarationKind::Alias
+        {
+            if !seen.insert(current) {
+                return None;
+            }
+            current = head(self, self.type_declarations[&current].underlying()?)?;
+        }
+        Some(current)
+    }
+
     pub fn type_for_pattern(&self, syntax_id: SyntaxId) -> Option<TypeId> {
         self.nominal_patterns.get(&syntax_id).copied()
     }
@@ -1038,6 +1063,7 @@ fn reexport_declaration(
     declaration: &UseDeclaration,
     interfaces: &[Interface],
     exported: &mut Interface,
+    is_type_value: &dyn Fn(SymbolId) -> bool,
 ) -> bool {
     let Some(imported_module) = program.imported_module(declaration.syntax.id) else {
         return false;
@@ -1063,9 +1089,13 @@ fn reexport_declaration(
                     .is_some_and(|module| *module != namespace);
                 let compatible_item =
                     imported.types.contains_key(item) || imported.traits.contains_key(item);
-                let conflicts = imported.values.contains_key(item)
-                    || imported.macros.contains_key(item)
-                    || different_namespace;
+                // A type's own constructor or singleton value travels with
+                // the type rather than competing with its namespace.
+                let value_conflicts = imported.values.get(item).is_some_and(|symbol| {
+                    !(imported.types.contains_key(item) && is_type_value(*symbol))
+                });
+                let conflicts =
+                    value_conflicts || imported.macros.contains_key(item) || different_namespace;
                 if compatible_item && !conflicts {
                     return export_interface_item(exported, imported, item, item)
                         | exported
@@ -1275,9 +1305,15 @@ impl NameResolver {
                 || interface.macros.contains_key(name)
                 || interface.traits.contains_key(name)
                 || different_namespace;
-            let conflicts = interface.values.contains_key(name)
-                || interface.macros.contains_key(name)
-                || different_namespace;
+            // A type's own constructor or singleton value travels with the
+            // type and its companion namespace rather than competing with it.
+            let value_conflicts = interface.values.get(name).is_some_and(|symbol| {
+                !(interface.types.contains_key(name)
+                    && (self.constructors.contains_key(symbol)
+                        || self.singleton_values.contains_key(symbol)))
+            });
+            let conflicts =
+                value_conflicts || interface.macros.contains_key(name) || different_namespace;
             (any_item, conflicts)
         }) {
             self.diagnostics.push(Diagnostic::new(
@@ -1361,6 +1397,7 @@ impl NameResolver {
         }
 
         self.validate_trait_prerequisite_cycles();
+        self.validate_alias_companions(&program);
 
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
@@ -1403,31 +1440,33 @@ impl NameResolver {
             }
         }
         let mut companion_type_for_module = HashMap::new();
-        let companion_members = self
-            .type_modules
-            .iter()
-            .filter_map(|(ty, owner)| {
-                let name = &self.type_declarations[ty].name;
-                let child = program.child_named(*owner, name)?;
-                program.module(child).companion.then(|| {
-                    companion_type_for_module.insert(child, *ty);
-                    let members = self.module_values[child.0]
-                        .iter()
-                        .map(|(name, symbol)| {
-                            (
-                                name.clone(),
-                                ResolvedCompanionMember {
-                                    symbol: *symbol,
-                                    declaring_module: *owner,
-                                    public: self.interfaces[child.0].values.contains_key(name),
-                                },
-                            )
-                        })
-                        .collect();
-                    (*ty, members)
-                })
-            })
-            .collect();
+        let mut companion_members = HashMap::<TypeId, HashMap<_, _>>::new();
+        for (ty, owner) in &self.type_modules {
+            let name = &self.type_declarations[ty].name;
+            let Some(child) = program.child_named(*owner, name) else {
+                continue;
+            };
+            if !program.module(child).companion {
+                continue;
+            }
+            // A companion of an alias is the companion of the aliased type.
+            let Some(target) = self.alias_companion_target(*ty) else {
+                continue;
+            };
+            companion_type_for_module.insert(child, target);
+            companion_members.entry(target).or_default().extend(
+                self.module_values[child.0].iter().map(|(name, symbol)| {
+                    (
+                        name.clone(),
+                        ResolvedCompanionMember {
+                            symbol: *symbol,
+                            declaring_module: *owner,
+                            public: self.interfaces[child.0].values.contains_key(name),
+                        },
+                    )
+                }),
+            );
+        }
         let exported_module_definitions = self
             .interfaces
             .iter()
@@ -1592,6 +1631,7 @@ impl NameResolver {
             "NominalPattern",
             "AliasDeclaration",
             "WrapperDeclaration",
+            "FromDeclaration",
             "SingletonDeclaration",
             "OpaqueDeclaration",
             "TypeDeclarationKind",
@@ -1599,6 +1639,7 @@ impl NameResolver {
             "TypeBody",
             "AliasBody",
             "WrapperBody",
+            "FromBody",
             "OpaqueBody",
             "Modifier",
             "ModifiedItem",
@@ -1930,7 +1971,17 @@ impl NameResolver {
                         continue;
                     }
                     let exported = &mut self.interfaces[source_module.id.0];
-                    changed |= reexport_declaration(program, declaration, &previous, exported);
+                    let is_type_value = |symbol: SymbolId| {
+                        self.constructors.contains_key(&symbol)
+                            || self.singleton_values.contains_key(&symbol)
+                    };
+                    changed |= reexport_declaration(
+                        program,
+                        declaration,
+                        &previous,
+                        exported,
+                        &is_type_value,
+                    );
                 }
             }
             if !changed {
@@ -1962,11 +2013,16 @@ impl NameResolver {
                     } else {
                         &self.interfaces
                     };
+                    let is_type_value = |symbol: SymbolId| {
+                        self.constructors.contains_key(&symbol)
+                            || self.singleton_values.contains_key(&symbol)
+                    };
                     changed |= reexport_declaration(
                         program,
                         declaration,
                         visible,
                         &mut self.package_interfaces[source_module.id.0],
+                        &is_type_value,
                     );
                 }
             }
@@ -2317,13 +2373,15 @@ impl NameResolver {
                         if submodule.visibility != Visibility::Private
                             && let Some(child) = program.child_module(submodule.syntax.id)
                         {
-                            self.package_interfaces[source_module.id.0]
-                                .namespaces
-                                .insert(submodule.name.clone(), child);
-                            if submodule.visibility == Visibility::Public {
-                                self.interfaces[source_module.id.0]
+                            for name in submodule_namespace_names(program, submodule, child) {
+                                self.package_interfaces[source_module.id.0]
                                     .namespaces
-                                    .insert(submodule.name.clone(), child);
+                                    .insert(name.clone(), child);
+                                if submodule.visibility == Visibility::Public {
+                                    self.interfaces[source_module.id.0]
+                                        .namespaces
+                                        .insert(name, child);
+                                }
                             }
                         }
                     }
@@ -2382,8 +2440,7 @@ impl NameResolver {
         }
         self.type_declarations.insert(id, declaration.clone());
         self.type_modules.insert(id, module);
-        if (declaration.kind() == staple_syntax::TypeDeclarationKind::Wrapper
-            && declaration.underlying().is_some())
+        if (declaration.kind().is_wrapper() && declaration.underlying().is_some())
             || declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton
         {
             let symbol = SymbolId(self.next_symbol_id);
@@ -2403,12 +2460,14 @@ impl NameResolver {
             } else {
                 self.constructors.insert(symbol, id);
             }
-            let constructor_visibility =
-                if declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton {
-                    declaration.visibility
-                } else {
-                    declaration.representation_visibility()
-                };
+            // Calling a `from` type's constructor is the same introduction
+            // its implicit conversion performs, so it shares the type's
+            // visibility; destructuring still requires the representation.
+            let constructor_visibility = match declaration.kind() {
+                staple_syntax::TypeDeclarationKind::Singleton
+                | staple_syntax::TypeDeclarationKind::From => declaration.visibility,
+                _ => declaration.representation_visibility(),
+            };
             if constructor_visibility != Visibility::Private {
                 self.insert_visible_value(
                     module,
@@ -2469,8 +2528,9 @@ impl NameResolver {
                 if let Item::Submodule(submodule) = item
                     && let Some(child) = program.child_module(submodule.syntax.id)
                 {
-                    self.definition_context_namespaces[module.id.0]
-                        .insert(submodule.name.clone(), child);
+                    for name in submodule_namespace_names(program, submodule, child) {
+                        self.definition_context_namespaces[module.id.0].insert(name, child);
+                    }
                 }
             }
         }
@@ -2915,13 +2975,15 @@ impl NameResolver {
             let Some(child) = program.child_module(submodule.syntax.id) else {
                 continue;
             };
-            let previous = self
-                .namespaces
-                .last_mut()
-                .expect("resolver namespace scope")
-                .insert(submodule.name.clone(), child);
-            if previous.is_some_and(|previous| previous != child) {
-                self.duplicate_import(&submodule.name, submodule.syntax.span.clone());
+            for name in submodule_namespace_names(program, submodule, child) {
+                let previous = self
+                    .namespaces
+                    .last_mut()
+                    .expect("resolver namespace scope")
+                    .insert(name.clone(), child);
+                if previous.is_some_and(|previous| previous != child) {
+                    self.duplicate_import(&name, submodule.syntax.span.clone());
+                }
             }
         }
     }
@@ -3337,6 +3399,21 @@ impl NameResolver {
             if declaration.representation_visibility() != Visibility::Private {
                 self.validate_representation(underlying, declaration.representation_visibility());
             }
+            // The implicit `Source -> Type` introduction is usable wherever
+            // the type is, so its source must be at least as visible.
+            if declaration.kind() == staple_syntax::TypeDeclarationKind::From
+                && declaration.visibility != Visibility::Private
+            {
+                self.validate_type_visibility(underlying, declaration.visibility, "`from` source");
+            }
+        }
+        if declaration.kind() == staple_syntax::TypeDeclarationKind::From
+            && declaration.recursive_constructor
+        {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                "`@recursive_constructor` types must use `wrap`, not `from`",
+            ));
         }
         self.pop_type_parameter_scope();
     }
@@ -4963,7 +5040,87 @@ impl NameResolver {
         }
     }
 
+    /// The type a companion of `ty` extends: `ty` itself, or for an alias the
+    /// nominal type at the head of its underlying type, following alias
+    /// chains. `None` when an alias names a structural type, which cannot
+    /// have companion items.
+    fn alias_companion_target(&self, ty: TypeId) -> Option<TypeId> {
+        fn head(resolver: &NameResolver, ty: &Type) -> Option<TypeId> {
+            match ty {
+                Type::Named(named) => resolver.named_types.get(&named.syntax.id).copied(),
+                Type::Application(application) => head(resolver, &application.callee),
+                Type::EffectApplication(application) => head(resolver, &application.callee),
+                _ => None,
+            }
+        }
+        let mut current = ty;
+        let mut seen = HashSet::new();
+        while self.type_declarations[&current].kind() == staple_syntax::TypeDeclarationKind::Alias {
+            if !seen.insert(current) {
+                return None;
+            }
+            current = head(self, self.type_declarations[&current].underlying()?)?;
+        }
+        Some(current)
+    }
+
+    /// `companion A` for `type A = alias B` is `companion B`, so B must be a
+    /// nominal type declared alongside the alias, where `companion B` could
+    /// be written directly.
+    fn validate_alias_companions(&mut self, program: &Program) {
+        let mut problems = Vec::new();
+        let mut types = self.type_modules.iter().collect::<Vec<_>>();
+        types.sort_by_key(|(ty, _)| ty.0);
+        for (ty, owner) in types {
+            let declaration = &self.type_declarations[ty];
+            if declaration.kind() != staple_syntax::TypeDeclarationKind::Alias {
+                continue;
+            }
+            let Some(child) = program.child_named(*owner, &declaration.name) else {
+                continue;
+            };
+            if !program.module(child).companion {
+                continue;
+            }
+            let problem = match self.alias_companion_target(*ty) {
+                None => format!(
+                    "companion target `{}` is an alias of a type that cannot have companion items",
+                    declaration.name
+                ),
+                Some(target) if self.type_modules.get(&target) != Some(owner) => format!(
+                    "companion target `{}` is an alias of `{}`, which is declared in another module; add companion items where `{}` is declared",
+                    declaration.name,
+                    self.type_declarations[&target].name,
+                    self.type_declarations[&target].name
+                ),
+                Some(_) => continue,
+            };
+            let span = program
+                .module(*owner)
+                .syntax
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    Item::Submodule(submodule)
+                        if submodule.companion && submodule.name == declaration.name =>
+                    {
+                        Some(submodule.syntax.span.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| declaration.syntax.span.clone());
+            problems.push(Diagnostic::new(span, problem));
+        }
+        self.diagnostics.extend(problems);
+    }
+
     fn validate_representation(&mut self, ty: &Type, required: Visibility) {
+        self.validate_type_visibility(ty, required, "representation");
+    }
+
+    /// Reports every named type in `ty` less visible than `required`;
+    /// `subject` names what `ty` is in the diagnostic.
+    fn validate_type_visibility(&mut self, ty: &Type, required: Visibility, subject: &str) {
         match ty {
             Type::Named(named) => {
                 if self.type_parameters.contains_key(&named.syntax.id) {
@@ -4975,49 +5132,43 @@ impl NameResolver {
                     self.diagnostics.push(Diagnostic::new(
                         named.syntax.span.clone(),
                         if required == Visibility::Public {
-                            format!(
-                                "public representation references private type `{}`",
-                                named.name
-                            )
+                            format!("public {subject} references private type `{}`", named.name)
                         } else {
-                            format!(
-                                "package representation references private type `{}`",
-                                named.name
-                            )
+                            format!("package {subject} references private type `{}`", named.name)
                         },
                     ));
                 }
             }
             Type::Product(product) | Type::ParameterProduct(product) => {
                 for element in &product.elements {
-                    self.validate_representation(&element.ty, required);
+                    self.validate_type_visibility(&element.ty, required, subject);
                 }
             }
             Type::Sum(sum) => {
                 for alternative in &sum.alternatives {
-                    self.validate_representation(alternative, required);
+                    self.validate_type_visibility(alternative, required, subject);
                 }
             }
             Type::Function(function) => {
-                self.validate_representation(&function.parameter, required);
+                self.validate_type_visibility(&function.parameter, required, subject);
                 for resource in &function.effects.resources {
-                    self.validate_representation(&resource.value_type, required);
+                    self.validate_type_visibility(&resource.value_type, required, subject);
                 }
-                self.validate_representation(&function.result, required);
+                self.validate_type_visibility(&function.result, required, subject);
             }
             Type::Application(application) => {
-                self.validate_representation(&application.callee, required);
-                self.validate_representation(&application.argument, required);
+                self.validate_type_visibility(&application.callee, required, subject);
+                self.validate_type_visibility(&application.argument, required, subject);
             }
             Type::EffectApplication(application) => {
-                self.validate_representation(&application.callee, required);
+                self.validate_type_visibility(&application.callee, required, subject);
                 for resource in &application.effects.resources {
-                    self.validate_representation(&resource.value_type, required);
+                    self.validate_type_visibility(&resource.value_type, required, subject);
                 }
             }
             Type::Array(array) => {
-                self.validate_representation(&array.element, required);
-                self.validate_representation(&array.count, required);
+                self.validate_type_visibility(&array.element, required, subject);
+                self.validate_type_visibility(&array.count, required, subject);
             }
             Type::Inferred(_)
             | Type::NumberLiteral(_)
@@ -5206,8 +5357,7 @@ impl NameResolver {
             Pattern::Nominal(pattern) => {
                 if let Some(id) = self.named_types.get(&pattern.syntax.id).copied() {
                     let declaration = &self.type_declarations[&id];
-                    let represented = (declaration.kind()
-                        == staple_syntax::TypeDeclarationKind::Wrapper
+                    let represented = (declaration.kind().is_wrapper()
                         && declaration.underlying().is_some())
                         || declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton;
                     if !represented {
@@ -5684,6 +5834,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         ),
         "AliasBody" => Some("Type -> AliasBody Type"),
         "WrapperBody" => Some("(Visibility, Type) -> WrapperBody (Visibility, Type)"),
+        "FromBody" => Some("(Visibility, Type) -> FromBody (Visibility, Type)"),
         "OpaqueBody" => Some("OpaqueBody"),
         "ModifiedItem" => Some("(modifiers: Sequence Modifier, item: Item) -> ModifiedItem"),
         "Syntax"
@@ -5699,6 +5850,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         | "TypeDeclarationKind"
         | "AliasDeclaration"
         | "WrapperDeclaration"
+        | "FromDeclaration"
         | "SingletonDeclaration"
         | "OpaqueDeclaration"
         | "Visibility"
@@ -5773,11 +5925,13 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
                     | "TypeBody"
                     | "AliasBody"
                     | "WrapperBody"
+                    | "FromBody"
                     | "OpaqueBody"
                     | "UnstructuredItem"
                     | "TypeDeclarationKind"
                     | "AliasDeclaration"
                     | "WrapperDeclaration"
+                    | "FromDeclaration"
                     | "SingletonDeclaration"
                     | "OpaqueDeclaration"
                     | "Visibility"
@@ -6554,4 +6708,22 @@ fn mangle_function_name(name: &str) -> String {
             .collect::<String>();
         format!("operator.{encoded}")
     }
+}
+
+/// The namespace names an inline submodule is reachable by: its own name,
+/// plus, for an alias's companion merged into the aliased type's companion
+/// module, that type's name.
+fn submodule_namespace_names(
+    program: &Program,
+    submodule: &staple_syntax::Submodule,
+    child: ModuleId,
+) -> Vec<String> {
+    let mut names = vec![submodule.name.clone()];
+    if submodule.companion
+        && let Some(name) = &program.module(child).name
+        && *name != submodule.name
+    {
+        names.push(name.clone());
+    }
+    names
 }
