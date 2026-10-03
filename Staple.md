@@ -3639,12 +3639,10 @@ unwrap nested nominal types; use one `.*` for each visible layer, as in
 `outer.*.*.name`. Both explicit and shortcut forms are rejected when the
 representation is private in the current scope.
 
-A represented type with a visible representation may also be indexed
-directly: `value[index]` means `value.*[index]`, and `value[index] = item`
-assigns through `value.*`, whenever the type has no `Index` or `MutateIndex`
-implementation of its own. Like field access, this unwraps exactly one layer.
-It is a shortcut rather than a derived implementation, so the wrapper does not
-satisfy `Index` or `MutateIndex` bounds through its representation.
+Indexing has no such shortcut: a represented type is indexable only through
+its own `Index` and `MutateIndex` implementations, so `value[index]` on a
+wrapper without one is an error. Index the representation explicitly with
+`value.*[index]`, or implement the traits to make the wrapper indexable.
 
 `= pub wrap T` exposes the representation and generated constructor as part of
 the module interface:
@@ -3795,7 +3793,7 @@ ownership behavior as calling the constructor: a non-`Copy` source is moved.
 
 The visibility before `from` controls *representation* visibility, not the
 visibility of the conversion. The conversion and constructor are usable
-wherever the type itself is visible; projection with `.*`, field and index
+wherever the type itself is visible; projection with `.*`, field
 shortcuts, and pattern matching through the representation follow the
 representation visibility:
 

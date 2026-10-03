@@ -2896,8 +2896,8 @@ fn from_types_introduce_publicly_but_project_by_representation_visibility() {
             "a private `from` representation cannot be projected",
         ),
         (
-            "use units.*\nlet pair: Pair = (1, 2)\nlet first = pair[0]\n",
-            "a private `from` representation cannot be indexed",
+            "use units.*\nlet pair: Pair = (1, 2)\nlet first = pair.*[0]\n",
+            "a private `from` representation cannot be indexed through `.*`",
         ),
         (
             "use units.*\ndef first: Pair -> I32 = pair => match pair {\n    (left, _) => left,\n}\n",
@@ -2906,10 +2906,7 @@ fn from_types_introduce_publicly_but_project_by_representation_visibility() {
     ] {
         fixture.write("main.sta", source);
         let error = fixture.compile().expect_err(reason);
-        assert!(
-            error.contains("is private") || error.contains("no `Index` implementation"),
-            "{reason}: {error}"
-        );
+        assert!(error.contains("is private"), "{reason}: {error}");
     }
 }
 

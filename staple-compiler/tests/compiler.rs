@@ -12461,47 +12461,60 @@ fn patterns_see_through_one_from_layer() {
 }
 
 #[test]
-fn indexing_shortcuts_through_visible_wrapper_representations() {
+fn named_types_are_indexed_only_through_their_own_implementations() {
+    for (source, reason) in [
+        (
+            "type Triple = wrap (I32, I32, I32)\nlet first = (Triple (1, 2, 3))[0]\n",
+            "a `wrap` type does not index its representation implicitly",
+        ),
+        (
+            "type Names = from (String, String)\nlet names: Names = (\"ada\", \"grace\")\nlet name = names[1]\n",
+            "a `from` type does not index its representation implicitly",
+        ),
+    ] {
+        let messages = type_check_errors(source, reason);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("no `Index` implementation is available")),
+            "{reason}: {messages:?}"
+        );
+    }
+    let messages = type_check_errors(
+        concat!(
+            "type Triple = wrap (I32, I32, I32)\n",
+            "def run = () => {\n",
+            "    let mut triple = Triple (1, 2, 3)\n",
+            "    triple[1] = 20\n",
+            "}\n",
+        ),
+        "a wrapper is not index-assignable without `MutateIndex`",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("requires a `MutateIndex` implementation")),
+        "{messages:?}"
+    );
+
+    // Explicit representation access and user implementations still index.
     let module = type_check(concat!(
         "type Triple = wrap (I32, I32, I32)\n",
-        "type Names = from (String, String)\n",
+        "type Cells = wrap (I32, I32)\n",
+        "impl Index Cells USize I32 { index = (Cells cells, position) => cells[position] }\n",
         "def run = () => {\n",
         "    let mut triple = Triple (1, 2, 3)\n",
-        "    triple[1] = 20\n",
-        "    let names: Names = (\"ada\", \"grace\")\n",
-        "    let first: I32 = triple[0]\n",
-        "    let name: String = names[1]\n",
-        "    first\n",
+        "    triple.*[1] = 20\n",
+        "    let second: I32 = triple.*[1]\n",
+        "    let cell: I32 = (Cells (4, 5))[1]\n",
+        "    second + cell\n",
         "}\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
-        .expect("indexing through a wrapper should compile");
-    // A wrapper's own implementation wins over the shortcut, and the shortcut
-    // never satisfies an indexing bound.
-    type_check(concat!(
-        "type Cells = wrap (I32, I32)\n",
-        "impl Index Cells USize String { index = (cells, position) => \"cell\" }\n",
-        "let text: String = (Cells (1, 2))[0]\n",
-    ));
-    let messages = type_check_errors(
-        concat!(
-            "type Cells = wrap (I32, I32)\n",
-            "def first: <T where Index T USize I32> T -> I32 = value => value[0]\n",
-            "let value = first (Cells (1, 2))\n",
-        ),
-        "the indexing shortcut is not an implementation",
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("trait bound is not satisfied")
-                && message.contains("Cells")),
-        "{messages:?}"
-    );
+        .expect("explicit representation indexing and user `Index` should compile");
 }
-
 #[test]
 fn from_types_reject_recursive_constructors() {
     let diagnostics = resolve_result("@recursive_constructor\ntype Loop = from I32\n")

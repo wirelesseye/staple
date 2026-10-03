@@ -6010,10 +6010,6 @@ impl TypeChecker {
                         partial[1] = position_type;
                         resolved = self.resolve_trait_obligation(trait_id, &partial);
                     }
-                    if resolved.is_none() {
-                        resolved =
-                            self.project_index_target(module, trait_id, &index.value, &partial);
-                    }
                     let Some(arguments) = resolved else {
                         self.diagnostics.push(Diagnostic::new(
                             assignment.target.syntax().span.clone(),
@@ -8927,9 +8923,6 @@ impl TypeChecker {
                     partial[1] = position_type;
                     resolved = self.resolve_trait_obligation(trait_id, &partial);
                 }
-                if resolved.is_none() {
-                    resolved = self.project_index_target(module, trait_id, &index.value, &partial);
-                }
                 let Some(arguments) = resolved else {
                     self.diagnostics.push(Diagnostic::new(
                         index.syntax.span.clone(),
@@ -9186,44 +9179,6 @@ impl TypeChecker {
             },
         );
         bool_type
-    }
-
-    /// Indexing a represented wrapper without its own `Index`/`MutateIndex`
-    /// implementation indexes its representation, one layer, where that
-    /// representation is visible: `a[i]` means `a.*[i]`. This is a shortcut
-    /// like `a.field`, not a derived implementation, so the wrapper never
-    /// satisfies an indexing bound. The projection is recorded as a
-    /// wrapper-to-representation coercion on the indexed value.
-    fn project_index_target(
-        &mut self,
-        module: &ResolvedModule,
-        trait_id: TraitId,
-        value: &Expression,
-        partial: &[CheckedType],
-    ) -> Option<Vec<CheckedType>> {
-        let CheckedType::Wrapper {
-            id, representation, ..
-        } = &partial[0]
-        else {
-            return None;
-        };
-        let current_module = module
-            .module_for_syntax(value.syntax().id)
-            .unwrap_or_else(|| module.program().entry());
-        if !module.representation_visible_from(*id, current_module) {
-            return None;
-        }
-        let mut projected = partial.to_vec();
-        projected[0] = representation.as_ref().clone();
-        let arguments = self.resolve_trait_obligation(trait_id, &projected)?;
-        self.expression_coercions.insert(
-            value.syntax().id,
-            CheckedCoercion {
-                source: partial[0].clone(),
-                target: projected[0].clone(),
-            },
-        );
-        Some(arguments)
     }
 
     fn check_match_expression(

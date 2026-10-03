@@ -565,8 +565,7 @@ pub(crate) struct LoweredExpression {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoweredCoercionPlan {
     /// The representation is unchanged: `source == target`, a string literal
-    /// set widened to `String` or another set, `NumberLiteral` to `USize`, or
-    /// a wrapper projected to its representation by an indexing shortcut.
+    /// set widened to `String` or another set, or `NumberLiteral` to `USize`.
     Identity,
     /// `Ref (T; N)` to `Slice T`: build the slice from the pointer and the
     /// checked element count `N`.
@@ -635,12 +634,6 @@ impl LoweredCoercionPlan {
                     )
                     | (CheckedType::NumberLiteral(_), CheckedType::USize)
             )
-        {
-            return Ok(LoweredCoercionPlan::Identity);
-        }
-        // Projecting a wrapper to its representation (an indexing shortcut)
-        // keeps the value: a wrapper shares its representation's layout.
-        if matches!(source, CheckedType::Wrapper { representation, .. } if representation.as_ref() == target)
         {
             return Ok(LoweredCoercionPlan::Identity);
         }
@@ -4532,8 +4525,7 @@ impl LoweredProgram {
             ));
         };
         let base = if expression_has_place_root(module.resolved(), &index.value) {
-            let place = self.lower_place(module, owner, context, &index.value)?;
-            self.project_index_base_place(module, &index.value, place)
+            self.lower_place(module, owner, context, &index.value)?
         } else {
             let value_syntax = index.value.syntax();
             let Some(base_type) = module.type_of_expression(value_syntax.id).cloned() else {
@@ -4564,34 +4556,6 @@ impl LoweredProgram {
                 index: position,
             },
         }))
-    }
-
-    /// The place an index operates on: the indexed value's place, or, for an
-    /// indexing shortcut through a wrapper, that place's representation,
-    /// which shares the wrapper's storage.
-    fn project_index_base_place(
-        &mut self,
-        module: &TypedModule,
-        value: &Expression,
-        place: PlaceId,
-    ) -> PlaceId {
-        match module.coercion_for(value.syntax().id) {
-            Some(coercion)
-                if matches!(&coercion.source, CheckedType::Wrapper { representation, .. }
-                    if representation.as_ref() == &coercion.target) =>
-            {
-                let syntax = value.syntax();
-                self.places.push(LoweredPlace {
-                    origin: Origin {
-                        syntax: syntax.id,
-                        span: syntax.span.clone(),
-                    },
-                    value_type: coercion.target.clone(),
-                    kind: LoweredPlaceKind::Representation { base: place },
-                })
-            }
-            _ => place,
-        }
     }
 
     /// Lowers an assignment target into an explicit place tree.
@@ -6170,9 +6134,7 @@ impl LoweredProgram {
         // Record the operand places so emission can reuse them without
         // re-deriving `expression_has_place_root`.
         let base_place = if base_is_place {
-            self.lower_place(module, owner, context, &index.value)
-                .ok()
-                .map(|place| self.project_index_base_place(module, &index.value, place))
+            self.lower_place(module, owner, context, &index.value).ok()
         } else {
             None
         };
@@ -6195,13 +6157,7 @@ impl LoweredProgram {
                 let base_type = self
                     .expressions
                     .get(base)
-                    .map(|expression| {
-                        expression
-                            .coercion
-                            .as_ref()
-                            .map_or(&expression.value_type, |coercion| &coercion.target)
-                            .clone()
-                    })
+                    .map(|expression| expression.value_type.clone())
                     .unwrap_or(CheckedType::Error);
                 let position_type = self
                     .expressions
@@ -9904,13 +9860,10 @@ impl LoweredProgram {
                             "index evidence does not match its checked dispatch",
                         ));
                     }
-                    // An indexing shortcut through a wrapper coerces the base
-                    // to its representation.
-                    let base_type = self.expressions.get(index.base).map(|base| {
-                        base.coercion
-                            .as_ref()
-                            .map_or(&base.value_type, |coercion| &coercion.target)
-                    });
+                    let base_type = self
+                        .expressions
+                        .get(index.base)
+                        .map(|base| &base.value_type);
                     let position_type = self
                         .expressions
                         .get(index.index)
