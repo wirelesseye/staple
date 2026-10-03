@@ -1,5 +1,7 @@
 pub mod
 
+use std.core.sized.sized_opaque
+
 use std.process.panic
 use std.core.reactive.Reactive
 
@@ -10,11 +12,15 @@ use std.core.reactive.Reactive
 /// its deferred effect row `E` to the awaiting coroutine body. A `Coroutine`
 /// is affine: constructing one moves its owned captures, and dropping it
 /// without awaiting destroys those captures without running the body.
+@sized_opaque
 pub type Coroutine{E} T = opaque
+impl<T, effect E> !Copy (Coroutine{E} T) {}
 
 /// A scope-owned handle to a spawned coroutine's eventual result. Affine:
 /// `await` consumes the handle. Dropping a handle does not cancel its task.
+@sized_opaque
 pub type Task T = opaque
+impl<T> !Copy (Task T) {}
 
 /// The result of `await`-ing a `Task` that ran to completion; wraps the value
 /// the task produced.
@@ -39,12 +45,16 @@ pub def block_on: <T, effect E> Coroutine{E} T ->{E} T =
 
 /// An explicitly driven owner of coroutine ready queues. No coroutine runs
 /// until a `pump`. Multiple schedulers coexist on the one runtime thread.
+@sized_opaque
 pub type Scheduler = opaque
+impl !Copy Scheduler {}
 
 /// An affine scope, bound to a scheduler, under which coroutines are spawned.
 /// Used as the provider of the implicit `Tasks` capability:
 /// `with Tasks = task_scope (sched) { ... }`.
+@sized_opaque
 pub type Tasks = opaque
+impl !Copy Tasks {}
 
 // Every function below is lowered directly by the compiler; the bodies exist
 // only to satisfy "a declared binding needs an initializer".
@@ -89,11 +99,15 @@ companion Task {
 
 /// A one-shot wait that a task `await`s and anything can resolve. Affine:
 /// `await` consumes it; dropping one unconsumed abandons the operation.
+@sized_opaque
 pub type Wait T = opaque
+impl<T> !Copy (Wait T) {}
 
 /// The write end of a `completion`. Affine and single-use: `complete` or
 /// `cancel` consumes it, and dropping an unused resolver cancels the wait.
+@sized_opaque
 pub type Resolver T = opaque
+impl<T> !Copy (Resolver T) {}
 
 /// Creates a one-shot completion bound to `scheduler`: a `Wait T` to `await`
 /// and a `Resolver T` to fulfil it. The wait may only be `await`ed from a task
@@ -115,7 +129,9 @@ pub def completion_with_cancel: <T> (Scheduler, () -> ()) -> (wait: Wait T, reso
 /// A host holds it across the FFI boundary and calls one of the C entry points
 /// `__staple_completion_token_resolve` / `_cancel` / `_release` on it; dropping
 /// the token from Staple releases it (cancelling an unresolved completion).
+@sized_opaque
 pub type CompletionToken = opaque
+impl !Copy CompletionToken {}
 
 /// Creates a unit-valued completion bound to `scheduler` and returns the `Wait`
 /// to `await` plus an opaque `CompletionToken` for a host to resolve.

@@ -3370,10 +3370,18 @@ pub type CPointer Pointee = opaque
 ```
 
 Arguments are part of nominal identity, so two applications with different
-arguments are distinct. A by-value use requires a representation supplied by
-the compiler or another future implementation mechanism. `std.core.I32` and
-`std.cinterop.CPointer` are opaque declarations whose representations are
-provided by the compiler.
+arguments are distinct. Opaque types are unsized and non-`Copy` by default.
+They may be referenced through `Ref`, whose parameter accepts unsized types,
+but cannot be used by value or satisfy implicit `Sized` bounds.
+
+The standard-library-only intrinsic modifier `@sized_opaque`, declared in
+`std.core.sized` with `pub(package)` visibility, marks opaque types with
+compiler-supplied sized representations. Compiler-known sized opaque types such as `std.core.I32` and
+`std.cinterop.CPointer` must carry this modifier. The modifier grants sizedness;
+sized opaque types are `Copy` by default. The stdlib explicitly declares
+`impl !Copy` for opaque types that own resources or must be consumed once.
+Negative implementations may quantify effect parameters, for example
+`impl<T, effect E> !Copy (Coroutine{E} T) {}` covers every deferred effect row.
 
 #### Singleton types
 

@@ -44,6 +44,7 @@ enum MacroKind {
     Doc,
     Feature,
     NoPrelude,
+    SizedOpaque,
     Quote,
     ParseQuote,
 }
@@ -1130,6 +1131,13 @@ impl MacroExpander {
         let mut definitions = HashMap::new();
         let mut scopes = vec![ModuleScope::default(); program.modules().len()];
         let core = program.standard_library_core();
+        let standard_library_directory = core.and_then(|id| {
+            program
+                .module(id)
+                .path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        });
         let prelude = program.standard_library_prelude();
         let syntax = program.standard_library_syntax();
         let cinterop = program.standard_library_cinterop();
@@ -1185,6 +1193,12 @@ impl MacroExpander {
                                 && declaration.name == "no_prelude"
                             {
                                 MacroKind::NoPrelude
+                            } else if standard_library_directory.as_ref().is_some_and(|root| {
+                                source_module.path == root.join("core/sized.sta")
+                            }) && declaration.modifier
+                                && declaration.name == "sized_opaque"
+                            {
+                                MacroKind::SizedOpaque
                             } else if let Some(value) = &declaration.value {
                                 MacroKind::User(value.clone())
                             } else {
@@ -2781,10 +2795,13 @@ impl MacroExpander {
             if definition.key.modifier {
                 if matches!(
                     definition.key.name.as_str(),
-                    "recursive_constructor" | "doc" | "feature" | "no_prelude"
+                    "recursive_constructor" | "doc" | "feature" | "no_prelude" | "sized_opaque"
                 ) && !matches!(
                     definition.kind,
-                    MacroKind::Doc | MacroKind::Feature | MacroKind::NoPrelude
+                    MacroKind::Doc
+                        | MacroKind::Feature
+                        | MacroKind::NoPrelude
+                        | MacroKind::SizedOpaque
                 ) {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -2871,7 +2888,20 @@ impl MacroExpander {
                         "compiler-provided macro `c_string` must have signature `Expr -> Expr`",
                     ));
                 }
-                MacroKind::Doc | MacroKind::Feature | MacroKind::NoPrelude => {}
+                MacroKind::SizedOpaque
+                    if definition.parameters != [MetaType::Item]
+                        || definition.result != MetaType::Item
+                        || definition.declaration.value.is_some() =>
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        definition.declaration.syntax.span.clone(),
+                        "compiler-provided modifier `@sized_opaque` must be bodyless with signature `Item -> Item`",
+                    ));
+                }
+                MacroKind::Doc
+                | MacroKind::Feature
+                | MacroKind::NoPrelude
+                | MacroKind::SizedOpaque => {}
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -3354,6 +3384,24 @@ impl MacroExpander {
         }
         let (definition, argument) = self.select_modifier(module, &invocation)?;
         self.record_invocation(invocation.syntax.id, &definition);
+        if matches!(definition.kind, MacroKind::SizedOpaque) {
+            let Some(declaration) = modified_type_declaration_mut(&mut current) else {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@sized_opaque` may only modify an opaque type declaration",
+                ));
+                return None;
+            };
+            if declaration.kind() != staple_syntax::TypeDeclarationKind::Opaque {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@sized_opaque` may only modify an opaque type declaration",
+                ));
+                return None;
+            }
+            declaration.sized_opaque = true;
+            return Some(ModifierChainResult::Item(current));
+        }
         let key = definition.key.clone();
         if self.expansion_stack.contains(&key) {
             self.diagnostics.push(Diagnostic::new(
@@ -3430,7 +3478,12 @@ impl MacroExpander {
                     .map(|keys| {
                         keys.iter()
                             .filter(|key| {
-                                self.definitions[*key].declaration.visibility == Visibility::Public
+                                let definition = &self.definitions[*key];
+                                definition.declaration.visibility == Visibility::Public
+                                    || (definition.declaration.visibility == Visibility::Package
+                                        && self.module_packages[context.0]
+                                            .zip(self.module_packages[definition.key.module.0])
+                                            .is_some_and(|(caller, owner)| caller == owner))
                             })
                             .cloned()
                             .collect()
@@ -4547,7 +4600,7 @@ impl MacroExpander {
                     },
                 )))
             }
-            MacroKind::Doc | MacroKind::Feature | MacroKind::NoPrelude => {
+            MacroKind::Doc | MacroKind::Feature | MacroKind::NoPrelude | MacroKind::SizedOpaque => {
                 unreachable!("built-in modifiers are applied directly")
             }
             MacroKind::Quote => {

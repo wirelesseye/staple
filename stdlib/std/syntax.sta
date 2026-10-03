@@ -1,5 +1,7 @@
 pub mod
 
+use std.core.sized.sized_opaque
+
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 /// their data in the first structured-syntax slice; remaining expressions round-trip
 /// through `UnstructuredExpr` without exposing fields.
@@ -46,12 +48,16 @@ pub type Bracketed Contents = pub ctor Contents
 @recursive_constructor
 pub type Braced Contents = pub ctor Contents
 /// An expression syntax node without structured fields.
+@sized_opaque
 pub type UnstructuredExpr = opaque
+impl !Copy UnstructuredExpr {}
 /// The syntax category for expressions.
 pub type Expr = alias Ident String | CallExpr | StringExpr | UnstructuredExpr
 
 /// The syntax category for types.
+@sized_opaque
 pub type Type = opaque
+impl !Copy Type {}
 /// A binding pattern constructed from an identifier.
 @recursive_constructor
 pub type BindingPattern = pub ctor Ident String
@@ -59,7 +65,9 @@ pub type BindingPattern = pub ctor Ident String
 @recursive_constructor
 pub type NominalPattern = pub ctor (name: Ident String, argument: Pattern)
 /// A pattern whose structure is not exposed yet.
+@sized_opaque
 pub type UnstructuredPattern = opaque
+impl !Copy UnstructuredPattern {}
 /// The syntax category for patterns.
 pub type Pattern = alias BindingPattern | NominalPattern | UnstructuredPattern
 /// The kind of a type declaration.
@@ -90,9 +98,13 @@ pub type OpaqueBody
 /// The body of a type declaration written after `=`.
 pub type TypeBody = alias AliasBody Type | ConstructorBody Visibility Type | OpaqueBody
 /// An item whose structure is not exposed yet.
+@sized_opaque
 pub type UnstructuredItem = opaque
+impl !Copy UnstructuredItem {}
 /// A lossless modifier invocation whose structure is intentionally opaque.
+@sized_opaque
 pub type Modifier = opaque
+impl !Copy Modifier {}
 /// An item carrying modifiers that have not yet been applied. Modifiers are
 /// ordered outermost first.
 @recursive_constructor
@@ -120,7 +132,9 @@ pub type Visibility = alias Private | Package | Public
 /// An arbitrary lossless syntax fragment. `SyntaxNode` is exactly one structural
 /// node; delimiter nodes retain their complete opaque contents.
 /// An opaque lossless syntax fragment.
+@sized_opaque
 pub type Syntax = opaque
+impl !Copy Syntax {}
 /// Exactly one structural syntax node.
 pub type SyntaxNode = alias Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
 

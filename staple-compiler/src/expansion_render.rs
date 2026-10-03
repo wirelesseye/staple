@@ -215,6 +215,9 @@ fn render_binding(program: &Program, binding: &staple_syntax::Binding) -> String
 
 fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> String {
     let mut out = String::new();
+    if declaration.sized_opaque {
+        out.push_str("@sized_opaque\n");
+    }
     out.push_str(visibility_prefix(declaration.visibility));
     out.push_str("type ");
     out.push_str(&declaration.name);

@@ -2819,3 +2819,47 @@ fn moved_std_core_paths_are_absent_but_canonical_paths_work() {
             .contains("no submodule named `list`")
     );
 }
+
+#[test]
+fn resolves_package_visible_modifiers_through_imports_and_qualified_names() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.sta",
+        concat!(
+            "use package.internal.stamp\n",
+            "use package.internal\n",
+            "use package.bridge\n",
+            "@stamp\ndef imported = () => 1\n",
+            "@internal.stamp\ndef qualified = () => 2\n",
+            "@bridge.stamp\ndef reexported = () => 3\n",
+        ),
+    );
+    fixture.write(
+        "src/internal.sta",
+        "pub(package) macro @stamp: Item -> Item = item => item\n",
+    );
+    fixture.write(
+        "src/bridge.sta",
+        "pub(package) use package.internal.stamp\n",
+    );
+    fs::write(fixture.root.join("staple.kdl"), "package \"app\"\n").unwrap();
+    let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("package-visible modifier fixtures should load");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("package-visible modifiers should resolve within their package");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("modifier outputs should type-check");
+}

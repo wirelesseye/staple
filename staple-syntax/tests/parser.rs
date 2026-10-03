@@ -2717,3 +2717,17 @@ fn reserves_package_while_allowing_package_qualified_paths() {
     );
     assert!(parse("let package = 1\n").is_err());
 }
+
+#[test]
+fn negative_implementations_accept_effect_parameters() {
+    let module = parse("impl<T, effect E> !Copy (Coroutine{E} T) {}\n")
+        .expect("negative implementations can quantify effect rows");
+    let Item::TraitImplementation(implementation) = &module.items[0] else {
+        panic!("expected trait implementation");
+    };
+    assert!(implementation.negative);
+    assert!(
+        matches!(&implementation.type_parameters[1], staple_syntax::TypeParameterPattern::Effect(binding) if binding.name == "E")
+    );
+    assert!(parse("impl<effect E> Trait (Coroutine{E} I32) {}\n").is_err());
+}

@@ -1,31 +1,45 @@
 pub mod
 
+use std.core.sized.sized_opaque
+
 /// Marks non-negative integer singleton types.
 pub trait Natural T {}
 
 /// An 8-bit signed integer.
+@sized_opaque
 pub type I8 = opaque
 /// A 16-bit signed integer.
+@sized_opaque
 pub type I16 = opaque
 /// A 32-bit signed integer.
+@sized_opaque
 pub type I32 = opaque
 /// A 64-bit signed integer.
+@sized_opaque
 pub type I64 = opaque
 /// An 8-bit unsigned integer.
+@sized_opaque
 pub type U8 = opaque
 /// A 16-bit unsigned integer.
+@sized_opaque
 pub type U16 = opaque
 /// A 32-bit unsigned integer.
+@sized_opaque
 pub type U32 = opaque
 /// A 64-bit unsigned integer.
+@sized_opaque
 pub type U64 = opaque
 /// A pointer-width signed integer.
+@sized_opaque
 pub type ISize = opaque
 /// A pointer-width unsigned integer.
+@sized_opaque
 pub type USize = opaque
 /// A 32-bit floating-point number.
+@sized_opaque
 pub type F32 = opaque
 /// A 64-bit floating-point number.
+@sized_opaque
 pub type F64 = opaque
 
 /// A value that may be absent.

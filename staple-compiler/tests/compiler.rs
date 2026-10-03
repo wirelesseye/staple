@@ -3606,10 +3606,6 @@ fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
         "let value: Generic I32 = default ()\n",
     ));
     type_check(concat!(
-        "type Token = opaque\n",
-        "impl Default Token { def default = () => loop {} }\n",
-    ));
-    type_check(concat!(
         "trait LocalTrait T { value: () -> T }\n",
         "impl LocalTrait I32 { def value = () => 0 }\n",
         "let value: I32 = LocalTrait.value ()\n",
@@ -4797,7 +4793,7 @@ fn c_pointer_preserves_its_pointee_type() {
 fn generic_opaque_arguments_are_part_of_type_identity() {
     let module = resolve(concat!(
         "type Handle T = opaque\n",
-        "def invalid: Handle I32 -> Handle String = value => value\n",
+        "def invalid: Ref (Handle I32) -> Ref (Handle String) = value => value\n",
     ));
     let diagnostics = TypeChecker::new()
         .check(module)
@@ -4805,7 +4801,7 @@ fn generic_opaque_arguments_are_part_of_type_identity() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("expected `Handle String`, found `Handle I32`")
+            .contains("expected `Ref Handle String`, found `Ref Handle I32`")
     }));
 }
 
@@ -11567,5 +11563,224 @@ fn checks_inferred_and_explicit_compile_time_match_binding_types() {
                 .any(|diagnostic| diagnostic.message.contains(expected)),
             "expected `{expected}`, found {diagnostics:#?}",
         );
+    }
+}
+
+#[test]
+fn opaque_types_are_unsized_but_can_be_referenced() {
+    let module = type_check(concat!(
+        "type Token = opaque\n",
+        "type Handle T = opaque\n",
+        "def token: Ref Token -> Ref Token = value => value\n",
+        "def handle: Ref (Handle I32) -> Ref (Handle I32) = value => value\n",
+        "def any: <T where ?Sized T> Ref T -> Ref T = value => value\n",
+        "def use_any: Ref Token -> Ref Token = value => any value\n",
+    ));
+    let opaque = CheckedType::Opaque {
+        sized: false,
+        id: staple_compiler::TypeId(usize::MAX),
+        name: "Token".to_owned(),
+        arguments: Vec::new(),
+    };
+    assert!(!opaque.is_sized());
+    assert!(!module.is_copy_type(&opaque));
+    assert!(CheckedType::Ref(Box::new(opaque)).is_sized());
+    assert!(module.is_copy_type(&CheckedType::I32));
+}
+
+#[test]
+fn rejects_opaque_types_in_sized_positions() {
+    for (body, expected) in [
+        ("def invalid: Token -> () = _ => ()\n", "function parameter"),
+        (
+            "def invalid: () -> Token = () => loop {}\n",
+            "function parameters and results must be sized",
+        ),
+        ("type Invalid = ctor Token\n", "must be sized"),
+        (
+            "type Invalid = alias (Token, I32)\ndef use_invalid: Ref Invalid -> () = _ => ()\n",
+            "must be sized",
+        ),
+        (
+            "type Invalid = alias Token | I32\ndef use_invalid: Ref Invalid -> () = _ => ()\n",
+            "sized",
+        ),
+        (
+            "impl Default Token { def default = () => loop {} }\n",
+            "implicit `Sized` bound",
+        ),
+        (
+            "type Box T = ctor T\ntype Invalid = alias Box Token\ndef use_invalid: Ref Invalid -> () = _ => ()\n",
+            "implicit `Sized` bound",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&format!("type Token = opaque\n{body}")))
+            .expect_err_diagnostics(&format!("opaque types must not be placed by value: {body}"));
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "{body}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn sized_opaque_modifier_is_package_visible_in_stdlib() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for source in [
+        "@sized_opaque\ntype Token = opaque\n",
+        "@std.core.sized.sized_opaque\ntype Token = opaque\n",
+        "use std.core.sized.(sized_opaque)\n@sized_opaque\ntype Token = opaque\n",
+        "use std.core.sized.*\n@sized_opaque\ntype Token = opaque\n",
+        "pub use std.core.sized.sized_opaque\n@sized_opaque\ntype Token = opaque\n",
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should load");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err_diagnostics("user code cannot invoke sized_opaque");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("sized_opaque")),
+            "{diagnostics:?}"
+        );
+    }
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            &with_syntax_imports("macro @sized_opaque: Item -> Item = item => item\n"),
+            root,
+        )
+        .expect("source should load");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("sized_opaque name is reserved");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("reserved by the compiler")),
+        "{diagnostics:?}"
+    );
+}
+
+fn sized_opaque_stdlib_diagnostics(
+    path: &str,
+    original: &str,
+    replacement: &str,
+) -> Vec<Diagnostic> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temporary = std::env::temp_dir().join(format!(
+        "staple-sized-opaque-{}-{nonce}",
+        std::process::id()
+    ));
+    copy_directory(&root.join("stdlib"), &temporary);
+    let file = temporary.join(path);
+    let source = std::fs::read_to_string(&file).unwrap();
+    assert!(source.contains(original));
+    std::fs::write(file, source.replacen(original, replacement, 1)).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(&temporary)
+        .load_source("", root)
+        .expect("fixture should load");
+    let result = NameResolver::new().resolve_program(program);
+    std::fs::remove_dir_all(temporary).unwrap();
+    match result {
+        Err(diagnostics) => diagnostics,
+        Ok(module) => TypeChecker::new().check(module).err().unwrap_or_default(),
+    }
+}
+
+#[test]
+fn sized_opaque_stdlib_contract_and_validation() {
+    for (path, original, replacement, expected) in [
+        (
+            "std/core/number/types.sta",
+            "@sized_opaque\npub type I32 = opaque",
+            "pub type I32 = opaque",
+            "type `I32` must be marked `@sized_opaque`",
+        ),
+        (
+            "std/io.sta",
+            "@sized_opaque\npub type IO = opaque",
+            "pub type IO = opaque",
+            "type `IO` must be marked `@sized_opaque`",
+        ),
+        (
+            "std/core/number/types.sta",
+            "@sized_opaque\npub type I32 = opaque",
+            "@sized_opaque(1)\npub type I32 = opaque",
+            "does not accept an argument",
+        ),
+        (
+            "std/core/number/types.sta",
+            "@sized_opaque\npub type I32 = opaque",
+            "@sized_opaque\npub type I32 = alias I64",
+            "may only modify an opaque type declaration",
+        ),
+        (
+            "std/core/sized.sta",
+            "pub trait Sized T {}",
+            "@sized_opaque\npub trait Sized T {}",
+            "may only modify an opaque type declaration",
+        ),
+    ] {
+        let diagnostics = sized_opaque_stdlib_diagnostics(path, original, replacement);
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "{diagnostics:?}"
+        );
+    }
+    let diagnostics = sized_opaque_stdlib_diagnostics(
+        "std/core/number/types.sta",
+        "@sized_opaque\npub type I32 = opaque",
+        "@std.core.sized.sized_opaque\n@identity\npub type I32 = opaque\nuse std.syntax.Item\nmacro @identity: Item -> Item = item => item",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn stdlib_opaque_copy_policy_uses_explicit_negative_implementations() {
+    let cases = [
+        ("I32", true),
+        ("CChar", true),
+        ("CPointer I32", true),
+        ("IO", true),
+        ("CString", false),
+        ("Buffer I32", false),
+        ("Buffer String", false),
+        ("Reactive", false),
+        ("Coroutine{} I32", false),
+        ("Coroutine{IO} String", false),
+        ("Task I32", false),
+        ("Task String", false),
+        ("Scheduler", false),
+        ("Tasks", false),
+        ("Wait I32", false),
+        ("Resolver String", false),
+        ("CompletionToken", false),
+    ];
+    let mut source = String::from(
+        "use std.cinterop.*\nuse std.coroutine.*\nuse std.io.IO\nuse std.buffer.Buffer\n",
+    );
+    for (index, (name, _)) in cases.iter().enumerate() {
+        source.push_str(&format!("def check_copy_{index}: {name} -> () = _ => ()\n"));
+    }
+    let module = type_check(&source);
+    for (index, (name, copy)) in cases.iter().enumerate() {
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name == format!("check_copy_{index}"))
+            .expect("test function should exist");
+        let checked = module.type_of_function(function.id).unwrap();
+        assert!(checked.parameter.is_sized(), "{name}");
+        assert_eq!(module.is_copy_type(&checked.parameter), *copy, "{name}");
     }
 }

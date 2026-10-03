@@ -1013,7 +1013,6 @@ impl<'a> TraitSelectionContext<'a> {
             value_type,
             self.program.semantic_ids.copy_trait,
             self.program.semantic_ids.drop_trait,
-            self.program.semantic_ids.io_type,
             &self.implementations,
             &self.bounds,
             &|bound| self.drop_bound_holds(bound),

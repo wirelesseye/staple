@@ -1144,8 +1144,12 @@ impl Grammar {
     ) -> Result<TraitImplementation, ParseError> {
         self.expect(TokenKind::Impl, "expected `impl`")?;
         let (type_parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
-        self.reject_effect_parameters(&type_parameters, "trait implementations")?;
         let negative = self.eat(TokenKind::Bang);
+        // Negative implementations have no methods and can quantify the effect
+        // row of affine opaque types such as Coroutine{E} T.
+        if !negative {
+            self.reject_effect_parameters(&type_parameters, "trait implementations")?;
+        }
         let trait_start = self.position;
         let first = self
             .expect(TokenKind::Identifier, "expected trait name")?
@@ -1583,6 +1587,7 @@ impl Grammar {
             name_syntax,
             docs: Vec::new(),
             recursive_constructor: false,
+            sized_opaque: false,
             visibility,
             body,
             name,

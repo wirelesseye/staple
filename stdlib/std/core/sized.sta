@@ -2,3 +2,8 @@ pub mod
 
 /// Marks types with a statically known size.
 pub trait Sized T {}
+
+use std.syntax.Item
+
+/// Marks a compiler-represented opaque type as sized. Reserved for the standard library.
+pub(package) macro @sized_opaque: Item -> Item

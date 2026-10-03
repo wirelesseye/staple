@@ -2107,6 +2107,14 @@ impl NameResolver {
                 ));
             }
         }
+        if declaration.kind() == staple_syntax::TypeDeclarationKind::Opaque
+            && !declaration.sized_opaque
+        {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                format!("standard library type `{name}` must be marked `@sized_opaque`"),
+            ));
+        }
         if matches!(
             builtin,
             BuiltinType::CPointer | BuiltinType::Ref | BuiltinType::Slice | BuiltinType::Buffer

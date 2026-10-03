@@ -293,6 +293,8 @@ pub struct TypeDeclaration {
     pub name_syntax: Syntax,
     pub docs: Vec<String>,
     pub recursive_constructor: bool,
+    /// Whether the stdlib intrinsic supplies a statically sized opaque representation.
+    pub sized_opaque: bool,
     pub visibility: Visibility,
     /// The declaration body after `=`; absent for singleton declarations.
     pub body: Option<TypeBody>,

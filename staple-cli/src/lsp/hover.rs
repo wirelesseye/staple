@@ -3650,7 +3650,7 @@ mod tests {
             "def hidden: Hidden -> Hidden = value => value\n",
             "def hidden_generic: HiddenGeneric I32 -> HiddenGeneric I32 = value => value\n",
             "def visible: Visible -> Visible = value => value\n",
-            "def secret: Secret -> Secret\n",
+            "def secret: Ref Secret -> Ref Secret\n",
             "def alias_value: Alias -> Alias = value => value\n",
         );
         let path = root.join("main.sta");

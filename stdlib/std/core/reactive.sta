@@ -1,7 +1,11 @@
 pub mod
 
+use std.core.sized.sized_opaque
+
 /// The lexical owner of reactions created within a reactive scope.
+@sized_opaque
 pub type Reactive = opaque
+impl !Copy Reactive {}
 
 def __reactive_scope: () -> Reactive = () => __reactive_scope ()
 

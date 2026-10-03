@@ -1,8 +1,11 @@
 pub mod
 
+use std.core.sized.sized_opaque
+
 use std.cinterop.*
 
 /// The capability required for standard output operations.
+@sized_opaque
 pub type IO = opaque
 
 pub(package) extern "c" {

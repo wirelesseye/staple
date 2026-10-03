@@ -992,6 +992,7 @@ mod tests {
 
     fn opaque(id: usize, name: &str) -> CheckedType {
         CheckedType::Opaque {
+            sized: false,
             id: TypeId(id),
             name: name.to_owned(),
             arguments: Vec::new(),

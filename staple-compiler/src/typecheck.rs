@@ -244,6 +244,7 @@ pub enum CheckedType {
         arguments: Vec<CheckedType>,
     },
     Opaque {
+        sized: bool,
         id: TypeId,
         name: String,
         arguments: Vec<CheckedType>,
@@ -293,8 +294,9 @@ fn compact_type_template(value_type: CheckedType) -> CheckedType {
             id,
             name,
             arguments,
-            ..
+            representation,
         } => CheckedType::Opaque {
+            sized: representation.is_sized(),
             id,
             name,
             arguments: arguments.into_iter().map(compact_type_template).collect(),
@@ -309,10 +311,12 @@ fn compact_type_template(value_type: CheckedType) -> CheckedType {
             arguments: arguments.into_iter().map(compact_type_template).collect(),
         },
         CheckedType::Opaque {
+            sized,
             id,
             name,
             arguments,
         } => CheckedType::Opaque {
+            sized,
             id,
             name,
             arguments: arguments.into_iter().map(compact_type_template).collect(),
@@ -898,7 +902,7 @@ impl CheckedType {
             // independently.
             Self::Inferred | Self::Error | Self::TypeConstructor { .. } => true,
             Self::Array { element, .. } => element.is_sized(),
-            Self::Parameter { sized, .. } => *sized,
+            Self::Parameter { sized, .. } | Self::Opaque { sized, .. } => *sized,
             Self::Product(product) => product
                 .elements
                 .iter()
@@ -927,8 +931,7 @@ impl CheckedType {
             | Self::String
             | Self::StringLiteralSet(_)
             | Self::CString
-            | Self::CChar
-            | Self::Opaque { .. } => true,
+            | Self::CChar => true,
             Self::NumberLiteral(_) => true,
         }
     }
@@ -1481,7 +1484,6 @@ impl TypedModule {
             value_type,
             self.copy_trait,
             self.drop_trait,
-            self.io_type,
             &self.trait_implementations,
             &[],
             &|bound| self.drop_bound_holds(bound),
@@ -1507,7 +1509,6 @@ impl TypedModule {
             value_type,
             self.copy_trait,
             self.drop_trait,
-            self.io_type,
             &self.trait_implementations,
             &bounds,
             &|bound| self.drop_bound_holds(bound),
@@ -1589,6 +1590,7 @@ impl TypedModule {
     pub(crate) fn io_resource(&self) -> Option<CheckedResource> {
         self.io_type.map(|id| CheckedResource {
             value_type: CheckedType::Opaque {
+                sized: true,
                 id,
                 name: "IO".to_owned(),
                 arguments: Vec::new(),
@@ -1600,6 +1602,7 @@ impl TypedModule {
     pub(crate) fn reactive_resource(&self) -> Option<CheckedResource> {
         self.reactive_type.map(|id| CheckedResource {
             value_type: CheckedType::Opaque {
+                sized: true,
                 id,
                 name: "Reactive".to_owned(),
                 arguments: Vec::new(),
@@ -2660,12 +2663,15 @@ impl TypeChecker {
             if implementation.negative
                 && !matches!(
                     target,
-                    CheckedType::Distinct { .. } | CheckedType::Buffer(_)
+                    CheckedType::Distinct { .. }
+                        | CheckedType::Opaque { sized: true, .. }
+                        | CheckedType::CString
+                        | CheckedType::Buffer(_)
                 )
             {
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    "`!Copy` may only be implemented for a represented nominal type or Buffer",
+                    "`!Copy` may only be implemented for a represented nominal type, sized opaque type, CString, or Buffer",
                 ));
                 continue;
             }
@@ -9278,6 +9284,7 @@ impl TypeChecker {
             self.declared_coroutine_rows.insert(thunk, declared.clone());
         }
         CheckedType::Opaque {
+            sized: true,
             id: coroutine_id,
             name: "Coroutine".to_owned(),
             arguments: vec![effect_substitution_type(deferred), body_result],
@@ -10369,7 +10376,6 @@ impl TypeChecker {
             value_type,
             self.copy_trait,
             self.drop_trait,
-            self.io_type,
             &self.trait_implementations,
             bounds,
             &|bound| self.drop_bound_holds(bound, bounds),
@@ -11733,6 +11739,7 @@ impl TypeChecker {
             name: display_name.to_owned(),
             arguments: arguments.to_vec(),
             representation: Box::new(CheckedType::Opaque {
+                sized: true,
                 id,
                 name: display_name.to_owned(),
                 arguments: arguments.to_vec(),
@@ -11835,6 +11842,7 @@ impl TypeChecker {
             }
             Some(crate::RecursiveConstruction::Syntax) => {
                 return CheckedType::Opaque {
+                    sized: true,
                     id,
                     name: display_name,
                     arguments,
@@ -11844,6 +11852,7 @@ impl TypeChecker {
         }
         if declaration.kind() == TypeDeclarationKind::Opaque {
             return CheckedType::Opaque {
+                sized: declaration.sized_opaque,
                 id,
                 name: display_name,
                 arguments,
@@ -12178,21 +12187,25 @@ impl TypeChecker {
                     arguments: Vec::new(),
                 },
                 BuiltinType::IO => CheckedType::Opaque {
+                    sized: true,
                     id,
                     name: "IO".to_owned(),
                     arguments: Vec::new(),
                 },
                 BuiltinType::Reactive => CheckedType::Opaque {
+                    sized: true,
                     id,
                     name: "Reactive".to_owned(),
                     arguments: Vec::new(),
                 },
                 BuiltinType::Scheduler => CheckedType::Opaque {
+                    sized: true,
                     id,
                     name: "Scheduler".to_owned(),
                     arguments: Vec::new(),
                 },
                 BuiltinType::Tasks => CheckedType::Opaque {
+                    sized: true,
                     id,
                     name: "Tasks".to_owned(),
                     arguments: Vec::new(),
@@ -12218,6 +12231,7 @@ impl TypeChecker {
                     arguments: Vec::new(),
                 },
                 BuiltinType::CompletionToken => CheckedType::Opaque {
+                    sized: true,
                     id,
                     name: "CompletionToken".to_owned(),
                     arguments: Vec::new(),
@@ -12237,6 +12251,7 @@ impl TypeChecker {
                     let declaration = &self.type_declarations[&id];
                     if declaration.type_parameters.is_empty() {
                         CheckedType::Opaque {
+                            sized: true,
                             id,
                             name: module.type_name(id).unwrap_or(&named.name).to_owned(),
                             arguments: Vec::new(),
@@ -12265,6 +12280,7 @@ impl TypeChecker {
         }
         if declaration.kind() == TypeDeclarationKind::Opaque {
             let value_type = CheckedType::Opaque {
+                sized: declaration.sized_opaque,
                 id,
                 name: display_name,
                 arguments: Vec::new(),
@@ -12448,17 +12464,23 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
         }),
         (
             CheckedType::Opaque {
+                sized,
                 id: actual_id,
                 name: actual_name,
                 arguments: actual_arguments,
             },
             CheckedType::Opaque {
+                sized: expected_sized,
                 id: expected_id,
                 name: _,
                 arguments: expected_arguments,
             },
-        ) if actual_id == expected_id && actual_arguments.len() == expected_arguments.len() => {
+        ) if actual_id == expected_id
+            && sized == expected_sized
+            && actual_arguments.len() == expected_arguments.len() =>
+        {
             Some(CheckedType::Opaque {
+                sized,
                 id: actual_id,
                 name: actual_name,
                 arguments: actual_arguments
@@ -12876,10 +12898,12 @@ pub(crate) fn substitute_type(
             }
         }
         CheckedType::Opaque {
+            sized,
             id,
             name,
             arguments,
         } => CheckedType::Opaque {
+            sized,
             id,
             name,
             arguments: arguments
@@ -13005,10 +13029,12 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
         CheckedType::Buffer(value) => CheckedType::Buffer(Box::new(erase_type_parameters(value))),
         CheckedType::Array { .. } => CheckedType::Inferred,
         CheckedType::Opaque {
+            sized,
             id,
             name,
             arguments,
         } => CheckedType::Opaque {
+            sized: *sized,
             id: *id,
             name: name.clone(),
             arguments: arguments.iter().map(erase_type_parameters).collect(),
@@ -15059,13 +15085,32 @@ fn has_negative_copy_implementation(
     value_type: &CheckedType,
     copy_trait: Option<TraitId>,
     implementations: &[CheckedTraitImplementation],
+    discharge: &dyn Fn(&CheckedTraitBound) -> bool,
 ) -> bool {
     copy_trait.is_some_and(|copy_trait| {
         implementations.iter().any(|implementation| {
-            implementation.trait_id == copy_trait
-                && implementation.negative
-                && implementation.arguments.len() == 1
-                && &implementation.arguments[0] == value_type
+            if implementation.trait_id != copy_trait
+                || !implementation.negative
+                || implementation.arguments.len() != 1
+            {
+                return false;
+            }
+            let mut substitutions = HashMap::new();
+            if !infer_type_parameters(&implementation.arguments[0], value_type, &mut substitutions)
+            {
+                return false;
+            }
+            implementation.bounds.iter().all(|bound| {
+                discharge(&CheckedTraitBound {
+                    trait_id: bound.trait_id,
+                    arguments: bound
+                        .arguments
+                        .iter()
+                        .cloned()
+                        .map(|argument| substitute_type(argument, &substitutions))
+                        .collect(),
+                })
+            })
         })
     })
 }
@@ -15208,13 +15253,13 @@ pub(crate) fn is_copy_type(
     value_type: &CheckedType,
     copy_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
-    io_type: Option<TypeId>,
     implementations: &[CheckedTraitImplementation],
     bounds: &[CheckedTraitBound],
     discharge: &dyn Fn(&CheckedTraitBound) -> bool,
 ) -> bool {
-    if drop_implementation_applies(value_type, drop_trait, implementations, discharge)
-        || has_negative_copy_implementation(value_type, copy_trait, implementations)
+    if !value_type.is_sized()
+        || drop_implementation_applies(value_type, drop_trait, implementations, discharge)
+        || has_negative_copy_implementation(value_type, copy_trait, implementations, discharge)
     {
         return false;
     }
@@ -15237,11 +15282,14 @@ pub(crate) fn is_copy_type(
         | CheckedType::String
         | CheckedType::StringLiteralSet(_)
         | CheckedType::CChar
+        | CheckedType::CString
+        | CheckedType::Buffer(_)
+        | CheckedType::Opaque { .. }
         | CheckedType::CPointer { .. }
         | CheckedType::Ref(_)
         | CheckedType::Slice(_)
         | CheckedType::Function(_) => true,
-        CheckedType::CString | CheckedType::Buffer(_) | CheckedType::Array { .. } => false,
+        CheckedType::Array { .. } => false,
         CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {
             bounds.iter().any(|bound| {
                 bound.trait_id == copy_trait
@@ -15254,7 +15302,6 @@ pub(crate) fn is_copy_type(
                 &element.value_type,
                 copy_trait,
                 drop_trait,
-                io_type,
                 implementations,
                 bounds,
                 discharge,
@@ -15265,7 +15312,6 @@ pub(crate) fn is_copy_type(
                 alternative,
                 copy_trait,
                 drop_trait,
-                io_type,
                 implementations,
                 bounds,
                 discharge,
@@ -15275,12 +15321,10 @@ pub(crate) fn is_copy_type(
             representation,
             copy_trait,
             drop_trait,
-            io_type,
             implementations,
             bounds,
             discharge,
         ),
-        CheckedType::Opaque { id, .. } => Some(*id) == io_type,
         CheckedType::TypeConstructor { .. } => false,
     }
 }
@@ -15330,5 +15374,59 @@ pub(crate) fn is_default_type(
                 && &bound.arguments[0] == value_type
         }),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod opaque_sizedness_tests {
+    use super::*;
+
+    #[test]
+    fn opaque_transformations_preserve_sizedness_and_arguments() {
+        let parameter = TypeParameterId(0);
+        for sized in [false, true] {
+            let opaque = CheckedType::Opaque {
+                sized,
+                id: TypeId(0),
+                name: "Handle".to_owned(),
+                arguments: vec![CheckedType::Parameter {
+                    id: parameter,
+                    name: "T".to_owned(),
+                    sized: true,
+                }],
+            };
+            assert_eq!(compact_type_template(opaque.clone()).is_sized(), sized);
+            assert_eq!(erase_type_parameters(&opaque).is_sized(), sized);
+            let substituted = substitute_type(
+                opaque.clone(),
+                &HashMap::from([(parameter, CheckedType::I32)]),
+            );
+            assert_eq!(
+                substituted,
+                CheckedType::Opaque {
+                    sized,
+                    id: TypeId(0),
+                    name: "Handle".to_owned(),
+                    arguments: vec![CheckedType::I32],
+                }
+            );
+            assert_eq!(merge_types(opaque.clone(), opaque.clone()), Some(opaque));
+        }
+    }
+
+    #[test]
+    fn sized_opaques_copy_by_default_and_unsized_opaques_cannot_copy() {
+        for sized in [false, true] {
+            let opaque = CheckedType::Opaque {
+                sized,
+                id: TypeId(0),
+                name: "IO".to_owned(),
+                arguments: Vec::new(),
+            };
+            assert_eq!(
+                is_copy_type(&opaque, None, None, &[], &[], &|_| false),
+                sized
+            );
+        }
     }
 }

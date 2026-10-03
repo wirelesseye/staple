@@ -466,6 +466,7 @@ mod tests {
     #[test]
     fn an_absent_semantic_id_matches_no_type() {
         let opaque = CheckedType::Opaque {
+            sized: false,
             id: TypeId(7),
             name: "Handle".to_owned(),
             arguments: Vec::new(),

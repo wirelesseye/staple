@@ -1,3 +1,6 @@
 pub mod
 
+use std.core.sized.sized_opaque
+
+@sized_opaque
 pub type Never = opaque

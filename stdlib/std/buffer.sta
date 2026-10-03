@@ -1,9 +1,12 @@
 pub mod
 
+use std.core.sized.sized_opaque
+
 use std.slice.Slice
 use std.clone.Clone
 
 /// A mutable, fixed-capacity buffer of values.
+@sized_opaque
 pub type Buffer T = opaque
 impl<T> !Copy (Buffer T) {}
 
