@@ -3253,7 +3253,7 @@ An array can be viewed as a `Slice`:
 
 ```staple
 let fixed: Ref (I32; 3) = Ref (10, 20, 30)
-let values: Slice I32 = fixed
+let values: Slice I32 = Slice.from_ref fixed
 let count: USize = Slice.length values
 let second = values.1
 let index: USize = 2
@@ -3261,15 +3261,13 @@ let third = values[index]
 ```
 
 `Slice T` is a pointer-and-length view of an allocation whose concrete length
-is still fixed. It is not a dynamic array and is not equal to any `Ref (T; N)`;
-a fixed reference is implicitly converted wherever a `Slice T` is expected
-(as in the `let values: Slice I32 = fixed` binding above), and the companion
+is still fixed. It is not a dynamic array and is not equal to any `Ref (T; N)`,
+and a fixed reference never converts to a slice implicitly: the companion
 function `Slice.from_ref: <N where Natural N> Ref (T; N) -> Slice T` performs the
-same conversion explicitly — `Slice.from_ref fixed` — for use as a first-class
-function value or wherever an explicit spelling is clearer. As with the
-implicit conversion, a singleton `Ref T` (a `(T; 1)`, normalized to `T`) becomes
-a length-1 slice, and an empty `Ref ()` becomes a length-0 slice, requiring an
-expected `Slice` type to infer its element type. Literal and variable indexing
+conversion explicitly, as in the `Slice.from_ref fixed` binding above. A
+singleton `Ref T` (a `(T; 1)`, normalized to `T`) becomes a length-1 slice, and
+an empty `Ref ()` becomes a length-0 slice, requiring an expected `Slice` type to
+infer its element type. Literal and variable indexing
 perform runtime bounds checks.
 `Slice.get_ref: <T> [Slice T, USize] -> Ref T` borrows an element by position,
 trapping when out of bounds; it is the primitive behind the standard library's

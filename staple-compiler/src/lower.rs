@@ -33,7 +33,7 @@ use crate::{
     IntegerType, IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction,
     ResolvedModule, SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId,
     TypeParameterId, TypedModule, contains_type_parameter, implicit_wrapper_representation,
-    infer_type_parameters, select_sum_alternative_with, slice_ref_length,
+    infer_type_parameters, select_sum_alternative_with,
     sum_through_implicit_wrapper,
 };
 
@@ -567,9 +567,6 @@ pub(crate) enum LoweredCoercionPlan {
     /// The representation is unchanged: `source == target`, a string literal
     /// set widened to `String` or another set, or `NumberLiteral` to `USize`.
     Identity,
-    /// `Ref (T; N)` to `Slice T`: build the slice from the pointer and the
-    /// checked element count `N`.
-    SliceRef { length: usize },
     /// Inject a non-sum value into one alternative of the target sum.
     SumInject {
         alternative: usize,
@@ -600,7 +597,7 @@ impl LoweredCoercionPlan {
     /// Whether the plan implicitly introduces a `from` wrapper anywhere.
     pub(crate) fn introduces_wrapper(&self) -> bool {
         match self {
-            LoweredCoercionPlan::Identity | LoweredCoercionPlan::SliceRef { .. } => false,
+            LoweredCoercionPlan::Identity => false,
             LoweredCoercionPlan::Wrap { .. } => true,
             LoweredCoercionPlan::SumInject { payload, .. } => payload.introduces_wrapper(),
             LoweredCoercionPlan::SumWiden { arms } => arms
@@ -636,14 +633,6 @@ impl LoweredCoercionPlan {
             )
         {
             return Ok(LoweredCoercionPlan::Identity);
-        }
-        if matches!(
-            (source, target),
-            (CheckedType::Ref(_), CheckedType::Slice(_))
-        ) {
-            let length = slice_ref_length(source, target)
-                .ok_or_else(|| format!("invalid slice coercion from `{source}` to `{target}`"))?;
-            return Ok(LoweredCoercionPlan::SliceRef { length });
         }
         let CheckedType::Sum(target_sum) = target else {
             if from == FromCoercion::Allowed
@@ -12877,6 +12866,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         | Intrinsic::StringAdd
         | Intrinsic::SliceLength
         | Intrinsic::SliceGetRef
+        | Intrinsic::SliceFromRef
         | Intrinsic::BufferWithCapacity
         | Intrinsic::BufferLength
         | Intrinsic::BufferCapacity
@@ -19312,7 +19302,7 @@ mod tests {
             "type IOError = wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
             "let sum: Ok I32 | IOError = Ok (41)\n",
-            "let slice: Slice I32 = Ref 8\n",
+            "let slice: Slice I32 = Slice.from_ref (Ref 8)\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -19345,8 +19335,8 @@ mod tests {
                 .expect("checked child type")
         );
 
-        // Coercions recorded on deferred call headers (sum injection and
-        // `Ref` to `Slice`) are retained for lowering.
+        // Coercions recorded on deferred call headers (sum injection) are
+        // retained for lowering.
         let coercions = program
             .expressions
             .iter()
@@ -19355,10 +19345,6 @@ mod tests {
         assert!(coercions.iter().any(|coercion| matches!(
             &coercion.target,
             CheckedType::Sum(sum) if sum.alternatives.len() == 2
-        )));
-        assert!(coercions.iter().any(|coercion| matches!(
-            (&coercion.source, &coercion.target),
-            (CheckedType::Ref(_), CheckedType::Slice(_))
         )));
     }
 
@@ -19653,7 +19639,7 @@ mod tests {
             "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
             "def widen: () -> Ok I32 | IOError | Other = () => read()\n",
             "let injected: Ok I32 | IOError = Ok (41)\n",
-            "let slice: Slice I32 = Ref 8\n",
+            "let slice: Slice I32 = Slice.from_ref (Ref 8)\n",
             "def describe = (value: String) => match value {\n",
             "  \"literal\" => 1,\n",
             "  text => 2,\n",
@@ -19721,22 +19707,6 @@ mod tests {
         };
         assert_eq!(*alternative, 0);
         assert_eq!(**payload, LoweredCoercionPlan::Identity);
-
-        let slice_plan = program
-            .expressions
-            .iter()
-            .find_map(|(_, expression)| match &expression.coercion_plan {
-                Some(LoweredCoercionPlan::SliceRef { length }) => Some((expression, *length)),
-                _ => None,
-            })
-            .expect("slice-ref plan");
-        let coercion = slice_plan.0.coercion.as_ref().expect("slice coercion");
-        assert!(matches!(coercion.source, CheckedType::Ref(_)));
-        assert!(matches!(coercion.target, CheckedType::Slice(_)));
-        assert_eq!(
-            slice_plan.1,
-            slice_ref_length(&coercion.source, &coercion.target).expect("fixed reference length")
-        );
 
         // Patterns: the literal payload is decoded, the sum alternatives match
         // the checked positions, and the nominal identities are recorded.

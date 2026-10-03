@@ -2958,15 +2958,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 self.emit_coercion(value, source, representation, payload, span)
             }
-            crate::LoweredCoercionPlan::SliceRef { length } => {
-                let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(value) else {
-                    return Err(Diagnostic::new(
-                        span.clone(),
-                        "invalid fixed reference representation",
-                    ));
-                };
-                self.backend.build_slice_ref_value(pointer, *length)
-            }
             crate::LoweredCoercionPlan::SumInject {
                 alternative,
                 payload,
@@ -6801,6 +6792,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend
                     .build_slice_length(*slice)
                     .map(|value| value.as_any_value_enum())
+            }
+            IntrinsicFunction::SliceFromRef => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(Diagnostic::new(span, "from_ref requires a reference"));
+                };
+                let length = call.runtime.slice_length.ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "from_ref is missing its concrete length")
+                })?;
+                self.backend.build_slice_ref_value(*pointer, length)
             }
             IntrinsicFunction::SliceGetRef => {
                 let [

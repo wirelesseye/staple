@@ -298,6 +298,7 @@ pub enum IntrinsicFunction {
     StringAdd,
     SliceLength,
     SliceGetRef,
+    SliceFromRef,
     BufferWithCapacity,
     BufferLength,
     BufferCapacity,
@@ -1814,7 +1815,9 @@ impl NameResolver {
             ("std.buffer", "__buffer_freeze", IntrinsicFunction::BufferFreeze),
             ("std.buffer", "__buffer_transfer", IntrinsicFunction::BufferTransfer),
             ("std.buffer", "__buffer_clone", IntrinsicFunction::BufferClone),
+            ("std.slice", "__slice_length", IntrinsicFunction::SliceLength),
             ("std.slice", "__slice_get_ref", IntrinsicFunction::SliceGetRef),
+            ("std.slice", "__slice_from_ref", IntrinsicFunction::SliceFromRef),
             ("std.core.reference", "__ref_replace", IntrinsicFunction::RefReplace),
             ("std.core.reactive", "__reactive_scope", IntrinsicFunction::ReactiveScope),
             // Call-site-sensitive intrinsics are public API themselves; the
@@ -1853,12 +1856,6 @@ impl NameResolver {
         ] {
             declarations.push((module.to_owned(), None, name.to_owned(), intrinsic));
         }
-        declarations.push((
-            "std.slice".to_owned(),
-            Some("Slice"),
-            "length".to_owned(),
-            IntrinsicFunction::SliceLength,
-        ));
         let standard_library_directory = program
             .module(core)
             .path

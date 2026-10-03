@@ -844,7 +844,7 @@ static CORPUS: [CorpusProgram; 89] = [
                     "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
                     "def widen: () -> Ok I32 | IOError | Other = () => read ()\n",
                     "def inject: Ok I32 -> Ok I32 | IOError = value => value\n",
-                    "def slice_ref: Ref (I32; 2) -> Slice I32 = value => value\n",
+                    "def slice_ref: Ref (I32; 2) -> Slice I32 = value => Slice.from_ref value\n",
                     "def take: Ok I32 | IOError -> I32 = value => 1\n",
                     "\n",
                     "def consume: () -> I32 = () => {\n",
@@ -1779,8 +1779,8 @@ let value = at (Ref (1, 2), (USize :: 5))
     )),
     must_run(expect_stdout(
         inline(
-            "slice_ref_coercion",
-            "use std.slice.Slice\nlet fixed: Ref (I32; 3) = Ref (1, 2, 3)\nlet values: Slice I32 = fixed\n",
+            "slice_from_ref",
+            "use std.slice.Slice\nlet fixed: Ref (I32; 3) = Ref (1, 2, 3)\nlet values: Slice I32 = Slice.from_ref fixed\n",
             "emission",
         ),
         "",
@@ -2412,7 +2412,7 @@ let value = at (Ref (1, 2), (USize :: 5))
                     "type Tag = wrap CString\n",
                     "impl Drop Tag { cleanup = Tag text => { puts text; () } }\n",
                     "def from_array: () -> Ref Tag = () => {\n",
-                    "    let values: Slice Tag = Ref (Tag (c_string \"drop array first\"), Tag (c_string \"drop array second\"), Tag (c_string \"drop array third\"))\n",
+                    "    let values: Slice Tag = Slice.from_ref (Ref (Tag (c_string \"drop array first\"), Tag (c_string \"drop array second\"), Tag (c_string \"drop array third\")))\n",
                     "    Slice.get_ref values 2\n",
                     "}\n",
                     "def from_buffer: () -> Ref Tag = () => {\n",

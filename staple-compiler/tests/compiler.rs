@@ -1703,12 +1703,12 @@ fn supports_repeated_spread_and_slice_references() {
         "let explicit: (I32; 3) = (1, 2, 3)\n",
         "let spread: (String, ...(I32; 2)) = (\"x\", 4, 5)\n",
         "let fixed: Ref (I32; 3) = Ref explicit\n",
-        "let erased: Slice I32 = fixed\n",
-        "let constructed: Slice I32 = Ref (6, 7)\n",
-        "let singleton: Slice I32 = Ref 8\n",
-        "let empty: Slice I32 = Ref ()\n",
+        "let erased: Slice I32 = Slice.from_ref fixed\n",
+        "let constructed: Slice I32 = Slice.from_ref (Ref (6, 7))\n",
+        "let singleton: Slice I32 = Slice.from_ref (Ref 8)\n",
+        "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
         "let count: USize = Slice.length erased\n",
-        "let fixed_count: USize = Slice.length fixed\n",
+        "let fixed_count: USize = Slice.length (Slice.from_ref fixed)\n",
         "let literal: I32 = erased.1\n",
         "let index: USize = 2\n",
         "let dynamic: I32 = erased[index]\n",
@@ -1736,8 +1736,6 @@ fn from_ref_accepts_generic_arrays_and_is_first_class() {
         "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
         "let operation: (Ref (I32; 3)) -> Slice I32 = Slice.from_ref\n",
         "let applied: Slice I32 = operation fixed\n",
-        "def coerce: <T, N where Natural N> Ref (T; N) -> Slice T = value => value\n",
-        "let coerced: Slice I32 = coerce fixed\n",
         "def forward: <T, N where Natural N> Ref (T; N) -> Slice T = value => Slice.from_ref value\n",
         "let forwarded: Slice I32 = forward fixed\n",
     ));
@@ -3071,7 +3069,7 @@ fn derives_trait_delegated_product_indexing() {
         "let mutate_operation: (mut Ref (I32; 3), USize, I32) -> () = MutateIndex.mutate_index\n",
         "mutate_operation (fixed, position, 6)\n",
         "fixed[position] = 7\n",
-        "let mut erased: Slice I32 = fixed\n",
+        "let mut erased: Slice I32 = Slice.from_ref fixed\n",
         "erased[position] = 8\n",
     );
     let module = type_check(source);
@@ -3182,7 +3180,7 @@ fn delegates_indexing_through_refs_to_the_payload() {
         "def mixed_at: (Ref (I32, Bool), USize) -> I32 | Bool = (pair, position) => pair[position]\n",
         "def list_at: (Ref (List I32), USize) -> I32 = (list, position) => list[position]\n",
         "let fixed: Ref (I32; 3) = Ref (1, 2, 3)\n",
-        "let values: Slice I32 = fixed\n",
+        "let values: Slice I32 = Slice.from_ref fixed\n",
         "def slice_at: (Ref (Slice I32), USize) -> I32 = (slice, position) => slice[position]\n",
         "type Keyed = wrap (key: String, value: I32)\n",
         "impl Index Keyed String I32 { index = (entry, key) => entry.value }\n",
@@ -3255,7 +3253,7 @@ fn indexes_slices_through_the_standard_library_implementation() {
     let source = concat!(
         "use std.slice.Slice\n",
         "let fixed: Ref (I32; 3) = Ref (1, 2, 3)\n",
-        "let mut values: Slice I32 = fixed\n",
+        "let mut values: Slice I32 = Slice.from_ref fixed\n",
         "let value: I32 = values[0]\n",
         "values[1] = 9\n",
         "let operation: (Slice I32, USize) -> I32 = Index.index\n",
@@ -3275,7 +3273,7 @@ fn iterates_slices_through_the_standard_library_implementations() {
     let source = concat!(
         "use std.slice.(Slice, SliceIter)\n",
         "let fixed: Ref (I32; 3) = Ref (10, 20, 30)\n",
-        "let values: Slice I32 = fixed\n",
+        "let values: Slice I32 = Slice.from_ref fixed\n",
         "let iterator: SliceIter I32 = IntoIterator.into_iterator values\n",
         "let step: IterStep (SliceIter I32, I32) = Iterator.next iterator\n",
         "def sum: Slice I32 -> I32 = slice => {\n",
@@ -3300,10 +3298,10 @@ fn compares_slices_and_strings_through_the_standard_library_eq_implementations()
         "let same: Ref (I32; 3) = Ref (1, 2, 3)\n",
         "let different: Ref (I32; 3) = Ref (1, 2, 4)\n",
         "let shorter: Ref (I32; 2) = Ref (1, 2)\n",
-        "let left: Slice I32 = first\n",
-        "let right: Slice I32 = same\n",
-        "let other: Slice I32 = different\n",
-        "let short: Slice I32 = shorter\n",
+        "let left: Slice I32 = Slice.from_ref first\n",
+        "let right: Slice I32 = Slice.from_ref same\n",
+        "let other: Slice I32 = Slice.from_ref different\n",
+        "let short: Slice I32 = Slice.from_ref shorter\n",
         "let same_values: Bool = left == right\n",
         "let different_values: Bool = left != other\n",
         "let different_lengths: Bool = left != short\n",
@@ -3469,7 +3467,7 @@ fn rejects_overlapping_structural_iterator_implementations() {
 fn rejects_slice_ref_destructuring() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "use std.slice.Slice\nlet fixed: Ref (I32; 2) = Ref (1, 2)\nlet values: Slice I32 = fixed\nlet Ref payload = values\n",
+            "use std.slice.Slice\nlet fixed: Ref (I32; 2) = Ref (1, 2)\nlet values: Slice I32 = Slice.from_ref fixed\nlet Ref payload = values\n",
         ))
         .expect_err_diagnostics("a slice cannot be destructured as a Ref");
     assert!(
@@ -3510,7 +3508,7 @@ fn aliases_complete_slice_references_and_reject_ffi() {
         "use std.slice.Slice\n",
         "type Ints = alias Slice I32\n",
         "let fixed: Ref (I32; 2) = Ref (1, 2)\n",
-        "let values: Ints = fixed\n",
+        "let values: Ints = Slice.from_ref fixed\n",
         "let count: USize = Slice.length values\n",
     ));
 
@@ -3533,7 +3531,7 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
         "def preserve_slice: <T> Slice T -> Slice T = value => value\n",
         "def explicitly_sized: <T where ?Sized T, Sized T> Ref T -> Ref T = value => value\n",
         "let fixed: Ref (I32; 2) = Ref (1, 2)\n",
-        "let erased: Slice I32 = fixed\n",
+        "let erased: Slice I32 = Slice.from_ref fixed\n",
         "let same: Slice I32 = preserve_slice erased\n",
         "let same_fixed: Ref (I32; 2) = explicitly_sized fixed\n",
     ));
@@ -12606,7 +12604,6 @@ fn intrinsic_values_require_a_direct_call() {
         "let read = snapshot\n",
         "let read: I32 -> I32 = snapshot\n",
         "use std.coroutine.spawn\nlet start = spawn\n",
-        "let length: std.slice.Slice I32 -> USize = std.slice.Slice.length\n",
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
@@ -12772,5 +12769,26 @@ fn drop_cleanup_cannot_be_referenced_directly() {
     }
     type_check(&format!(
         "{prelude}def go = () => {{ let a = Resource 1; drop a }}\n"
+    ));
+}
+
+#[test]
+fn fixed_references_do_not_convert_to_slices_implicitly() {
+    for source in [
+        "use std.slice.Slice\nlet fixed: Ref (I32; 2) = Ref (1, 2)\nlet values: Slice I32 = fixed\n",
+        "use std.slice.Slice\nlet values: Slice I32 = Ref 8\n",
+        "use std.slice.Slice\nlet fixed: Ref (I32; 2) = Ref (1, 2)\nlet count = Slice.length fixed\n",
+        "use std.slice.Slice\ndef coerce: <T, N where Natural N> Ref (T; N) -> Slice T = value => value\n",
+    ] {
+        TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("a Ref must be converted with `Slice.from_ref`");
+    }
+    // The explicit conversion infers the element type for generic callers.
+    type_check(concat!(
+        "use std.slice.Slice\n",
+        "let fixed: Ref (I32; 3) = Ref (1, 2, 3)\n",
+        "let first: Ref I32 = Slice.get_ref (Slice.from_ref fixed) 0\n",
+        "let count: USize = Slice.length (Slice.from_ref fixed)\n",
     ));
 }

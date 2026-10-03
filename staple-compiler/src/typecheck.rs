@@ -3790,6 +3790,17 @@ impl TypeChecker {
                                 && *function.result == CheckedType::USize
                     ))
                     .unwrap_or(CheckedType::Error),
+                crate::IntrinsicFunction::SliceFromRef => self
+                    .symbol_types
+                    .get(symbol)
+                    .cloned()
+                    .filter(|value_type| matches!(
+                        value_type,
+                        CheckedType::Function(function)
+                            if matches!(function.parameter.as_ref(), CheckedType::Ref(_))
+                                && matches!(function.result.as_ref(), CheckedType::Slice(_))
+                    ))
+                    .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::SliceGetRef => self
                     .symbol_types
                     .get(symbol)
@@ -10525,9 +10536,6 @@ impl TypeChecker {
                     )
                 })
             }
-            (CheckedType::Ref(_), CheckedType::Slice(_)) => {
-                slice_ref_coercion_is_valid(&actual, expected)
-            }
             (actual, expected) => {
                 implicit_wrapper_representation(expected).is_some_and(|representation| {
                     can_coerce_type_with(actual, representation, FromCoercion::Forbidden)
@@ -13073,6 +13081,11 @@ pub(crate) fn slice_ref_length(source: &CheckedType, target: &CheckedType) -> Op
     let element_matches = |candidate: &CheckedType| {
         matches!(element.as_ref(), CheckedType::Inferred) || candidate == element.as_ref()
     };
+    if let CheckedType::Array { element: repeated, count } = actual.as_ref()
+        && let CheckedType::NumberLiteral(count) = count.as_ref()
+    {
+        return element_matches(repeated).then_some(*count as usize);
+    }
     if element_matches(actual.as_ref()) {
         return Some(1);
     }
@@ -13084,28 +13097,6 @@ pub(crate) fn slice_ref_length(source: &CheckedType, target: &CheckedType) -> Op
     }
     let homogeneous = product.homogeneous_element()?;
     element_matches(homogeneous).then_some(product.elements.len())
-}
-
-/// Whether a `Ref` may coerce to a `Slice` while type checking.
-///
-/// This accepts everything `slice_ref_length` does, plus a still-generic
-/// homogeneous array `Ref T[N]` whose count is a compile-time parameter: the
-/// concrete length is only needed once the surrounding function is
-/// monomorphized, at which point `N` has been substituted and
-/// `slice_ref_length` can compute it.
-pub(crate) fn slice_ref_coercion_is_valid(source: &CheckedType, target: &CheckedType) -> bool {
-    if slice_ref_length(source, target).is_some() {
-        return true;
-    }
-    let (CheckedType::Ref(actual), CheckedType::Slice(element)) = (source, target) else {
-        return false;
-    };
-    matches!(
-        actual.as_ref(),
-        CheckedType::Array { element: repeated, count }
-            if repeated.as_ref() == element.as_ref()
-                && matches!(count.as_ref(), CheckedType::Parameter { .. })
-    )
 }
 
 fn replace_product_default_policy(merged: CheckedType, expected: &CheckedType) -> CheckedType {
@@ -13453,9 +13444,6 @@ pub(crate) fn can_coerce_type_with(
                     Ok(Some(_))
                 )
             })
-        }
-        (CheckedType::Ref(_), CheckedType::Slice(_)) => {
-            slice_ref_coercion_is_valid(actual, expected)
         }
         (actual, expected) if from == FromCoercion::Allowed => {
             implicit_wrapper_representation(expected).is_some_and(|representation| {
@@ -14871,12 +14859,6 @@ fn infer_type_parameters_for_expected(
             return true;
         }
         return false;
-    }
-    // A `Ref` result coerces to a `Slice` after instantiation (see
-    // `slice_ref_coercion_is_valid`), so an expected `Slice` does not
-    // constrain the call's remaining compile-time parameters here.
-    if matches!(template, CheckedType::Ref(_)) && matches!(expected, CheckedType::Slice(_)) {
-        return true;
     }
     infer_type_parameters(template, expected, substitutions)
 }
