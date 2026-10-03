@@ -6791,18 +6791,6 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
             "`@doc` may only modify a named declaration",
         ),
         (
-            "@recursive_constructor\ntype Box = wrap I32\n",
-            "`@recursive_constructor` may only mark a compiler-owned recursive constructor",
-        ),
-        (
-            "@recursive_constructor(1)\ntype Box = wrap I32\n",
-            "`@recursive_constructor` does not accept an argument",
-        ),
-        (
-            "@recursive_constructor\nlet value = 1\n",
-            "`@recursive_constructor` may only modify a type declaration",
-        ),
-        (
             "macro @identity: Item -> Item = item => item\n@identity\nuse std.core.*\n",
             "modifier macros may only be applied to `let`, `def`, `type`, `extern`, `trait`, or `impl` items",
         ),
@@ -11796,18 +11784,56 @@ fn sized_opaque_modifier_is_package_visible_in_stdlib() {
     );
 }
 
-fn sized_opaque_stdlib_diagnostics(
-    path: &str,
-    original: &str,
-    replacement: &str,
-) -> Vec<Diagnostic> {
+#[test]
+fn recursive_constructor_modifier_is_package_visible_in_stdlib() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for source in [
+        "@recursive_constructor\ntype Token = opaque\n",
+        "@std.core.recursive_constructor.recursive_constructor\ntype Token = opaque\n",
+        "use std.core.recursive_constructor.(recursive_constructor)\n@recursive_constructor\ntype Token = opaque\n",
+        "use std.core.recursive_constructor.*\n@recursive_constructor\ntype Token = opaque\n",
+        "pub use std.core.recursive_constructor.recursive_constructor\n@recursive_constructor\ntype Token = opaque\n",
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should load");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err_diagnostics("user code cannot invoke recursive_constructor");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("recursive_constructor")),
+            "{diagnostics:?}"
+        );
+    }
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            &with_syntax_imports("macro @recursive_constructor: Item -> Item = item => item\n"),
+            root,
+        )
+        .expect("source should load");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("recursive_constructor name is reserved");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("reserved by the compiler")),
+        "{diagnostics:?}"
+    );
+}
+
+fn stdlib_modifier_diagnostics(path: &str, original: &str, replacement: &str) -> Vec<Diagnostic> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     let temporary = std::env::temp_dir().join(format!(
-        "staple-sized-opaque-{}-{nonce}",
+        "staple-stdlib-modifier-{}-{nonce}",
         std::process::id()
     ));
     copy_directory(&root.join("stdlib"), &temporary);
@@ -11861,13 +11887,13 @@ fn sized_opaque_stdlib_contract_and_validation() {
             "may only modify an opaque type declaration",
         ),
     ] {
-        let diagnostics = sized_opaque_stdlib_diagnostics(path, original, replacement);
+        let diagnostics = stdlib_modifier_diagnostics(path, original, replacement);
         assert!(
             diagnostics.iter().any(|d| d.message.contains(expected)),
             "{diagnostics:?}"
         );
     }
-    let diagnostics = sized_opaque_stdlib_diagnostics(
+    let diagnostics = stdlib_modifier_diagnostics(
         "std/core/number/types.sta",
         "@sized_opaque\npub type I32 = opaque",
         "@std.core.sized.sized_opaque\n@identity\npub type I32 = opaque\nuse std.syntax.Item\nmacro @identity: Item -> Item = item => item",
@@ -12519,12 +12545,57 @@ fn named_types_are_indexed_only_through_their_own_implementations() {
 }
 #[test]
 fn from_types_reject_recursive_constructors() {
-    let diagnostics = resolve_result("@recursive_constructor\ntype Loop = from I32\n")
-        .expect_err_diagnostics("recursive constructors must use `wrap`");
+    let diagnostics = stdlib_modifier_diagnostics(
+        "std/core/reference.sta",
+        "pub type Ref T where ?Sized T = pub wrap T",
+        "pub type Ref T where ?Sized T = pub from T",
+    );
     assert!(
         diagnostics.iter().any(|diagnostic| diagnostic
             .message
             .contains("`@recursive_constructor` types must use `wrap`, not `from`")),
         "{diagnostics:?}"
     );
+}
+
+#[test]
+fn recursive_constructor_stdlib_contract_and_validation() {
+    for (path, original, replacement, expected) in [
+        (
+            "std/core/reference.sta",
+            "@recursive_constructor\npub type Ref",
+            "@recursive_constructor(1)\npub type Ref",
+            "`@recursive_constructor` does not accept an argument",
+        ),
+        (
+            "std/core/reference.sta",
+            "@recursive_constructor\npub type Ref",
+            "pub type Ref",
+            "type `Ref` must be marked `@recursive_constructor`",
+        ),
+        (
+            "std/core/reference.sta",
+            "@recursive_constructor\npub type Ref",
+            "@recursive_constructor\nlet value = 1\npub type Ref",
+            "`@recursive_constructor` may only modify a type declaration",
+        ),
+        (
+            "std/core/recursive_constructor.sta",
+            "macro @recursive_constructor: Item -> Item",
+            "macro @recursive_constructor: Item -> Item = item => item",
+            "compiler-provided modifier `@recursive_constructor` must be bodyless",
+        ),
+    ] {
+        let diagnostics = stdlib_modifier_diagnostics(path, original, replacement);
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "{diagnostics:?}"
+        );
+    }
+    let diagnostics = stdlib_modifier_diagnostics(
+        "std/core/reference.sta",
+        "@recursive_constructor\npub type Ref",
+        "@std.core.recursive_constructor.recursive_constructor\npub type Ref",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }

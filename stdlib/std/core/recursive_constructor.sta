@@ -1,0 +1,6 @@
+pub mod
+
+use std.syntax.Item
+
+/// Marks a compiler-owned recursive type constructor. Reserved for the standard library.
+pub(package) macro @recursive_constructor: Item -> Item

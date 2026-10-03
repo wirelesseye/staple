@@ -1,5 +1,7 @@
 pub mod
 
+use std.core.recursive_constructor.recursive_constructor
+
 use std.core.index.(Index, MutateIndex)
 use std.iterator.(IntoIterator, Iterator)
 use std.iterator.IterStep.(Done, Yield)

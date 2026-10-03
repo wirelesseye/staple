@@ -45,6 +45,7 @@ enum MacroKind {
     Feature,
     NoPrelude,
     SizedOpaque,
+    RecursiveConstructor,
     Quote,
     ParseQuote,
 }
@@ -1199,6 +1200,12 @@ impl MacroExpander {
                                 && declaration.name == "sized_opaque"
                             {
                                 MacroKind::SizedOpaque
+                            } else if standard_library_directory.as_ref().is_some_and(|root| {
+                                source_module.path == root.join("core/recursive_constructor.sta")
+                            }) && declaration.modifier
+                                && declaration.name == "recursive_constructor"
+                            {
+                                MacroKind::RecursiveConstructor
                             } else if let Some(value) = &declaration.value {
                                 MacroKind::User(value.clone())
                             } else {
@@ -2802,6 +2809,7 @@ impl MacroExpander {
                         | MacroKind::Feature
                         | MacroKind::NoPrelude
                         | MacroKind::SizedOpaque
+                        | MacroKind::RecursiveConstructor
                 ) {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -2888,20 +2896,24 @@ impl MacroExpander {
                         "compiler-provided macro `c_string` must have signature `Expr -> Expr`",
                     ));
                 }
-                MacroKind::SizedOpaque
+                MacroKind::SizedOpaque | MacroKind::RecursiveConstructor
                     if definition.parameters != [MetaType::Item]
                         || definition.result != MetaType::Item
                         || definition.declaration.value.is_some() =>
                 {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
-                        "compiler-provided modifier `@sized_opaque` must be bodyless with signature `Item -> Item`",
+                        format!(
+                            "compiler-provided modifier `@{}` must be bodyless with signature `Item -> Item`",
+                            definition.key.name
+                        ),
                     ));
                 }
                 MacroKind::Doc
                 | MacroKind::Feature
                 | MacroKind::NoPrelude
-                | MacroKind::SizedOpaque => {}
+                | MacroKind::SizedOpaque
+                | MacroKind::RecursiveConstructor => {}
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -3256,24 +3268,6 @@ impl MacroExpander {
             ));
             return None;
         }
-        if invocation.namespace.is_none() && invocation.name == "recursive_constructor" {
-            if invocation.argument.is_some() {
-                self.diagnostics.push(Diagnostic::new(
-                    invocation.syntax.span,
-                    "`@recursive_constructor` does not accept an argument",
-                ));
-                return None;
-            }
-            let Some(declaration) = modified_type_declaration_mut(&mut current) else {
-                self.diagnostics.push(Diagnostic::new(
-                    invocation.syntax.span,
-                    "`@recursive_constructor` may only modify a type declaration",
-                ));
-                return None;
-            };
-            declaration.recursive_constructor = true;
-            return Some(ModifierChainResult::Item(current));
-        }
         if invocation.namespace.is_none() && invocation.name == "no_prelude" {
             let (definition, _) = self.select_modifier(module, &invocation)?;
             self.record_invocation(invocation.syntax.id, &definition);
@@ -3384,6 +3378,17 @@ impl MacroExpander {
         }
         let (definition, argument) = self.select_modifier(module, &invocation)?;
         self.record_invocation(invocation.syntax.id, &definition);
+        if matches!(definition.kind, MacroKind::RecursiveConstructor) {
+            let Some(declaration) = modified_type_declaration_mut(&mut current) else {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@recursive_constructor` may only modify a type declaration",
+                ));
+                return None;
+            };
+            declaration.recursive_constructor = true;
+            return Some(ModifierChainResult::Item(current));
+        }
         if matches!(definition.kind, MacroKind::SizedOpaque) {
             let Some(declaration) = modified_type_declaration_mut(&mut current) else {
                 self.diagnostics.push(Diagnostic::new(
@@ -4601,7 +4606,11 @@ impl MacroExpander {
                     },
                 )))
             }
-            MacroKind::Doc | MacroKind::Feature | MacroKind::NoPrelude | MacroKind::SizedOpaque => {
+            MacroKind::Doc
+            | MacroKind::Feature
+            | MacroKind::NoPrelude
+            | MacroKind::SizedOpaque
+            | MacroKind::RecursiveConstructor => {
                 unreachable!("built-in modifiers are applied directly")
             }
             MacroKind::Quote => {
