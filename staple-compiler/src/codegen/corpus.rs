@@ -140,7 +140,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 85] = [
+static CORPUS: [CorpusProgram; 87] = [
     expect_stdout(must_run(inline("empty", "", "core")), ""),
     expect_stdout(
         must_run(inline(
@@ -2327,6 +2327,93 @@ let value = at (Ref (1, 2), (5 satisfies USize))
             ],
         ),
         "direct borrowed\ndrop direct borrowed\ndirect moved\ndrop direct moved\nindirect borrowed\ndrop indirect borrowed\nindirect moved\ndrop indirect moved\ntrait borrowed\ndrop trait borrowed\nproduct element\ndrop product element\nnamed binding\nspread temporary\ndrop spread right\ndrop spread left\nspread temporary mixed\ndrop spread left\ndrop spread right\nspread temporary generic\ndrop spread right\ndrop spread left\nextern C string\nprinted by puts\nend of scope\ndrop spread first\ndrop spread second\ndrop named at scope exit\n",
+    )),
+    // A `Ref` into the middle of a managed allocation keeps the whole
+    // allocation alive across collections: an array viewed as a slice, a
+    // buffer, and a frozen buffer. No element is finalized during the churn.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "interior_refs_keep_their_allocation_alive",
+                concat!(
+                    "use std.cinterop.(CString, c_string)\n",
+                    "use std.slice.Slice\n",
+                    "use std.buffer.Buffer\n",
+                    "extern \"c\" { puts: CString -> I32 }\n",
+                    "type Tag = ctor CString\n",
+                    "impl Drop Tag { def drop = Tag text => { puts text; () } }\n",
+                    "def from_array: () -> Ref Tag = () => {\n",
+                    "    let values: Slice Tag = Ref (Tag (c_string \"drop array first\"), Tag (c_string \"drop array second\"), Tag (c_string \"drop array third\"))\n",
+                    "    Slice.get_ref values 2\n",
+                    "}\n",
+                    "def from_buffer: () -> Ref Tag = () => {\n",
+                    "    let mut buffer: Buffer Tag = Buffer.with_capacity 4\n",
+                    "    Buffer.push buffer (Tag (c_string \"drop buffer first\"))\n",
+                    "    Buffer.push buffer (Tag (c_string \"drop buffer second\"))\n",
+                    "    Buffer.get_ref buffer 1\n",
+                    "}\n",
+                    "def from_frozen: () -> Ref Tag = () => {\n",
+                    "    let mut buffer: Buffer Tag = Buffer.with_capacity 4\n",
+                    "    Buffer.push buffer (Tag (c_string \"drop frozen first\"))\n",
+                    "    Buffer.push buffer (Tag (c_string \"drop frozen second\"))\n",
+                    "    let frozen = Buffer.freeze buffer\n",
+                    "    Slice.get_ref frozen 1\n",
+                    "}\n",
+                    "def churn: I32 -> I32 = n => {\n",
+                    "    let mut index = 0\n",
+                    "    loop {\n",
+                    "        if (index == n) { break index }\n",
+                    "        let garbage = \"x\" + \"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"\n",
+                    "        index = index + 1\n",
+                    "        continue\n",
+                    "    }\n",
+                    "}\n",
+                    "let array = from_array ()\n",
+                    "let buffered = from_buffer ()\n",
+                    "let frozen = from_frozen ()\n",
+                    "let spins = churn 100000\n",
+                    "puts (c_string \"after churn\")\n",
+                    "let first = Ref.replace array (Tag (c_string \"drop replacement\"))\n",
+                    "let second = Ref.replace buffered (Tag (c_string \"drop replacement\"))\n",
+                    "let third = Ref.replace frozen (Tag (c_string \"drop replacement\"))\n",
+                    "puts (c_string \"replaced\")\n",
+                ),
+                "ownership",
+            ),
+            &["from_array", "from_buffer", "from_frozen", "churn"],
+        ),
+        "after churn\nreplaced\n",
+    )),
+    // Taking a buffer element `Ref` costs nothing at collection time, so a
+    // loop that takes many of them while allocating stays linear.
+    must_run(expect_stdout(
+        emits(
+            inline(
+                "buffer_refs_in_a_loop_stay_linear",
+                concat!(
+                    "use std.io.println\n",
+                    "use std.buffer.Buffer\n",
+                    "def run: USize -> USize = n => {\n",
+                    "    let mut buffer: Buffer U8 = Buffer.with_capacity 16\n",
+                    "    Buffer.push buffer 7;\n",
+                    "    let mut index: USize = 0\n",
+                    "    let mut total: USize = 0\n",
+                    "    loop {\n",
+                    "        if (index == n) { break total }\n",
+                    "        let Ref value = Buffer.get_ref buffer 0\n",
+                    "        let garbage = \"x\" + \"y\"\n",
+                    "        total = total + 1\n",
+                    "        index = index + 1\n",
+                    "        continue\n",
+                    "    }\n",
+                    "}\n",
+                    "println \"${run 100000:?}\"\n",
+                ),
+                "ownership",
+            ),
+            &["run"],
+        ),
+        "100000\n",
     )),
 ];
 

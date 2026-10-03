@@ -6972,7 +6972,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     *position,
                     "buffer.get.reference",
                 )?;
-                self.backend.register_gc_interior(reference, *buffer)?;
                 Ok(reference.as_any_value_enum())
             }
             IntrinsicFunction::BufferPop => self.emit_buffer_pop(call, arguments, &span),
@@ -7002,7 +7001,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "buffer.length",
                 )?;
                 let data = self.backend.buffer_data_pointer(*buffer, llvm_element)?;
-                self.backend.register_gc_interior(data, *buffer)?;
                 let mut result = self.backend.slice_type().const_zero();
                 result = self
                     .backend

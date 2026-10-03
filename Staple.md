@@ -3308,6 +3308,11 @@ Finalization is two-phase: all unreachable finalizers run while their objects
 still exist, resurrection does not retain those objects, and allocation is
 allowed while nested collection is suppressed.
 
+A managed allocation stays reachable through a pointer to any position inside
+it, not only its start. A `Ref` to one element of a slice or buffer, or a slice
+over a frozen buffer, keeps the whole allocation alive, including the other
+elements, until no such pointer remains.
+
 `CChar`, `CString`, and the generic `CPointer` constructor are public opaque
 types in `std.cinterop`. Source code must import them explicitly, for example
 with `use std.cinterop.*`. `CPointer T` is the language's C pointer type; the

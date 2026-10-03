@@ -41,33 +41,6 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
-    /// Registers an interior pointer so the collector keeps its allocation
-    /// alive.
-    pub(crate) fn register_gc_interior(
-        &self,
-        interior: inkwell::values::PointerValue<'context>,
-        payload: inkwell::values::PointerValue<'context>,
-    ) -> CodeGenerationResult<()> {
-        let function_type = self.context.void_type().fn_type(
-            &[
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.context.ptr_type(AddressSpace::default()).into(),
-            ],
-            false,
-        );
-        let register = self
-            .llvm_module
-            .get_function("__staple_gc_register_interior")
-            .unwrap_or_else(|| {
-                self.llvm_module
-                    .add_function("__staple_gc_register_interior", function_type, None)
-            });
-        self.builder
-            .build_direct_call(register, &[interior.into(), payload.into()], "")
-            .map(|_| ())
-            .map_err(compiler_diagnostic)
-    }
-
     /// Allocates `size` bytes from the GC heap.
     pub(crate) fn build_gc_allocation(
         &self,

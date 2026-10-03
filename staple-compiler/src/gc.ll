@@ -3,14 +3,11 @@
 %GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, ptr, {{SIZE}} }
 ; Explicit roots form a linked list of byte ranges: start, size, next root.
 %GcRoot = type { ptr, {{SIZE}}, ptr }
-; Registered interior views map an interior pointer back to its allocation.
-%GcInterior = type { ptr, ptr, ptr }
 
 ; Global collector state. The hash table contains payload pointers and uses
 ; address 1 as a tombstone, allowing expected-O(1) pointer validation.
 @__staple_gc_head = internal global ptr null
 @__staple_gc_roots = internal global ptr null
-@__staple_gc_interiors = internal global ptr null
 @__staple_gc_bytes = internal global {{SIZE}} 0
 @__staple_gc_threshold = internal global {{SIZE}} 1048576
 @__staple_gc_stack_bottom = internal global ptr null
@@ -18,10 +15,21 @@
 @__staple_gc_table_capacity = internal global {{SIZE}} 0
 @__staple_gc_table_count = internal global {{SIZE}} 0
 @__staple_gc_collecting = internal global i1 false
+; Payload pointers sorted by address, rebuilt at the start of every mark phase,
+; and the inclusive address bounds they span. Marking resolves a pointer into
+; the middle of an allocation by binary search, so interior views need no
+; registration.
+@__staple_gc_sorted = internal global ptr null
+@__staple_gc_sorted_capacity = internal global {{SIZE}} 0
+@__staple_gc_sorted_count = internal global {{SIZE}} 0
+@__staple_gc_heap_low = internal global {{SIZE}} 0
+@__staple_gc_heap_high = internal global {{SIZE}} 0
 
 declare ptr @malloc({{SIZE}})
 declare ptr @calloc({{SIZE}}, {{SIZE}})
+declare ptr @realloc(ptr, {{SIZE}})
 declare void @free(ptr)
+declare void @qsort(ptr, {{SIZE}}, {{SIZE}}, ptr)
 declare i32 @setjmp(ptr) returns_twice
 declare void @llvm.trap()
 
@@ -173,54 +181,95 @@ not.found:
   ret ptr null
 }
 
-; Return the allocation registered for an interior view, if any.
-define internal ptr @__staple_gc_containing_payload({{SIZE}} %candidate) {
+; Order two payload pointers by address for qsort.
+define internal i32 @__staple_gc_compare_payloads(ptr %left, ptr %right) {
 entry:
-  %head = load ptr, ptr @__staple_gc_interiors
-  br label %loop
-
-loop:
-  %node = phi ptr [ %head, %entry ], [ %next, %continue ]
-  %done = icmp eq ptr %node, null
-  br i1 %done, label %not.found, label %check
-
-check:
-  %interior.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 0
-  %interior = load ptr, ptr %interior.slot
-  %integer = ptrtoint ptr %interior to {{SIZE}}
-  %matches = icmp eq {{SIZE}} %integer, %candidate
-  br i1 %matches, label %found, label %continue
-
-continue:
-  %next.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 2
-  %next = load ptr, ptr %next.slot
-  br label %loop
-
-found:
-  %payload.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 1
-  %payload = load ptr, ptr %payload.slot
-  ret ptr %payload
-
-not.found:
-  ret ptr null
+  %left.value = load {{SIZE}}, ptr %left
+  %right.value = load {{SIZE}}, ptr %right
+  %less = icmp ult {{SIZE}} %left.value, %right.value
+  %greater = icmp ugt {{SIZE}} %left.value, %right.value
+  %positive = zext i1 %greater to i32
+  %result = select i1 %less, i32 -1, i32 %positive
+  ret i32 %result
 }
 
-; Register an interior Buffer Ref/Slice pointer. Duplicate registrations are harmless.
-define void @__staple_gc_register_interior(ptr %interior, ptr %payload) {
+; Snapshot every allocation's payload pointer in address order, and record the
+; lowest payload start and the highest payload end. The array is reused across
+; collections and grows to the live allocation count.
+define internal void @__staple_gc_build_sorted() {
 entry:
-  %node = call ptr @malloc({{SIZE}} {{ROOT_BYTES}})
-  %failed = icmp eq ptr %node, null
-  br i1 %failed, label %trap, label %initialize
+  store {{SIZE}} 0, ptr @__staple_gc_sorted_count
+  %head = load ptr, ptr @__staple_gc_head
+  br label %count.loop
 
-initialize:
-  %interior.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 0
-  store ptr %interior, ptr %interior.slot
-  %payload.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 1
-  store ptr %payload, ptr %payload.slot
-  %head = load ptr, ptr @__staple_gc_interiors
-  %next.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 2
-  store ptr %head, ptr %next.slot
-  store ptr %node, ptr @__staple_gc_interiors
+count.loop:
+  %count.header = phi ptr [ %head, %entry ], [ %count.next, %count.body ]
+  %count = phi {{SIZE}} [ 0, %entry ], [ %count.incremented, %count.body ]
+  %count.done = icmp eq ptr %count.header, null
+  br i1 %count.done, label %ensure, label %count.body
+
+count.body:
+  %count.incremented = add {{SIZE}} %count, 1
+  %count.next.slot = getelementptr %GcHeader, ptr %count.header, i32 0, i32 0
+  %count.next = load ptr, ptr %count.next.slot
+  br label %count.loop
+
+ensure:
+  %empty = icmp eq {{SIZE}} %count, 0
+  br i1 %empty, label %return, label %capacity.check
+
+capacity.check:
+  %capacity = load {{SIZE}}, ptr @__staple_gc_sorted_capacity
+  %enough = icmp uge {{SIZE}} %capacity, %count
+  br i1 %enough, label %fill.start, label %grow
+
+grow:
+  ; Every counted allocation occupies more than a pointer, so the byte count
+  ; cannot overflow.
+  %old = load ptr, ptr @__staple_gc_sorted
+  %bytes = mul {{SIZE}} %count, {{PTR_BYTES}}
+  %grown = call ptr @realloc(ptr %old, {{SIZE}} %bytes)
+  %failed = icmp eq ptr %grown, null
+  br i1 %failed, label %trap, label %install
+
+install:
+  store ptr %grown, ptr @__staple_gc_sorted
+  store {{SIZE}} %count, ptr @__staple_gc_sorted_capacity
+  br label %fill.start
+
+fill.start:
+  %sorted = load ptr, ptr @__staple_gc_sorted
+  br label %fill.loop
+
+fill.loop:
+  %fill.header = phi ptr [ %head, %fill.start ], [ %fill.next, %fill.body ]
+  %index = phi {{SIZE}} [ 0, %fill.start ], [ %index.next, %fill.body ]
+  %fill.done = icmp eq ptr %fill.header, null
+  br i1 %fill.done, label %sort, label %fill.body
+
+fill.body:
+  %payload = getelementptr i8, ptr %fill.header, {{SIZE}} {{HEADER_BYTES}}
+  %slot = getelementptr ptr, ptr %sorted, {{SIZE}} %index
+  store ptr %payload, ptr %slot
+  %index.next = add {{SIZE}} %index, 1
+  %fill.next.slot = getelementptr %GcHeader, ptr %fill.header, i32 0, i32 0
+  %fill.next = load ptr, ptr %fill.next.slot
+  br label %fill.loop
+
+sort:
+  call void @qsort(ptr %sorted, {{SIZE}} %index, {{SIZE}} {{PTR_BYTES}}, ptr @__staple_gc_compare_payloads)
+  store {{SIZE}} %index, ptr @__staple_gc_sorted_count
+  %first = load {{SIZE}}, ptr %sorted
+  store {{SIZE}} %first, ptr @__staple_gc_heap_low
+  ; Allocations never overlap, so the last start also has the highest end.
+  %last.index = sub {{SIZE}} %index, 1
+  %last.slot = getelementptr ptr, ptr %sorted, {{SIZE}} %last.index
+  %last = load ptr, ptr %last.slot
+  %last.end = call {{SIZE}} @__staple_gc_payload_end(ptr %last)
+  store {{SIZE}} %last.end, ptr @__staple_gc_heap_high
+  br label %return
+
+return:
   ret void
 
 trap:
@@ -228,35 +277,73 @@ trap:
   unreachable
 }
 
-define internal void @__staple_gc_remove_interiors(ptr %payload) {
+; The address one past a payload's requested size. A pointer equal to it still
+; belongs to the allocation, so an empty view at the end stays valid.
+define internal {{SIZE}} @__staple_gc_payload_end(ptr %payload) {
 entry:
-  br label %loop
+  %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
+  %size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
+  %size = load {{SIZE}}, ptr %size.slot
+  %start = ptrtoint ptr %payload to {{SIZE}}
+  %end = add {{SIZE}} %start, %size
+  ret {{SIZE}} %end
+}
 
-loop:
-  %link = phi ptr [ @__staple_gc_interiors, %entry ], [ %next.link, %keep ], [ %link, %remove ]
-  %node = load ptr, ptr %link
-  %done = icmp eq ptr %node, null
-  br i1 %done, label %return, label %check
+; Return the allocation whose payload contains candidate, from its start through
+; one past its end, if any. Only valid during a mark phase.
+define internal ptr @__staple_gc_containing_payload({{SIZE}} %candidate) {
+entry:
+  %count = load {{SIZE}}, ptr @__staple_gc_sorted_count
+  %low = load {{SIZE}}, ptr @__staple_gc_heap_low
+  %high = load {{SIZE}}, ptr @__staple_gc_heap_high
+  %empty = icmp eq {{SIZE}} %count, 0
+  %below = icmp ult {{SIZE}} %candidate, %low
+  %above = icmp ugt {{SIZE}} %candidate, %high
+  %outside.bounds = or i1 %below, %above
+  %outside = or i1 %empty, %outside.bounds
+  br i1 %outside, label %not.found, label %search.start
+
+search.start:
+  %sorted = load ptr, ptr @__staple_gc_sorted
+  br label %search.loop
+
+; Find the first payload that starts after candidate; its predecessor is the
+; only allocation that can contain candidate.
+search.loop:
+  %lower = phi {{SIZE}} [ 0, %search.start ], [ %lower.next, %search.body ]
+  %upper = phi {{SIZE}} [ %count, %search.start ], [ %upper.next, %search.body ]
+  %searching = icmp ult {{SIZE}} %lower, %upper
+  br i1 %searching, label %search.body, label %search.done
+
+search.body:
+  %span = sub {{SIZE}} %upper, %lower
+  %half = lshr {{SIZE}} %span, 1
+  %middle = add {{SIZE}} %lower, %half
+  %middle.slot = getelementptr ptr, ptr %sorted, {{SIZE}} %middle
+  %middle.value = load {{SIZE}}, ptr %middle.slot
+  %starts.after = icmp ugt {{SIZE}} %middle.value, %candidate
+  %middle.plus = add {{SIZE}} %middle, 1
+  %lower.next = select i1 %starts.after, {{SIZE}} %lower, {{SIZE}} %middle.plus
+  %upper.next = select i1 %starts.after, {{SIZE}} %middle, {{SIZE}} %upper
+  br label %search.loop
+
+search.done:
+  %none.before = icmp eq {{SIZE}} %lower, 0
+  br i1 %none.before, label %not.found, label %check
 
 check:
-  %payload.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 1
-  %registered = load ptr, ptr %payload.slot
-  %matches = icmp eq ptr %registered, %payload
-  br i1 %matches, label %remove, label %keep
+  %index = sub {{SIZE}} %lower, 1
+  %slot = getelementptr ptr, ptr %sorted, {{SIZE}} %index
+  %payload = load ptr, ptr %slot
+  %end = call {{SIZE}} @__staple_gc_payload_end(ptr %payload)
+  %inside = icmp ule {{SIZE}} %candidate, %end
+  br i1 %inside, label %found, label %not.found
 
-remove:
-  %next.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 2
-  %next = load ptr, ptr %next.slot
-  store ptr %next, ptr %link
-  call void @free(ptr %node)
-  br label %loop
+found:
+  ret ptr %payload
 
-keep:
-  %next.link = getelementptr %GcInterior, ptr %node, i32 0, i32 2
-  br label %loop
-
-return:
-  ret void
+not.found:
+  ret ptr null
 }
 
 ; Replace a removed payload with a tombstone so later probe chains stay valid.
@@ -296,7 +383,8 @@ return:
   ret void
 }
 
-; Mark an exact or interior payload pointer and recursively scan the object.
+; Mark the allocation an exact or interior pointer refers to, and recursively
+; scan the object.
 define internal void @__staple_gc_mark_candidate({{SIZE}} %candidate) {
 entry:
   %exact = call ptr @__staple_gc_hash_lookup({{SIZE}} %candidate)
@@ -369,7 +457,7 @@ clear.start:
 clear.loop:
   %clear.header = phi ptr [ %head, %clear.start ], [ %clear.next, %clear.body ]
   %clear.done = icmp eq ptr %clear.header, null
-  br i1 %clear.done, label %roots.start, label %clear.body
+  br i1 %clear.done, label %sorted.start, label %clear.body
 
 clear.body:
   %clear.mark = getelementptr %GcHeader, ptr %clear.header, i32 0, i32 2
@@ -377,6 +465,10 @@ clear.body:
   %clear.next.slot = getelementptr %GcHeader, ptr %clear.header, i32 0, i32 0
   %clear.next = load ptr, ptr %clear.next.slot
   br label %clear.loop
+
+sorted.start:
+  call void @__staple_gc_build_sorted()
+  br label %roots.start
 
 roots.start:
   ; setjmp exposes saved register state in a scannable memory buffer.
@@ -474,7 +566,6 @@ discard:
   %dead.size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
   %dead.size = load {{SIZE}}, ptr %dead.size.slot
   %dead.payload = getelementptr i8, ptr %header, {{SIZE}} {{HEADER_BYTES}}
-  call void @__staple_gc_remove_interiors(ptr %dead.payload)
   call void @__staple_gc_hash_remove(ptr %dead.payload)
   %dead.has.payload = icmp ne {{SIZE}} %dead.size, 0
   %dead.payload.size = select i1 %dead.has.payload, {{SIZE}} %dead.size, {{SIZE}} 1
