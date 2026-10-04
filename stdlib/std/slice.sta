@@ -1,5 +1,7 @@
 pub mod
 
+use std.string.InvalidUtf8
+
 use std.core.recursive_constructor.recursive_constructor
 
 use std.core.index.(Index, MutateIndex)
@@ -87,4 +89,13 @@ impl<T where Eq T> Eq (Slice T) {
             False
         }
     }
+}
+
+impl<T, N where Natural N> Convert (Ref (T; N)) (Slice T) {
+    convert = move value => Slice.from_ref value
+}
+
+impl TryConvert (Slice U8) String {
+    type Error = InvalidUtf8
+    try_convert = move bytes => String.from_utf8 bytes
 }

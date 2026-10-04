@@ -1,5 +1,10 @@
 pub mod
 
+/// The bytes are not valid UTF-8.
+pub type InvalidUtf8
+
+use std.convert.checked_conversion
+
 use std.slice.(Slice)
 
 /// A UTF-8 byte slice used as Staple's string type.
@@ -27,6 +32,14 @@ companion String {
     /// Returns the UTF-8 bytes backing a string.
     pub def bytes: String -> Slice U8 = value => string_bytes value
 
+    /// Constructs a String from bytes, returning InvalidUtf8 on validation failure.
+    pub def from_utf8: Slice U8 -> Ok String | InvalidUtf8 = bytes =>
+        if (__valid_utf8 bytes == 1) {
+            Ok (String.from_utf8_unchecked bytes)
+        } else {
+            InvalidUtf8
+        }
+
     /// Constructs a string from bytes known to contain valid UTF-8.
     pub def from_utf8_unchecked: Slice U8 -> String = bytes => string_from_utf8_unchecked bytes
 }
@@ -37,4 +50,131 @@ impl Add String {
 
 impl Eq String {
     eq = (left, right) => Eq.eq (String.bytes left, String.bytes right)
+}
+
+extern "staple-intrinsic" {
+    __parse_i8: String -> (U8, I8)
+    __parse_i16: String -> (U8, I16)
+    __parse_i32: String -> (U8, I32)
+    __parse_i64: String -> (U8, I64)
+    __parse_u8: String -> (U8, U8)
+    __parse_u16: String -> (U8, U16)
+    __parse_u32: String -> (U8, U32)
+    __parse_u64: String -> (U8, U64)
+    __parse_isize: String -> (U8, ISize)
+    __parse_usize: String -> (U8, USize)
+    __parse_f32: String -> (U8, F32)
+    __parse_f64: String -> (U8, F64)
+    __valid_utf8: Slice U8 -> U8
+}
+
+impl TryConvert String I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_i8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String I16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_i16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String I32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_i32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String I64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_i64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_u16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String U32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_u32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String U64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_u64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String ISize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_isize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String USize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_usize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String F32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_f32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String F64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __parse_f64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert String Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == "True" => Ok (Bool :: True),
+        value == "true" => Ok (Bool :: True),
+        value == "False" => Ok (Bool :: False),
+        value == "false" => Ok (Bool :: False),
+        else => InvalidBool,
+    }
+}
+
+impl Convert String (Slice U8) {
+    convert = move value => String.bytes value
 }

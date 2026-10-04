@@ -1261,15 +1261,15 @@ def named: (left: I32, right: I32) -> String = pair => "${pair:?}"
 def sum: (I32 | U8) -> String = value => "${value:?}"
 def generic: (Held I32, I32) -> String = pair => "${pair:?}"
 def template: I32 -> String = value => "display=${value} debug=${value:?}"
-puts (CString.from_string (nested ((1, 2), (3, 4))))
-puts (CString.from_string (named (5, 6)))
-puts (CString.from_string (sum ((I32 | U8) :: 7)))
-puts (CString.from_string (sum ((I32 | U8) :: (U8 :: 8))))
-puts (CString.from_string (generic (Held 9, 10)))
-puts (CString.from_string (template 11))
+puts (CString.from_string_unchecked (nested ((1, 2), (3, 4))))
+puts (CString.from_string_unchecked (named (5, 6)))
+puts (CString.from_string_unchecked (sum ((I32 | U8) :: 7)))
+puts (CString.from_string_unchecked (sum ((I32 | U8) :: (U8 :: 8))))
+puts (CString.from_string_unchecked (generic (Held 9, 10)))
+puts (CString.from_string_unchecked (template 11))
 def nested_sum: ((I32, I32) | U8) -> String = value => "${value:?}"
-puts (CString.from_string (nested_sum (((I32, I32) | U8) :: (12, 13))))
-puts (CString.from_string (nested_sum (((I32, I32) | U8) :: (U8 :: 14))))
+puts (CString.from_string_unchecked (nested_sum (((I32, I32) | U8) :: (12, 13))))
+puts (CString.from_string_unchecked (nested_sum (((I32, I32) | U8) :: (U8 :: 14))))
 "#,
                 "structural",
             ),
@@ -1299,11 +1299,11 @@ def ref_uniform: Ref (I32, I32) -> I32 = reference => reference[1]
 def ref_mixed: Ref (U8, I32) -> (I32 | U8) = reference => reference[0]
 def ref_row: Ref Row -> I32 = reference => reference[0]
 def ref_replace: move (Ref (I32, I32)) -> Ref (I32, I32) = move reference => { let mut own = reference; own[0] = 8; own }
-puts (CString.from_string "mixed=${mixed ((U8 :: 1), 2):?} uniform=${uniform (4, 5)}")
-puts (CString.from_string "replace=${replace (1, 2):?}")
-puts (CString.from_string "refs=${ref_uniform (Ref (5, 6))} ${ref_mixed (Ref ((U8 :: 9), 10)):?} ${ref_row (Ref (Row (1, 2)))}")
+puts (CString.from_string_unchecked "mixed=${mixed ((U8 :: 1), 2):?} uniform=${uniform (4, 5)}")
+puts (CString.from_string_unchecked "replace=${replace (1, 2):?}")
+puts (CString.from_string_unchecked "refs=${ref_uniform (Ref (5, 6))} ${ref_mixed (Ref ((U8 :: 9), 10)):?} ${ref_row (Ref (Row (1, 2)))}")
 let replaced = ref_replace (Ref (1, 2))
-puts (CString.from_string "ref_replace=${replaced[0]} ${replaced[1]}")
+puts (CString.from_string_unchecked "ref_replace=${replaced[0]} ${replaced[1]}")
 "#,
                 "structural",
             ),
@@ -1325,8 +1325,8 @@ puts (CString.from_string "ref_replace=${replaced[0]} ${replaced[1]}")
                 "structural_iterators",
                 r#"use std.cinterop.CString
 extern "c" { puts: CString -> I32 }
-def walk_mixed: (U8, I32) -> () = pair => { for item in pair { puts (CString.from_string "${item:?}") }; () }
-def walk_uniform: (I32, I32) -> () = pair => { for item in pair { puts (CString.from_string "${item}") }; () }
+def walk_mixed: (U8, I32) -> () = pair => { for item in pair { puts (CString.from_string_unchecked "${item:?}") }; () }
+def walk_uniform: (I32, I32) -> () = pair => { for item in pair { puts (CString.from_string_unchecked "${item}") }; () }
 walk_mixed ((U8 :: 1), 2)
 walk_uniform (3, 4)
 "#,

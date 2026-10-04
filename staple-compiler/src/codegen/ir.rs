@@ -276,7 +276,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(value)
     }
 
-    /// Validates a C string as UTF-8 and copies it to an owned GC String.
+    /// Copies a C string to an owned GC String without UTF-8 validation.
     /// The caller evaluates the argument and emits its recorded release.
     pub(crate) fn build_string_from_c_string(
         &self,
@@ -295,26 +295,6 @@ impl<'program, 'context> Backend<'program, 'context> {
             .try_as_basic_value()
             .unwrap_basic()
             .into_int_value();
-        let validator = self
-            .llvm_module
-            .get_function("__staple_is_valid_utf8")
-            .ok_or_else(|| Diagnostic::new(span.clone(), "missing UTF-8 validator"))?;
-        let valid = self
-            .builder
-            .build_direct_call(
-                validator,
-                &[source.into(), length.into()],
-                "c_string.valid_utf8",
-            )
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        let invalid = self
-            .builder
-            .build_not(valid, "c_string.invalid_utf8")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.build_trap_if(invalid, span.clone())?;
         let pointer = self.build_gc_allocation(length, "string.data", span.clone())?;
         self.builder
             .build_memcpy(pointer, 1, source, 1, length)
@@ -340,7 +320,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
-    /// Traps on an interior NUL and allocates a NUL-terminated String copy.
+    /// Allocates a NUL-terminated String copy without checking for interior NULs.
     pub(crate) fn build_string_to_c_string(
         &self,
         string: inkwell::values::StructValue<'context>,
@@ -356,35 +336,6 @@ impl<'program, 'context> Backend<'program, 'context> {
             .build_extract_value(string, 1, "string.length")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
             .into_int_value();
-        let memchr_type = self.context.ptr_type(AddressSpace::default()).fn_type(
-            &[
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.context.i32_type().into(),
-                self.size_type.into(),
-            ],
-            false,
-        );
-        let memchr = self.declare_named_function("memchr", memchr_type);
-        let nul = self
-            .builder
-            .build_direct_call(
-                memchr,
-                &[
-                    pointer.into(),
-                    self.context.i32_type().const_zero().into(),
-                    length.into(),
-                ],
-                "string.interior_nul",
-            )
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_pointer_value();
-        let has_nul = self
-            .builder
-            .build_is_not_null(nul, "string.has_interior_nul")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        self.build_trap_if(has_nul, span.clone())?;
         let allocation_length = self
             .builder
             .build_int_add(

@@ -2441,10 +2441,10 @@ Because each function accepts one value, passing several logical arguments
 means passing a product:
 
 ```staple
-printf (c_string "%s\n", CString.from_string s)
+printf (c_string "%s\n", CString.from_string_unchecked s)
 ```
 
-Here, `printf` receives one two-element product.
+Here, `printf` receives one two-element product, assuming `s` contains no NUL bytes.
 
 Function application associates to the left, while function types associate to
 the right. Nested function values can therefore define a curried API:
@@ -3499,10 +3499,13 @@ pointers.
 `CPointer CChar` is not assumed to be NUL terminated. Passing a `CString` to a
 C function creates a call-scoped view rather than transferring ownership, and
 C declarations may not return `CString`. `CString.to_string` takes its argument
-as `move CString`: it validates and copies UTF-8 into a `String`, then frees the
-C string, so the argument cannot be used afterward;
-`CString.from_string` allocates an owned copy, appends a terminator, and traps on
-an interior NUL byte. Invalid UTF-8 also traps.
+as `move CString`: it validates and copies UTF-8 into a `String`, returning
+`Ok String | InvalidUtf8`. It frees the C string on success and failure, so the
+argument cannot be used afterward. `CString.from_string` returns
+`Ok CString | InteriorNul`, rejecting embedded NUL bytes before allocating an
+owned, terminated copy. `CString.to_string_unchecked` and
+`CString.from_string_unchecked` perform the same copies without validation;
+their callers must ensure valid UTF-8 and absence of embedded NULs, respectively.
 
 An underscore asks the compiler to infer a type:
 
@@ -3539,6 +3542,47 @@ arithmetic traits, `Eq`, and `PartialOrd`, but not `Ord`. A comparison involving
 NaN makes `partial_cmp` return `None`; ordered boolean comparisons are false,
 `==` is false, and `!=` is true. Float division by zero follows IEEE behavior.
 Staple does not provide implicit numeric conversions.
+
+Explicit conversions use `Convert From To` and `TryConvert From To` from
+`std.convert`, also available through the prelude. `Convert.convert` consumes
+its input and returns `To`. `TryConvert.try_convert` returns `Ok To | Error`,
+where `Error` is an associated type. Every type converts to itself, and every
+`Convert` implementation also implements `TryConvert` with `Error = Never`.
+
+Numeric `Convert` implementations preserve every source value: integer
+widening, unsigned integers to sufficiently wider signed integers, `F32` to
+`F64`, and integers small enough to be exactly represented by the target float.
+Guarantees for `ISize` and `USize` hold on both 32-bit and 64-bit targets.
+Other numeric pairs implement `TryConvert`, with `ConversionError.OutOfRange`
+or `ConversionError.PrecisionLoss`. Float-to-integer conversion requires an
+integral value in range; NaN and infinity return `ConversionError.NonFinite`.
+`F64` to `F32` accepts NaN and infinities, without promising preservation of
+NaN payload bits, and requires finite values to be represented exactly.
+
+`Bool` converts to every integer as zero or one; checked integer-to-`Bool`
+conversion accepts only those two values. Numbers and booleans convert to
+`String` using their existing formatting. Checked string parsing consumes the
+complete input and rejects whitespace and embedded NULs. Signed integers
+accept decimal digits with an optional `+` or `-`; unsigned integers accept
+an optional `+`. Floating-point parsing uses the C library's floating-point
+syntax, including exponents, hexadecimal floats, NaN, and infinity, and rounds
+to the target precision. Syntax failures return `InvalidNumber`; overflow
+and underflow reported by the parser return `OutOfRange`. Boolean parsing
+accepts `True`, `true`, `False`, and `false`, otherwise returning `std.core.boolean.InvalidBool`.
+
+`String` converts to its `Slice U8` bytes, `Ref (T; N)` converts to `Slice T`,
+and consuming a `Buffer T` converts it to a frozen `Slice T`. Checked byte
+slice-to-string conversion uses `String.from_utf8`, which returns
+`Ok String | std.string.InvalidUtf8`. `String.from_utf8_unchecked` constructs a
+string without validation when the caller knows the bytes are valid UTF-8.
+Checked `String` to `CString` conversion rejects embedded NULs with
+`std.cinterop.InteriorNul`; checked `CString` to `String` validates UTF-8 and frees the
+consumed C string on both success and failure.
+
+`CPointer T` and `USize` convert in both directions. An unchanged round trip
+preserves the pointer. Integer-to-pointer conversion does not validate the
+address, alignment, allocation lifetime, or whether dereferencing is permitted.
+Address arithmetic follows the existing `USize` arithmetic rules.
 
 ### Type declarations
 

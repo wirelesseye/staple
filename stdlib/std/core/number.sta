@@ -1,5 +1,7 @@
 pub mod
 
+use std.convert.checked_conversion
+
 use std.string.String
 use std.fmt.(Display, Debug, Formatter)
 
@@ -583,3 +585,1152 @@ impl Neg I64 { negate = value => 0 - value }
 impl Neg ISize { negate = value => 0 - value }
 impl Neg F32 { negate = value => 0.0 - value }
 impl Neg F64 { negate = value => 0.0 - value }
+
+extern "staple-intrinsic" {
+    __i8_to_i16: I8 -> (U8, I16)
+    __i8_to_i32: I8 -> (U8, I32)
+    __i8_to_i64: I8 -> (U8, I64)
+    __i8_to_u8: I8 -> (U8, U8)
+    __i8_to_u16: I8 -> (U8, U16)
+    __i8_to_u32: I8 -> (U8, U32)
+    __i8_to_u64: I8 -> (U8, U64)
+    __i8_to_isize: I8 -> (U8, ISize)
+    __i8_to_usize: I8 -> (U8, USize)
+    __i8_to_f32: I8 -> (U8, F32)
+    __i8_to_f64: I8 -> (U8, F64)
+    __i16_to_i8: I16 -> (U8, I8)
+    __i16_to_i32: I16 -> (U8, I32)
+    __i16_to_i64: I16 -> (U8, I64)
+    __i16_to_u8: I16 -> (U8, U8)
+    __i16_to_u16: I16 -> (U8, U16)
+    __i16_to_u32: I16 -> (U8, U32)
+    __i16_to_u64: I16 -> (U8, U64)
+    __i16_to_isize: I16 -> (U8, ISize)
+    __i16_to_usize: I16 -> (U8, USize)
+    __i16_to_f32: I16 -> (U8, F32)
+    __i16_to_f64: I16 -> (U8, F64)
+    __i32_to_i8: I32 -> (U8, I8)
+    __i32_to_i16: I32 -> (U8, I16)
+    __i32_to_i64: I32 -> (U8, I64)
+    __i32_to_u8: I32 -> (U8, U8)
+    __i32_to_u16: I32 -> (U8, U16)
+    __i32_to_u32: I32 -> (U8, U32)
+    __i32_to_u64: I32 -> (U8, U64)
+    __i32_to_isize: I32 -> (U8, ISize)
+    __i32_to_usize: I32 -> (U8, USize)
+    __i32_to_f32: I32 -> (U8, F32)
+    __i32_to_f64: I32 -> (U8, F64)
+    __i64_to_i8: I64 -> (U8, I8)
+    __i64_to_i16: I64 -> (U8, I16)
+    __i64_to_i32: I64 -> (U8, I32)
+    __i64_to_u8: I64 -> (U8, U8)
+    __i64_to_u16: I64 -> (U8, U16)
+    __i64_to_u32: I64 -> (U8, U32)
+    __i64_to_u64: I64 -> (U8, U64)
+    __i64_to_isize: I64 -> (U8, ISize)
+    __i64_to_usize: I64 -> (U8, USize)
+    __i64_to_f32: I64 -> (U8, F32)
+    __i64_to_f64: I64 -> (U8, F64)
+    __u8_to_i8: U8 -> (U8, I8)
+    __u8_to_i16: U8 -> (U8, I16)
+    __u8_to_i32: U8 -> (U8, I32)
+    __u8_to_i64: U8 -> (U8, I64)
+    __u8_to_u16: U8 -> (U8, U16)
+    __u8_to_u32: U8 -> (U8, U32)
+    __u8_to_u64: U8 -> (U8, U64)
+    __u8_to_isize: U8 -> (U8, ISize)
+    __u8_to_usize: U8 -> (U8, USize)
+    __u8_to_f32: U8 -> (U8, F32)
+    __u8_to_f64: U8 -> (U8, F64)
+    __u16_to_i8: U16 -> (U8, I8)
+    __u16_to_i16: U16 -> (U8, I16)
+    __u16_to_i32: U16 -> (U8, I32)
+    __u16_to_i64: U16 -> (U8, I64)
+    __u16_to_u8: U16 -> (U8, U8)
+    __u16_to_u32: U16 -> (U8, U32)
+    __u16_to_u64: U16 -> (U8, U64)
+    __u16_to_isize: U16 -> (U8, ISize)
+    __u16_to_usize: U16 -> (U8, USize)
+    __u16_to_f32: U16 -> (U8, F32)
+    __u16_to_f64: U16 -> (U8, F64)
+    __u32_to_i8: U32 -> (U8, I8)
+    __u32_to_i16: U32 -> (U8, I16)
+    __u32_to_i32: U32 -> (U8, I32)
+    __u32_to_i64: U32 -> (U8, I64)
+    __u32_to_u8: U32 -> (U8, U8)
+    __u32_to_u16: U32 -> (U8, U16)
+    __u32_to_u64: U32 -> (U8, U64)
+    __u32_to_isize: U32 -> (U8, ISize)
+    __u32_to_usize: U32 -> (U8, USize)
+    __u32_to_f32: U32 -> (U8, F32)
+    __u32_to_f64: U32 -> (U8, F64)
+    __u64_to_i8: U64 -> (U8, I8)
+    __u64_to_i16: U64 -> (U8, I16)
+    __u64_to_i32: U64 -> (U8, I32)
+    __u64_to_i64: U64 -> (U8, I64)
+    __u64_to_u8: U64 -> (U8, U8)
+    __u64_to_u16: U64 -> (U8, U16)
+    __u64_to_u32: U64 -> (U8, U32)
+    __u64_to_isize: U64 -> (U8, ISize)
+    __u64_to_usize: U64 -> (U8, USize)
+    __u64_to_f32: U64 -> (U8, F32)
+    __u64_to_f64: U64 -> (U8, F64)
+    __isize_to_i8: ISize -> (U8, I8)
+    __isize_to_i16: ISize -> (U8, I16)
+    __isize_to_i32: ISize -> (U8, I32)
+    __isize_to_i64: ISize -> (U8, I64)
+    __isize_to_u8: ISize -> (U8, U8)
+    __isize_to_u16: ISize -> (U8, U16)
+    __isize_to_u32: ISize -> (U8, U32)
+    __isize_to_u64: ISize -> (U8, U64)
+    __isize_to_usize: ISize -> (U8, USize)
+    __isize_to_f32: ISize -> (U8, F32)
+    __isize_to_f64: ISize -> (U8, F64)
+    __usize_to_i8: USize -> (U8, I8)
+    __usize_to_i16: USize -> (U8, I16)
+    __usize_to_i32: USize -> (U8, I32)
+    __usize_to_i64: USize -> (U8, I64)
+    __usize_to_u8: USize -> (U8, U8)
+    __usize_to_u16: USize -> (U8, U16)
+    __usize_to_u32: USize -> (U8, U32)
+    __usize_to_u64: USize -> (U8, U64)
+    __usize_to_isize: USize -> (U8, ISize)
+    __usize_to_f32: USize -> (U8, F32)
+    __usize_to_f64: USize -> (U8, F64)
+    __f32_to_i8: F32 -> (U8, I8)
+    __f32_to_i16: F32 -> (U8, I16)
+    __f32_to_i32: F32 -> (U8, I32)
+    __f32_to_i64: F32 -> (U8, I64)
+    __f32_to_u8: F32 -> (U8, U8)
+    __f32_to_u16: F32 -> (U8, U16)
+    __f32_to_u32: F32 -> (U8, U32)
+    __f32_to_u64: F32 -> (U8, U64)
+    __f32_to_isize: F32 -> (U8, ISize)
+    __f32_to_usize: F32 -> (U8, USize)
+    __f32_to_f64: F32 -> (U8, F64)
+    __f64_to_i8: F64 -> (U8, I8)
+    __f64_to_i16: F64 -> (U8, I16)
+    __f64_to_i32: F64 -> (U8, I32)
+    __f64_to_i64: F64 -> (U8, I64)
+    __f64_to_u8: F64 -> (U8, U8)
+    __f64_to_u16: F64 -> (U8, U16)
+    __f64_to_u32: F64 -> (U8, U32)
+    __f64_to_u64: F64 -> (U8, U64)
+    __f64_to_isize: F64 -> (U8, ISize)
+    __f64_to_usize: F64 -> (U8, USize)
+    __f64_to_f32: F64 -> (U8, F32)
+}
+
+impl Convert I8 I16 {
+    convert = move value => { let (_, converted) = __i8_to_i16 value; converted }
+}
+
+impl Convert I8 I32 {
+    convert = move value => { let (_, converted) = __i8_to_i32 value; converted }
+}
+
+impl Convert I8 I64 {
+    convert = move value => { let (_, converted) = __i8_to_i64 value; converted }
+}
+
+impl TryConvert I8 U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i8_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I8 U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i8_to_u16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I8 U32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i8_to_u32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I8 U64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i8_to_u64 value
+        checked_conversion result
+    }
+}
+
+impl Convert I8 ISize {
+    convert = move value => { let (_, converted) = __i8_to_isize value; converted }
+}
+
+impl TryConvert I8 USize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i8_to_usize value
+        checked_conversion result
+    }
+}
+
+impl Convert I8 F32 {
+    convert = move value => { let (_, converted) = __i8_to_f32 value; converted }
+}
+
+impl Convert I8 F64 {
+    convert = move value => { let (_, converted) = __i8_to_f64 value; converted }
+}
+
+impl TryConvert I16 I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i16_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl Convert I16 I32 {
+    convert = move value => { let (_, converted) = __i16_to_i32 value; converted }
+}
+
+impl Convert I16 I64 {
+    convert = move value => { let (_, converted) = __i16_to_i64 value; converted }
+}
+
+impl TryConvert I16 U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i16_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I16 U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i16_to_u16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I16 U32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i16_to_u32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I16 U64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i16_to_u64 value
+        checked_conversion result
+    }
+}
+
+impl Convert I16 ISize {
+    convert = move value => { let (_, converted) = __i16_to_isize value; converted }
+}
+
+impl TryConvert I16 USize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i16_to_usize value
+        checked_conversion result
+    }
+}
+
+impl Convert I16 F32 {
+    convert = move value => { let (_, converted) = __i16_to_f32 value; converted }
+}
+
+impl Convert I16 F64 {
+    convert = move value => { let (_, converted) = __i16_to_f64 value; converted }
+}
+
+impl TryConvert I32 I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i32_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I32 I16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i32_to_i16 value
+        checked_conversion result
+    }
+}
+
+impl Convert I32 I64 {
+    convert = move value => { let (_, converted) = __i32_to_i64 value; converted }
+}
+
+impl TryConvert I32 U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i32_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I32 U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i32_to_u16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I32 U32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i32_to_u32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I32 U64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i32_to_u64 value
+        checked_conversion result
+    }
+}
+
+impl Convert I32 ISize {
+    convert = move value => { let (_, converted) = __i32_to_isize value; converted }
+}
+
+impl TryConvert I32 USize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i32_to_usize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I32 F32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i32_to_f32 value
+        checked_conversion result
+    }
+}
+
+impl Convert I32 F64 {
+    convert = move value => { let (_, converted) = __i32_to_f64 value; converted }
+}
+
+impl TryConvert I64 I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I64 I16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_i16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I64 I32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_i32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I64 U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I64 U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_u16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I64 U32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_u32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I64 U64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_u64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I64 ISize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_isize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I64 USize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_usize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I64 F32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_f32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I64 F64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __i64_to_f64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U8 I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u8_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl Convert U8 I16 {
+    convert = move value => { let (_, converted) = __u8_to_i16 value; converted }
+}
+
+impl Convert U8 I32 {
+    convert = move value => { let (_, converted) = __u8_to_i32 value; converted }
+}
+
+impl Convert U8 I64 {
+    convert = move value => { let (_, converted) = __u8_to_i64 value; converted }
+}
+
+impl Convert U8 U16 {
+    convert = move value => { let (_, converted) = __u8_to_u16 value; converted }
+}
+
+impl Convert U8 U32 {
+    convert = move value => { let (_, converted) = __u8_to_u32 value; converted }
+}
+
+impl Convert U8 U64 {
+    convert = move value => { let (_, converted) = __u8_to_u64 value; converted }
+}
+
+impl Convert U8 ISize {
+    convert = move value => { let (_, converted) = __u8_to_isize value; converted }
+}
+
+impl Convert U8 USize {
+    convert = move value => { let (_, converted) = __u8_to_usize value; converted }
+}
+
+impl Convert U8 F32 {
+    convert = move value => { let (_, converted) = __u8_to_f32 value; converted }
+}
+
+impl Convert U8 F64 {
+    convert = move value => { let (_, converted) = __u8_to_f64 value; converted }
+}
+
+impl TryConvert U16 I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u16_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U16 I16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u16_to_i16 value
+        checked_conversion result
+    }
+}
+
+impl Convert U16 I32 {
+    convert = move value => { let (_, converted) = __u16_to_i32 value; converted }
+}
+
+impl Convert U16 I64 {
+    convert = move value => { let (_, converted) = __u16_to_i64 value; converted }
+}
+
+impl TryConvert U16 U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u16_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl Convert U16 U32 {
+    convert = move value => { let (_, converted) = __u16_to_u32 value; converted }
+}
+
+impl Convert U16 U64 {
+    convert = move value => { let (_, converted) = __u16_to_u64 value; converted }
+}
+
+impl Convert U16 ISize {
+    convert = move value => { let (_, converted) = __u16_to_isize value; converted }
+}
+
+impl Convert U16 USize {
+    convert = move value => { let (_, converted) = __u16_to_usize value; converted }
+}
+
+impl Convert U16 F32 {
+    convert = move value => { let (_, converted) = __u16_to_f32 value; converted }
+}
+
+impl Convert U16 F64 {
+    convert = move value => { let (_, converted) = __u16_to_f64 value; converted }
+}
+
+impl TryConvert U32 I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u32_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U32 I16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u32_to_i16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U32 I32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u32_to_i32 value
+        checked_conversion result
+    }
+}
+
+impl Convert U32 I64 {
+    convert = move value => { let (_, converted) = __u32_to_i64 value; converted }
+}
+
+impl TryConvert U32 U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u32_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U32 U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u32_to_u16 value
+        checked_conversion result
+    }
+}
+
+impl Convert U32 U64 {
+    convert = move value => { let (_, converted) = __u32_to_u64 value; converted }
+}
+
+impl TryConvert U32 ISize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u32_to_isize value
+        checked_conversion result
+    }
+}
+
+impl Convert U32 USize {
+    convert = move value => { let (_, converted) = __u32_to_usize value; converted }
+}
+
+impl TryConvert U32 F32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u32_to_f32 value
+        checked_conversion result
+    }
+}
+
+impl Convert U32 F64 {
+    convert = move value => { let (_, converted) = __u32_to_f64 value; converted }
+}
+
+impl TryConvert U64 I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U64 I16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_i16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U64 I32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_i32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U64 I64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_i64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U64 U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U64 U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_u16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U64 U32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_u32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U64 ISize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_isize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U64 USize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_usize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U64 F32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_f32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert U64 F64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __u64_to_f64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert ISize I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __isize_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert ISize I16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __isize_to_i16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert ISize I32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __isize_to_i32 value
+        checked_conversion result
+    }
+}
+
+impl Convert ISize I64 {
+    convert = move value => { let (_, converted) = __isize_to_i64 value; converted }
+}
+
+impl TryConvert ISize U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __isize_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert ISize U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __isize_to_u16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert ISize U32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __isize_to_u32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert ISize U64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __isize_to_u64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert ISize USize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __isize_to_usize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert ISize F32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __isize_to_f32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert ISize F64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __isize_to_f64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert USize I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __usize_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert USize I16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __usize_to_i16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert USize I32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __usize_to_i32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert USize I64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __usize_to_i64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert USize U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __usize_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert USize U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __usize_to_u16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert USize U32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __usize_to_u32 value
+        checked_conversion result
+    }
+}
+
+impl Convert USize U64 {
+    convert = move value => { let (_, converted) = __usize_to_u64 value; converted }
+}
+
+impl TryConvert USize ISize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __usize_to_isize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert USize F32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __usize_to_f32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert USize F64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __usize_to_f64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F32 I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f32_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F32 I16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f32_to_i16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F32 I32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f32_to_i32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F32 I64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f32_to_i64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F32 U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f32_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F32 U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f32_to_u16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F32 U32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f32_to_u32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F32 U64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f32_to_u64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F32 ISize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f32_to_isize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F32 USize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f32_to_usize value
+        checked_conversion result
+    }
+}
+
+impl Convert F32 F64 {
+    convert = move value => { let (_, converted) = __f32_to_f64 value; converted }
+}
+
+impl TryConvert F64 I8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_i8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F64 I16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_i16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F64 I32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_i32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F64 I64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_i64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F64 U8 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_u8 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F64 U16 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_u16 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F64 U32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_u32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F64 U64 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_u64 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F64 ISize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_isize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F64 USize {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_usize value
+        checked_conversion result
+    }
+}
+
+impl TryConvert F64 F32 {
+    type Error = ConversionError
+    try_convert = move value => {
+        let result = __f64_to_f32 value
+        checked_conversion result
+    }
+}
+
+impl TryConvert I8 Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == 0 => Ok (Bool :: False),
+        value == 1 => Ok (Bool :: True),
+        else => InvalidBool,
+    }
+}
+
+impl TryConvert I16 Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == 0 => Ok (Bool :: False),
+        value == 1 => Ok (Bool :: True),
+        else => InvalidBool,
+    }
+}
+
+impl TryConvert I32 Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == 0 => Ok (Bool :: False),
+        value == 1 => Ok (Bool :: True),
+        else => InvalidBool,
+    }
+}
+
+impl TryConvert I64 Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == 0 => Ok (Bool :: False),
+        value == 1 => Ok (Bool :: True),
+        else => InvalidBool,
+    }
+}
+
+impl TryConvert U8 Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == 0 => Ok (Bool :: False),
+        value == 1 => Ok (Bool :: True),
+        else => InvalidBool,
+    }
+}
+
+impl TryConvert U16 Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == 0 => Ok (Bool :: False),
+        value == 1 => Ok (Bool :: True),
+        else => InvalidBool,
+    }
+}
+
+impl TryConvert U32 Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == 0 => Ok (Bool :: False),
+        value == 1 => Ok (Bool :: True),
+        else => InvalidBool,
+    }
+}
+
+impl TryConvert U64 Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == 0 => Ok (Bool :: False),
+        value == 1 => Ok (Bool :: True),
+        else => InvalidBool,
+    }
+}
+
+impl TryConvert ISize Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == 0 => Ok (Bool :: False),
+        value == 1 => Ok (Bool :: True),
+        else => InvalidBool,
+    }
+}
+
+impl TryConvert USize Bool {
+    type Error = InvalidBool
+    try_convert = move value => when {
+        value == 0 => Ok (Bool :: False),
+        value == 1 => Ok (Bool :: True),
+        else => InvalidBool,
+    }
+}
+
+impl Convert I8 String { convert = move value => ToString.to_string value }
+
+impl Convert I16 String { convert = move value => ToString.to_string value }
+
+impl Convert I32 String { convert = move value => ToString.to_string value }
+
+impl Convert I64 String { convert = move value => ToString.to_string value }
+
+impl Convert U8 String { convert = move value => ToString.to_string value }
+
+impl Convert U16 String { convert = move value => ToString.to_string value }
+
+impl Convert U32 String { convert = move value => ToString.to_string value }
+
+impl Convert U64 String { convert = move value => ToString.to_string value }
+
+impl Convert ISize String { convert = move value => ToString.to_string value }
+
+impl Convert USize String { convert = move value => ToString.to_string value }
+
+impl Convert F32 String { convert = move value => ToString.to_string value }
+
+impl Convert F64 String { convert = move value => ToString.to_string value }

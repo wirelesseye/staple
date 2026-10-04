@@ -3849,6 +3849,19 @@ impl TypeChecker {
     fn validate_intrinsics(&mut self, module: &ResolvedModule) {
         for (symbol, intrinsic) in module.intrinsic_functions() {
             let expected = match intrinsic {
+                crate::IntrinsicFunction::NumericConvert { .. }
+                | crate::IntrinsicFunction::ParseNumber { .. }
+                | crate::IntrinsicFunction::PointerAddress
+                | crate::IntrinsicFunction::AddressPointer
+                | crate::IntrinsicFunction::ValidateUtf8
+                | crate::IntrinsicFunction::StringHasNul
+                | crate::IntrinsicFunction::CStringBytes => {
+                    self.symbol_types
+                        .get(symbol)
+                        .cloned()
+                        .filter(|value| valid_conversion_intrinsic_type(value, *intrinsic))
+                        .unwrap_or(CheckedType::Error)
+                }
                 crate::IntrinsicFunction::ToString { value } => {
                     let parameter = match value {
                         crate::NumericType::Integer(integer) => CheckedType::integer(*integer),
@@ -16944,4 +16957,62 @@ fn canonical_projection_arguments(arguments: &[CheckedType]) -> Vec<CheckedType>
         .iter()
         .map(|argument| substitute_type(argument.clone(), &substitutions))
         .collect()
+}
+
+fn valid_conversion_intrinsic_type(
+    value: &CheckedType,
+    intrinsic: crate::IntrinsicFunction,
+) -> bool {
+    let CheckedType::Function(function) = value else {
+        return false;
+    };
+    if function.parameter_style != staple_syntax::FunctionParameterStyle::Single
+        || !function.mutations.is_empty()
+        || !function.moves.is_empty()
+        || function.effects != CheckedEffectSet::default()
+    {
+        return false;
+    }
+    let numeric = |value| match value {
+        crate::NumericType::Integer(integer) => CheckedType::integer(integer),
+        crate::NumericType::Float(float) => CheckedType::float(float),
+    };
+    let checked_result = |to| match function.result.as_ref() {
+        CheckedType::Product(product) => {
+            !product.variadic
+                && matches!(product.elements.as_slice(),
+            [status, value] if status.name.is_none() && value.name.is_none()
+                && status.default.is_none() && value.default.is_none()
+                && status.value_type == CheckedType::U8 && value.value_type == numeric(to))
+        }
+        _ => false,
+    };
+    match intrinsic {
+        crate::IntrinsicFunction::NumericConvert { from, to } => {
+            *function.parameter == numeric(from) && checked_result(to)
+        }
+        crate::IntrinsicFunction::ParseNumber { to } => {
+            *function.parameter == CheckedType::String && checked_result(to)
+        }
+        crate::IntrinsicFunction::PointerAddress => {
+            matches!(function.parameter.as_ref(), CheckedType::CPointer { .. })
+                && *function.result == CheckedType::USize
+        }
+        crate::IntrinsicFunction::AddressPointer => {
+            *function.parameter == CheckedType::USize
+                && matches!(function.result.as_ref(), CheckedType::CPointer { .. })
+        }
+        crate::IntrinsicFunction::ValidateUtf8 => {
+            *function.parameter == CheckedType::Slice(Box::new(CheckedType::U8))
+                && *function.result == CheckedType::U8
+        }
+        crate::IntrinsicFunction::StringHasNul => {
+            *function.parameter == CheckedType::String && *function.result == CheckedType::U8
+        }
+        crate::IntrinsicFunction::CStringBytes => {
+            *function.parameter == CheckedType::CString
+                && *function.result == CheckedType::Slice(Box::new(CheckedType::U8))
+        }
+        _ => false,
+    }
 }

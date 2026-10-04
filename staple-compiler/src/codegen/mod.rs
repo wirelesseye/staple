@@ -39,6 +39,7 @@ use staple_syntax::{Diagnostic, Span};
 #[cfg(test)]
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+mod conversions;
 mod abi;
 #[doc(hidden)]
 pub mod corpus;

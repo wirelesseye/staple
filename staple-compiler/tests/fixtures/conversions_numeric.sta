@@ -1,0 +1,146 @@
+def expect_bool: (Ok Bool | InvalidBool, Bool) -> () = (result, expected) => match result {
+    Ok value => if (value == expected) { () } else { panic "wrong boolean" },
+    InvalidBool => panic "valid boolean rejected",
+}
+
+def error_code: ConversionError -> I32 = error => match error {
+    ConversionError.OutOfRange => 1,
+    ConversionError.PrecisionLoss => 2,
+    ConversionError.NonFinite => 3,
+    ConversionError.InvalidNumber => 4,
+}
+
+def expect_error: <T where Copy T> (Ok T | ConversionError, I32) -> () = (result, expected) => match result {
+    Ok _ => panic "expected a conversion error",
+    error: ConversionError => if (error_code error == expected) { () } else { panic "wrong conversion error" },
+}
+
+def expect_success: <T where Copy T, Eq T> (Ok T | ConversionError, T) -> () = (result, expected) => match result {
+    Ok value => if (value == expected) { () } else { panic "wrong converted value" },
+    _ => panic "unexpected conversion error",
+}
+
+let nan: F64 = 0.0 / 0.0
+let infinity: F64 = 1.0 / 0.0
+let negative_infinity: F64 = -1.0 / 0.0
+let result_0: Ok I8 | ConversionError = TryConvert.try_convert (I16 :: 127)
+expect_success (result_0, I8 :: 127)
+let result_1: Ok I8 | ConversionError = TryConvert.try_convert (I16 :: 128)
+expect_error (result_1, 1)
+let result_2: Ok I8 | ConversionError = TryConvert.try_convert (((I16 :: 0) - (I16 :: 128)))
+expect_success (result_2, ((I8 :: 0) - (I8 :: 127) - (I8 :: 1)))
+let result_3: Ok I8 | ConversionError = TryConvert.try_convert (((I16 :: 0) - (I16 :: 129)))
+expect_error (result_3, 1)
+let result_4: Ok U8 | ConversionError = TryConvert.try_convert (((I8 :: 0) - (I8 :: 1)))
+expect_error (result_4, 1)
+let result_5: Ok U8 | ConversionError = TryConvert.try_convert (I8 :: 127)
+expect_success (result_5, U8 :: 127)
+let result_6: Ok I64 | ConversionError = TryConvert.try_convert (U64 :: 18446744073709551615)
+expect_error (result_6, 1)
+let result_7: Ok U32 | ConversionError = TryConvert.try_convert (U64 :: 18446744073709551615)
+expect_error (result_7, 1)
+let result_8: Ok F32 | ConversionError = TryConvert.try_convert (I64 :: 16777216)
+expect_success (result_8, F32 :: 16777216.0)
+let result_9: Ok F32 | ConversionError = TryConvert.try_convert (I64 :: 16777217)
+expect_error (result_9, 2)
+let result_10: Ok F64 | ConversionError = TryConvert.try_convert (I64 :: 9223372036854775807)
+expect_error (result_10, 2)
+let result_11: Ok F64 | ConversionError = TryConvert.try_convert (((I64 :: 0) - (I64 :: 9223372036854775807) - (I64 :: 1)))
+expect_success (result_11, ((F64 :: 0.0) - (F64 :: 9223372036854775808.0)))
+let result_12: Ok F64 | ConversionError = TryConvert.try_convert (U64 :: 18446744073709551615)
+expect_error (result_12, 2)
+let result_13: Ok I8 | ConversionError = TryConvert.try_convert (F64 :: 42.0)
+expect_success (result_13, I8 :: 42)
+let result_14: Ok I8 | ConversionError = TryConvert.try_convert (F64 :: 42.5)
+expect_error (result_14, 2)
+let result_15: Ok I8 | ConversionError = TryConvert.try_convert (F64 :: 128.0)
+expect_error (result_15, 1)
+let result_16: Ok I8 | ConversionError = TryConvert.try_convert (((F64 :: 0.0) - (F64 :: 128.0)))
+expect_success (result_16, ((I8 :: 0) - (I8 :: 127) - (I8 :: 1)))
+let result_17: Ok I8 | ConversionError = TryConvert.try_convert (((F64 :: 0.0) - (F64 :: 128.5)))
+expect_error (result_17, 1)
+let result_18: Ok I64 | ConversionError = TryConvert.try_convert (F64 :: 9223372036854775808.0)
+expect_error (result_18, 1)
+let result_19: Ok I64 | ConversionError = TryConvert.try_convert (((F64 :: 0.0) - (F64 :: 9223372036854775808.0)))
+expect_success (result_19, ((I64 :: 0) - (I64 :: 9223372036854775807) - (I64 :: 1)))
+let result_20: Ok U64 | ConversionError = TryConvert.try_convert (F64 :: 18446744073709551616.0)
+expect_error (result_20, 1)
+let result_21: Ok U64 | ConversionError = TryConvert.try_convert (F64 :: 18446744073709549568.0)
+expect_success (result_21, U64 :: 18446744073709549568)
+let result_22: Ok U8 | ConversionError = TryConvert.try_convert (((F64 :: 0.0) - (F64 :: 1.0)))
+expect_error (result_22, 1)
+let result_23: Ok U8 | ConversionError = TryConvert.try_convert (((F64 :: 0.0) - (F64 :: 0.0)))
+expect_success (result_23, U8 :: 0)
+let result_24: Ok F32 | ConversionError = TryConvert.try_convert (F64 :: 1.5)
+expect_success (result_24, F32 :: 1.5)
+let result_25: Ok F32 | ConversionError = TryConvert.try_convert (F64 :: 1.1)
+expect_error (result_25, 2)
+let result_26: Ok F32 | ConversionError = TryConvert.try_convert (F64 :: 1.0e300)
+expect_error (result_26, 1)
+let result_27: Ok F32 | ConversionError = TryConvert.try_convert (F64 :: 1.0e-300)
+expect_error (result_27, 2)
+let result_28: Ok I32 | ConversionError = TryConvert.try_convert (F64 :: nan)
+expect_error (result_28, 3)
+let result_29: Ok U32 | ConversionError = TryConvert.try_convert (F64 :: infinity)
+expect_error (result_29, 3)
+let result_30: Ok I32 | ConversionError = TryConvert.try_convert (F64 :: negative_infinity)
+expect_error (result_30, 3)
+let result_31: Ok I8 | ConversionError = TryConvert.try_convert (String :: "127")
+expect_success (result_31, I8 :: 127)
+let result_32: Ok I8 | ConversionError = TryConvert.try_convert (String :: "128")
+expect_error (result_32, 1)
+let result_33: Ok I64 | ConversionError = TryConvert.try_convert (String :: "-9223372036854775808")
+expect_success (result_33, ((I64 :: 0) - (I64 :: 9223372036854775807) - (I64 :: 1)))
+let result_34: Ok I64 | ConversionError = TryConvert.try_convert (String :: "9223372036854775808")
+expect_error (result_34, 1)
+let result_35: Ok U64 | ConversionError = TryConvert.try_convert (String :: "18446744073709551615")
+expect_success (result_35, U64 :: 18446744073709551615)
+let result_36: Ok U64 | ConversionError = TryConvert.try_convert (String :: "18446744073709551616")
+expect_error (result_36, 1)
+let result_37: Ok U64 | ConversionError = TryConvert.try_convert (String :: "-1")
+expect_error (result_37, 4)
+let result_38: Ok I32 | ConversionError = TryConvert.try_convert (String :: "")
+expect_error (result_38, 4)
+let result_39: Ok I32 | ConversionError = TryConvert.try_convert (String :: " 1")
+expect_error (result_39, 4)
+let result_40: Ok I32 | ConversionError = TryConvert.try_convert (String :: "1 ")
+expect_error (result_40, 4)
+let result_41: Ok I32 | ConversionError = TryConvert.try_convert (String :: "1x")
+expect_error (result_41, 4)
+let result_42: Ok I32 | ConversionError = TryConvert.try_convert (String :: "1\0x")
+expect_error (result_42, 4)
+let result_43: Ok I32 | ConversionError = TryConvert.try_convert (String :: "+42")
+expect_success (result_43, I32 :: 42)
+let result_44: Ok I32 | ConversionError = TryConvert.try_convert (String :: "0xff")
+expect_error (result_44, 4)
+let result_45: Ok F32 | ConversionError = TryConvert.try_convert (String :: "1.5")
+expect_success (result_45, F32 :: 1.5)
+let result_46: Ok F64 | ConversionError = TryConvert.try_convert (String :: "1.25e2")
+expect_success (result_46, F64 :: 125.0)
+let result_47: Ok F32 | ConversionError = TryConvert.try_convert (String :: "1e100")
+expect_error (result_47, 1)
+let result_48: Ok F64 | ConversionError = TryConvert.try_convert (String :: "1e9999")
+expect_error (result_48, 1)
+let result_49: Ok F64 | ConversionError = TryConvert.try_convert (String :: "1e-9999")
+expect_error (result_49, 1)
+let result_50: Ok F64 | ConversionError = TryConvert.try_convert (String :: "1.2x")
+expect_error (result_50, 4)
+let result_51: Ok Bool | InvalidBool = TryConvert.try_convert (String :: "True")
+expect_bool (result_51, Bool :: True)
+let result_52: Ok Bool | InvalidBool = TryConvert.try_convert (String :: "false")
+expect_bool (result_52, Bool :: False)
+let result_53: Ok Bool | InvalidBool = TryConvert.try_convert (String :: "TRUE")
+match result_53 { InvalidBool => (), _ => panic "invalid boolean accepted", }
+let result_54: Ok Bool | InvalidBool = TryConvert.try_convert (I8 :: 0)
+expect_bool (result_54, Bool :: False)
+let result_55: Ok Bool | InvalidBool = TryConvert.try_convert (I8 :: 1)
+expect_bool (result_55, Bool :: True)
+let result_56: Ok Bool | InvalidBool = TryConvert.try_convert (I8 :: 2)
+match result_56 { InvalidBool => (), _ => panic "invalid boolean accepted", }
+let result_57: Ok Bool | InvalidBool = TryConvert.try_convert (((I8 :: 0) - (I8 :: 1)))
+match result_57 { InvalidBool => (), _ => panic "invalid boolean accepted", }
+
+let narrowed_nan: Ok F32 | ConversionError = TryConvert.try_convert nan
+match narrowed_nan { Ok value => if (value != value) { () } else { panic "NaN lost" }, _ => panic "NaN conversion failed", }
+let narrowed_infinity: Ok F32 | ConversionError = TryConvert.try_convert infinity
+match narrowed_infinity { Ok value => if (value > (F32 :: 1.0e30)) { () } else { panic "infinity lost" }, _ => panic "infinity conversion failed", }

@@ -1663,13 +1663,12 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
     ));
     copy_directory(&root.join("stdlib"), &temporary);
     let production_string = include_str!("../../stdlib/std/string.sta");
-    let production_body = production_string
+    let (production_prefix, production_body) = production_string
         .split_once("pub type String = wrap Slice U8\n")
-        .map(|(_, body)| body)
         .expect("production String module has its canonical declaration");
     std::fs::write(
         temporary.join("std/string.sta"),
-        format!("pub mod\nuse std.slice.Slice\n{declaration}\n{production_body}"),
+        format!("{production_prefix}{declaration}\n{production_body}"),
     )
     .expect("test String declaration should be written");
 
@@ -5260,8 +5259,8 @@ fn c_string_is_an_imported_primitive_macro() {
         "def exercise = () => {\n",
         "  let text: String = \"hello\"\n",
         "  let c_text: CString = c_string \"hello\"\n",
-        "  let copied: String = CString.to_string c_text\n",
-        "  let converted: CString = CString.from_string text\n",
+        "  let copied: String = CString.to_string_unchecked c_text\n",
+        "  let converted: CString = CString.from_string_unchecked text\n",
         "}\n",
     ));
     let context = Context::create();
@@ -10625,8 +10624,8 @@ fn exposes_copy_but_rejects_explicit_implementations() {
 fn c_string_to_string_consumes_its_argument() {
     type_check(concat!(
         "use std.cinterop.*\n",
-        "def convert = () => { let text = c_string \"x\"; CString.to_string text }\n",
-        "def temporary = () => CString.to_string (c_string \"y\")\n",
+        "def convert = () => { let text = c_string \"x\"; CString.to_string_unchecked text }\n",
+        "def temporary = () => CString.to_string_unchecked (c_string \"y\")\n",
     ));
 
     let diagnostics = TypeChecker::new()
@@ -10634,8 +10633,8 @@ fn c_string_to_string_consumes_its_argument() {
             "use std.cinterop.*\n",
             "def twice = () => {\n",
             "  let text = c_string \"x\"\n",
-            "  let first = CString.to_string text\n",
-            "  CString.to_string text\n",
+            "  let first = CString.to_string_unchecked text\n",
+            "  CString.to_string_unchecked text\n",
             "}\n",
         )))
         .expect_err_diagnostics("a converted CString is moved");
@@ -10649,7 +10648,7 @@ fn c_string_to_string_consumes_its_argument() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.cinterop.*\n",
-            "def borrowed: CString -> String = text => CString.to_string text\n",
+            "def borrowed: CString -> String = text => CString.to_string_unchecked text\n",
         )))
         .expect_err_diagnostics("a borrowed CString cannot be converted");
     assert!(

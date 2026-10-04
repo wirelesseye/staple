@@ -331,6 +331,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ),
             );
         }
+        if requirements.contains(RuntimeRequirement::NumericParse) {
+            self.backend.declare_numeric_parsers();
+        }
         if requirements.contains(RuntimeRequirement::NumericToString) {
             self.backend.declare_named_function(
                 "snprintf",
@@ -6660,6 +6663,79 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
         };
         match intrinsic {
+            IntrinsicFunction::NumericConvert { from, to } => {
+                let [argument] = arguments else {
+                    return Err(unsupported("numeric conversion"));
+                };
+                let value = BasicValueEnum::try_from(*argument)
+                    .map_err(|_| unsupported("numeric conversion operand"))?;
+                Ok(self
+                    .backend
+                    .build_numeric_conversion(from, to, value)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::ParseNumber { to } => {
+                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                    return Err(unsupported("numeric parsing operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_parse_number(to, *string, span)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::PointerAddress => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(unsupported("pointer address operand"));
+                };
+                Ok(self
+                    .backend
+                    .builder
+                    .build_ptr_to_int(*pointer, self.backend.size_type, "pointer.address")
+                    .map_err(compiler_diagnostic)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::AddressPointer => {
+                let [BasicMetadataValueEnum::IntValue(address)] = arguments else {
+                    return Err(unsupported("address pointer operand"));
+                };
+                Ok(self
+                    .backend
+                    .builder
+                    .build_int_to_ptr(
+                        *address,
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        "address.pointer",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::ValidateUtf8 => {
+                let [BasicMetadataValueEnum::StructValue(bytes)] = arguments else {
+                    return Err(unsupported("UTF-8 operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_validate_utf8(*bytes)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::StringHasNul => {
+                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                    return Err(unsupported("interior-NUL operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_string_has_nul(*string)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::CStringBytes => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(unsupported("CString bytes operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_c_string_bytes(*pointer, span)?
+                    .as_any_value_enum())
+            }
             IntrinsicFunction::IntegerBinary { integer, operation } => {
                 let [
                     BasicMetadataValueEnum::IntValue(left),

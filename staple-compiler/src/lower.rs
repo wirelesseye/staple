@@ -12871,7 +12871,14 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         Intrinsic::ResolverCancel => Some(IntrinsicRoute::Coroutine(
             CoroutineIntrinsicRoute::ResolverCancel,
         )),
-        Intrinsic::ToString { .. }
+        Intrinsic::NumericConvert { .. }
+        | Intrinsic::ParseNumber { .. }
+        | Intrinsic::PointerAddress
+        | Intrinsic::AddressPointer
+        | Intrinsic::ValidateUtf8
+        | Intrinsic::StringHasNul
+        | Intrinsic::CStringBytes
+        | Intrinsic::ToString { .. }
         | Intrinsic::IntegerBinary { .. }
         | Intrinsic::IntegerCompare { .. }
         | Intrinsic::FloatBinary { .. }
@@ -17756,17 +17763,17 @@ mod tests {
     #[test]
     fn borrowed_temporaries_drop_after_the_call() {
         let module = checked_program(concat!(
-            "use std.cinterop.(CString, c_string)\n",
-            "use std.io.print\n",
+            "use std.cinterop.(CString, CPointer, CChar, c_string)\n",
             "extern \"c\" { strlen: CString -> USize }\n",
+            "extern \"c\" { printf: (CPointer CChar, ...) -> I32 }\n",
             "def borrow: CString -> USize = value => strlen value\n",
             "def consume: move CString -> USize = move value => strlen value\n",
             "def apply: (CString -> USize) -> USize = f => f (c_string \"borrowed\")\n",
             "def apply_move: ((move CString) -> USize) -> USize = f => f (c_string \"moved\")\n",
             "let a = apply borrow\n",
             "let b = apply_move consume\n",
-            "let c = strlen (CString.from_string \"extern\")\n",
-            "print \"variadic\"\n",
+            "let c = strlen (CString.from_string_unchecked \"extern\")\n",
+            "printf (c_string \"%s\", CString.from_string_unchecked \"variadic\")\n",
         ));
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
@@ -17783,7 +17790,17 @@ mod tests {
                     && *call.function_type.parameter == CheckedType::CString
             })
             .collect::<Vec<_>>();
-        assert_eq!(callbacks.len(), 2, "both callback calls lower");
+        assert!(callbacks.len() >= 2, "both callback calls lower");
+        assert!(
+            callbacks
+                .iter()
+                .any(|call| call.function_type.moves.is_empty())
+        );
+        assert!(
+            callbacks
+                .iter()
+                .any(|call| !call.function_type.moves.is_empty())
+        );
         for call in callbacks {
             assert_eq!(
                 call.arguments[0].drops_after_call,

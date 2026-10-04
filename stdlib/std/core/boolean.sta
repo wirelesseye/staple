@@ -1,5 +1,8 @@
 pub mod
 
+/// The input is not a supported boolean representation.
+pub type InvalidBool
+
 use std.fmt.(Display, Debug, Formatter)
 
 /// A logical value that is either true or false.
@@ -30,3 +33,45 @@ impl Eq Bool {
 impl Not Bool {
     not = value => if value { False } else { True }
 }
+
+impl Convert Bool I8 {
+    convert = move value => if value { 1 } else { 0 }
+}
+
+impl Convert Bool I16 {
+    convert = move value => if value { 1 } else { 0 }
+}
+
+impl Convert Bool I32 {
+    convert = move value => if value { 1 } else { 0 }
+}
+
+impl Convert Bool I64 {
+    convert = move value => if value { 1 } else { 0 }
+}
+
+impl Convert Bool U8 {
+    convert = move value => if value { 1 } else { 0 }
+}
+
+impl Convert Bool U16 {
+    convert = move value => if value { 1 } else { 0 }
+}
+
+impl Convert Bool U32 {
+    convert = move value => if value { 1 } else { 0 }
+}
+
+impl Convert Bool U64 {
+    convert = move value => if value { 1 } else { 0 }
+}
+
+impl Convert Bool ISize {
+    convert = move value => if value { 1 } else { 0 }
+}
+
+impl Convert Bool USize {
+    convert = move value => if value { 1 } else { 0 }
+}
+
+impl Convert Bool String { convert = move value => ToString.to_string value }

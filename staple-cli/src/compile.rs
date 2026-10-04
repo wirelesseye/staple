@@ -4225,7 +4225,7 @@ mod tests {
                 "extern \"c\" { exit: I32 -> () }\n",
                 "use std.cinterop.(CString)\n",
                 "type Some = wrap String\n",
-                "def roundtrip: String -> String = value => CString.to_string (CString.from_string value)\n",
+                "def roundtrip: String -> String = value => CString.to_string_unchecked (CString.from_string_unchecked value)\n",
                 "def return_unicode = () => roundtrip \"hé\"\n",
                 "def capture = (value: String) => () => value\n",
                 "def empty_score: String -> I32 = value => match value { \"\" => 1, _ => 100, }\n",

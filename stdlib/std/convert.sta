@@ -23,3 +23,23 @@ impl<From, To where Convert From To> TryConvert From To {
     type Error = Never
     try_convert = move value => Ok (To :: Convert.convert value)
 }
+
+/// The reason a checked conversion failed.
+pub typegroup ConversionError {
+    /// The value is outside the target type's range.
+    OutOfRange,
+    /// The target cannot represent the value exactly.
+    PrecisionLoss,
+    /// NaN or infinity cannot be converted to an integer.
+    NonFinite,
+    /// The complete input is not a valid number.
+    InvalidNumber,
+}
+
+pub(package) def checked_conversion: <T> move (U8, T) -> Ok T | ConversionError = move (status, value) => when {
+    status == 0 => Ok value,
+    status == 1 => ConversionError.OutOfRange,
+    status == 2 => ConversionError.PrecisionLoss,
+    status == 3 => ConversionError.NonFinite,
+    else => ConversionError.InvalidNumber,
+}

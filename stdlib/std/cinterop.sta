@@ -1,5 +1,11 @@
 pub mod
 
+/// A C string cannot contain an embedded NUL byte.
+pub type InteriorNul
+
+use std.string.InvalidUtf8
+use std.slice.Slice
+
 use std.core.sized.sized_opaque
 
 use std.syntax.(Expr)
@@ -25,13 +31,61 @@ impl !Copy CString {}
 pub macro c_string: Expr -> Expr
 
 extern "staple-intrinsic" {
-    __string_from_c_string: move CString -> String
-    __string_to_c_string: String -> CString
+    __string_from_c_string_unchecked: move CString -> String
+    __string_to_c_string_unchecked: String -> CString
 }
 
 companion CString {
-    /// Converts a C string to a Staple string, consuming and freeing it.
-    pub def to_string: move CString -> String = move value => __string_from_c_string value
-    /// Converts a Staple string to a C string.
-    pub def from_string: String -> CString = value => __string_to_c_string value
+    /// Validates UTF-8 and copies the bytes into a String.
+    /// Consumes and frees the C string on both success and failure.
+    pub def to_string: move CString -> Ok String | InvalidUtf8 =
+        move value => TryConvert.try_convert value
+
+    /// Copies a String into a C string, rejecting embedded NUL bytes.
+    pub def from_string: String -> Ok CString | InteriorNul =
+        value => TryConvert.try_convert value
+
+    /// Copies bytes known to be valid UTF-8, consuming and freeing the C string.
+    /// The caller must ensure the bytes are valid UTF-8.
+    pub def to_string_unchecked: move CString -> String =
+        move value => __string_from_c_string_unchecked value
+
+    /// Copies and terminates a String without checking for embedded NUL bytes.
+    /// The caller must ensure the String contains no embedded NUL bytes.
+    pub def from_string_unchecked: String -> CString =
+        value => __string_to_c_string_unchecked value
+}
+
+extern "staple-intrinsic" {
+    __pointer_address: <T> CPointer T -> USize
+    __address_pointer: <T> USize -> CPointer T
+    __c_string_bytes: CString -> Slice U8
+    __has_interior_nul: String -> U8
+}
+
+impl TryConvert String CString {
+    type Error = InteriorNul
+    try_convert = move value => {
+        if (__has_interior_nul value == 1) {
+            InteriorNul
+        } else {
+            Ok (CString.from_string_unchecked value)
+        }
+    }
+}
+
+impl TryConvert CString String {
+    type Error = InvalidUtf8
+    try_convert = move value => match (String.from_utf8 (__c_string_bytes value)) {
+        Ok _ => Ok (CString.to_string_unchecked value),
+        InvalidUtf8 => InvalidUtf8,
+    }
+}
+
+impl<T> Convert (CPointer T) USize {
+    convert = move value => __pointer_address value
+}
+
+impl<T> Convert USize (CPointer T) {
+    convert = move value => __address_pointer value
 }

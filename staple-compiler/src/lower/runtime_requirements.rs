@@ -38,6 +38,8 @@ pub(crate) enum RuntimeRequirement {
     LiteralComparison,
     /// Libc `snprintf` for numeric-to-string conversion.
     NumericToString,
+    /// Libc numeric parsers and thread-local errno.
+    NumericParse,
     /// Libc `strlen` for C-string conversion.
     CStringLength,
     /// Libc `memchr` for interior-NUL checks.
@@ -46,7 +48,7 @@ pub(crate) enum RuntimeRequirement {
 
 impl RuntimeRequirement {
     /// Every requirement in canonical order.
-    pub(crate) const ALL: [RuntimeRequirement; 9] = [
+    pub(crate) const ALL: [RuntimeRequirement; 10] = [
         RuntimeRequirement::GarbageCollector,
         RuntimeRequirement::CoroutineRuntime,
         RuntimeRequirement::ReactiveRuntime,
@@ -54,6 +56,7 @@ impl RuntimeRequirement {
         RuntimeRequirement::CStringFree,
         RuntimeRequirement::LiteralComparison,
         RuntimeRequirement::NumericToString,
+        RuntimeRequirement::NumericParse,
         RuntimeRequirement::CStringLength,
         RuntimeRequirement::InteriorNulCheck,
     ];
@@ -68,6 +71,7 @@ impl RuntimeRequirement {
             RuntimeRequirement::CStringFree => "c-string-free",
             RuntimeRequirement::LiteralComparison => "literal-comparison",
             RuntimeRequirement::NumericToString => "numeric-to-string",
+            RuntimeRequirement::NumericParse => "numeric-parse",
             RuntimeRequirement::CStringLength => "c-string-length",
             RuntimeRequirement::InteriorNulCheck => "interior-nul-check",
         }
@@ -109,6 +113,8 @@ impl RuntimeRequirement {
             "free" => Some(RuntimeRequirement::CStringFree),
             "memcmp" => Some(RuntimeRequirement::LiteralComparison),
             "snprintf" => Some(RuntimeRequirement::NumericToString),
+            "strtoll" | "strtoull" | "strtof" | "strtod" | "__error" | "__errno_location"
+            | "_errno" => Some(RuntimeRequirement::NumericParse),
             "strlen" => Some(RuntimeRequirement::CStringLength),
             "memchr" => Some(RuntimeRequirement::InteriorNulCheck),
             _ => None,
@@ -414,6 +420,16 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 recursive: Some(_), ..
             } => self.gc(),
             LoweredCallableTarget::Intrinsic { intrinsic, .. } => match intrinsic {
+                IntrinsicFunction::ParseNumber { .. } => {
+                    self.requirements.record(RuntimeRequirement::NumericParse);
+                    self.gc();
+                }
+                IntrinsicFunction::ValidateUtf8 => {
+                    self.requirements.record(RuntimeRequirement::Utf8Validator);
+                }
+                IntrinsicFunction::CStringBytes => {
+                    self.requirements.record(RuntimeRequirement::CStringLength);
+                }
                 IntrinsicFunction::ToString { .. } => {
                     self.requirements
                         .record(RuntimeRequirement::NumericToString);
@@ -421,11 +437,10 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 }
                 IntrinsicFunction::StringFromCString => {
                     self.requirements.record(RuntimeRequirement::CStringLength);
-                    self.requirements.record(RuntimeRequirement::Utf8Validator);
                     self.requirements.record(RuntimeRequirement::CStringFree);
                     self.gc();
                 }
-                IntrinsicFunction::StringToCString => {
+                IntrinsicFunction::StringHasNul => {
                     self.requirements
                         .record(RuntimeRequirement::InteriorNulCheck);
                 }

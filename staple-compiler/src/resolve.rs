@@ -277,6 +277,18 @@ pub struct CompileTimeBindingInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IntrinsicFunction {
+    NumericConvert {
+        from: NumericType,
+        to: NumericType,
+    },
+    ParseNumber {
+        to: NumericType,
+    },
+    PointerAddress,
+    AddressPointer,
+    ValidateUtf8,
+    CStringBytes,
+    StringHasNul,
     ToString {
         value: NumericType,
     },
@@ -340,6 +352,30 @@ pub enum IntrinsicFunction {
 pub enum NumericType {
     Integer(IntegerType),
     Float(FloatType),
+}
+
+impl NumericType {
+    pub const ALL: [Self; 12] = [
+        Self::Integer(IntegerType::I8),
+        Self::Integer(IntegerType::I16),
+        Self::Integer(IntegerType::I32),
+        Self::Integer(IntegerType::I64),
+        Self::Integer(IntegerType::U8),
+        Self::Integer(IntegerType::U16),
+        Self::Integer(IntegerType::U32),
+        Self::Integer(IntegerType::U64),
+        Self::Integer(IntegerType::ISize),
+        Self::Integer(IntegerType::USize),
+        Self::Float(FloatType::F32),
+        Self::Float(FloatType::F64),
+    ];
+
+    pub fn intrinsic_name(self) -> &'static str {
+        match self {
+            Self::Integer(integer) => integer.intrinsic_name(),
+            Self::Float(float) => float.intrinsic_name(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1790,11 +1826,11 @@ impl NameResolver {
             }
         }
         expected.push((
-            "__string_from_c_string".to_owned(),
+            "__string_from_c_string_unchecked".to_owned(),
             IntrinsicFunction::StringFromCString,
         ));
         expected.push((
-            "__string_to_c_string".to_owned(),
+            "__string_to_c_string_unchecked".to_owned(),
             IntrinsicFunction::StringToCString,
         ));
         expected.push(("__string_add".to_owned(), IntrinsicFunction::StringAdd));
@@ -1812,7 +1848,50 @@ impl NameResolver {
                 (module.to_owned(), None, name, intrinsic)
             })
             .collect();
+        for from in NumericType::ALL {
+            for to in NumericType::ALL {
+                if from != to {
+                    declarations.push((
+                        "std.core.number".to_owned(),
+                        None,
+                        format!("__{}_to_{}", from.intrinsic_name(), to.intrinsic_name()),
+                        IntrinsicFunction::NumericConvert { from, to },
+                    ));
+                }
+            }
+            declarations.push((
+                "std.string".to_owned(),
+                None,
+                format!("__parse_{}", from.intrinsic_name()),
+                IntrinsicFunction::ParseNumber { to: from },
+            ));
+        }
         for (module, name, intrinsic) in [
+            (
+                "std.cinterop",
+                "__has_interior_nul",
+                IntrinsicFunction::StringHasNul,
+            ),
+            (
+                "std.cinterop",
+                "__pointer_address",
+                IntrinsicFunction::PointerAddress,
+            ),
+            (
+                "std.cinterop",
+                "__address_pointer",
+                IntrinsicFunction::AddressPointer,
+            ),
+            (
+                "std.string",
+                "__valid_utf8",
+                IntrinsicFunction::ValidateUtf8,
+            ),
+            (
+                "std.cinterop",
+                "__c_string_bytes",
+                IntrinsicFunction::CStringBytes,
+            ),
             (
                 "std.buffer",
                 "__buffer_with_capacity",

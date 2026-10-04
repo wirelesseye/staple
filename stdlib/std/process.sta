@@ -1,7 +1,7 @@
 pub mod
 
 use std.io.printf
-use std.cinterop.(c_string, CString)
+use std.cinterop.(c_string, CString, InteriorNul)
 
 // Nested so the raw C `exit` symbol (extern bindings are always named
 // exactly after their C symbol) doesn't collide with the `exit` wrapper
@@ -22,6 +22,9 @@ pub def exit: I32 -> Never = code => {
 
 /// Terminates the program after printing `message`.
 pub def panic: String -> Never = message => {
-    let _ = printf (c_string "panic: %s\n", CString.from_string message)
+    match (CString.from_string message) {
+        Ok text => { let _ = printf (c_string "panic: %s\n", text); () },
+        InteriorNul => { let _ = printf (c_string "panic: message contains an embedded NUL byte\n"); () },
+    }
     exit 1
 }

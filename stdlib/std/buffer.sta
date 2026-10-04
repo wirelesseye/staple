@@ -62,3 +62,7 @@ companion<T> Buffer T {
 impl<T where Clone T> Clone (Buffer T) {
     clone = buffer => __buffer_clone buffer
 }
+
+impl<T> Convert (Buffer T) (Slice T) {
+    convert = move value => Buffer.freeze value
+}

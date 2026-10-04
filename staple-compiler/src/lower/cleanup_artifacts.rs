@@ -3140,7 +3140,7 @@ mod tests {
         "}\n",
         "def closure_env: move CString -> (() -> I32) = move value => () => inspect value\n",
         "def make_ref: () -> Ref CString = () => Ref (c_string \"x\")\n",
-        "def convert: move CString -> String = move value => CString.to_string value\n",
+        "def convert: move CString -> String = move value => CString.to_string_unchecked value\n",
         "def nested: (I32) -> I32 = value => {\n",
         "  let outer = c_string \"a\"\n",
         "  when { value > 0 => { let inner = c_string \"b\"; inspect inner }, else => inspect outer }\n",
