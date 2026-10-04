@@ -2307,6 +2307,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn as_conversion_does_not_leak_synthesized_tokens() {
+        let source = "use std.cinterop.CString\nlet x = 1 as I64\n";
+        let module = parse(source).unwrap();
+        let labels = labels(source, &tokens(source, Some(&module), None, None));
+
+        assert_eq!(labels[0], ("std", NAMESPACE), "labels: {labels:?}");
+        assert_eq!(labels[1], ("cinterop", NAMESPACE), "labels: {labels:?}");
+    }
+
     fn labels<'a>(source: &'a str, tokens: &[SemanticToken]) -> Vec<(&'a str, u32)> {
         let lines = source.split('\n').collect::<Vec<_>>();
         let mut line = 0;

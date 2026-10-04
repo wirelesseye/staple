@@ -36,10 +36,18 @@ pub fn named_range(syntax: &Syntax, name: &str, last: bool, path: &Path) -> Opti
     {
         return Some(range.clone());
     }
+    let Span::User { range: node, .. } = &syntax.span else {
+        return None;
+    };
     if !belongs_to(&syntax.span, path) {
         return None;
     }
-    token.map(|token| token.span.clone())
+    // Synthesized tokens (e.g. the `Convert.convert` callee the parser builds
+    // for `as`) are lexed from a standalone string, so their spans are offsets
+    // into that string rather than the file; skip any that fall outside the node.
+    token
+        .map(|token| token.span.clone())
+        .filter(|span| span.start >= node.start && span.end <= node.end)
 }
 
 pub fn syntax_range(syntax: &Syntax, path: &Path) -> Option<Range<usize>> {
