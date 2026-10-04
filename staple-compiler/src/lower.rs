@@ -14344,6 +14344,10 @@ impl Lowerer {
     }
 
     pub fn lower(&self, module: &TypedModule) -> Result<LoweredModule, Vec<Diagnostic>> {
+        let polymorphic = module.polymorphic_value_diagnostics();
+        if !polymorphic.is_empty() {
+            return Err(polymorphic);
+        }
         let mut program = LoweredProgram::default();
         let mut diagnostics = validate_checked_module(module);
         if diagnostics.is_empty() {

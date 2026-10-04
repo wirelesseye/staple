@@ -1707,7 +1707,10 @@ impl Grammar {
         } else {
             None
         };
-        if matches!(annotation, Some(Type::Forall(_))) && kind != BindingKind::Def {
+        if matches!(annotation, Some(Type::Forall(_))) && signal {
+            return Err(self.error("generic function types are not supported in signal bindings"));
+        }
+        if matches!(annotation, Some(Type::Forall(_))) && kind == BindingKind::Const {
             return Err(self.error("compile-time parameters are only allowed on `def` bindings"));
         }
         let value = if self.eat(TokenKind::Equals) {
@@ -2248,6 +2251,9 @@ impl Grammar {
     fn parse_type(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
         if self.at_operator("<") {
+            if self.conversion_target {
+                return Err(self.error("generic function types are not allowed in `as` targets"));
+            }
             let (parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
             let generics = crate::GenericParameters {
                 syntax: self.annotation_syntax(start, 1),

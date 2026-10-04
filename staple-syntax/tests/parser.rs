@@ -3234,18 +3234,51 @@ fn forall_does_not_change_expression_or_explicit_argument_parsing() {
         "let value = I32 :: 1\n",
         "let value = f.<I32> 1\n",
         "let value = f.<(<T> T -> T)>\n",
-        "let value = x as (<T> T -> T)\n",
-        "let value = x as <T> T -> T\n",
         "let value = (<T> T -> T) :: x\n",
     ] {
         parse(source).unwrap_or_else(|e| panic!("{source}: {e:?}"));
     }
     assert!(parse("let value = f.<<T> T -> T>\n").is_err());
-    for keyword in ["let", "const"] {
+    parse("let identity: <T> T -> T = x => x\n").unwrap();
+    for keyword in ["const"] {
         let error = parse(&format!("{keyword} identity: <T> T -> T = x => x\n")).unwrap_err();
         assert_eq!(
             error.message,
             "compile-time parameters are only allowed on `def` bindings"
         );
     }
+}
+
+#[test]
+fn forall_is_rejected_in_conversion_targets() {
+    for source in [
+        "let x = value as (<T> T -> T)\n",
+        "let x = value as Box (<T> T -> T)\n",
+    ] {
+        let error = parse(source).unwrap_err();
+        assert_eq!(
+            error.message,
+            "generic function types are not allowed in `as` targets"
+        );
+    }
+}
+
+#[test]
+fn forall_annotations_are_storage_types_only_on_ordinary_lets() {
+    for prefix in ["let", "let mut"] {
+        let module = parse(&format!("{prefix} id: <T> move T -> T = move x => x\n")).unwrap();
+        let staple_syntax::Item::Binding(binding) = &module.items[0] else {
+            panic!("binding")
+        };
+        assert!(!binding.is_generic());
+        assert!(matches!(
+            binding.annotation_body(),
+            Some(staple_syntax::Type::Forall(_))
+        ));
+    }
+    let error = parse("let signal id: <T> move T -> T = move x => x\n").unwrap_err();
+    assert_eq!(
+        error.message,
+        "generic function types are not supported in signal bindings"
+    );
 }

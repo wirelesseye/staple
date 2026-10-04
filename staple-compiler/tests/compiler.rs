@@ -10254,7 +10254,7 @@ fn rejects_unconstrained_generic_values_and_non_function_schemes() {
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>();
     assert!(
-        messages
+        !messages
             .iter()
             .any(|message| message.contains("requires a concrete expected type"))
     );
@@ -13091,36 +13091,14 @@ fn call_site_type_arguments_enforce_sized_and_subtype_bounds() {
 }
 
 #[test]
-fn forall_placement_is_rejected_by_resolve_with_scoped_parameters() {
+fn forall_placement_resolves_with_scoped_parameters() {
     for source in [
         "def f: (<T> T -> T) -> I32\n",
         "def f: I32 -> (<T> T -> T)\n",
-        "def f: (a: <T> T -> T, b: I32)\n",
         "type Box T = wrap T\ndef f: Box (<T> T -> T)\n",
         "type Alias = alias <T> T -> T\n",
-        "def id: <T> T -> T = x => x\nlet value = id.<(<U> U -> U)>\n",
-        "def f: <T where Copy (<U> U -> U)> T -> T = x => x\n",
-        "let value = 1 as (<T> T -> T)\n",
-        "let value = 1 as <T> T -> T\n",
-        "let value = (<T> T -> T) :: 1\n",
     ] {
-        let diagnostics =
-            resolve_result(source).expect_err_diagnostics("nested forall must fail resolution");
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.message == "generic function types are not supported here yet")
-                .count(),
-            1,
-            "{source}: {diagnostics:?}"
-        );
-        assert!(
-            !diagnostics
-                .iter()
-                .any(|d| d.message.contains("unknown type `T`")
-                    || d.message.contains("unknown type `U`")),
-            "{source}: {diagnostics:?}"
-        );
+        resolve_result(source).unwrap_or_else(|diagnostics| panic!("{source}: {diagnostics:?}"));
     }
     let diagnostics = resolve_result("trait Test T { apply: <U> (T, U) -> U }\n")
         .expect_err_diagnostics("trait member forall is unsupported");
@@ -13282,4 +13260,208 @@ fn checked_schemes_preserve_trait_argument_inference_from_expected_types() {
         "let equals: (I32, I32) -> Bool = Eq.eq.<_>\n",
         "let same: Bool = equals (1, 1)\n",
     ));
+}
+
+#[test]
+fn stage3_goal_programs_check() {
+    for source in [
+        "def identity: <T> move T -> T = move value => value\nlet id = identity\n",
+        "def identity: <T> move T -> T = move value => value\nlet annotated: <U> move U -> U = identity\n",
+        "def identity: <T> move T -> T = move value => value\nlet concrete: I32 -> I32 = identity\n",
+        "type Functions = wrap (identity: <T> move T -> T,)\n",
+        "def consume: (<T> move T -> T) -> (I32, String) = f => (f 42, f \"hello\")\n",
+        "def identity: <T> move T -> T = move value => value\nlet mut selected: <U> move U -> U = identity\nselected = identity\n",
+        "let id: <T> move T -> T = move value => value\nlet a = id 42\nlet b = id \"hello\"\n",
+    ] {
+        TypeChecker::new()
+            .check(resolve(source))
+            .unwrap_or_else(|diagnostics| panic!("{source}: {diagnostics:?}"));
+    }
+}
+
+#[test]
+fn stage3_polymorphic_values_check_in_every_value_position() {
+    const ID: &str = "def identity: <T> move T -> T = move value => value\n";
+    for source in [
+        "let id = identity\nlet a = id 42\nlet b = id \"hello\"\n",
+        "let id = identity\nlet a = id.<_> 42\n",
+        "let id = (<U> move U -> U) :: identity\nlet a = id.<I32> 42\n",
+        "let id = (<U> move U -> U) :: (move x => x)\nlet a = id 42\n",
+        "def consume: (<U> move U -> U) -> I32 = f => f 42\nlet a = consume (move x => x)\n",
+        "def consume: (<U where Copy U> U -> U) -> I32 = f => f 42\nlet a = consume (x => x)\n",
+        "let f: <U where Copy U> U -> U = x => x\nlet a = f 42\n",
+        "def consume: (<effect E> (() ->{E} I32) ->{E} I32) -> I32 = f => f (() => 42)\nlet a = consume (f => f ())\n",
+        "def outer: <A where Copy A> A -> I32 = a => { let f: <U where Copy U> U -> U = x => { let saved = a; x }; f 42 }\n",
+        "def consume: (<U> move U -> U) -> (I32, String) = f => (f 42, f \"hello\")\nlet a = consume identity\n",
+        "type Functions = wrap (identity: <U> move U -> U,)\nlet fs = Functions (identity: identity)\nlet a = fs.identity 42\n",
+        "def make: () -> (<U> move U -> U) = () => identity\nlet a = (make ()).<I32> 42\nlet b = (make ()).<_> 42\n",
+        "let mut selected: <U> move U -> U = identity\nselected = (<V> move V -> V) :: identity\nlet a = selected 42\n",
+        "type Box T = wrap T\nlet b: Box (<U> move U -> U) = Box identity\n",
+        "type Box T = wrap T\nlet b = Box.<(<U> move U -> U)> identity\n",
+        "let id: <T> move T -> T = move (x: T) => x\nlet a = id 42\n",
+        "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\nlet f = apply\nlet a: I32 = f (() => 42)\n",
+        "let apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\nlet a: I32 = apply (() => 42)\n",
+        "def copied: <T where Copy T> T -> T = x => x\nlet c: <U where Copy U> U -> U = copied\nlet a = c 42\n",
+        "def copied: <T where Copy T> T -> T = x => x\nlet c = copied\nlet a = c.<I32> 42\n",
+        "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\nlet alias: <effect F> (() ->{F} I32) ->{F} I32 = apply\nlet a = alias (() => 42)\n",
+        "let pair: (a: <T> move T -> T, b: <U> move U -> U) = (a: identity, b: identity)\n",
+    ] {
+        let source = format!("{ID}{source}");
+        TypeChecker::new()
+            .check(resolve(&source))
+            .unwrap_or_else(|diagnostics| panic!("{source}: {diagnostics:?}"));
+    }
+}
+
+#[test]
+fn stage3_rejects_invalid_polymorphic_values() {
+    for (source, message) in [
+        ("trait Test T { apply: (<U> move U -> U) -> I32 }\n", "trait members"),
+        ("let f: <T> T = 42\n", "function body"),
+        (
+            "type Token = wrap I32\nimpl !Copy Token {}\ndef escaping: Token -> (<U> move U -> U) = token => move value => { let n = token.*; value }\nlet token = Token 42\nlet f = escaping token\n",
+            "borrowed closure",
+        ),
+        (
+            "def copied: <T where Copy T> T -> T = x => x\ndef make: () -> (<U where Copy U> U -> U) = () => copied\ntype Token = wrap I32\nimpl !Copy Token {}\nlet f = (make ()).<Token>\n",
+            "trait bound",
+        ),
+        (
+            "let f: <effect E> () ->{E} () = () => std.io.print \"hello\"\n",
+            "declared effect set",
+        ),
+        (
+            "def copied: <T where Copy T> T -> T = x => x\ntype Token = wrap I32\nimpl !Copy Token {}\nlet f = copied\nlet result = f (Token 42)\n",
+            "trait bound",
+        ),
+        (
+            "def id: <T> move T -> T = move x => x\nlet f = id\nlet bad = f.<I32, String> 42\n",
+            "type arguments",
+        ),
+        (
+            "use std.io.IO\ndef apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\nlet bad: (() ->{IO} I32) -> I32 = apply\n",
+            "expected",
+        ),
+        (
+            "def run: <A> (A -> I32) -> I32 = f => 42\nlet f = run\n",
+            "parameter-product-capable",
+        ),
+        (
+            "def consume: (<A> A -> I32) -> I32 = f => 42\n",
+            "parameter-product-capable",
+        ),
+        ("let f: <T> move T -> T = move x => 42\n", "expected"),
+        (
+            "def mono: I32 -> I32 = x => x\nlet f: <T> T -> T = mono\n",
+            "expected",
+        ),
+        (
+            "def id: <T> move T -> T = move x => x\nlet mut f = id\nf = (x: I32) => x\n",
+            "expected",
+        ),
+        (
+            "def copied: <T where Copy T> T -> T = x => x\nlet f: <U> U -> U = copied\n",
+            "trait bound",
+        ),
+        (
+            "def id: <T> move T -> T = move x => x\ntype Box T = wrap T\nlet b = Box id\n",
+            "concrete expected type",
+        ),
+        (
+            "def id: <T> move T -> T = move x => x\nlet signal f = id\n",
+            "signal bindings",
+        ),
+        (
+            "extern \"C\" { f: (<T> T -> T) -> I32 }\n",
+            "external signatures",
+        ),
+        (
+            "def consume: ((<T> T -> T) -> I32) -> I32 = f => 42\ndef mono: (I32 -> I32) -> I32 = f => 42\nlet a = consume mono\n",
+            "expected",
+        ),
+        ("let f = x => x\nlet g: <T> T -> T = f\n", "expected"),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics(source);
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(message)),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn stage3_lowering_reports_polymorphic_values_at_the_boundary() {
+    let module = type_check("def id: <T> move T -> T = move x => x\nlet f = id\n");
+    let diagnostics = Lowerer::new()
+        .lower(&module)
+        .expect_err_diagnostics("polymorphic values need Stage 4");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "polymorphic function values are not supported yet"
+    );
+    assert_ne!(diagnostics[0].span, staple_syntax::Span::Compiler);
+}
+
+#[test]
+fn stage3_schemes_are_visible_on_bindings_and_lambdas() {
+    let module = type_check(
+        "def id: <T> move T -> T = move x => x\nlet alias = id\nlet annotated: <U> move U -> U = move x => x\n",
+    );
+    for item in &module.syntax().items {
+        let Item::Binding(binding) = item else {
+            continue;
+        };
+        if binding.name == "alias" || binding.name == "annotated" {
+            assert!(!binding.is_generic());
+            let symbol = module.symbol_for(binding.syntax.id).unwrap();
+            assert!(matches!(
+                module.type_of_symbol(symbol),
+                Some(CheckedType::Forall(_))
+            ));
+            assert!(module.scheme_of_symbol(symbol).is_some());
+        }
+        if binding.name == "annotated" {
+            let function = module
+                .function_for(binding.value.as_ref().unwrap().syntax().id)
+                .unwrap();
+            assert!(module.scheme_of_function(function).is_some());
+        }
+    }
+}
+
+#[test]
+fn stage3_lowering_ignores_unused_generic_bodies_with_polymorphic_locals() {
+    let module = type_check(concat!(
+        "def id: <U> move U -> U = move x => x\n",
+        "def unused: <T> move T -> T = move x => { let f = id; x }\n",
+        "let answer = id 42\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn stage3_lowering_keeps_explicit_and_expected_instantiations_concrete() {
+    let module = type_check(concat!(
+        "def id: <T> move T -> T = move x => x\n",
+        "let explicit = id.<I32>\n",
+        "let inferred: move I32 -> I32 = id\n",
+        "let answer = explicit 42\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn stage3_lowering_keeps_generic_capture_dependencies_demand_driven() {
+    let module = type_check(concat!(
+        "def id: <U> move U -> U = move x => x\n",
+        "def unused: <T where Copy T> T -> T = x => {\n",
+        "  let inner = () => { let poly = id; let saved = x; 42 }\n",
+        "  x\n",
+        "}\n",
+        "let answer = id 42\n",
+    ));
+    lower(&module);
 }

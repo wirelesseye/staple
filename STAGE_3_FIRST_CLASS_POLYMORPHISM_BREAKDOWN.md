@@ -302,3 +302,46 @@ unaffected.
   lowering and hits Stage 2's internal invariant diagnostic instead of the
   user-facing one. Step 9 checks the gate with every Goal program and
   every rule test.
+
+## Implementation notes
+
+- `Forall` annotations on ordinary `let` bindings describe storage. Scoped
+  quantifiers for annotated lambdas are resolved once and shared by the
+  annotation and body. `TypedModule::scheme_of_function` exposes checked
+  lambda schemes for Stage 4.
+- Compatibility uses alpha-equivalence recursively through products,
+  wrappers, containers, and function types. The equality audit also covers
+  inference conflicts and fallbacks, projections and trait arguments,
+  refresh passes, and structural trait checks. Primitive sentinel, symbol,
+  and declaration-id comparisons remain structural.
+- Expected-direction inference can solve a parameter to a written scheme.
+  Result annotations supply those substitutions before call arguments are
+  checked. Argument-direction inference remains predicative.
+- Explicit application retains checker-only information for unresolved `_`
+  arguments, so an enclosing call can infer them on arbitrary expressions.
+  Its expression type remains an instantiated function, not a smaller scheme.
+- The lowering gate walks initializer expressions, concrete function roots,
+  and referenced generic bodies, with visited sets for recursive functions.
+  It reports source diagnostics before building lowering artifacts.
+- The bounds side tables and parity assertions are retained. Signature
+  collection, conditional implementation checking, and the subsequent bound
+  inheritance pass still need their partial body templates before all schemes
+  are available. Parity assertions cover declaration schemes; a stored
+  lambda's scheme omits obligations already captured from its enclosing body.
+  Use-site checks read schemes; body checking and lowering
+  continue to use the existing side tables. Deriving these tables only once
+  would require restructuring that signature/inheritance pipeline beyond
+  this checker stage.
+- The illustrative function named `use` is named `consume` in tests, because
+  `use` is a reserved import keyword. The other Goal examples retain their
+  spelling, including the `I32 -> I32` specialization.
+
+## Validation
+
+- Stage 3 tests cover the Goal examples, schemes in each value position,
+  alpha-equivalent assignment, rigid bounds and effects, predicative inference,
+  scoped lambda annotations, ownership, hover rendering, and lowering reachability.
+- Release LLVM IR is unchanged for all 100 examples and code-generation corpus
+  programs compared against the pre-implementation `85a4362` release build.
+- `cargo test --workspace --quiet` passes on the completed implementation
+  (one existing ignored test).

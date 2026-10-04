@@ -280,6 +280,7 @@ fn capability_violation(
         {
             Some(named.syntax.span.clone())
         }
+        Type::Forall(scheme) => visit(&scheme.body, false),
         Type::Function(function) => visit(
             &function.parameter,
             function.mutations.is_empty() && function.moves.is_empty(),
@@ -469,4 +470,47 @@ pub(super) fn single_value_conflict<'a>(
         ) => template.iter().zip(actual).find_map(|(t, a)| recurse(t, a)),
         _ => None,
     }
+}
+
+/// A scheme used as a closure must have a fixed parameter arity.
+pub(super) fn scheme_has_capable_parameters(
+    module: &ResolvedModule,
+    scheme: &staple_syntax::ForallType,
+    capable: &HashSet<TypeParameterId>,
+) -> bool {
+    fn bindings<'a>(
+        p: &'a TypeParameterPattern,
+        out: &mut Vec<&'a staple_syntax::TypeParameterBinding>,
+    ) {
+        match p {
+            TypeParameterPattern::Binding(b) => out.push(b),
+            TypeParameterPattern::Product(p) => {
+                for p in &p.elements {
+                    bindings(p, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut parameters = Vec::new();
+    for p in &scheme.generics.parameters {
+        bindings(p, &mut parameters);
+    }
+    parameters.into_iter().any(|binding| {
+        module
+            .type_parameter_for(binding.syntax.id)
+            .is_some_and(|id| {
+                capability_violation(module, &scheme.body, id, false, capable).is_none()
+                    && !scheme
+                        .generics
+                        .subtype_bounds
+                        .iter()
+                        .any(|bound| module.type_parameter_for(bound.syntax.id) == Some(id))
+                    && !scheme.generics.trait_bounds.iter().any(|bound| {
+                        bound.arguments.iter().any(|ty| {
+                            capability_violation(module, ty, id, false, capable).is_some()
+                        })
+                    })
+            })
+    })
 }

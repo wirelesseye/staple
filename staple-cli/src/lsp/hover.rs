@@ -1393,6 +1393,9 @@ impl Collector<'_> {
                         .map(|member| (*method, member))
                 });
             let instantiation = declaration.as_ref().and_then(|declaration| {
+                if matches!(expression_type, Some(CheckedType::Forall(_))) {
+                    return None;
+                }
                 let declared = declared_type.as_deref()?;
                 declaration
                     .is_instantiation(declared, &value_type)
@@ -1740,6 +1743,11 @@ impl Collector<'_> {
             }
             Type::Product(product) | Type::ParameterProduct(product) => {
                 for element in &product.elements {
+                    if matches!(element.ty, Type::Forall(_))
+                        && let Some(name) = &element.name
+                    {
+                        self.named(&element.syntax, name, format!("{name}: {}", element.ty));
+                    }
                     self.ty(&element.ty);
                 }
             }
@@ -2719,6 +2727,47 @@ mod tests {
                     &source[entry.range.clone()] == name && entry.signature == signature
                 }),
                 "missing {name}: {signature} in {entries:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_class_schemes_hover_on_storage_parameters_and_fields() {
+        let source = concat!(
+            "def identity: <T> move T -> T = move value => value\n",
+            "let id = identity\n",
+            "let annotated: <U> move U -> U = identity\n",
+            "let mut selected: <V> move V -> V = identity\n",
+            "def consume: (<W> move W -> W) -> I32 = f => 42\n",
+            "type Functions = wrap (identity: <X> move X -> X,)\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-first-class-schemes.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        for (name, signature) in [
+            ("id", "let id: <T> move T -> T"),
+            ("annotated", "let annotated: <U> move U -> U"),
+            ("selected", "let mut selected: <V> move V -> V"),
+            ("f", "f: <W> move W -> W"),
+            ("identity", "identity: <X> move X -> X"),
+        ] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| &source[entry.range.clone()] == name
+                        && entry.signature == signature),
+                "missing {signature}: {entries:?}"
             );
         }
     }

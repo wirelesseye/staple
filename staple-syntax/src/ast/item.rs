@@ -483,14 +483,18 @@ impl Binding {
     /// The parameters introduced by the top-level annotation.
     pub fn generics(&self) -> Option<&super::GenericParameters> {
         match self.annotation.as_ref() {
-            Some(Type::Forall(ty)) => Some(&ty.generics),
+            Some(Type::Forall(ty))
+                if matches!(self.kind, BindingKind::Def | BindingKind::Extern) =>
+            {
+                Some(&ty.generics)
+            }
             _ => None,
         }
     }
     /// Peel only the top-level generic function type.
     pub fn annotation_body(&self) -> Option<&Type> {
         self.annotation.as_ref().map(|ty| match ty {
-            Type::Forall(ty) => ty.body.as_ref(),
+            Type::Forall(ty) if self.generics().is_some() => ty.body.as_ref(),
             _ => ty,
         })
     }

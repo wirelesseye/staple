@@ -403,7 +403,7 @@ impl<'a> OwnershipChecker<'a> {
                     if !matches!(value.argument.as_ref(), Expression::Name(name) if name.name == "_")
                     {
                         let residual = plan.defaults.last().and_then(|default| {
-                            match default.function.result.as_ref() {
+                            match default.function.result.scheme_body() {
                                 crate::CheckedType::Function(function) => Some(function),
                                 _ => None,
                             }
@@ -437,7 +437,7 @@ impl<'a> OwnershipChecker<'a> {
                                 .symbol_for(value.callee.syntax().id)
                                 .and_then(|symbol| self.module.type_of_symbol(symbol))
                         })
-                        .and_then(|ty| match ty {
+                        .and_then(|ty| match ty.scheme_body() {
                             crate::CheckedType::Function(function) => Some(function),
                             _ => None,
                         });

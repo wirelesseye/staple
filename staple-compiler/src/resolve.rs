@@ -3915,7 +3915,34 @@ impl NameResolver {
             self.binding_companion_targets
                 .insert(binding.syntax.id, target.clone());
         }
-        if let Some(annotation) = binding.annotation_body() {
+        if let Some(Type::Forall(ty)) = &binding.annotation
+            && binding.kind == BindingKind::Let
+        {
+            self.binding_type_parameters
+                .insert(binding.syntax.id, ty.generics.parameters.clone());
+            self.binding_trait_bounds
+                .insert(binding.syntax.id, ty.generics.trait_bounds.clone());
+            self.binding_subtype_bounds
+                .insert(binding.syntax.id, ty.generics.subtype_bounds.clone());
+            for parameter in &ty.generics.parameters {
+                self.declare_type_parameter_pattern(parameter);
+            }
+            for bound in &ty.generics.trait_bounds {
+                if let Some(id) = self.resolve_trait_name(&bound.trait_name) {
+                    self.trait_references.insert(bound.syntax.id, id);
+                }
+                for argument in &bound.arguments {
+                    self.resolve_type(argument);
+                }
+            }
+            for bound in &ty.generics.subtype_bounds {
+                if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                    self.type_parameters.insert(bound.syntax.id, id);
+                }
+                self.resolve_type(&bound.supertype);
+            }
+            self.resolve_type(&ty.body);
+        } else if let Some(annotation) = binding.annotation_body() {
             self.resolve_type(annotation);
         }
         for bound in &binding.all_trait_bounds() {
@@ -3943,7 +3970,10 @@ impl NameResolver {
         if let Some(value) = &binding.value {
             self.resolve_expression(
                 value,
-                binding.annotation_body(),
+                binding.annotation_body().map(|ty| match ty {
+                    Type::Forall(ty) if binding.kind == BindingKind::Let => ty.body.as_ref(),
+                    ty => ty,
+                }),
                 Some((&binding.name, binding.syntax.id)),
             );
         }
@@ -4952,8 +4982,10 @@ impl NameResolver {
     /// Resolve rejected generic types in their own scope so the placement
     /// diagnostic does not turn into spurious unknown-parameter errors.
     fn resolve_forall_type(&mut self, ty: &staple_syntax::ForallType, strict: bool, message: &str) {
-        self.diagnostics
-            .push(Diagnostic::new(ty.syntax.span.clone(), message));
+        if !message.is_empty() {
+            self.diagnostics
+                .push(Diagnostic::new(ty.syntax.span.clone(), message));
+        }
         self.push_type_parameter_scope();
         for parameter in &ty.generics.parameters {
             self.declare_type_parameter_pattern(parameter);
@@ -4978,11 +5010,7 @@ impl NameResolver {
 
     fn resolve_type_with(&mut self, ty: &Type, strict: bool) {
         match ty {
-            Type::Forall(ty) => self.resolve_forall_type(
-                ty,
-                strict,
-                "generic function types are not supported here yet",
-            ),
+            Type::Forall(ty) => self.resolve_forall_type(ty, strict, ""),
             Type::Named(named) => {
                 if named.namespace.is_none()
                     && let Some(id) = self.lookup_type_parameter(&named.name)
