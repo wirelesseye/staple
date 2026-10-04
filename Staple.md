@@ -3679,12 +3679,12 @@ match status {
 ```
 
 The explicit nominal form `Ready()` remains available, including in
-destructuring and propagating bindings.
+destructuring, propagating, and panicking bindings.
 
 The same form can select a singleton alternative in a propagating binding:
 
 ```staple
-let Ready()? = operation()
+let? Ready() = operation()
 ```
 
 The standard-library `Bool` type is defined entirely in these terms, using
@@ -3921,7 +3921,7 @@ so `match flag { True => ..., False => ... }` works on a `Bool`. Within a sum,
 a pattern that selects no alternative directly matches inside the unique
 `from` alternative whose representation it selects from, so `True` matches the
 `Bool` alternative of `Bool | I32`. Typed patterns, destructuring bindings,
-and propagating bindings (`let Some(value)? = option`) see through the same
+and propagating bindings (`let? Some(value) = option`) see through the same
 way. Exhaustiveness is checked against the representation, and the
 representation must be visible where the pattern is written.
 
@@ -4004,13 +4004,13 @@ An untyped binding or `_` matches the whole sum.
 
 #### Propagating bindings
 
-A `?` after a nominal destructuring pattern selects its success alternative
-and returns every other alternative from the enclosing function:
+`let?` followed by a nominal destructuring pattern selects its success
+alternative and returns every other alternative from the enclosing function:
 
 ```staple
 def load = (path: String) => {
-    let Ok(file)? = read_file(path)
-    let Ok(tree)? = parse_tree_from_file(file)
+    let? Ok(file) = read_file(path)
+    let? Ok(tree) = parse_tree_from_file(file)
     Ok(tree)
 }
 ```
@@ -4028,6 +4028,26 @@ reachable explicit returns, and every propagated alternative. The example
 therefore infers `Ok Tree | IOError | ParseError`. With an explicit binding
 annotation or type-ascription constraint on the body, every normal and propagated
 result must be contained in that type.
+
+#### Asserting bindings
+
+`let!` takes the same patterns and right-hand sides as `let?`, but a mismatch
+terminates the program instead of returning:
+
+```staple
+let! Ready() = operation()
+```
+
+On the selected tag, the payload is destructured and execution continues. Any
+other tag writes a message to standard error naming the pattern and the source
+location of the binding, then exits with status 1:
+
+```text
+panic: `let!` pattern `Ready()` did not match at main.sta:3:1
+```
+
+Unlike `let?`, a panicking binding adds nothing to the enclosing function's
+result type and is also allowed at module level.
 
 Sum types use Staple's internal tagged inline representation and may not appear
 anywhere inside an `extern` binding type.

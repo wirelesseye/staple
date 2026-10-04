@@ -1576,7 +1576,7 @@ fn composes_sum_variants_across_modules() {
         "main.sta",
         concat!(
             "use errors.*\n",
-            "def parse = (path: String) => { let Ok(file)? = read(path); Ok(file) }\n",
+            "def parse = (path: String) => { let? Ok(file) = read(path); Ok(file) }\n",
             "let result: Ok String | IOError | ParseError = parse(\"input\")\n",
         ),
     );

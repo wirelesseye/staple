@@ -114,13 +114,13 @@ fn render_item(program: &Program, item: &Item) -> String {
             None => binding.syntax.text().trim().to_owned(),
         },
         Item::PatternBinding(binding) if binding.syntax.is_generated() => format!(
-            "let {}{} = {}",
-            render_pattern(&binding.pattern),
-            if binding.kind == staple_syntax::PatternBindingKind::Propagating {
-                " ?"
-            } else {
-                ""
+            "let{} {} = {}",
+            match binding.kind {
+                staple_syntax::PatternBindingKind::Irrefutable => "",
+                staple_syntax::PatternBindingKind::Propagating => "?",
+                staple_syntax::PatternBindingKind::Asserting => "!",
             },
+            render_pattern(&binding.pattern),
             render_expr(program, &binding.value),
         ),
         Item::PatternBinding(binding) => {

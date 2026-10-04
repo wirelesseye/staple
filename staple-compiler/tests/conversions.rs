@@ -176,3 +176,49 @@ fn opaque_pointer_requires_explicit_conversion() {
             && error.message.contains("CPointer I32")), "{errors:?}");
     }
 }
+
+#[cfg(unix)]
+fn run_raw(lowered: &LoweredModule) -> std::process::Output {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let base = std::env::temp_dir().join(format!("staple-panic-{}-{nonce}", std::process::id()));
+    let object = base.with_extension("o");
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .emit_object(lowered, &object, None)
+        .unwrap_or_else(|errors| panic!("emit: {errors:?}"));
+    let link = Command::new("cc")
+        .arg(&object)
+        .arg("-o")
+        .arg(&base)
+        .output()
+        .unwrap();
+    assert!(link.status.success());
+    let output = Command::new(&base).output().unwrap();
+    let _ = std::fs::remove_file(object);
+    let _ = std::fs::remove_file(base);
+    output
+}
+
+#[cfg(unix)]
+#[test]
+fn panicking_binding_continues_on_match_and_reports_location_on_mismatch() {
+    let source = |value: &str| {
+        format!(
+            "pub type Ready = pub wrap I32\npub type Waiting = pub wrap I32\nlet value: Ready | Waiting = {value}\nlet! Ready(number) = value\nif (number == 7) {{ () }} else {{ panic \"wrong payload\" }}\n"
+        )
+    };
+    let output = run_raw(&lower(&source("Ready 7")));
+    assert!(output.status.success(), "{:?}", output.status);
+
+    let output = run_raw(&lower(&source("Waiting 7")));
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`let!` pattern `Ready(number)` did not match at"),
+        "{stderr}"
+    );
+    assert!(stderr.ends_with(":4:1\n"), "{stderr}");
+}

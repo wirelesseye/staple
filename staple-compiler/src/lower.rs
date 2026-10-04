@@ -2350,10 +2350,14 @@ pub(crate) struct LoweredBindingItem {
 pub(crate) struct LoweredPatternBindingItem {
     pub pattern: PatternId,
     pub value: ExpressionId,
-    /// `true` for `let pattern? = value` propagation.
+    /// `true` for `let? pattern = value` propagation.
     pub propagating: bool,
-    /// Checked propagation metadata, present exactly for propagating
-    /// bindings.
+    /// `true` for `let! pattern = value`, which panics on a mismatch.
+    pub asserting: bool,
+    /// The message an asserting binding writes to stderr on a mismatch.
+    pub panic_message: Option<String>,
+    /// Checked propagation metadata, present exactly for propagating and
+    /// asserting bindings.
     pub propagation: Option<CheckedPropagation>,
     /// The failure value's coercion plan: from the whole source when the
     /// propagated result is a sum (or a `from` type over one), otherwise from
@@ -2363,6 +2367,22 @@ pub(crate) struct LoweredPatternBindingItem {
     /// The source alternative returned as the failure value when the propagated
     /// result is not sum-shaped (extracted with `extract_sum_alternative`).
     pub propagation_residual: Option<usize>,
+}
+
+/// `file:line:column` of a binding for its runtime panic message.
+fn panic_location_text(span: &staple_syntax::Span) -> String {
+    match span {
+        staple_syntax::Span::User {
+            source, location, ..
+        } => {
+            let file = source.as_deref().unwrap_or("<source>");
+            match location {
+                Some(location) => format!("{file}:{}:{}", location.line, location.column),
+                None => file.to_owned(),
+            }
+        }
+        staple_syntax::Span::Compiler => "<compiler>".to_owned(),
+    }
 }
 
 impl LoweredPatternBindingItem {
@@ -3763,6 +3783,7 @@ impl LoweredProgram {
             .map(|value| value.value_type.clone())
             .unwrap_or(CheckedType::Never);
         let propagating = binding.kind == staple_syntax::PatternBindingKind::Propagating;
+        let asserting = binding.kind == staple_syntax::PatternBindingKind::Asserting;
         let propagation = module.propagation_for(binding.syntax.id).cloned();
         // A propagating `from` value is matched as its sum representation,
         // which shares the value's runtime layout.
@@ -3773,12 +3794,19 @@ impl LoweredProgram {
             _ => value_type,
         };
         let pattern = self.lower_pattern(module, &binding.pattern, &subject)?;
-        if propagating && propagation.is_none() {
+        if (propagating || asserting) && propagation.is_none() {
             return Err(Diagnostic::new(
                 binding.syntax.span.clone(),
                 "cannot lower a propagating binding without checked propagation metadata",
             ));
         }
+        let panic_message = asserting.then(|| {
+            format!(
+                "panic: `let!` pattern `{}` did not match at {}\n",
+                binding.pattern.syntax().text().trim(),
+                panic_location_text(&binding.syntax.span),
+            )
+        });
         let (propagation_plan, propagation_residual) = propagation
             .as_ref()
             .map(LoweredPatternBindingItem::failure_path)
@@ -3787,6 +3815,8 @@ impl LoweredProgram {
             pattern,
             value,
             propagating,
+            asserting,
+            panic_message,
             propagation,
             propagation_plan,
             propagation_residual,
@@ -19417,7 +19447,7 @@ mod tests {
             "type IOError = wrap String\n",
             "def read: () -> Ok I32 | IOError = () => Ok (42)\n",
             "def propagates = () => {\n",
-            "  let Ok(value)? = read()\n",
+            "  let? Ok(value) = read()\n",
             "  value\n",
             "}\n",
         ));
@@ -21091,7 +21121,7 @@ mod tests {
             "  let whole@(third, fourth) = (3, 4)\n",
             "  let Wrapper inner = Wrapper (value: 5)\n",
             "  let Ref payload = Ref 6\n",
-            "  let Ok(value)? = read()\n",
+            "  let? Ok(value) = read()\n",
             "  first + second + third + fourth + whole.0 + inner + payload + value\n",
             "}\n",
         ));
@@ -22677,7 +22707,7 @@ mod tests {
             "}\n",
             "def patterns = () => {\n",
             "  let (first, second) = (1, 2)\n",
-            "  let Ok(value)? = read()\n",
+            "  let? Ok(value) = read()\n",
             "  let Wrapper inner = Wrapper (value: first + second + value)\n",
             "  inner\n",
             "}\n",

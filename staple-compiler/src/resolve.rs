@@ -3817,8 +3817,10 @@ impl NameResolver {
         match item {
             Item::Binding(binding) => self.resolve_binding(binding),
             Item::PatternBinding(binding) => {
-                if binding.kind == PatternBindingKind::Propagating {
-                    if self.function_stack.is_empty() {
+                if binding.kind != PatternBindingKind::Irrefutable {
+                    if binding.kind == PatternBindingKind::Propagating
+                        && self.function_stack.is_empty()
+                    {
                         self.diagnostics.push(Diagnostic::new(
                             binding.syntax.span.clone(),
                             "propagating bindings are only allowed inside a function",
@@ -3831,7 +3833,7 @@ impl NameResolver {
                     if !matches!(root, Pattern::Nominal(_)) {
                         self.diagnostics.push(Diagnostic::new(
                             binding.pattern.syntax().span.clone(),
-                            "a propagating binding requires a nominal pattern",
+                            "a propagating or asserting binding requires a nominal pattern",
                         ));
                     }
                 }

@@ -357,7 +357,10 @@ pub struct PatternBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternBindingKind {
     Irrefutable,
+    /// `let? Pattern = value`: returns every other alternative.
     Propagating,
+    /// `let! Pattern = value`: panics unless the alternative matches.
+    Asserting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

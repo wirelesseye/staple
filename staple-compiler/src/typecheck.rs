@@ -6251,7 +6251,7 @@ impl TypeChecker {
             Item::PatternBinding(binding) => {
                 let value_type = self.check_expression(module, &binding.value);
                 if !self.did_return {
-                    if binding.kind == PatternBindingKind::Propagating {
+                    if binding.kind != PatternBindingKind::Irrefutable {
                         self.check_propagating_binding(module, binding, &value_type);
                     } else {
                         self.bind_pattern_types(module, &binding.pattern, &value_type);
@@ -6589,6 +6589,7 @@ impl TypeChecker {
         binding: &staple_syntax::PatternBinding,
         value_type: &CheckedType,
     ) {
+        let asserts = binding.kind == PatternBindingKind::Asserting;
         let mut root = &binding.pattern;
         while let Pattern::At(at) = root {
             self.pattern_types.insert(at.syntax.id, value_type.clone());
@@ -6637,7 +6638,10 @@ impl TypeChecker {
             if *value_type != CheckedType::Error {
                 self.diagnostics.push(Diagnostic::new(
                     binding.value.syntax().span.clone(),
-                    format!("a propagating binding requires a sum value, found `{value_type}`"),
+                    format!(
+                        "a `{}` binding requires a sum value, found `{value_type}`",
+                        if asserts { "let!" } else { "let?" }
+                    ),
                 ));
             }
             return;
@@ -6662,6 +6666,19 @@ impl TypeChecker {
             return;
         };
         self.bind_pattern_types(module, &pattern.argument, representation);
+        if asserts {
+            // A mismatch panics instead of returning, so nothing joins the
+            // function result and the failure value is never built.
+            self.propagations.insert(
+                binding.syntax.id,
+                CheckedPropagation {
+                    source: value_type.clone(),
+                    success_index: *success_index,
+                    result: value_type.clone(),
+                },
+            );
+            return;
+        }
         let contributions = self
             .return_contributions
             .last_mut()

@@ -140,6 +140,55 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(())
     }
 
+    /// Writes `message` to stderr and exits with status 1, ending the block.
+    pub(crate) fn build_panic(&self, message: &str, span: &Span) -> CodeGenerationResult<()> {
+        let fail =
+            |error: inkwell::builder::BuilderError| Diagnostic::new(span.clone(), error.to_string());
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let write = self.declare_named_function(
+            "write",
+            self.size_type.fn_type(
+                &[
+                    self.context.i32_type().into(),
+                    pointer_type.into(),
+                    self.size_type.into(),
+                ],
+                false,
+            ),
+        );
+        let exit = self.declare_named_function(
+            "exit",
+            self.context
+                .void_type()
+                .fn_type(&[self.context.i32_type().into()], false),
+        );
+        let text = self
+            .builder
+            .build_global_string_ptr(message, "panic.message")
+            .map_err(fail)?
+            .as_pointer_value();
+        self.builder
+            .build_direct_call(
+                write,
+                &[
+                    self.context.i32_type().const_int(2, false).into(),
+                    text.into(),
+                    self.size_type.const_int(message.len() as u64, false).into(),
+                ],
+                "",
+            )
+            .map_err(fail)?;
+        self.builder
+            .build_direct_call(
+                exit,
+                &[self.context.i32_type().const_int(1, false).into()],
+                "",
+            )
+            .map_err(fail)?;
+        self.builder.build_unreachable().map_err(fail)?;
+        Ok(())
+    }
+
     pub(crate) fn unit_value(&self) -> inkwell::values::AnyValueEnum<'context> {
         self.context
             .struct_type(&[], true)

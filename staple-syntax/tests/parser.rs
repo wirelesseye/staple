@@ -2639,7 +2639,7 @@ fn rejects_missing_return_values_and_empty_separators() {
 fn parses_sum_types_and_propagating_patterns_losslessly() {
     let source = concat!(
         "def read: String -> Ok String | IOError = path => Ok(path)\n",
-        "def parse = (path: String) => { let Ok(file)? = read(path); Ok(file) }\n",
+        "def parse = (path: String) => { let? Ok(file) = read(path); Ok(file) }\n",
     );
     let root = parse(source).expect("sum and propagation syntax should parse");
     assert_eq!(root.text(), source);

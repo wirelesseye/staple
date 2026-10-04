@@ -2487,14 +2487,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if environment.returned {
                     return Ok(());
                 }
-                if binding.propagating {
+                if binding.propagating || binding.asserting {
                     let value = value_as_basic(value).ok_or_else(|| {
                         Diagnostic::new(
                             item.origin.span.clone(),
                             "destructured value is not first-class",
                         )
                     })?;
-                    return self.emit_propagating_binding(owner, &binding, value, environment);
+                    self.emit_propagating_binding(owner, &binding, value, environment)?;
+                    if binding.propagating {
+                        return Ok(());
+                    }
+                    self.store_pattern_globals(owner, binding.pattern, environment)?;
+                    return self.store_pattern_initialization_state(owner, binding.pattern, 2);
                 }
                 self.bind_pattern(owner, binding.pattern, value, environment)?;
                 self.store_pattern_globals(owner, binding.pattern, environment)?;
@@ -4305,6 +4310,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_conditional_branch(success, success_block, failure_block)
             .map_err(compiler_diagnostic)?;
         self.backend.builder.position_at_end(failure_block);
+        if let Some(message) = &binding.panic_message {
+            self.backend.build_panic(message, &span)?;
+            self.backend.builder.position_at_end(success_block);
+            return self.bind_propagated_success(
+                owner,
+                binding,
+                sum_value,
+                source_sum,
+                propagation.success_index,
+                &span,
+                environment,
+            );
+        }
         let failure_value = if propagation.source == propagation.result {
             sum_value.as_any_value_enum()
         } else if let Some(index) = binding.propagation_residual {
@@ -4349,10 +4367,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_return(Some(&failure_value))
             .map_err(compiler_diagnostic)?;
         self.backend.builder.position_at_end(success_block);
-        let success_value = self.backend.extract_sum_alternative(
+        self.bind_propagated_success(
+            owner,
+            binding,
             sum_value,
             source_sum,
             propagation.success_index,
+            &span,
+            environment,
+        )
+    }
+
+    /// Destructures a matched success alternative and binds any at bindings.
+    #[allow(clippy::too_many_arguments)]
+    fn bind_propagated_success(
+        &mut self,
+        owner: EmissionOwner,
+        binding: &crate::LoweredPatternBindingItem,
+        sum_value: inkwell::values::StructValue<'context>,
+        source_sum: &crate::CheckedSumType,
+        success_index: usize,
+        span: &staple_syntax::Span,
+        environment: &mut FunctionEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let span = span.clone();
+        let success_value = self.backend.extract_sum_alternative(
+            sum_value,
+            source_sum,
+            success_index,
             span.clone(),
         )?;
         let mut root = binding.pattern;

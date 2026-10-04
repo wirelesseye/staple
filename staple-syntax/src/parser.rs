@@ -1347,11 +1347,17 @@ impl Grammar {
             self.position = checkpoint;
             return self.parse_binding(visibility, start).map(Item::Binding);
         }
+        let refutable_kind = if self.eat_operator("?") {
+            Some(PatternBindingKind::Propagating)
+        } else if self.eat(TokenKind::Bang) {
+            Some(PatternBindingKind::Asserting)
+        } else {
+            None
+        };
         let pattern = self.parse_pattern()?;
         if pattern_has_move(&pattern) {
             return Err(self.error("`move` is only allowed on a function parameter"));
         }
-        let propagating = self.eat_operator("?");
         if !matches!(pattern, Pattern::Binding(_)) {
             if visibility == Visibility::Public {
                 return Err(self.error("destructuring `let` bindings cannot be public"));
@@ -1363,17 +1369,13 @@ impl Grammar {
             let value = self.parse_expression()?;
             return Ok(Item::PatternBinding(PatternBinding {
                 syntax: self.syntax(pattern_start),
-                kind: if propagating {
-                    PatternBindingKind::Propagating
-                } else {
-                    PatternBindingKind::Irrefutable
-                },
+                kind: refutable_kind.unwrap_or(PatternBindingKind::Irrefutable),
                 pattern,
                 value,
             }));
         }
-        if propagating {
-            return Err(self.error("`?` requires a destructuring pattern"));
+        if refutable_kind.is_some() {
+            return Err(self.error("`let?` and `let!` require a destructuring pattern"));
         }
         self.position = checkpoint;
         self.parse_binding(visibility, start).map(Item::Binding)
