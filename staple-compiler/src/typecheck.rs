@@ -15074,22 +15074,55 @@ pub(crate) fn infer_type_parameters(
                 && infer_type_parameters(&template.result, &actual.result, substitutions)
         }
         CheckedType::Sum(template) => {
-            let CheckedType::Sum(actual) = actual else {
-                let normalized = normalize_substituted_sum(
-                    template
-                        .alternatives
-                        .iter()
-                        .cloned()
-                        .map(|alternative| substitute_type(alternative, substitutions))
-                        .collect(),
-                );
-                return !matches!(normalized, CheckedType::Sum(_))
-                    && infer_type_parameters(&normalized, actual, substitutions);
+            let normalized = normalize_substituted_sum(
+                template
+                    .alternatives
+                    .iter()
+                    .cloned()
+                    .map(|alternative| substitute_type(alternative, substitutions))
+                    .collect(),
+            );
+            if !matches!(normalized, CheckedType::Sum(_)) {
+                return infer_type_parameters(&normalized, actual, substitutions);
+            }
+            // Substitution can reorder sum alternatives or remove `Never`.
+            // Match concrete shapes before bare parameters so `Ok T | Error`
+            // infers T from Ok and Error from the remaining alternative.
+            let mut remaining = match actual {
+                CheckedType::Sum(sum) => sum.alternatives.iter().collect::<Vec<_>>(),
+                CheckedType::Never => Vec::new(),
+                other => vec![other],
             };
-            template.alternatives.len() == actual.alternatives.len()
-                && template.alternatives.iter().zip(&actual.alternatives).all(
-                    |(template, actual)| infer_type_parameters(template, actual, substitutions),
-                )
+            let mut alternatives = template.alternatives.iter().collect::<Vec<_>>();
+            alternatives
+                .sort_by_key(|alternative| matches!(alternative, CheckedType::Parameter { .. }));
+            let mut candidate = substitutions.clone();
+            for alternative in alternatives {
+                let matches = remaining
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, actual)| {
+                        let mut inferred = candidate.clone();
+                        infer_type_parameters(alternative, actual, &mut inferred)
+                            .then_some((index, inferred))
+                    })
+                    .collect::<Vec<_>>();
+                if let [(index, inferred)] = matches.as_slice() {
+                    remaining.remove(*index);
+                    candidate = inferred.clone();
+                } else if matches.is_empty()
+                    && infer_type_parameters(alternative, &CheckedType::Never, &mut candidate)
+                {
+                    continue;
+                } else {
+                    return false;
+                }
+            }
+            if !remaining.is_empty() {
+                return false;
+            }
+            *substitutions = candidate;
+            true
         }
         CheckedType::Wrapper { id, arguments, .. } => {
             let CheckedType::Wrapper {

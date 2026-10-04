@@ -11534,6 +11534,67 @@ fn resolves_local_const_names_before_their_textual_position_like_def() {
 }
 
 #[test]
+fn standard_library_conversion_blankets_consume_non_copy_values() {
+    let module = type_check(concat!(
+        "type Resource = wrap I32\n",
+        "impl Drop Resource { cleanup = Resource value => () }\n",
+        "def convert_resource: () -> Ok Resource | Never = () => {\n",
+        "    let resource: Resource = Convert.convert (Resource 41)\n",
+        "    TryConvert.try_convert resource\n",
+        "}\n",
+        "def identity: <T> move T -> T = move value => Convert.convert value\n",
+        "def attempt: <T> move T -> Ok T | Never = move value => TryConvert.try_convert value\n",
+        "let generic: Ok Resource | Never = attempt (identity (Resource 42))\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("identity conversion blankets should consume non-Copy values");
+}
+
+#[test]
+fn standard_library_try_convert_delegates_to_convert() {
+    let module = type_check(concat!(
+        "use std.convert.(Convert, TryConvert)\n",
+        "type Source = wrap I32\n",
+        "type Target = wrap I32\n",
+        "impl Convert Source Target { convert = move Source value => Target value }\n",
+        "let converted: Target = Convert.convert (Source 41)\n",
+        "let attempted: Ok Target | Never = TryConvert.try_convert (Source 42)\n",
+        "def attempt: <From, To where Convert From To> move From -> Ok To | Never =\n",
+        "    move value => TryConvert.try_convert value\n",
+        "let generic: Ok Target | Never = attempt (Source 43)\n",
+        "let error: TryConvert.Error Source Target -> Never = value => value\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("infallible conversions should provide TryConvert with Never errors");
+}
+
+#[test]
+fn standard_library_try_convert_supports_fallible_implementations() {
+    let module = type_check(concat!(
+        "type Source = wrap I32\n",
+        "type Target = wrap I32\n",
+        "type ConversionError = wrap I32\n",
+        "impl TryConvert Source Target {\n",
+        "    type Error = ConversionError\n",
+        "    try_convert = move Source value => match (value == 0) {\n",
+        "        True() => ConversionError value,\n",
+        "        False() => Ok (Target value),\n",
+        "    }\n",
+        "}\n",
+        "let success: Ok Target | ConversionError = TryConvert.try_convert (Source 42)\n",
+        "let failure: Ok Target | ConversionError = TryConvert.try_convert (Source 0)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("manual fallible conversions should compile");
+}
+
+#[test]
 fn every_copy_type_gets_a_blanket_clone_implementation() {
     let module = type_check(concat!(
         "let value: I32 = 41\n",

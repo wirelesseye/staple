@@ -1,0 +1,25 @@
+pub mod
+
+/// Converts a value into another type without failure.
+pub trait Convert From To {
+    /// Consumes the source value and returns the converted value.
+    convert: move From -> To
+}
+
+/// Converts a value into another type, possibly returning an error.
+pub trait TryConvert From To {
+    /// The error returned when conversion fails.
+    type Error
+
+    /// Consumes the source value and returns a success or an error.
+    try_convert: move From -> Ok To | Error
+}
+
+impl<T> Convert T T {
+    convert = move value => value
+}
+
+impl<From, To where Convert From To> TryConvert From To {
+    type Error = Never
+    try_convert = move value => Ok (To :: Convert.convert value)
+}

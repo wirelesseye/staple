@@ -1,6 +1,7 @@
 pub mod
 
 pub use std.clone.*
+pub use std.convert.*
 pub use std.default.*
 pub use std.flow.*
 pub use std.iterator.*
