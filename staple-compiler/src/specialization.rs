@@ -147,6 +147,12 @@ impl CanonicalType {
 
     fn convert(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
         let key = match value_type {
+            CheckedType::Forall(_) => {
+                return Err(origin_diagnostic(
+                    origin,
+                    "generic function types never reach lowering",
+                ));
+            }
             CheckedType::Inferred => {
                 return Err(origin_diagnostic(
                     origin,

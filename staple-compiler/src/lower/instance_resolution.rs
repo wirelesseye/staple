@@ -52,6 +52,22 @@ impl RelevantParameters {
             .or_insert_with(|| name.to_owned());
     }
 
+    /// Merges the parameters noticed inside a scheme, except the scheme's own.
+    fn absorb_free(&mut self, inner: Self, bound: &HashSet<TypeParameterId>) {
+        for parameter in inner.types {
+            if !bound.contains(&parameter) {
+                let name = inner.names.get(&parameter).map_or("", String::as_str);
+                self.notice_type(parameter, name);
+            }
+        }
+        for parameter in inner.effects {
+            if !bound.contains(&parameter) {
+                let name = inner.names.get(&parameter).map_or("", String::as_str);
+                self.notice_effect(parameter, name);
+            }
+        }
+    }
+
     /// The declared name of a relevant parameter, when it was observed.
     pub(crate) fn name(&self, parameter: TypeParameterId) -> Option<&str> {
         self.names.get(&parameter).map(String::as_str)
@@ -324,6 +340,22 @@ impl SubstitutionEnvironment {
 
 fn collect_referenced_parameters(value_type: &CheckedType, out: &mut BTreeSet<TypeParameterId>) {
     match value_type {
+        // Lowering never sees a scheme in Stage 2 (canonicalization reports one
+        // as an invariant violation); collect only its free parameters.
+        CheckedType::Forall(scheme) => {
+            let mut inner = BTreeSet::new();
+            collect_referenced_parameters(&scheme.body, &mut inner);
+            for bound in &scheme.trait_bounds {
+                for argument in &bound.arguments {
+                    collect_referenced_parameters(argument, &mut inner);
+                }
+            }
+            for bound in &scheme.subtype_bounds {
+                collect_referenced_parameters(&bound.supertype, &mut inner);
+            }
+            let bound = scheme.bound_ids();
+            out.extend(inner.into_iter().filter(|id| !bound.contains(id)));
+        }
         CheckedType::Parameter { id, .. } => {
             out.insert(*id);
         }
@@ -2243,6 +2275,20 @@ impl<'a> ParameterCollector<'a> {
     /// carried by the nominal ID plus arguments, matching canonical keys.
     fn collect_type(&mut self, value_type: &CheckedType) {
         match value_type {
+            // Lowering never sees a scheme in Stage 2 (canonicalization reports
+            // one as an invariant violation); notice only its free parameters.
+            CheckedType::Forall(scheme) => {
+                let outer = std::mem::take(&mut self.relevant);
+                self.collect_type(&scheme.body);
+                for bound in &scheme.trait_bounds {
+                    self.collect_bound(bound);
+                }
+                for bound in &scheme.subtype_bounds {
+                    self.collect_type(&bound.supertype);
+                }
+                let inner = std::mem::replace(&mut self.relevant, outer);
+                self.relevant.absorb_free(inner, &scheme.bound_ids());
+            }
             CheckedType::Inferred | CheckedType::Error => {}
             CheckedType::Never
             | CheckedType::I32

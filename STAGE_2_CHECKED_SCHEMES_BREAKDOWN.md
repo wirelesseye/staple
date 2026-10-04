@@ -236,12 +236,23 @@ causes it.
 
 ## Intended Differences
 
-- Possibly one, decided in Step 3: a non-generic local function whose type
-  mentions an enclosing generic parameter is no longer instantiated at its
-  call sites. This changes only programs that the old heuristic accepted
-  by inferring an outer rigid parameter as a concrete type.
-- None otherwise. In particular, `Display` of a `Forall` never reaches user
-  output in this stage, because diagnostics and hover print peeled types.
+Both differences were confirmed in the implementation review by running the
+pre-Stage 2 compiler on the same programs.
+
+- **Enclosing parameters are rigid.** A non-generic local function whose
+  type mentions an enclosing generic parameter is no longer instantiated at
+  its call sites. The old compiler accepts
+  `def helper: [move T] -> T = move x => x; helper 5` inside a generic
+  `outer`, even though the body is ill-typed for every `T` except `I32`.
+  Stage 2 rejects it with ``expected `T`, found `I32` ``
+  (`checked_schemes_preserve_enclosing_rigid_parameters`).
+- **`.<…>` on a non-generic function.** The diagnostic changes from
+  "generic value expects 0 type arguments, but 1 were supplied" to
+  "call-site type arguments require a generic function or constructor",
+  because only a symbol with a scheme accepts explicit arguments
+  (`call_site_type_arguments_reject_wrong_arity_and_conflicts`).
+- None otherwise. `Display` of a `Forall` never reaches user output in this
+  stage, because diagnostics and hover print peeled types.
 
 ## Risks
 

@@ -12992,7 +12992,7 @@ fn call_site_type_arguments_reject_wrong_arity_and_conflicts() {
         ),
         (
             "def f: I32 -> I32 = x => x\nlet x = f.<I32> 1\n",
-            "expects 0 type arguments",
+            "call-site type arguments require a generic function or constructor",
         ),
         (
             "def f: <T> move T -> T = move x => x\nlet x = f.<I32> \"wrong\"\n",
@@ -13186,5 +13186,100 @@ fn forall_preserves_generic_compile_time_helpers() {
         "def concrete_type: <T> () -> Type = () => parse_quote { I32 }\n",
         "macro typed: Expr -> Expr = value => { let ty: Type = concrete_type (); parse_quote { $ty :: $value } }\n",
         "let typed_answer: I32 = typed 7\n",
+    ));
+}
+
+#[test]
+fn checked_schemes_preserve_enclosing_rigid_parameters() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def outer: <T> [move T] -> I32 = move value => {\n",
+            "  def helper: [move T] -> T = move x => x\n",
+            "  helper 5\n",
+            "  0\n",
+            "}\n",
+            "outer 1\n",
+        )))
+        .expect_err_diagnostics("a local nongeneric helper cannot instantiate its enclosing T");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `T`, found `I32`")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn checked_schemes_instantiate_local_generics_independently() {
+    type_check(concat!(
+        "def outer: <T> [move T] -> T = move value => {\n",
+        "  def helper: <U> [move U] -> U = move x => x\n",
+        "  helper value\n",
+        "}\n",
+        "outer 1\n",
+    ));
+}
+
+#[test]
+fn checked_schemes_expose_templates_and_explicit_effect_arguments() {
+    let module = type_check(concat!(
+        "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\n",
+        "let value: I32 = apply.<(_ -> _)> (() => 42)\n",
+    ));
+    let binding = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "apply" => Some(binding),
+            _ => None,
+        })
+        .expect("effect-generic binding");
+    let symbol = module.resolved().symbol_for(binding.syntax.id).unwrap();
+    let scheme = module
+        .scheme_of_symbol(symbol)
+        .expect("effect parameter has a scheme");
+    assert!(matches!(
+        scheme.parameters.as_slice(),
+        [staple_compiler::CheckedSchemeParameter::Effect { .. }]
+    ));
+    assert_eq!(module.type_of_symbol(symbol), Some(scheme.body.as_ref()));
+    assert_eq!(
+        module.declared_type_of_symbol(symbol),
+        Some(scheme.body.as_ref().clone())
+    );
+}
+
+#[test]
+fn checked_schemes_preserve_concrete_constructor_residuals() {
+    type_check(concat!(
+        "use std.slice.Slice\n",
+        "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
+    ));
+}
+
+#[test]
+fn checked_schemes_preserve_invalid_generic_body_diagnostics() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def bad: <T> I32 -> I32 = 42\n"))
+        .expect_err_diagnostics("a generic def still requires a function body");
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "expected `I32 -> I32`, found `I32`",
+            "a generic `def` requires a function body",
+        ]
+    );
+}
+
+#[test]
+fn checked_schemes_preserve_trait_argument_inference_from_expected_types() {
+    type_check(concat!(
+        "let equals: (I32, I32) -> Bool = Eq.eq.<_>\n",
+        "let same: Bool = equals (1, 1)\n",
     ));
 }
