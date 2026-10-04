@@ -350,9 +350,8 @@ scope in the binding's value. This matches today's behavior for a generic
 - **Exit:** every example in the summary type-checks; negative tests cover
   each restriction.
 
-**Breakdown plan: required.** It needs its own rule-by-rule spec and test
-matrix (instantiation, generalization, entailment, impredicative
-annotations, mutable storage, effects) before code.
+**Breakdown plan: required.** See
+[STAGE_3_FIRST_CLASS_POLYMORPHISM_BREAKDOWN.md](STAGE_3_FIRST_CLASS_POLYMORPHISM_BREAKDOWN.md).
 
 ### Stage 4 — Core dictionary passing (unbounded type parameters)
 
@@ -460,7 +459,7 @@ small plan, and they can be scheduled separately or dropped.
 |---|---|
 | 1 — `Forall` in the syntax tree | **Required** — [written](STAGE_1_FORALL_SYNTAX_BREAKDOWN.md) |
 | 2 — Explicit checked schemes | **Required** — [written](STAGE_2_CHECKED_SCHEMES_BREAKDOWN.md) |
-| 3 — First-class polymorphism in the checker | **Required** |
+| 3 — First-class polymorphism in the checker | **Required** — [written](STAGE_3_FIRST_CLASS_POLYMORPHISM_BREAKDOWN.md) |
 | 4 — Core dictionary passing | **Required** (split 4a/4b) |
 | 5 — Effect polymorphism at run time | Not required |
 | 6 — Trait bounds via dictionaries | **Required** |
