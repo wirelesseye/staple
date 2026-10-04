@@ -310,22 +310,25 @@ scope in the binding's value. This matches today's behavior for a generic
 
 - Add `CheckedType::Forall(CheckedScheme)` (type and effect parameters,
   bounds, body).
-- Store generic `def`s and trait members in `function_types` as schemes.
+- Store the symbol types of generic `def`s, companion members, generic
+  intrinsics, and generic constructors as schemes. `function_types` keeps
+  the body templates. Trait members keep free trait parameters until
+  Stage 7.
 - Instantiate when a `Forall` is encountered. This replaces the
-  `generic_function` flag, `active_generic_parameters`-based detection, and
-  free-parameter heuristics.
+  `generic_function` flag and its `active_generic_parameters` test.
 - Derive explicit `.<…>` parameter order from the scheme (companion
   parameters first, then the member's), replacing the `call_type_parameters`
   side table. Trait methods keep `trait_parameter_arguments` until Stage 7.
-- Update `contains_type_parameter`, `infer_type_parameters`, and their users
-  in lowering and specialization.
+- Use-site bound checks read the scheme's bounds.
+- `TypedModule::type_of_symbol` returns the scheme's body, so lowering,
+  ownership, and the LSP are unchanged. Lowering learns about `Forall` in
+  Stage 4.
 - Still rank-1, still monomorphization only.
 - No `Staple.md` change.
 - **Exit:** identical behavior; all tests pass; emitted IR unchanged.
 
-**Breakdown plan: required.** `typecheck.rs` and `lower.rs` are the largest
-files and lean on the "free parameters mean generic" convention; the
-migration needs an inventory of those sites and an ordered cutover.
+**Breakdown plan: required.** See
+[STAGE_2_CHECKED_SCHEMES_BREAKDOWN.md](STAGE_2_CHECKED_SCHEMES_BREAKDOWN.md).
 
 ### Stage 3 — Type system for first-class polymorphism (checker only)
 
@@ -456,7 +459,7 @@ small plan, and they can be scheduled separately or dropped.
 | Stage | Breakdown plan |
 |---|---|
 | 1 — `Forall` in the syntax tree | **Required** — [written](STAGE_1_FORALL_SYNTAX_BREAKDOWN.md) |
-| 2 — Explicit checked schemes | **Required** |
+| 2 — Explicit checked schemes | **Required** — [written](STAGE_2_CHECKED_SCHEMES_BREAKDOWN.md) |
 | 3 — First-class polymorphism in the checker | **Required** |
 | 4 — Core dictionary passing | **Required** (split 4a/4b) |
 | 5 — Effect polymorphism at run time | Not required |
@@ -476,8 +479,10 @@ small plan, and they can be scheduled separately or dropped.
   - an unused polymorphic value produces no descriptors, dictionaries, or
     adapters.
 - Stages 1 and 2 must leave the existing suite and emitted IR unchanged,
-  checked with `scripts/compare-llvm-ir.py` against a reference binary built
-  from the stage's base commit.
+  checked with `scripts/compare-llvm-ir.py` against a **release** reference
+  binary built from the stage's base commit (debug binaries take over an
+  hour on the full example and corpus set). Stage 1 passed: 100 of 100
+  programs `same`.
 - Every stage that changes user-visible behavior updates `Staple.md` in the
   same stage.
 - Suite command: `cargo test --workspace --quiet`.

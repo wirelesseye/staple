@@ -150,8 +150,8 @@ starts.
 - `parse_binding` and the extern-member parser stop calling
   `parse_bracketed_generics()` themselves; the annotation's `parse_type()`
   produces the `Forall`. `SyntaxId`s are still allocated in source order.
-  The new `GenericParameters` and `ForallType` nodes add ids, which is
-  harmless because ids are only keys (see Risks).
+  The new `GenericParameters` and `ForallType` nodes get ids in a separate
+  namespace, so no other node's id changes (see Risks).
 - `parse_binding` keeps the "compile-time parameters are only allowed on
   `def` bindings" error, raised when a non-`def` binding's annotation is a
   top-level `Forall`.
@@ -268,12 +268,13 @@ starts.
 
 ## Risks
 
-- **`SyntaxId` shifts.** The new nodes allocate ids, which shifts every
-  later id in a file. Ids are only keys, and planned names don't use them,
-  but the LSP relies on the open file being parsed in the same order as the
-  program (see the `parse_at` fix). Both paths use the same parser, so they
-  shift together. Any test that pins raw id numbers needs updating, and
-  Step 2 checks for such tests.
+- **`SyntaxId` shifts.** *Resolved in the implementation.* Rather than
+  shifting every later id, `GenericParameters` and `ForallType` nodes get
+  ids in a separate high-bit namespace (`SyntaxId::annotation_node`), and
+  macro-generated copies get a third namespace with their own cursor. Every
+  other node keeps the id it had before `Forall` existed. There is one macro
+  expander per program and id counters are passed along, never derived from
+  the largest id, so the namespaces cannot collide.
 - **Double declaration.** Resolve must not declare the top-level `Forall`'s
   parameters both in `resolve_binding` and in the nested `resolve_type`
   arm. `resolve_binding` resolves `annotation_body()`, not the whole
