@@ -95,7 +95,7 @@ fn parses_effect_parameters_and_open_effect_rows() {
         panic!("expected binding")
     };
     assert!(
-        matches!(binding.type_parameters.as_slice(), [staple_syntax::TypeParameterPattern::Binding(_), staple_syntax::TypeParameterPattern::Effect(value)] if value.name == "E")
+        matches!(binding.all_type_parameters().as_slice(), [staple_syntax::TypeParameterPattern::Binding(_), staple_syntax::TypeParameterPattern::Effect(value)] if value.name == "E")
     );
 }
 
@@ -579,9 +579,9 @@ fn parses_traits_implementations_and_bounds_losslessly() {
     let Item::Binding(binding) = unmodified_item(&root.items[2]) else {
         panic!("expected bounded function binding")
     };
-    assert_eq!(binding.type_parameters.len(), 1);
-    assert_eq!(binding.trait_bounds.len(), 1);
-    assert_eq!(binding.trait_bounds[0].trait_name.name, "ToString");
+    assert_eq!(binding.all_type_parameters().len(), 1);
+    assert_eq!(binding.all_trait_bounds().len(), 1);
+    assert_eq!(binding.all_trait_bounds()[0].trait_name.name, "ToString");
 }
 
 #[test]
@@ -690,7 +690,7 @@ fn parses_curried_and_product_trait_parameters_and_arguments() {
     let Item::Binding(combine) = unmodified_item(&root.items[4]) else {
         panic!("expected bounded function");
     };
-    assert_eq!(combine.trait_bounds[0].arguments.len(), 3);
+    assert_eq!(combine.all_trait_bounds()[0].arguments.len(), 3);
 }
 
 #[test]
@@ -757,7 +757,7 @@ fn parses_trait_associated_types_losslessly() {
     let Item::Binding(iterate) = unmodified_item(&root.items[3]) else {
         panic!("expected iterate binding");
     };
-    assert_eq!(iterate.trait_bounds[0].arguments.len(), 1);
+    assert_eq!(iterate.all_trait_bounds()[0].arguments.len(), 1);
 }
 
 #[test]
@@ -2267,7 +2267,7 @@ fn parses_compile_time_parameters_and_type_application() {
     let Item::Binding(identity) = unmodified_item(&root.items[2]) else {
         panic!("expected generic function binding");
     };
-    assert_eq!(identity.type_parameters.len(), 1);
+    assert_eq!(identity.all_type_parameters().len(), 1);
     let Item::Binding(value) = unmodified_item(&root.items[3]) else {
         panic!("expected annotated binding");
     };
@@ -2383,7 +2383,7 @@ fn parses_sized_relaxations_losslessly() {
         panic!("expected generic binding");
     };
     assert!(matches!(
-        preserve.type_parameters.as_slice(),
+        preserve.all_type_parameters().as_slice(),
         [staple_syntax::TypeParameterPattern::Binding(binding)] if !binding.sized
     ));
 
@@ -2391,7 +2391,7 @@ fn parses_sized_relaxations_losslessly() {
         panic!("expected generic binding");
     };
     assert!(matches!(
-        ordinary.type_parameters.as_slice(),
+        ordinary.all_type_parameters().as_slice(),
         [staple_syntax::TypeParameterPattern::Binding(binding)] if binding.sized
     ));
 
@@ -3020,10 +3020,10 @@ fn generic_extern_bindings_and_companions_round_trip() {
     let Item::ExternBlock(block) = &module.items[0] else {
         panic!("extern block")
     };
-    assert_eq!(block.bindings[0].type_parameters.len(), 1);
-    assert_eq!(block.bindings[1].trait_bounds.len(), 1);
+    assert_eq!(block.bindings[0].all_type_parameters().len(), 1);
+    assert_eq!(block.bindings[1].all_trait_bounds().len(), 1);
     assert!(matches!(
-        block.bindings[2].type_parameters[0],
+        block.bindings[2].all_type_parameters()[0],
         staple_syntax::TypeParameterPattern::Effect(_)
     ));
     let Item::Submodule(companion) = &module.items[1] else {
@@ -3032,12 +3032,12 @@ fn generic_extern_bindings_and_companions_round_trip() {
     let Item::ExternBlock(members) = &companion.module.items[0] else {
         panic!("extern members")
     };
-    assert_eq!(members.bindings[0].type_parameters.len(), 1);
-    assert_eq!(members.bindings[1].type_parameters.len(), 2);
-    assert_eq!(members.bindings[0].trait_bounds.len(), 1);
+    assert_eq!(members.bindings[0].all_type_parameters().len(), 1);
+    assert_eq!(members.bindings[1].all_type_parameters().len(), 2);
+    assert_eq!(members.bindings[0].all_trait_bounds().len(), 1);
     assert_ne!(
-        members.bindings[0].trait_bounds[0].syntax.id,
-        members.bindings[1].trait_bounds[0].syntax.id
+        members.bindings[0].all_trait_bounds()[0].syntax.id,
+        members.bindings[1].all_trait_bounds()[0].syntax.id
     );
     assert!(
         members
@@ -3051,7 +3051,7 @@ fn generic_extern_bindings_and_companions_round_trip() {
     let Item::ExternBlock(block) = &reparsed.items[0] else {
         panic!("extern block")
     };
-    assert_eq!(block.bindings[1].trait_bounds.len(), 1);
+    assert_eq!(block.bindings[1].all_trait_bounds().len(), 1);
     assert!(parse("extern \"c\" { identity: <T> T -> T }\n").is_ok());
 }
 
@@ -3112,5 +3112,140 @@ fn rejects_malformed_call_site_type_arguments() {
         "let x = f.<I32, , String> ()\n",
     ] {
         assert!(parse(source).is_err(), "unexpectedly parsed {source}");
+    }
+}
+
+#[test]
+fn forall_annotations_own_parameters_and_constraints() {
+    let source = "def run: <T, effect E where ?Sized T, Clone T, T <: I32> (Ref T, () ->{E} ()) ->{E} Ref T = x => x\nextern \"staple-intrinsic\" { identity: <U> U -> U }\n";
+    let module = parse(source).unwrap();
+    let Item::Binding(binding) = unmodified_item(&module.items[0]) else {
+        panic!("binding")
+    };
+    let Some(Type::Forall(ty)) = &binding.annotation else {
+        panic!("forall annotation")
+    };
+    assert_eq!(ty.generics.parameters.len(), 2);
+    assert!(
+        matches!(&ty.generics.parameters[0], staple_syntax::TypeParameterPattern::Binding(p) if !p.sized)
+    );
+    assert!(
+        matches!(&ty.generics.parameters[1], staple_syntax::TypeParameterPattern::Effect(p) if p.name == "E")
+    );
+    assert_eq!(ty.generics.trait_bounds.len(), 1);
+    assert_eq!(ty.generics.subtype_bounds.len(), 1);
+    assert_eq!(
+        ty.generics.syntax.text().trim(),
+        "<T, effect E where ?Sized T, Clone T, T <: I32>"
+    );
+    assert!(matches!(binding.annotation_body(), Some(Type::Function(_))));
+    assert!(binding.companion_generics.is_none());
+    let rendered = ty.generics.to_string();
+    assert_eq!(rendered, "<T, effect E where ?Sized T, Clone T, T <: I32>");
+    parse(&format!(
+        "def run: {}\n",
+        binding.annotation.as_ref().unwrap()
+    ))
+    .unwrap();
+    let Item::ExternBlock(block) = &module.items[1] else {
+        panic!("extern")
+    };
+    assert!(
+        matches!(&block.bindings[0].annotation, Some(Type::Forall(ty)) if ty.generics.parameters[0].names() == ["U"])
+    );
+}
+
+#[test]
+fn companion_generics_are_separate_and_fresh_for_each_member() {
+    let source = "companion<T where Clone T> Box T { def first: <U> (Box T, U) -> T = x => x; def second: Box T -> T = x => x }\n";
+    let module = parse(source).unwrap();
+    let Item::Submodule(companion) = &module.items[0] else {
+        panic!("companion")
+    };
+    let Item::Binding(first) = &companion.module.items[0] else {
+        panic!("first")
+    };
+    let Item::Binding(second) = &companion.module.items[1] else {
+        panic!("second")
+    };
+    let header = first.companion_generics.as_ref().unwrap();
+    assert_eq!(header.parameters[0].names(), ["T"]);
+    assert_eq!(first.generics().unwrap().parameters[0].names(), ["U"]);
+    assert!(second.generics().is_none());
+    assert_eq!(
+        first
+            .all_type_parameters()
+            .iter()
+            .flat_map(|p| p.names())
+            .collect::<Vec<_>>(),
+        ["T", "U"]
+    );
+    assert_ne!(
+        header.parameters[0].syntax().id,
+        second.companion_generics.as_ref().unwrap().parameters[0]
+            .syntax()
+            .id
+    );
+    assert_ne!(
+        header.trait_bounds[0].syntax.id,
+        second.companion_generics.as_ref().unwrap().trait_bounds[0]
+            .syntax
+            .id
+    );
+}
+
+#[test]
+fn forall_parses_in_nested_type_positions_and_display_round_trips() {
+    for source in [
+        "def f: (<T> move T -> T) -> I32\n",
+        "def f: I32 -> (<T> T -> T)\n",
+        "def f: (a: <T> T -> T, b: I32)\n",
+        "def f: Box (<T> T -> T)\n",
+        "def f: ((<T> T -> T); 2)\n",
+        "def f: (<T> T -> T) | I32\n",
+    ] {
+        let module = parse(source).unwrap_or_else(|e| panic!("{source}: {e:?}"));
+        let Item::Binding(binding) = &module.items[0] else {
+            panic!("binding")
+        };
+        let annotation = binding.annotation.as_ref().unwrap().to_string();
+        let reparsed = parse(&format!("def f: {annotation}\n")).unwrap();
+        let Item::Binding(binding) = &reparsed.items[0] else {
+            panic!("binding")
+        };
+        assert_eq!(binding.annotation.as_ref().unwrap().to_string(), annotation);
+    }
+    let module = parse("def f: (a: <T> T -> T, b: I32)\n").unwrap();
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("binding")
+    };
+    let Some(Type::Product(product)) = &binding.annotation else {
+        panic!("product")
+    };
+    assert_eq!(product.elements.len(), 2);
+    assert!(
+        matches!(&product.elements[0].ty, Type::Forall(ty) if matches!(ty.body.as_ref(), Type::Function(_)))
+    );
+}
+
+#[test]
+fn forall_does_not_change_expression_or_explicit_argument_parsing() {
+    for source in [
+        "let value = I32 :: 1\n",
+        "let value = f.<I32> 1\n",
+        "let value = f.<(<T> T -> T)>\n",
+        "let value = x as (<T> T -> T)\n",
+        "let value = x as <T> T -> T\n",
+        "let value = (<T> T -> T) :: x\n",
+    ] {
+        parse(source).unwrap_or_else(|e| panic!("{source}: {e:?}"));
+    }
+    assert!(parse("let value = f.<<T> T -> T>\n").is_err());
+    for keyword in ["let", "const"] {
+        let error = parse(&format!("{keyword} identity: <T> T -> T = x => x\n")).unwrap_err();
+        assert_eq!(
+            error.message,
+            "compile-time parameters are only allowed on `def` bindings"
+        );
     }
 }

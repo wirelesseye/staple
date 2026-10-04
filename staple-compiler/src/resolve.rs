@@ -2769,11 +2769,11 @@ impl NameResolver {
         self.symbol_declaration_spans
             .insert(symbol, binding.syntax.span.clone());
         self.binding_type_parameters
-            .insert(binding.syntax.id, binding.type_parameters.clone());
+            .insert(binding.syntax.id, binding.all_type_parameters());
         self.binding_trait_bounds
-            .insert(binding.syntax.id, binding.trait_bounds.clone());
+            .insert(binding.syntax.id, binding.all_trait_bounds());
         self.binding_subtype_bounds
-            .insert(binding.syntax.id, binding.subtype_bounds.clone());
+            .insert(binding.syntax.id, binding.all_subtype_bounds());
         self.symbols.insert(binding.syntax.id, symbol);
         self.symbol_owners.insert(symbol, None);
         self.symbol_modules.insert(symbol, self.current_module);
@@ -3619,7 +3619,15 @@ impl NameResolver {
                 }
                 let mut default_methods = HashMap::new();
                 for member in &declaration.members {
-                    self.resolve_type(&member.annotation);
+                    if let Type::Forall(ty) = &member.annotation {
+                        self.resolve_forall_type(
+                            ty,
+                            true,
+                            "trait members cannot introduce their own compile-time parameters yet",
+                        );
+                    } else {
+                        self.resolve_type(&member.annotation);
+                    }
                     if declaration.visibility == Visibility::Public {
                         self.validate_representation(&member.annotation, Visibility::Public);
                     }
@@ -3891,15 +3899,15 @@ impl NameResolver {
     fn resolve_binding(&mut self, binding: &Binding) {
         self.binding_type_parameters
             .entry(binding.syntax.id)
-            .or_insert_with(|| binding.type_parameters.clone());
+            .or_insert_with(|| binding.all_type_parameters());
         self.binding_trait_bounds
             .entry(binding.syntax.id)
-            .or_insert_with(|| binding.trait_bounds.clone());
+            .or_insert_with(|| binding.all_trait_bounds());
         self.binding_subtype_bounds
             .entry(binding.syntax.id)
-            .or_insert_with(|| binding.subtype_bounds.clone());
+            .or_insert_with(|| binding.all_subtype_bounds());
         self.push_type_parameter_scope();
-        for parameter in &binding.type_parameters {
+        for parameter in &binding.all_type_parameters() {
             self.declare_type_parameter_pattern(parameter);
         }
         if let Some(target) = &binding.companion_target {
@@ -3907,10 +3915,10 @@ impl NameResolver {
             self.binding_companion_targets
                 .insert(binding.syntax.id, target.clone());
         }
-        if let Some(annotation) = &binding.annotation {
+        if let Some(annotation) = binding.annotation_body() {
             self.resolve_type(annotation);
         }
-        for bound in &binding.trait_bounds {
+        for bound in &binding.all_trait_bounds() {
             if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
                 self.trait_references.insert(bound.syntax.id, trait_id);
             }
@@ -3918,7 +3926,7 @@ impl NameResolver {
                 self.resolve_type(argument);
             }
         }
-        for bound in &binding.subtype_bounds {
+        for bound in &binding.all_subtype_bounds() {
             if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
                 self.type_parameters.insert(bound.syntax.id, id);
             } else {
@@ -3935,7 +3943,7 @@ impl NameResolver {
         if let Some(value) = &binding.value {
             self.resolve_expression(
                 value,
-                binding.annotation.as_ref(),
+                binding.annotation_body(),
                 Some((&binding.name, binding.syntax.id)),
             );
         }
@@ -3985,13 +3993,13 @@ impl NameResolver {
 
     fn resolve_compile_time_helper_annotations(&mut self, binding: &Binding) {
         self.push_type_parameter_scope();
-        for parameter in &binding.type_parameters {
+        for parameter in &binding.all_type_parameters() {
             self.declare_type_parameter_pattern(parameter);
         }
-        if let Some(annotation) = &binding.annotation {
+        if let Some(annotation) = binding.annotation_body() {
             self.resolve_type_lenient(annotation);
         }
-        for bound in &binding.trait_bounds {
+        for bound in &binding.all_trait_bounds() {
             if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
                 self.trait_references.insert(bound.syntax.id, trait_id);
             }
@@ -4104,14 +4112,7 @@ impl NameResolver {
 
     fn resolve_compile_time_item_annotations(&mut self, item: &Item) {
         match item {
-            Item::Binding(value) => {
-                if let Some(annotation) = &value.annotation {
-                    self.resolve_type_lenient(annotation);
-                }
-                if let Some(expression) = &value.value {
-                    self.resolve_compile_time_expression_annotations(expression);
-                }
-            }
+            Item::Binding(value) => self.resolve_compile_time_helper_annotations(value),
             Item::PatternBinding(value) => {
                 self.resolve_pattern_types_lenient(&value.pattern);
                 self.resolve_compile_time_expression_annotations(&value.value);
@@ -4948,8 +4949,40 @@ impl NameResolver {
         self.resolve_type_with(ty, false);
     }
 
+    /// Resolve rejected generic types in their own scope so the placement
+    /// diagnostic does not turn into spurious unknown-parameter errors.
+    fn resolve_forall_type(&mut self, ty: &staple_syntax::ForallType, strict: bool, message: &str) {
+        self.diagnostics
+            .push(Diagnostic::new(ty.syntax.span.clone(), message));
+        self.push_type_parameter_scope();
+        for parameter in &ty.generics.parameters {
+            self.declare_type_parameter_pattern(parameter);
+        }
+        for bound in &ty.generics.trait_bounds {
+            if let Some(id) = self.resolve_trait_name(&bound.trait_name) {
+                self.trait_references.insert(bound.syntax.id, id);
+            }
+            for argument in &bound.arguments {
+                self.resolve_type_with(argument, strict);
+            }
+        }
+        for bound in &ty.generics.subtype_bounds {
+            if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                self.type_parameters.insert(bound.syntax.id, id);
+            }
+            self.resolve_type_with(&bound.supertype, strict);
+        }
+        self.resolve_type_with(&ty.body, strict);
+        self.pop_type_parameter_scope();
+    }
+
     fn resolve_type_with(&mut self, ty: &Type, strict: bool) {
         match ty {
+            Type::Forall(ty) => self.resolve_forall_type(
+                ty,
+                strict,
+                "generic function types are not supported here yet",
+            ),
             Type::Named(named) => {
                 if named.namespace.is_none()
                     && let Some(id) = self.lookup_type_parameter(&named.name)
@@ -5315,6 +5348,18 @@ impl NameResolver {
     /// `subject` names what `ty` is in the diagnostic.
     fn validate_type_visibility(&mut self, ty: &Type, required: Visibility, subject: &str) {
         match ty {
+            Type::Forall(ty) => {
+                self.validate_type_visibility(&ty.body, required, subject);
+                for bound in &ty.generics.trait_bounds {
+                    for argument in &bound.arguments {
+                        self.validate_type_visibility(argument, required, subject);
+                    }
+                }
+                for bound in &ty.generics.subtype_bounds {
+                    self.validate_type_visibility(&bound.supertype, required, subject);
+                }
+            }
+
             Type::Named(named) => {
                 if self.type_parameters.contains_key(&named.syntax.id) {
                     return;
@@ -5906,7 +5951,7 @@ fn analyze_compile_time_bindings(
         let mut scope = CompileTimeScope::new(*module, globals.clone());
         scope.reference(helper.syntax.id, &helper.name);
         if let Some(value) = &helper.value {
-            analyze_compile_helper_expression(value, helper.annotation.as_ref(), &mut scope);
+            analyze_compile_helper_expression(value, helper.annotation_body(), &mut scope);
         }
         result.extend(scope.occurrences);
     }
@@ -6312,8 +6357,7 @@ fn analyze_compile_item(
                 analyze_compile_expression(value, scope, parameter_kind, false);
             }
             let ty = binding
-                .annotation
-                .as_ref()
+                .annotation_body()
                 .map(ToString::to_string)
                 .or_else(|| {
                     binding

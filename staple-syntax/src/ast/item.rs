@@ -471,16 +471,58 @@ pub struct Binding {
     pub mutable: bool,
     pub signal: bool,
     pub name: String,
-    pub type_parameters: Vec<TypeParameterPattern>,
-    pub trait_bounds: Vec<TraitBound>,
-    pub subtype_bounds: Vec<SubtypeBound>,
     pub annotation: Option<Type>,
     /// Fresh per-member companion header for capability analysis.
     pub companion_target: Option<Type>,
+    /// Fresh enclosing companion parameters for this member.
+    pub companion_generics: Option<super::GenericParameters>,
     pub value: Option<Expression>,
 }
 
 impl Binding {
+    /// The parameters introduced by the top-level annotation.
+    pub fn generics(&self) -> Option<&super::GenericParameters> {
+        match self.annotation.as_ref() {
+            Some(Type::Forall(ty)) => Some(&ty.generics),
+            _ => None,
+        }
+    }
+    /// Peel only the top-level generic function type.
+    pub fn annotation_body(&self) -> Option<&Type> {
+        self.annotation.as_ref().map(|ty| match ty {
+            Type::Forall(ty) => ty.body.as_ref(),
+            _ => ty,
+        })
+    }
+    /// Companion parameters precede the member's own parameters.
+    pub fn all_type_parameters(&self) -> Vec<TypeParameterPattern> {
+        self.companion_generics
+            .iter()
+            .chain(self.generics())
+            .flat_map(|g| g.parameters.iter().cloned())
+            .collect()
+    }
+    pub fn all_trait_bounds(&self) -> Vec<TraitBound> {
+        self.companion_generics
+            .iter()
+            .chain(self.generics())
+            .flat_map(|g| g.trait_bounds.iter().cloned())
+            .collect()
+    }
+    pub fn all_subtype_bounds(&self) -> Vec<SubtypeBound> {
+        self.companion_generics
+            .iter()
+            .chain(self.generics())
+            .flat_map(|g| g.subtype_bounds.iter().cloned())
+            .collect()
+    }
+    pub fn is_generic(&self) -> bool {
+        self.companion_generics
+            .iter()
+            .chain(self.generics())
+            .any(|g| !g.parameters.is_empty())
+    }
+
     /// The keyword that introduces this binding, or `None` for extern members,
     /// which are written without one.
     pub fn keyword(&self) -> Option<&'static str> {

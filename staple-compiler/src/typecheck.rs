@@ -3817,13 +3817,13 @@ impl TypeChecker {
     }
 
     fn seed_binding_annotation(&mut self, module: &ResolvedModule, binding: &Binding) {
-        let Some(annotation) = &binding.annotation else {
+        let Some(annotation) = binding.annotation_body() else {
             return;
         };
         let value_type = self.resolve_source_type(module, annotation);
         if let Some(symbol) = module.symbol_for(binding.syntax.id) {
             let parameters = binding
-                .type_parameters
+                .all_type_parameters()
                 .iter()
                 .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
                 .collect();
@@ -3831,13 +3831,13 @@ impl TypeChecker {
             self.symbol_types.insert(symbol, value_type);
             if module.intrinsic_function(symbol).is_some() {
                 let bounds = binding
-                    .trait_bounds
+                    .all_trait_bounds()
                     .iter()
                     .filter_map(|bound| self.resolve_trait_bound(module, bound))
                     .collect::<Vec<_>>();
                 let bounds = self.expand_trait_bounds(bounds);
                 let subtype_bounds = binding
-                    .subtype_bounds
+                    .all_subtype_bounds()
                     .iter()
                     .filter_map(|bound| self.resolve_subtype_bound(module, bound))
                     .collect();
@@ -6167,7 +6167,7 @@ impl TypeChecker {
         match item {
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
-                    if !binding.type_parameters.is_empty() && block.abi != "\"staple-intrinsic\"" {
+                    if binding.is_generic() && block.abi != "\"staple-intrinsic\"" {
                         self.diagnostics.push(Diagnostic::new(
                             binding.syntax.span.clone(),
                             "external bindings cannot have compile-time parameters",
@@ -6175,8 +6175,7 @@ impl TypeChecker {
                     }
                     if block.abi != "\"staple-intrinsic\"" {
                         let external_type = binding
-                            .annotation
-                            .as_ref()
+                            .annotation_body()
                             .map(|annotation| self.resolve_source_type(module, annotation));
                         if external_type
                             .as_ref()
@@ -6716,8 +6715,7 @@ impl TypeChecker {
             }
         }
         let declared_type = binding
-            .annotation
-            .as_ref()
+            .annotation_body()
             .map(|annotation| self.resolve_source_type(module, annotation));
         let generic_annotation_is_function =
             matches!(declared_type, Some(CheckedType::Function(_)));
@@ -6775,10 +6773,7 @@ impl TypeChecker {
                 .iter()
                 .any(|id| !bound_parameters.contains(id))
         };
-        if binding.type_parameters.is_empty()
-            && has_free_type_parameter
-            && checked_type != CheckedType::Error
-        {
+        if !binding.is_generic() && has_free_type_parameter && checked_type != CheckedType::Error {
             self.diagnostics.push(Diagnostic::new(
                 binding.syntax.span.clone(),
                 format!(
@@ -6787,13 +6782,13 @@ impl TypeChecker {
                 ),
             ));
         }
-        if !binding.type_parameters.is_empty() && !generic_annotation_is_function {
+        if binding.is_generic() && !generic_annotation_is_function {
             self.diagnostics.push(Diagnostic::new(
                 binding.syntax.span.clone(),
                 "compile-time parameters require a function-valued `def`",
             ));
         }
-        if !binding.type_parameters.is_empty()
+        if binding.is_generic()
             && binding.kind != staple_syntax::BindingKind::Extern
             && !matches!(binding.value, Some(Expression::Function(_)))
         {
@@ -12314,6 +12309,7 @@ impl TypeChecker {
                     }
                 }
             }
+            Type::Forall(ty) => self.resolve_source_type_inner(module, &ty.body),
             Type::Splice(_) => CheckedType::Error,
         }
     }

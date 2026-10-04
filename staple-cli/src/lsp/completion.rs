@@ -628,9 +628,9 @@ impl Collector<'_> {
     }
 
     fn binding(&mut self, binding: &Binding, module_index: usize) {
-        if !binding.type_parameters.is_empty() {
+        if binding.is_generic() {
             let mut candidates = Vec::new();
-            for parameter in &binding.type_parameters {
+            for parameter in &binding.all_type_parameters() {
                 self.type_parameter_candidates(parameter, &mut candidates);
             }
             self.index.modules[module_index].scopes.push(Scope {

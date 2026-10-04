@@ -625,13 +625,13 @@ impl<'a> Classifier<'a> {
             Some(modifiers),
             resolved,
         );
-        for parameter in &binding.type_parameters {
+        for parameter in &binding.all_type_parameters() {
             self.type_parameter(parameter, resolved);
         }
-        for bound in &binding.trait_bounds {
+        for bound in &binding.all_trait_bounds() {
             self.trait_bound(bound, resolved);
         }
-        if let Some(annotation) = &binding.annotation {
+        if let Some(annotation) = binding.annotation_body() {
             self.ty(annotation, resolved);
         }
         if let Some(value) = &binding.value {
@@ -1087,6 +1087,19 @@ impl<'a> Classifier<'a> {
 
     fn ty(&mut self, ty: &Type, resolved: Option<&ResolvedModule>) {
         match ty {
+            Type::Forall(ty) => {
+                for parameter in &ty.generics.parameters {
+                    self.type_parameter(parameter, resolved);
+                }
+                for bound in &ty.generics.trait_bounds {
+                    self.trait_bound(bound, resolved);
+                }
+                for bound in &ty.generics.subtype_bounds {
+                    self.ty(&bound.supertype, resolved);
+                }
+                self.ty(&ty.body, resolved);
+            }
+
             Type::Named(value) => {
                 if let Some(namespace) = &value.namespace {
                     self.mark_first(&value.syntax, namespace, NAMESPACE, 0, 1);

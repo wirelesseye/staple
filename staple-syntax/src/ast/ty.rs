@@ -16,6 +16,7 @@ pub enum Type {
     ParameterProduct(ParameterProductType),
     Sum(SumType),
     Function(FunctionType),
+    Forall(ForallType),
     Application(TypeApplication),
     EffectApplication(EffectApplication),
     Array(ArrayType),
@@ -32,6 +33,7 @@ impl Type {
             Self::Product(ty) | Self::ParameterProduct(ty) => &ty.syntax,
             Self::Sum(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
+            Self::Forall(ty) => &ty.syntax,
             Self::Application(ty) => &ty.syntax,
             Self::EffectApplication(ty) => &ty.syntax,
             Self::Array(ty) => &ty.syntax,
@@ -97,10 +99,15 @@ impl fmt::Display for Type {
                     if index > 0 {
                         formatter.write_str(" | ")?;
                     }
-                    write!(formatter, "{alternative}")?;
+                    if matches!(alternative, Type::Forall(_)) {
+                        write!(formatter, "({alternative})")?;
+                    } else {
+                        write!(formatter, "{alternative}")?;
+                    }
                 }
                 Ok(())
             }
+            Self::Forall(forall) => write!(formatter, "{} {}", forall.generics, forall.body),
             Self::Function(function) => {
                 let parameter = format_mutable_parameter(
                     &function.parameter,
@@ -148,20 +155,25 @@ fn format_mutable_parameter(
     mutations: &[MutationTarget],
     moves: &[MutationTarget],
 ) -> String {
+    let rendered = if matches!(parameter, Type::Function(_) | Type::Forall(_)) {
+        format!("({parameter})")
+    } else {
+        parameter.to_string()
+    };
     if mutations
         .iter()
         .any(|mutation| mutation.target == MutationTargetKind::Whole)
     {
-        return format!("mut {parameter}");
+        return format!("mut {rendered}");
     }
     if moves
         .iter()
         .any(|target| target.target == MutationTargetKind::Whole)
     {
-        return format!("move {parameter}");
+        return format!("move {rendered}");
     }
     let Type::Product(product) = parameter else {
-        return parameter.to_string();
+        return rendered;
     };
     let mut result = String::from("(");
     for (index, element) in product.elements.iter().enumerate() {
@@ -196,7 +208,7 @@ fn format_mutable_parameter(
 }
 
 fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &Type) -> fmt::Result {
-    if matches!(argument, Type::Sum(_) | Type::Function(_)) {
+    if matches!(argument, Type::Sum(_) | Type::Function(_) | Type::Forall(_)) {
         write!(formatter, " ({argument})")
     } else {
         write!(formatter, " {argument}")
@@ -480,3 +492,82 @@ pub struct DefaultTypeBound {
 
 /// Slots of a juxtaposed function, retained as a type before alias expansion.
 pub type ParameterProductType = ProductType;
+
+/// A compile-time parameter list and its constraints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericParameters {
+    pub syntax: Syntax,
+    pub parameters: Vec<TypeParameterPattern>,
+    pub trait_bounds: Vec<TraitBound>,
+    pub subtype_bounds: Vec<SubtypeBound>,
+}
+
+/// A generic function type, `<T where …> body`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForallType {
+    pub syntax: Syntax,
+    pub generics: GenericParameters,
+    pub body: Box<Type>,
+}
+
+impl fmt::Display for GenericParameters {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn parameter(p: &TypeParameterPattern) -> String {
+            match p {
+                TypeParameterPattern::Binding(p) => p.name.clone(),
+                TypeParameterPattern::Effect(p) => format!("effect {}", p.name),
+                TypeParameterPattern::Product(p) => format!(
+                    "({})",
+                    p.elements
+                        .iter()
+                        .map(parameter)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                TypeParameterPattern::Splice(p) => format!("${}...", p.name),
+            }
+        }
+        write!(
+            f,
+            "<{}",
+            self.parameters
+                .iter()
+                .map(parameter)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+        let mut constraints = self
+            .parameters
+            .iter()
+            .filter_map(|p| match p {
+                TypeParameterPattern::Binding(p) if !p.sized => Some(format!("?Sized {}", p.name)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        constraints.extend(self.trait_bounds.iter().map(|b| {
+            let name = Type::Named(b.trait_name.clone()).to_string();
+            let arguments = b
+                .arguments
+                .iter()
+                .map(|argument| {
+                    if matches!(argument, Type::Function(_) | Type::Forall(_) | Type::Sum(_)) {
+                        format!("({argument})")
+                    } else {
+                        argument.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{name} {arguments}")
+        }));
+        constraints.extend(
+            self.subtype_bounds
+                .iter()
+                .map(|b| format!("{} <: {}", b.parameter.name, b.supertype)),
+        );
+        if !constraints.is_empty() {
+            write!(f, " where {}", constraints.join(", "))?;
+        }
+        f.write_str(">")
+    }
+}

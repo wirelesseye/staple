@@ -236,9 +236,9 @@ impl Collector<'_> {
                 binding.docs.clone()
             };
             let generics = self.bracketed_generic_prefix(
-                &binding.type_parameters,
-                &binding.trait_bounds,
-                &binding.subtype_bounds,
+                &binding.all_type_parameters(),
+                &binding.all_trait_bounds(),
+                &binding.all_subtype_bounds(),
             );
             self.declarations.insert(
                 symbol,
@@ -1262,11 +1262,27 @@ impl Collector<'_> {
             .map(|value_type| self.display_type(value_type));
         if let Some(value_type) = value_type {
             let prefix = binding.declaration_prefix();
-            let generics = self.bracketed_generic_prefix(
-                &binding.type_parameters,
-                &binding.trait_bounds,
-                &binding.subtype_bounds,
-            );
+            let signature_type = if binding.is_generic() {
+                binding
+                    .annotation
+                    .as_ref()
+                    .map(|annotation| {
+                        if binding.companion_generics.is_some() {
+                            let generics = staple_syntax::GenericParameters {
+                                syntax: binding.syntax.clone(),
+                                parameters: binding.all_type_parameters(),
+                                trait_bounds: binding.all_trait_bounds(),
+                                subtype_bounds: binding.all_subtype_bounds(),
+                            };
+                            format!("{generics} {}", binding.annotation_body().unwrap())
+                        } else {
+                            annotation.to_string()
+                        }
+                    })
+                    .unwrap_or(value_type)
+            } else {
+                value_type
+            };
             let docs = self
                 .typed
                 .symbol_for(binding.syntax.id)
@@ -1277,18 +1293,18 @@ impl Collector<'_> {
             self.named_with_docs(
                 &binding.syntax,
                 &binding.name,
-                format!("{prefix} {}: {generics}{value_type}", binding.name),
+                format!("{prefix} {}: {signature_type}", binding.name),
                 docs,
                 module,
             );
         }
-        for parameter in &binding.type_parameters {
+        for parameter in &binding.all_type_parameters() {
             self.type_parameter(parameter);
         }
-        for bound in &binding.trait_bounds {
+        for bound in &binding.all_trait_bounds() {
             self.trait_bound(bound);
         }
-        if let Some(annotation) = &binding.annotation {
+        if let Some(annotation) = binding.annotation_body() {
             self.ty(annotation);
         }
         if let Some(value) = &binding.value {
@@ -1699,6 +1715,19 @@ impl Collector<'_> {
 
     fn ty(&mut self, ty: &Type) {
         match ty {
+            Type::Forall(ty) => {
+                for parameter in &ty.generics.parameters {
+                    self.type_parameter(parameter);
+                }
+                for bound in &ty.generics.trait_bounds {
+                    self.trait_bound(bound);
+                }
+                for bound in &ty.generics.subtype_bounds {
+                    self.ty(&bound.supertype);
+                }
+                self.ty(&ty.body);
+            }
+
             Type::Named(named) => {
                 if let Some(id) = self.typed.resolved().type_for(named.syntax.id)
                     && let Some(signature) = self.type_signature(id, named.syntax.id)
@@ -3849,6 +3878,43 @@ mod tests {
                 .any(|entry| entry.1.contains("<compile-time")
                     || entry.1.contains("<macro parameter>")
                     || entry.1.contains("<syntax category>"))
+        );
+    }
+    #[test]
+    fn forall_companion_parameters_keep_lsp_signatures_and_targets() {
+        let source = r#"pub type Box T = pub wrap T
+companion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = (move Box x, move y) => y }
+let result: String = Box.choose.<I32, String> (Box 1, "yes")
+"#;
+        let path = std::env::temp_dir().join("staple-forall-companion-lsp.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        let member = source.find("def choose").unwrap() + "def ".len();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.range.start == member)
+            .unwrap();
+        assert_eq!(
+            entry.signature,
+            "def choose: <T, U> (move Box T, move U) -> U"
+        );
+        let parameter = source.find("<U>").unwrap() + 1;
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.range.start == parameter
+                    && entry.signature == "<type parameter> U")
         );
     }
 }

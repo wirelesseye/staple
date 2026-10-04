@@ -5774,7 +5774,7 @@ fn expands_modifier_lists_generated_by_item_macros() {
     let module = type_check(concat!(
         "macro @replace: Item -> Item = _ => parse_quote { let generated: I32 = 42 }\n",
         "macro emit: Expr -> Item = _: Expr => parse_quote { @replace let original = 0 }\n",
-        "emit ()\n",
+        "emit 1\n",
         "let result: I32 = generated\n",
     ));
     let context = Context::create();
@@ -13088,4 +13088,103 @@ fn call_site_type_arguments_enforce_sized_and_subtype_bounds() {
         "type Token = opaque\ndef f: <T where ?Sized T> Ref T -> Ref T = x => x\nlet specialized = f.<Token>\n",
     );
     lower(&module);
+}
+
+#[test]
+fn forall_placement_is_rejected_by_resolve_with_scoped_parameters() {
+    for source in [
+        "def f: (<T> T -> T) -> I32\n",
+        "def f: I32 -> (<T> T -> T)\n",
+        "def f: (a: <T> T -> T, b: I32)\n",
+        "type Box T = wrap T\ndef f: Box (<T> T -> T)\n",
+        "type Alias = alias <T> T -> T\n",
+        "def id: <T> T -> T = x => x\nlet value = id.<(<U> U -> U)>\n",
+        "def f: <T where Copy (<U> U -> U)> T -> T = x => x\n",
+        "let value = 1 as (<T> T -> T)\n",
+        "let value = 1 as <T> T -> T\n",
+        "let value = (<T> T -> T) :: 1\n",
+    ] {
+        let diagnostics =
+            resolve_result(source).expect_err_diagnostics("nested forall must fail resolution");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.message == "generic function types are not supported here yet")
+                .count(),
+            1,
+            "{source}: {diagnostics:?}"
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.message.contains("unknown type `T`")
+                    || d.message.contains("unknown type `U`")),
+            "{source}: {diagnostics:?}"
+        );
+    }
+    let diagnostics = resolve_result("trait Test T { apply: <U> (T, U) -> U }\n")
+        .expect_err_diagnostics("trait member forall is unsupported");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "trait members cannot introduce their own compile-time parameters yet"
+    );
+}
+
+#[test]
+fn forall_preserves_companion_parameter_order_and_function_annotations() {
+    let resolved = resolve(
+        "type Box T = wrap T\ncompanion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = (move Box x, move y) => y }\nlet result: String = Box.choose.<I32, String> (Box 1, \"yes\")\n",
+    );
+    let function = resolved
+        .functions()
+        .iter()
+        .find(|f| f.name.contains("choose"))
+        .unwrap();
+    assert_eq!(
+        function
+            .type_parameters
+            .iter()
+            .flat_map(|p| p.names())
+            .collect::<Vec<_>>(),
+        ["T", "U"]
+    );
+    assert!(matches!(
+        &function.binding_annotation,
+        Some(Type::Function(_))
+    ));
+    TypeChecker::new()
+        .check(resolved)
+        .expect("explicit arguments keep merged order");
+}
+
+
+#[test]
+fn forall_generic_binding_macro_expansion_remains_parseable_and_hygienic() {
+    let source = concat!(
+        "macro emit: Expr -> Item = ignored => parse_quote { def identity: <T> move T -> T = move value => value }\n",
+        "emit 1\n",
+        "let result: I32 = identity 42\n",
+    );
+    let resolved = resolve(source);
+    let expanded = staple_compiler::render_expanded_module(resolved.program()).unwrap();
+    let compact = expanded.split_whitespace().collect::<String>();
+    assert!(compact.contains("identity:<T>"), "{expanded}");
+    assert!(!compact.contains("identity<T>"), "{expanded}");
+    let reparsed = parse(&expanded).unwrap();
+    assert!(reparsed.items.iter().any(|item| matches!(item, Item::Binding(binding) if binding.generics().is_some())));
+    TypeChecker::new().check(resolved).expect("fresh generic annotation must type-check");
+}
+
+
+#[test]
+fn forall_preserves_generic_compile_time_helpers() {
+    type_check(concat!(
+        "def identity: <T> Expr -> Expr = value => value\n",
+        "macro relay: Expr -> Expr = value => identity value\n",
+        "let answer: I32 = relay 42\n",
+        "def concrete_type: <T> () -> Type = () => parse_quote { I32 }\n",
+        "macro typed: Expr -> Expr = value => { let ty: Type = concrete_type (); parse_quote { $ty :: $value } }\n",
+        "let typed_answer: I32 = typed 7\n",
+    ));
 }

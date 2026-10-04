@@ -759,18 +759,16 @@ impl Grammar {
                 self.position = generics_start;
                 let (member_type_parameters, member_trait_bounds, member_subtype_bounds) =
                     self.parse_bracketed_generics()?;
+                let member_generics_syntax = self.annotation_syntax(generics_start, 1);
                 binding.companion_target = Some(self.parse_type()?);
                 self.position = resume;
 
-                let mut parameters = member_type_parameters;
-                parameters.extend(binding.type_parameters.clone());
-                binding.type_parameters = parameters;
-                let mut bounds = member_trait_bounds;
-                bounds.extend(binding.trait_bounds.clone());
-                binding.trait_bounds = bounds;
-                let mut bounds = member_subtype_bounds;
-                bounds.extend(binding.subtype_bounds.clone());
-                binding.subtype_bounds = bounds;
+                binding.companion_generics = Some(crate::GenericParameters {
+                    syntax: member_generics_syntax,
+                    parameters: member_type_parameters,
+                    trait_bounds: member_trait_bounds,
+                    subtype_bounds: member_subtype_bounds,
+                });
             }
         }
         let module = Module {
@@ -1488,8 +1486,6 @@ impl Grammar {
             };
             let name = self.parse_binding_name()?;
             self.expect(TokenKind::Colon, "expected `:` after external binding name")?;
-            let (type_parameters, trait_bounds, subtype_bounds) =
-                self.parse_bracketed_generics()?;
             let previous = self.newline_terminates_type;
             self.newline_terminates_type = true;
             let annotation = self.parse_type();
@@ -1503,11 +1499,9 @@ impl Grammar {
                 mutable: false,
                 signal: false,
                 name,
-                type_parameters,
-                trait_bounds,
-                subtype_bounds,
                 annotation: Some(annotation),
                 companion_target: None,
+                companion_generics: None,
                 value: None,
             });
             self.eat(TokenKind::Semicolon);
@@ -1708,19 +1702,12 @@ impl Grammar {
         } else {
             None
         };
-        let mut type_parameters = Vec::new();
-        let mut trait_bounds = Vec::new();
-        let mut subtype_bounds = Vec::new();
         let annotation = if annotation.is_some() {
-            let (parameters, bounds, subtypes) = self.parse_bracketed_generics()?;
-            type_parameters = parameters;
-            trait_bounds = bounds;
-            subtype_bounds = subtypes;
             Some(self.parse_type()?)
         } else {
             None
         };
-        if !type_parameters.is_empty() && kind != BindingKind::Def {
+        if matches!(annotation, Some(Type::Forall(_))) && kind != BindingKind::Def {
             return Err(self.error("compile-time parameters are only allowed on `def` bindings"));
         }
         let value = if self.eat(TokenKind::Equals) {
@@ -1747,11 +1734,9 @@ impl Grammar {
             mutable,
             signal,
             name,
-            type_parameters,
-            trait_bounds,
-            subtype_bounds,
             annotation,
             companion_target: None,
+            companion_generics: None,
             value,
         })
     }
@@ -2262,7 +2247,23 @@ impl Grammar {
     /// Parses a type, treating function arrows as right-associative.
     fn parse_type(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
-        self.parse_non_juxtaposed_function_type(start)
+        if self.at_operator("<") {
+            let (parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
+            let generics = crate::GenericParameters {
+                syntax: self.annotation_syntax(start, 1),
+                parameters,
+                trait_bounds,
+                subtype_bounds,
+            };
+            let body = self.parse_non_juxtaposed_function_type(self.position)?;
+            Ok(Type::Forall(crate::ForallType {
+                syntax: self.annotation_syntax(start, 2),
+                generics,
+                body: Box::new(body),
+            }))
+        } else {
+            self.parse_non_juxtaposed_function_type(start)
+        }
     }
 
     fn parse_non_juxtaposed_function_type(&mut self, start: usize) -> Result<Type, ParseError> {
@@ -3129,6 +3130,13 @@ impl Grammar {
         Err(self.error("expected closing delimiter after syntax argument"))
     }
 
+    fn parse_explicit_type_argument(&mut self) -> Result<Type, ParseError> {
+        if self.at_operator("<") {
+            return Err(self.error("generic function type arguments must be parenthesized"));
+        }
+        self.parse_type()
+    }
+
     /// Parses chained named or positional product access.
     fn parse_access_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
@@ -3136,9 +3144,9 @@ impl Grammar {
         loop {
             if self.eat(TokenKind::Dot) {
                 if self.eat_operator("<") {
-                    let mut arguments = vec![self.parse_type()?];
+                    let mut arguments = vec![self.parse_explicit_type_argument()?];
                     while self.eat(TokenKind::Comma) {
-                        arguments.push(self.parse_type()?);
+                        arguments.push(self.parse_explicit_type_argument()?);
                     }
                     if !self.eat_operator(">") {
                         return Err(self.error("expected `>` to close call-site type arguments"));
@@ -4013,6 +4021,14 @@ impl Grammar {
     }
 
     /// Builds syntax metadata for tokens consumed since `start`.
+    fn annotation_syntax(&mut self, start: usize, kind: usize) -> Syntax {
+        let base = self.next_syntax_id;
+        let mut syntax = self.syntax(start);
+        self.next_syntax_id = base;
+        syntax.id = SyntaxId::annotation_node(base, kind);
+        syntax
+    }
+
     fn syntax(&mut self, start: usize) -> Syntax {
         let tokens = &self.tokens[start..self.position];
         let span_start = tokens
@@ -4120,6 +4136,7 @@ fn contains_mutable_type_element(ty: &Type) -> bool {
                     .iter()
                     .any(|resource| contains_mutable_type_element(&resource.value_type))
         }
+        Type::Forall(ty) => contains_mutable_type_element(&ty.body),
         Type::Array(array) => contains_mutable_type_element(&array.element),
         _ => false,
     }
@@ -4148,6 +4165,7 @@ fn contains_move_type_element(ty: &Type) -> bool {
                     .iter()
                     .any(|resource| contains_move_type_element(&resource.value_type))
         }
+        Type::Forall(ty) => contains_move_type_element(&ty.body),
         Type::Array(array) => contains_move_type_element(&array.element),
         _ => false,
     }

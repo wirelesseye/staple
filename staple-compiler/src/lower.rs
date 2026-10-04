@@ -3760,7 +3760,7 @@ impl LoweredProgram {
             symbol: Some(symbol),
             value,
             compile_time_only: compile_time_only_symbol(module, symbol),
-            generic: !binding.type_parameters.is_empty(),
+            generic: binding.is_generic(),
             derived: module.is_derived_symbol(symbol),
             signal: resolved.is_signal_symbol(symbol),
             reactive,
@@ -4147,7 +4147,7 @@ impl LoweredProgram {
         binding: &staple_syntax::Binding,
         symbol: SymbolId,
     ) -> Result<Option<LoweredReactiveOperationId>, Diagnostic> {
-        if !binding.type_parameters.is_empty() {
+        if binding.is_generic() {
             return Ok(None);
         }
         let origin = Origin {
@@ -13148,9 +13148,7 @@ impl SymbolDeclarationFacts {
                         // The emitter skips generic bindings (no storage global) and
                         // symbols that already have a declaration global
                         // (externs are predeclared before storage runs).
-                        if binding.type_parameters.is_empty()
-                            && !resolved.is_external_symbol(symbol)
-                        {
+                        if !binding.is_generic() && !resolved.is_external_symbol(symbol) {
                             globals.insert(symbol);
                         }
                     }

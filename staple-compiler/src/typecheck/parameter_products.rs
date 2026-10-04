@@ -92,19 +92,20 @@ impl TypeChecker {
                     continue;
                 };
                 for binding in &block.bindings {
-                    for parameter in self.declared_type_parameters(module, &binding.type_parameters)
+                    for parameter in
+                        self.declared_type_parameters(module, &binding.all_type_parameters())
                     {
                         let uses = signatures.entry(parameter).or_default();
                         if let Some(target) = &binding.companion_target {
                             uses.push((target.clone(), false));
                         }
-                        if let Some(annotation) = &binding.annotation {
+                        if let Some(annotation) = binding.annotation_body() {
                             uses.push((annotation.clone(), false));
                         }
-                        for bound in &binding.trait_bounds {
+                        for bound in &binding.all_trait_bounds() {
                             uses.extend(bound.arguments.iter().cloned().map(|ty| (ty, false)));
                         }
-                        for bound in &binding.subtype_bounds {
+                        for bound in &binding.all_subtype_bounds() {
                             if let Some(id) = module.type_parameter_for(bound.syntax.id) {
                                 forced_values.insert(id);
                             }

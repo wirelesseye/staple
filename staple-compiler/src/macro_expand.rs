@@ -1110,6 +1110,7 @@ struct MacroExpander {
     companion_modules: Vec<bool>,
     diagnostics: Vec<Diagnostic>,
     next_syntax_id: usize,
+    next_annotation_id: usize,
     next_mark: u64,
     steps: usize,
     expansion_stack: Vec<MacroKey>,
@@ -1804,6 +1805,7 @@ impl MacroExpander {
                 .collect(),
             diagnostics: Vec::new(),
             next_syntax_id,
+            next_annotation_id: 0,
             next_mark: 1,
             steps: 0,
             expansion_stack: Vec::new(),
@@ -1954,9 +1956,8 @@ impl MacroExpander {
         if let Some(value) = &helper.binding.value {
             let expected = helper
                 .binding
-                .annotation
-                .as_ref()
-                .map(compile_type)
+                .annotation_body()
+                .map(|ty| self.checked_compile_type(ty))
                 .unwrap_or(CompileType::Unknown);
             self.check_compile_expression(
                 helper.module,
@@ -2002,7 +2003,7 @@ impl MacroExpander {
                 CompileType::Error
             }
             Expression::TypeAscription(value) => {
-                let annotation = compile_type(&value.ty);
+                let annotation = self.checked_compile_type(&value.ty);
                 self.check_compile_expression(module, &value.value, environment, Some(&annotation))
             }
             Expression::Match(value) => {
@@ -2058,7 +2059,7 @@ impl MacroExpander {
             Expression::RepeatedProduct(value) => {
                 let element =
                     self.check_compile_expression(module, &value.value, environment, None);
-                let count = compile_type(&value.count);
+                let count = self.checked_compile_type(&value.count);
                 self.require_compile_type(
                     &count,
                     &CompileType::Integer,
@@ -2306,7 +2307,9 @@ impl MacroExpander {
     ) -> CompileType {
         match item {
             Item::Binding(binding) => {
-                let annotation = binding.annotation.as_ref().map(compile_type);
+                let annotation = binding
+                    .annotation_body()
+                    .map(|ty| self.checked_compile_type(ty));
                 let ty = binding.value.as_ref().map_or(CompileType::Error, |value| {
                     self.check_compile_expression(module, value, environment, annotation.as_ref())
                 });
@@ -2522,7 +2525,7 @@ impl MacroExpander {
                 let bound = if matches!(binding.ty, Type::Inferred(_)) {
                     ty.clone()
                 } else {
-                    let annotation = compile_type(&binding.ty);
+                    let annotation = self.checked_compile_type(&binding.ty);
                     let compatible = compile_types_compatible(&annotation, ty);
                     self.require_compile_type(&annotation, ty, binding.syntax.span.clone());
                     if compatible {
@@ -2715,6 +2718,11 @@ impl MacroExpander {
         }
     }
 
+    fn checked_compile_type(&mut self, ty: &Type) -> CompileType {
+        reject_compile_forall(ty, &mut self.diagnostics);
+        compile_type(ty)
+    }
+
     fn require_compile_type(&mut self, actual: &CompileType, expected: &CompileType, span: Span) {
         if !compile_types_compatible(actual, expected) {
             self.diagnostics.push(Diagnostic::new(
@@ -2772,6 +2780,13 @@ impl MacroExpander {
             }
         }
         for definition in self.definitions.values() {
+            if let Some(annotation) = &definition.declaration.annotation {
+                let before = self.diagnostics.len();
+                reject_compile_forall(annotation, &mut self.diagnostics);
+                if self.diagnostics.len() != before {
+                    continue;
+                }
+            }
             if definition.declaration.annotation.is_none()
                 && definition
                     .declaration
@@ -5495,7 +5510,7 @@ impl MacroExpander {
                                 return None;
                             };
                             let value = if let Some(expected) =
-                                binding.annotation.as_ref().and_then(meta_type)
+                                binding.annotation_body().and_then(meta_type)
                                 && let Expression::Quote(quote) = value
                                 && quote.kind == staple_syntax::QuoteKind::ParseQuote
                             {
@@ -6248,11 +6263,9 @@ impl MacroExpander {
                     self.suppress_expansion_trailer = true;
                     return None;
                 }
+                let expected = binding.annotation_body().and_then(function_result_meta_type);
                 let value = binding.value?;
-                let previous_context = binding
-                    .annotation
-                    .as_ref()
-                    .and_then(function_result_meta_type)
+                let previous_context = expected
                     .map(|expected| self.quote_context.replace(expected))
                     .unwrap_or_else(|| self.quote_context.take());
                 let function = self.eval_helper_value(module, &value, span.clone());
@@ -7023,7 +7036,16 @@ impl MacroExpander {
     }
 
     fn freshen_syntax(&mut self, syntax: &mut Syntax, module: ModuleId, mark: u64) {
-        syntax.id = self.fresh_id();
+        let annotation_namespace = syntax.id.0 >> (usize::BITS - 2);
+        syntax.id = if annotation_namespace != 0 && syntax.id != SyntaxId::COMPILER {
+            // Generated annotation wrappers have a third namespace. A separate
+            // cursor also handles nested wrappers after an empty parameter splice.
+            let id = SyntaxId(usize::MAX - 1 - self.next_annotation_id);
+            self.next_annotation_id += 1;
+            id
+        } else {
+            self.fresh_id()
+        };
         *syntax = syntax.clone().generated(module.0, mark);
     }
 
@@ -8627,6 +8649,7 @@ fn compile_type(ty: &Type) -> CompileType {
         Type::NumberLiteral(_) => CompileType::Integer,
         Type::StringLiteral(_) => CompileType::String,
         Type::Inferred(_) | Type::Splice(_) => CompileType::Unknown,
+        Type::Forall(_) => CompileType::Error,
         Type::Product(product) | Type::ParameterProduct(product) => CompileType::Product(
             product
                 .elements
@@ -8669,8 +8692,7 @@ fn compile_pattern_annotation(pattern: &Pattern) -> Option<CompileType> {
 
 fn helper_compile_type(binding: &Binding) -> CompileType {
     binding
-        .annotation
-        .as_ref()
+        .annotation_body()
         .map(compile_type)
         .or_else(|| binding.value.as_ref().and_then(infer_compile_function_type))
         .unwrap_or(CompileType::Unknown)
@@ -9715,6 +9737,7 @@ pub(crate) fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
 
 fn type_contains_syntax(ty: &Type) -> bool {
     match ty {
+        Type::Forall(ty) => forall_types(ty).any(type_contains_syntax),
         // `Trait.Item` is an associated-type projection, not the syntax type.
         Type::Named(named)
             if named
@@ -9791,6 +9814,13 @@ fn type_contains_syntax(ty: &Type) -> bool {
 
 fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashSet<&str>) -> bool {
     match ty {
+        Type::Forall(ty) => {
+            let mut declared = declared.clone();
+            for parameter in &ty.generics.parameters {
+                declared.extend(parameter.names());
+            }
+            forall_types(ty).any(|ty| type_contains_unshadowed_syntax(ty, &declared))
+        }
         Type::Named(named)
             if named.namespace.is_none() && declared.contains(named.name.as_str()) =>
         {
@@ -9843,8 +9873,7 @@ fn binding_is_compile_time_helper(binding: &Binding) -> bool {
 
 fn binding_contains_syntax(binding: &Binding) -> bool {
     binding
-        .annotation
-        .as_ref()
+        .annotation_body()
         .is_some_and(type_contains_syntax)
         || binding
             .value
@@ -9854,8 +9883,7 @@ fn binding_contains_syntax(binding: &Binding) -> bool {
 
 fn binding_uses_macro_call_metadata(binding: &Binding) -> bool {
     binding
-        .annotation
-        .as_ref()
+        .annotation_body()
         .is_some_and(|annotation| type_contains_named(annotation, "MacroCallMetadata"))
         || binding.value.as_ref().is_some_and(|value| {
             let mut current = value;
@@ -9888,6 +9916,7 @@ fn pattern_uses_macro_call_metadata(pattern: &Pattern) -> bool {
 
 fn type_contains_named(ty: &Type, expected: &str) -> bool {
     match ty {
+        Type::Forall(ty) => forall_types(ty).any(|ty| type_contains_named(ty, expected)),
         Type::Named(named) => named.namespace.is_none() && named.name == expected,
         Type::Function(function) => {
             type_contains_named(&function.parameter, expected)
@@ -11094,11 +11123,8 @@ fn substitute_binding(
     environment: &Environment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
-    for bound in &mut binding.trait_bounds {
-        substitute_trait_bound(bound, environment, diagnostics)?;
-    }
-    for bound in &mut binding.subtype_bounds {
-        substitute_subtype_bound(bound, environment, diagnostics)?;
+    if let Some(generics) = &mut binding.companion_generics {
+        substitute_generics(generics, environment, diagnostics)?;
     }
     if let Some(target) = &mut binding.companion_target {
         substitute_type(target, environment, diagnostics)?;
@@ -11275,6 +11301,11 @@ fn substitute_type(
         };
     }
     match ty {
+        Type::Forall(ty) => {
+            substitute_generics(&mut ty.generics, environment, diagnostics)?;
+            substitute_type(&mut ty.body, environment, diagnostics)?;
+        }
+
         Type::Product(product) | Type::ParameterProduct(product) => {
             for element in &mut product.elements {
                 substitute_type(&mut element.ty, environment, diagnostics)?;
@@ -12132,14 +12163,8 @@ fn freshen_binding(
     mark: u64,
 ) {
     expander.freshen_syntax(&mut binding.syntax, module, mark);
-    for parameter in &mut binding.type_parameters {
-        freshen_type_parameter(expander, parameter, module, mark);
-    }
-    for bound in &mut binding.trait_bounds {
-        freshen_trait_bound(expander, bound, module, mark);
-    }
-    for bound in &mut binding.subtype_bounds {
-        freshen_subtype_bound(expander, bound, module, mark);
+    if let Some(generics) = &mut binding.companion_generics {
+        freshen_generics(expander, generics, module, mark);
     }
     if let Some(target) = &mut binding.companion_target {
         freshen_type(expander, target, module, mark);
@@ -12363,6 +12388,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         Type::Product(ty) | Type::ParameterProduct(ty) => &mut ty.syntax,
         Type::Sum(ty) => &mut ty.syntax,
         Type::Function(ty) => &mut ty.syntax,
+        Type::Forall(ty) => &mut ty.syntax,
         Type::Application(ty) => &mut ty.syntax,
         Type::EffectApplication(ty) => &mut ty.syntax,
         Type::Array(ty) => &mut ty.syntax,
@@ -12370,6 +12396,11 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
     };
     expander.freshen_syntax(syntax, module, mark);
     match ty {
+        Type::Forall(ty) => {
+            freshen_generics(expander, &mut ty.generics, module, mark);
+            freshen_type(expander, &mut ty.body, module, mark);
+        }
+
         Type::Product(product) | Type::ParameterProduct(product) => {
             for element in &mut product.elements {
                 expander.freshen_syntax(&mut element.syntax, module, mark);
@@ -12414,6 +12445,107 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         | Type::NumberLiteral(_)
         | Type::StringLiteral(_)
         | Type::Named(_)
+        | Type::Splice(_) => {}
+    }
+}
+
+fn forall_types(ty: &staple_syntax::ForallType) -> impl Iterator<Item = &Type> {
+    std::iter::once(ty.body.as_ref())
+        .chain(
+            ty.generics
+                .trait_bounds
+                .iter()
+                .flat_map(|bound| bound.arguments.iter()),
+        )
+        .chain(
+            ty.generics
+                .subtype_bounds
+                .iter()
+                .map(|bound| &bound.supertype),
+        )
+}
+
+fn substitute_generics(
+    generics: &mut staple_syntax::GenericParameters,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    substitute_type_parameter_list(&mut generics.parameters, environment, diagnostics)?;
+    for bound in &mut generics.trait_bounds {
+        substitute_trait_bound(bound, environment, diagnostics)?;
+    }
+    for bound in &mut generics.subtype_bounds {
+        substitute_subtype_bound(bound, environment, diagnostics)?;
+    }
+    Some(())
+}
+
+fn freshen_generics(
+    expander: &mut MacroExpander,
+    generics: &mut staple_syntax::GenericParameters,
+    module: ModuleId,
+    mark: u64,
+) {
+    expander.freshen_syntax(&mut generics.syntax, module, mark);
+    for parameter in &mut generics.parameters {
+        freshen_type_parameter(expander, parameter, module, mark);
+    }
+    for bound in &mut generics.trait_bounds {
+        freshen_trait_bound(expander, bound, module, mark);
+    }
+    for bound in &mut generics.subtype_bounds {
+        freshen_subtype_bound(expander, bound, module, mark);
+    }
+}
+
+/// Compile-time type conversion must reject generic function types instead
+/// of treating them as an unknown type and silently accepting any value.
+fn reject_compile_forall(ty: &Type, diagnostics: &mut Vec<Diagnostic>) {
+    match ty {
+        Type::Forall(ty) => {
+            diagnostics.push(Diagnostic::new(
+                ty.syntax.span.clone(),
+                "generic function types are not supported here yet",
+            ));
+            for ty in forall_types(ty) {
+                reject_compile_forall(ty, diagnostics);
+            }
+        }
+        Type::Function(ty) => {
+            reject_compile_forall(&ty.parameter, diagnostics);
+            reject_compile_forall(&ty.result, diagnostics);
+            for resource in &ty.effects.resources {
+                reject_compile_forall(&resource.value_type, diagnostics);
+            }
+        }
+        Type::Product(ty) | Type::ParameterProduct(ty) => {
+            for element in &ty.elements {
+                reject_compile_forall(&element.ty, diagnostics);
+            }
+        }
+        Type::Sum(ty) => {
+            for alternative in &ty.alternatives {
+                reject_compile_forall(alternative, diagnostics);
+            }
+        }
+        Type::Application(ty) => {
+            reject_compile_forall(&ty.callee, diagnostics);
+            reject_compile_forall(&ty.argument, diagnostics);
+        }
+        Type::EffectApplication(ty) => {
+            reject_compile_forall(&ty.callee, diagnostics);
+            for resource in &ty.effects.resources {
+                reject_compile_forall(&resource.value_type, diagnostics);
+            }
+        }
+        Type::Array(ty) => {
+            reject_compile_forall(&ty.element, diagnostics);
+            reject_compile_forall(&ty.count, diagnostics);
+        }
+        Type::Inferred(_)
+        | Type::Named(_)
+        | Type::NumberLiteral(_)
+        | Type::StringLiteral(_)
         | Type::Splice(_) => {}
     }
 }
