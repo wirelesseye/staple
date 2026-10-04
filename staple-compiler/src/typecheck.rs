@@ -1756,6 +1756,9 @@ impl TypedModule {
         self.function_symbols.get(&symbol).copied()
     }
 
+    /// The scheme a function implements: its binding's written `<…>`
+    /// annotation (a generic `def` or a scheme-annotated `let`), or the
+    /// expected scheme a lambda was checked against.
     pub fn scheme_of_function(&self, function: FunctionId) -> Option<&CheckedScheme> {
         self.function_schemes.get(&function)
     }
@@ -1770,13 +1773,24 @@ impl TypedModule {
             free: HashSet<TypeParameterId>,
         }
         impl Visitor<'_> {
-            fn report(&mut self, syntax: &staple_syntax::Syntax, ty: Option<&CheckedType>) {
+            /// Expressions are reported where they are polymorphic values
+            /// themselves; patterns and declarations also when a scheme is
+            /// only nested in their type, since nothing else may construct it.
+            fn report(
+                &mut self,
+                syntax: &staple_syntax::Syntax,
+                ty: Option<&CheckedType>,
+                nested: bool,
+            ) {
                 if self.collect_free
                     && let Some(ty) = ty
                 {
                     self.free.extend(type_parameter_ids(ty));
                 }
-                if self.visited.insert(syntax.id) && ty.is_some_and(type_contains_scheme) {
+                let polymorphic = ty.is_some_and(|ty| {
+                    matches!(ty, CheckedType::Forall(_)) || nested && type_contains_scheme(ty)
+                });
+                if self.visited.insert(syntax.id) && polymorphic {
                     self.diagnostics.push(Diagnostic::new(
                         syntax.span.clone(),
                         "polymorphic function values are not supported yet",
@@ -1809,6 +1823,7 @@ impl TypedModule {
                 self.report(
                     pattern.syntax(),
                     self.module.type_of_pattern(pattern.syntax().id),
+                    true,
                 );
                 match pattern {
                     Pattern::Product(p) => {
@@ -1830,7 +1845,7 @@ impl TypedModule {
                         if let Some(value) = &binding.value {
                             self.expression(value);
                         } else if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
-                            self.report(&binding.syntax, self.module.type_of_symbol(symbol));
+                            self.report(&binding.syntax, self.module.type_of_symbol(symbol), true);
                         }
                     }
                     Item::PatternBinding(binding) => {
@@ -1855,6 +1870,7 @@ impl TypedModule {
                 self.report(
                     expression.syntax(),
                     self.module.type_of_expression(expression.syntax().id),
+                    false,
                 );
                 if !self.collect_free
                     && let Some(symbol) = self.module.symbol_for(expression.syntax().id)
@@ -1889,6 +1905,11 @@ impl TypedModule {
                         self.expression(&value.left);
                         self.expression(&value.right);
                     }
+                    Expression::Binary(value) => {
+                        self.expression(&value.left);
+                        self.expression(&value.right);
+                    }
+                    Expression::Unary(value) => self.expression(&value.operand),
                     Expression::Match(value) => {
                         self.expression(&value.subject);
                         for arm in &value.arms {
@@ -1966,6 +1987,16 @@ impl TypedModule {
                 }
             }
         }
+        // A pattern and its inner binding can share one span.
+        let mut spans = Vec::new();
+        visitor.diagnostics.retain(|diagnostic| {
+            if spans.contains(&diagnostic.span) {
+                false
+            } else {
+                spans.push(diagnostic.span.clone());
+                true
+            }
+        });
         visitor.diagnostics
     }
 
@@ -7919,13 +7950,15 @@ impl TypeChecker {
                         }
                     }
                 }
+                // The body reads the scheme while it is checked; a lambda that
+                // fails to check does not implement it.
                 let actual = self.check_expression_expected(module, expression, Some(&scheme.body));
                 if actual != CheckedType::Error {
-                    if let Some(id) = module.function_for(expression.syntax().id) {
-                        self.function_schemes.insert(id, scheme.as_ref().clone());
-                    }
                     expected.unwrap().clone()
                 } else {
+                    if let Some(id) = module.function_for(expression.syntax().id) {
+                        self.function_schemes.remove(&id);
+                    }
                     actual
                 }
             } else {

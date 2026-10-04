@@ -13465,3 +13465,69 @@ fn stage3_lowering_keeps_generic_capture_dependencies_demand_driven() {
     ));
     lower(&module);
 }
+
+#[test]
+fn stage3_generic_bodies_check_bounds_on_their_own_parameters() {
+    const COPIED: &str = "def copied: <T where Copy T> T -> T = x => x\n";
+    let source = format!("{COPIED}def outer: <A> A -> A = a => copied a\n");
+    let diagnostics = TypeChecker::new()
+        .check(resolve(&source))
+        .expect_err_diagnostics("an unbounded body cannot satisfy `Copy A`");
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["trait bound is not satisfied for `A`"]
+    );
+    type_check(&format!(
+        "{COPIED}def outer: <A where Copy A> A -> A = a => copied a\nlet answer = outer 42\n"
+    ));
+}
+
+#[test]
+fn stage3_effect_parameters_bind_to_rigid_effect_rows() {
+    const APPLY: &str = "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\n";
+    type_check(&format!(
+        "{APPLY}let alias: <effect F> (() ->{{F}} I32) ->{{F}} I32 = apply\n"
+    ));
+    let source = format!("{APPLY}let bad: <effect F> (() ->{{F}} I32) -> I32 = apply\n");
+    let diagnostics = TypeChecker::new()
+        .check(resolve(&source))
+        .expect_err_diagnostics("the result row must keep `F`");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message == "generic function conflicts with the expected type"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn stage3_lowering_reports_each_polymorphic_value_once() {
+    let module = type_check(concat!(
+        "def identity: <T> move T -> T = move value => value\n",
+        "def consume: (<T> move T -> T) -> I32 = f => f 1\n",
+        "let r = (consume identity) + 1\n",
+    ));
+    let diagnostics = Lowerer::new()
+        .lower(&module)
+        .expect_err_diagnostics("polymorphic values need Stage 4");
+    // The parameter `f` and the argument `identity`; not the callee
+    // `consume`, whose type only mentions a scheme.
+    assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+    assert_ne!(diagnostics[0].span, diagnostics[1].span);
+}
+
+#[test]
+fn stage3_lowering_reports_schemes_nested_in_parameter_types() {
+    let module = type_check(concat!(
+        "type Functions = wrap (identity: <T> move T -> T,)\n",
+        "def count: Functions -> I32 = fs => 1\n",
+        "let answer = 1\n",
+    ));
+    let diagnostics = Lowerer::new()
+        .lower(&module)
+        .expect_err_diagnostics("a scheme field still needs Stage 4");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+}

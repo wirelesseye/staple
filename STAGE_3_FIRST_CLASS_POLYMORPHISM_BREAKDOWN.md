@@ -277,6 +277,24 @@ unaffected.
   `Forall` value (rule 5). Tests that pin it for that case are updated.
 - Stage 1's "generic function types are not supported here yet" is
   replaced by targeted messages for the positions that stay rejected.
+- **Generic bodies check bounds on their own parameters.** Use-site bound
+  checks used to skip every obligation that mentioned a type parameter.
+  They now skip only parameters that are still being inferred, and check
+  rigid ones (the enclosing function's, or an expected scheme's) against
+  the active bounds. This closes a soundness hole:
+  `def outer: <A> A -> A = a => copied a` with
+  `copied: <T where Copy T> T -> T` used to compile, and so did
+  `outer (Token 1)` with a non-`Copy` `Token`. It is now rejected with
+  "trait bound is not satisfied for `A`", and the fix is to declare
+  `where Copy A`. Programs that relied on the hole stop compiling.
+  Covered by `stage3_generic_bodies_check_bounds_on_their_own_parameters`.
+- **Effect parameters can bind to rows with a variable.** Effect inference
+  used to reject any actual row that carried an effect variable. It now
+  binds the parameter to the remaining row, variable included, and rejects
+  a second binding with a different variable. Rule 10 needs this to match
+  `apply: <effect E> …` against an expected `<effect F> …` whose `F` is
+  rigid. The IR comparison shows no existing program changed. Covered by
+  `stage3_effect_parameters_bind_to_rigid_effect_rows`.
 
 ## Risks
 
@@ -307,8 +325,11 @@ unaffected.
 
 - `Forall` annotations on ordinary `let` bindings describe storage. Scoped
   quantifiers for annotated lambdas are resolved once and shared by the
-  annotation and body. `TypedModule::scheme_of_function` exposes checked
-  lambda schemes for Stage 4.
+  annotation and body. `TypedModule::scheme_of_function` exposes, for
+  Stage 4, the scheme each function implements: a generic `def`'s or a
+  scheme-annotated `let`'s written annotation, or the expected scheme a
+  lambda was checked against. A lambda that fails to check against its
+  expected scheme has no entry.
 - Compatibility uses alpha-equivalence recursively through products,
   wrappers, containers, and function types. The equality audit also covers
   inference conflicts and fallbacks, projections and trait arguments,
@@ -322,7 +343,13 @@ unaffected.
   Its expression type remains an instantiated function, not a smaller scheme.
 - The lowering gate walks initializer expressions, concrete function roots,
   and referenced generic bodies, with visited sets for recursive functions.
-  It reports source diagnostics before building lowering artifacts.
+  It reports source diagnostics before building lowering artifacts. An
+  expression is reported when its own type is a scheme, so a callee whose
+  type merely mentions one (`consume` in `consume identity`) is not.
+  Patterns and declarations without a value are also reported when a scheme
+  is nested in their type, because a parameter such as `fs: Functions` may
+  be the only place an unconstructed scheme appears. Diagnostics are
+  deduplicated by span.
 - The bounds side tables and parity assertions are retained. Signature
   collection, conditional implementation checking, and the subsequent bound
   inheritance pass still need their partial body templates before all schemes
