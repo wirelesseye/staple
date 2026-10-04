@@ -14,8 +14,9 @@ impl SyntaxId {
     pub const COMPILER: Self = Self(usize::MAX);
 
     /// Annotation wrappers use a separate namespace so introducing them does
-    /// not shift existing IDs embedded in generated implementation names.
-    /// `kind` distinguishes a generic header (1) from a forall wrapper (2).
+    /// not renumber the IDs of the nodes around them; every other node keeps
+    /// the ID it had before `Forall` existed. `kind` distinguishes a generic
+    /// header (1) from a forall wrapper (2).
     pub fn annotation_node(base: usize, kind: usize) -> Self {
         let shift = usize::BITS - 2;
         assert!(base < (1usize << shift) && matches!(kind, 1 | 2));

@@ -1262,27 +1262,11 @@ impl Collector<'_> {
             .map(|value_type| self.display_type(value_type));
         if let Some(value_type) = value_type {
             let prefix = binding.declaration_prefix();
-            let signature_type = if binding.is_generic() {
-                binding
-                    .annotation
-                    .as_ref()
-                    .map(|annotation| {
-                        if binding.companion_generics.is_some() {
-                            let generics = staple_syntax::GenericParameters {
-                                syntax: binding.syntax.clone(),
-                                parameters: binding.all_type_parameters(),
-                                trait_bounds: binding.all_trait_bounds(),
-                                subtype_bounds: binding.all_subtype_bounds(),
-                            };
-                            format!("{generics} {}", binding.annotation_body().unwrap())
-                        } else {
-                            annotation.to_string()
-                        }
-                    })
-                    .unwrap_or(value_type)
-            } else {
-                value_type
-            };
+            let generics = self.bracketed_generic_prefix(
+                &binding.all_type_parameters(),
+                &binding.all_trait_bounds(),
+                &binding.all_subtype_bounds(),
+            );
             let docs = self
                 .typed
                 .symbol_for(binding.syntax.id)
@@ -1293,7 +1277,7 @@ impl Collector<'_> {
             self.named_with_docs(
                 &binding.syntax,
                 &binding.name,
-                format!("{prefix} {}: {signature_type}", binding.name),
+                format!("{prefix} {}: {generics}{value_type}", binding.name),
                 docs,
                 module,
             );

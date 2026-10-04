@@ -5774,7 +5774,7 @@ fn expands_modifier_lists_generated_by_item_macros() {
     let module = type_check(concat!(
         "macro @replace: Item -> Item = _ => parse_quote { let generated: I32 = 42 }\n",
         "macro emit: Expr -> Item = _: Expr => parse_quote { @replace let original = 0 }\n",
-        "emit 1\n",
+        "emit ()\n",
         "let result: I32 = generated\n",
     ));
     let context = Context::create();
