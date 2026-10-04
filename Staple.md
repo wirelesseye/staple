@@ -1095,6 +1095,7 @@ directly to a call against a standard prelude trait:
 | Operator(s) | Precedence | Associativity | Desugars to |
 |---|---|---|---|
 | `-`, `!` (prefix) | 8 | — | `Neg.negate`, `Not.not` |
+| `as` | 7.5 | left | `Type :: Convert.convert expression` |
 | `*`, `/` | 7 | left | `Multiply.multiply`, `Divide.divide` |
 | `+`, `-` | 6 | left | `Add.add`, `Subtract.subtract` |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | 4 | none | `Eq.eq`/`Eq.ne`, `PartialOrd.lt`/`le`/`gt`/`ge` |
@@ -3583,6 +3584,18 @@ consumed C string on both success and failure.
 preserves the pointer. Integer-to-pointer conversion does not validate the
 address, alignment, allocation lifetime, or whether dereferencing is permitted.
 Address arithmetic follows the existing `USize` arithmetic rules.
+
+`expression as Type` is syntactic sugar for `Type :: Convert.convert expression`.
+It uses `Convert`, so it requires an infallible conversion implementation.
+It binds tighter than arithmetic and comparisons, but looser than prefix
+operators, function application, and access. Chained conversions associate
+left to right; parenthesize a larger source expression to convert its result:
+
+```staple
+let wide = (I8 :: 42) as I32
+let floating: F64 = wide as _
+let total = (wide + 1) as F64
+```
 
 ### Type declarations
 

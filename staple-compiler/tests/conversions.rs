@@ -136,3 +136,10 @@ fn string_collection_and_pointer_conversions_run() {
     #[cfg(unix)]
     run(&lowered);
 }
+
+#[test]
+fn as_syntax_runs_for_builtin_generic_custom_and_move_only_conversions() {
+    let lowered = lower(include_str!("fixtures/conversions_as.sta"));
+    #[cfg(unix)]
+    run(&lowered);
+}

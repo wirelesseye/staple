@@ -291,6 +291,7 @@ struct Grammar {
     newline_terminates_expression: bool,
     newline_terminates_type: bool,
     any_newline_terminates_type: bool,
+    conversion_target: bool,
     brace_terminates_expression: bool,
     macro_punctuation_arguments: bool,
     quote_depth: usize,
@@ -317,6 +318,7 @@ impl Grammar {
             newline_terminates_expression: false,
             newline_terminates_type: false,
             any_newline_terminates_type: false,
+            conversion_target: false,
             brace_terminates_expression: false,
             macro_punctuation_arguments: false,
             quote_depth: 0,
@@ -2277,7 +2279,7 @@ impl Grammar {
             false
         };
         let mut parameter = self.parse_type_union()?;
-        if self.at(TokenKind::Star) {
+        if self.at(TokenKind::Star) && !self.conversion_target {
             return Err(self.error("juxtaposed parameters are now written `[A, B] -> R`"));
         }
         if (whole_mutable || whole_moved) && matches!(parameter, Type::ParameterProduct(_)) {
@@ -2911,7 +2913,7 @@ impl Grammar {
     /// Parses `*`/`/` (precedence 7, left-associative).
     fn parse_multiplicative_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
-        let mut expression = self.parse_unary_expression()?;
+        let mut expression = self.parse_conversion_expression()?;
         loop {
             if self.newline_terminates_expression && self.has_newline_before_next_token() {
                 break;
@@ -2928,7 +2930,7 @@ impl Grammar {
                 break;
             };
             let operator_syntax = self.syntax(operator_start);
-            let right = self.parse_unary_expression()?;
+            let right = self.parse_conversion_expression()?;
             expression = Expression::Binary(BinaryExpression {
                 syntax: self.syntax(start),
                 operator_syntax,
@@ -2936,6 +2938,61 @@ impl Grammar {
                 left: Box::new(expression),
                 right: Box::new(right),
             });
+        }
+        Ok(expression)
+    }
+
+    /// Parses left-associative `value as Type` between prefix operators and
+    /// multiplication, desugaring it to `Type :: Convert.convert value`.
+    fn parse_conversion_expression(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
+        let mut expression = self.parse_unary_expression()?;
+        loop {
+            if self.newline_terminates_expression && self.has_newline_before_next_token() {
+                break;
+            }
+            let operator_start = self.position;
+            if !self.eat(TokenKind::As) {
+                break;
+            }
+            // Give synthesized references their own IDs and token text while
+            // anchoring diagnostics at the source `as` keyword.
+            let mut name_syntax = self.syntax(operator_start);
+            name_syntax.tokens = Arc::from(lex("Convert"));
+            name_syntax.token_range = 0..name_syntax.tokens.len();
+            let mut access_syntax = self.syntax(operator_start);
+            access_syntax.tokens = Arc::from(lex("Convert.convert"));
+            access_syntax.token_range = 0..access_syntax.tokens.len();
+
+            let newline_terminates_type = self.newline_terminates_type;
+            let any_newline_terminates_type = self.any_newline_terminates_type;
+            let conversion_target = self.conversion_target;
+            self.newline_terminates_type = true;
+            self.any_newline_terminates_type = true;
+            self.conversion_target = true;
+            let ty = self.parse_type();
+            self.newline_terminates_type = newline_terminates_type;
+            self.any_newline_terminates_type = any_newline_terminates_type;
+            self.conversion_target = conversion_target;
+            let ty = ty?;
+            let callee = Expression::Access(AccessExpression {
+                syntax: access_syntax,
+                value: Box::new(Expression::Name(NameExpression {
+                    syntax: name_syntax,
+                    name: "Convert".to_owned(),
+                })),
+                accessor: Accessor::Name("convert".to_owned()),
+            });
+            let value = Expression::Call(CallExpression {
+                syntax: self.syntax(start),
+                callee: Box::new(callee),
+                argument: Box::new(expression),
+            });
+            expression = Expression::TypeAscription(Box::new(TypeAscriptionExpression {
+                syntax: self.syntax(start),
+                value: Box::new(value),
+                ty,
+            }));
         }
         Ok(expression)
     }

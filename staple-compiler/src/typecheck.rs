@@ -7328,7 +7328,13 @@ impl TypeChecker {
                 self.check_explicit_type_application(module, application, expected)
             }
             Expression::TypeAscription(ascription) => {
-                let annotation = self.resolve_source_type(module, &ascription.ty);
+                let mut annotation = self.resolve_source_type(module, &ascription.ty);
+                if contains_inferred_type(&annotation)
+                    && let Some(expected) = expected
+                    && let Some(merged) = merge_types(annotation.clone(), expected.clone())
+                {
+                    annotation = merged;
+                }
                 self.check_expression_expected(module, &ascription.value, Some(&annotation))
             }
             Expression::Match(match_) => self.check_match_expression(module, match_, expected),

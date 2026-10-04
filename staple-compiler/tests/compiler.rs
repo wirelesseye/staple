@@ -3702,6 +3702,9 @@ fn checks_type_ascriptions_and_contextually_types_functions() {
         "let result: I32 = identity 42\n",
         "let left: I8 = 1\nlet right: I8 = 2\nlet sum = I8 :: left + right\n",
         "let applied = I32 :: identity 1 + identity 2\n",
+        "let inferred: I64 = _ :: Convert.convert small\n",
+        "let inferred_function: I32 -> I32 = _ -> I32 :: (value => value)\n",
+        "let inferred_pair: (I32, String) = (I32, _) :: (1, \"text\")\n",
     ));
 
     let module = resolve("let invalid = I32 :: \"text\"\n");
@@ -11529,6 +11532,39 @@ fn resolves_local_const_names_before_their_textual_position_like_def() {
         diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message.contains("later"))
+    );
+}
+
+#[test]
+fn as_syntax_requires_an_infallible_conversion() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let value = (I64 :: 42) as I8\n"))
+        .expect_err_diagnostics("as must not select a fallible conversion");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no trait implementation")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn as_syntax_consumes_move_only_sources() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.*\n",
+            "def exercise: () -> () = () => {\n",
+            "let original = c_string \"owned\"\n",
+            "let moved = original as CString\n",
+            "let reused = original as CString\n",
+            "()\n}\n",
+        )))
+        .expect_err_diagnostics("as must move its source like Convert.convert");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("moved")),
+        "{diagnostics:?}"
     );
 }
 

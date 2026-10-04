@@ -1,0 +1,70 @@
+use std.cinterop.(CString, CPointer, c_string)
+use std.slice.Slice
+use std.syntax.*
+
+def require: Bool -> () = condition => if condition { () } else { panic "as conversion failed" }
+def generic: <From, To where Convert From To> move From -> To = move value => value as To
+def generic_inferred: <From, To where Convert From To> move From -> To = move value => value as _
+def require_wide: I64 -> () = value => require (value == 42)
+def next: mut I32 -> I32 = mut counter => { counter = counter + 1; counter }
+
+type Source = wrap I32
+type Target = wrap I32
+impl !Copy Source {}
+impl Convert Source Target { convert = move Source value => Target value }
+
+macro widen = value: Expr => parse_quote { $value as I64 }
+macro identity = value: Expr => parse_quote { $value }
+
+def run: () -> () = () => {
+    let small: I8 = 42
+    let wide = small as I64
+    require (wide == 42)
+    let inferred_wide: I64 = small as _
+    require (inferred_wide == 42)
+    require_wide (small as _)
+    let generic_inferred_wide: I64 = generic_inferred small
+    require (generic_inferred_wide == 42)
+    require (small as I32 as F64 == 42.0)
+    require (small as I64 + 1 == 43)
+    require (small as I64 * 2 == 84)
+    require ((small + 1) as I64 == 43)
+    let generic_wide: I64 = generic small
+    require (generic_wide == 42)
+    let mut counter = 0
+    let evaluated = next counter as I64
+    require (evaluated == 1)
+    require (counter == 1)
+    let target = (Source 41) as Target
+    let Target payload = target
+    require (payload == 41)
+    let inferred_target: Target = (Source 42) as _
+    let Target inferred_payload = inferred_target
+    require (inferred_payload == 42)
+    let function: I32 -> I32 = value => value + 1
+    let same_function = function as I32 -> I32
+    require (same_function 41 == 42)
+    let pair = (I32 :: 1, "pair") as (I32, String)
+    let (number, label) = pair
+    require (number == 1)
+    require (label == "pair")
+    let owned = c_string "owned"
+    let moved = owned as CString
+    match (CString.to_string moved) { Ok text => require (text == "owned"), _ => panic "identity lost ownership", }
+    let pointer = (USize :: 4096) as CPointer I32
+    require (pointer as USize == 4096)
+    let inferred_pointer: CPointer I32 = (USize :: 4096) as CPointer _
+    require (inferred_pointer as USize == 4096)
+    let inferred_pair: (I32, String) = (I32 :: 1, "inferred") as (I32, _)
+    let (inferred_number, inferred_label) = inferred_pair
+    require (inferred_number == 1)
+    require (inferred_label == "inferred")
+    let bytes = "hello" as Slice U8
+    require (Slice.length bytes == 5)
+    require (widen small == 42)
+    require (identity (small as I64) == 42)
+    require ((identity small) as I64 == 42)
+    ()
+}
+
+run ()

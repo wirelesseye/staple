@@ -160,6 +160,7 @@ impl<'a> Formatter<'a> {
                     self.space();
                 }
                 TokenKind::Operator
+                | TokenKind::As
                 | TokenKind::DoubleColon
                 | TokenKind::Equals
                 | TokenKind::Arrow
@@ -357,6 +358,18 @@ fn needs_space(previous: Option<TokenKind>, current: TokenKind) -> bool {
 mod tests {
     use super::{format_source, format_token_stream};
     use crate::{TokenKind, lex};
+
+    #[test]
+    fn formats_conversion_syntax_and_import_aliases() {
+        let source = "use std.convert.Convert as Convert\nlet wide=(1+2)as I64*3\nlet pair=value as(I32,String)\n";
+        let formatted = format_source(source).expect("conversion syntax should format");
+        assert_eq!(
+            formatted,
+            "use std.convert.Convert as Convert\nlet wide = (1 + 2) as I64 * 3\nlet pair = value as (I32, String)\n"
+        );
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+        crate::parse(&formatted).expect("formatted conversions should parse");
+    }
 
     #[test]
     fn formats_type_ascriptions_as_low_precedence_operators() {

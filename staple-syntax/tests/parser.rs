@@ -1633,6 +1633,101 @@ fn parses_product_parameter_and_expression_body() {
 }
 
 #[test]
+fn conversion_syntax_desugars_to_an_ascribed_convert_call() {
+    for (source, target) in [
+        ("value as I64", "I64"),
+        ("value as Slice U8", "Slice U8"),
+        ("value as CPointer I32", "CPointer I32"),
+        ("value as (I32, String)", "(I32, String)"),
+        ("value as I32 -> I32", "I32 -> I32"),
+        ("value as I32 | String", "I32 | String"),
+        ("value as _", "_"),
+    ] {
+        let module = parse(source).expect("conversion should parse");
+        let Item::Expression(Expression::TypeAscription(ascription)) = &module.items[0] else {
+            panic!("expected an ascribed conversion for {source}");
+        };
+        assert_eq!(ascription.syntax.text(), source);
+        assert_eq!(ascription.ty.syntax().text().trim(), target);
+        let Expression::Call(call) = ascription.value.as_ref() else {
+            panic!("expected conversion call");
+        };
+        let Expression::Access(access) = call.callee.as_ref() else {
+            panic!("expected trait method access");
+        };
+        let Expression::Name(name) = access.value.as_ref() else {
+            panic!("expected trait name");
+        };
+        assert_eq!(name.name, "Convert");
+        assert_eq!(access.accessor, Accessor::Name("convert".to_owned()));
+        assert_eq!(name.syntax.text(), "Convert");
+        assert_eq!(access.syntax.text(), "Convert.convert");
+        assert!(matches!(call.argument.as_ref(), Expression::Name(name) if name.name == "value"));
+        let ids = [
+            ascription.syntax.id,
+            call.syntax.id,
+            access.syntax.id,
+            name.syntax.id,
+        ];
+        assert_eq!(
+            ids.into_iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
+    }
+}
+
+#[test]
+fn conversions_bind_between_prefix_operators_and_arithmetic_and_chain_left() {
+    let module = parse("-f x as I64 as F64 * y + z == result").unwrap();
+    let Item::Expression(Expression::Binary(comparison)) = &module.items[0] else {
+        panic!("expected comparison");
+    };
+    assert_eq!(comparison.operator, BinaryOperator::Equal);
+    let Expression::Binary(sum) = comparison.left.as_ref() else {
+        panic!("expected sum")
+    };
+    assert_eq!(sum.operator, BinaryOperator::Add);
+    let Expression::Binary(product) = sum.left.as_ref() else {
+        panic!("expected product")
+    };
+    assert_eq!(product.operator, BinaryOperator::Multiply);
+    let Expression::TypeAscription(outer) = product.left.as_ref() else {
+        panic!("expected outer conversion")
+    };
+    assert_eq!(outer.ty.syntax().text().trim(), "F64");
+    let Expression::Call(outer_call) = outer.value.as_ref() else {
+        panic!("expected outer call")
+    };
+    let Expression::TypeAscription(inner) = outer_call.argument.as_ref() else {
+        panic!("expected inner conversion")
+    };
+    assert_eq!(inner.ty.syntax().text().trim(), "I64");
+    let Expression::Call(inner_call) = inner.value.as_ref() else {
+        panic!("expected inner call")
+    };
+    assert!(matches!(inner_call.argument.as_ref(), Expression::Unary(_)));
+}
+
+#[test]
+fn conversion_types_stop_at_newlines_and_require_a_target() {
+    let source =
+        "use std.convert.Convert as Convert\nlet first = value as I64\nlet second = value as F64\n";
+    let module = parse(source).unwrap();
+    assert_eq!(module.items.len(), 3);
+    assert_eq!(module.syntax.text(), source);
+    for invalid in [
+        "value as",
+        "value as + other",
+        "as I64",
+        "value as\nlet other = 1",
+    ] {
+        assert!(parse(invalid).is_err(), "should reject {invalid}");
+    }
+}
+
+#[test]
 fn parses_low_precedence_type_ascription_expression() {
     let source = "let add = (a: I32, b: I32) => I32 :: a + b\n";
     let root = parse(source).expect("function should parse");
