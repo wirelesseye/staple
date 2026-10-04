@@ -50,6 +50,12 @@ split into stages below. Each stage ends with
 **Breakdown plan: required** get their own `STAGE_N_*_BREAKDOWN.md` before
 implementation starts.
 
+Work starts at Stage 1. There is no separate specification stage: the
+Design and Decisions sections below fix the semantics, and `Staple.md` is
+updated in the same stage that makes each behavior usable, following the
+repository's convention that the reference describes what the compiler
+actually does.
+
 ## Current State
 
 - **AST.**
@@ -281,39 +287,24 @@ scope in the binding's value. This matches today's behavior for a generic
 
 ## Stages
 
-### Stage 0 — Specification
-
-- Rewrite the Staple.md "Generic functions" section around `Forall` types:
-  polymorphic values, scope, instantiation, generalization, mutable storage,
-  restrictions.
-- Rewrite "Traits and bounded generic functions" to describe the hybrid
-  strategy and independently generic trait members.
-- Update the parameter-product "Where a parameter product may appear" and
-  capable-parameter rules for nested schemes.
-- Extend the call-site type argument rules (`.<…>`) to `Forall`-typed values
-  and state that parameter order comes from the scheme.
-
-**Breakdown plan: not required.** Documentation only; reviewed directly.
-
 ### Stage 1 — `Forall` in the syntax tree (behavior-preserving)
 
-- Add `Type::Forall` to the AST, parser, formatter, and `Display`.
+- Add `Type::Forall` to the AST, parser, and `Display`.
 - Remove `type_parameters`, `trait_bounds`, and `subtype_bounds` from
-  `Binding`; resolve reads them from a top-level `Forall` annotation. This
-  covers `def`s, generic `"staple-intrinsic"` extern bindings, and
-  companion members (whose companion-level parameters stay on the
-  companion). Trait member annotations do the same.
-- Update `macro_expand`, `expansion_render`, the `Syntax` reflection in
-  `stdlib/std/syntax.sta` (and `typegroup.sta` if affected), LSP hover and
-  semantic tokens, and `editors/vscode/syntaxes/staple.tmLanguage.json`.
-- A `Forall` is still accepted only at the top of a `def`, companion
-  member, generic intrinsic, or trait-member annotation; anywhere else it is
-  a "not yet supported" diagnostic.
-- **Exit:** identical behavior; all tests pass.
+  `Binding`. Resolve reads them from a top-level `Forall` annotation, which
+  covers `def`s, generic `"staple-intrinsic"` extern bindings, and companion
+  members. A companion's inherited parameters move to a separate per-member
+  field instead of being merged into the member's own.
+- Update resolve, typecheck, lowering, `macro_expand`, `expansion_render`,
+  and the LSP to read the new shape.
+- A `Forall` is accepted only at the top of a `def` or extern binding's
+  annotation; anywhere else (including trait members, until Stage 7) it is a
+  "not yet supported" diagnostic.
+- No `Staple.md` change: the surface syntax for `def` is unchanged.
+- **Exit:** identical behavior; all tests pass; emitted IR unchanged.
 
-**Breakdown plan: required.** It spans syntax, macros and syntax reflection,
-resolve's parameter scoping, the formatter, and the LSP, and must stay
-behavior-preserving.
+**Breakdown plan: required.** See
+[STAGE_1_FORALL_SYNTAX_BREAKDOWN.md](STAGE_1_FORALL_SYNTAX_BREAKDOWN.md).
 
 ### Stage 2 — Explicit checked schemes (behavior-preserving)
 
@@ -329,7 +320,8 @@ behavior-preserving.
 - Update `contains_type_parameter`, `infer_type_parameters`, and their users
   in lowering and specialization.
 - Still rank-1, still monomorphization only.
-- **Exit:** identical behavior; all tests pass.
+- No `Staple.md` change.
+- **Exit:** identical behavior; all tests pass; emitted IR unchanged.
 
 **Breakdown plan: required.** `typecheck.rs` and `lower.rs` are the largest
 files and lean on the "free parameters mean generic" convention; the
@@ -350,6 +342,8 @@ migration needs an inventory of those sites and an ordered cutover.
 - The ownership pass and LSP hover handle `Forall` values.
 - Lowering rejects reachable polymorphic values with a single "not yet
   supported" diagnostic until Stage 4.
+- No `Staple.md` change yet: polymorphic values can't run until Stage 4, so
+  the reference is updated there.
 - **Exit:** every example in the summary type-checks; negative tests cover
   each restriction.
 
@@ -368,6 +362,15 @@ annotations, mutable storage, effects) before code.
   concrete↔abstract adapters, including nested function types.
 - The transitive coroutine/reactive restriction from Design §3, with its
   diagnostic at the polymorphic-value site.
+- **`Staple.md`:**
+  - rewrite "Generic functions" around `Forall` types: polymorphic values,
+    scope, instantiation, shallow scheme matching, mutable storage with a
+    fixed scheme, and the restrictions in Design §3 (bounded and
+    effect-polymorphic values are noted as not yet supported);
+  - extend the call-site type argument rules (`.<…>`) to `Forall`-typed
+    values and state that parameter order comes from the scheme;
+  - update "Where a parameter product may appear" and the capable-parameter
+    rules for nested schemes.
 - **Exit:**
   - the summary examples compile and run;
   - reachability tests show no dictionary-passed code for concretely called
@@ -383,6 +386,8 @@ polymorphic closures, calls, and adapters.
 - Bundle pack/unpack adapters at concrete↔abstract boundaries.
 - `<effect E>` schemes as values, including effect-only schemes, which need
   no layout work.
+- **`Staple.md`:** state that effect-polymorphic functions can be used as
+  values, in the effect-parameter part of "Generic functions".
 - **Exit:** `<effect E> (() ->{E} ()) ->{E} ()` works as a stored value and
   as a parameter, with resource and empty instantiations.
 
@@ -398,6 +403,10 @@ pattern.
   descriptors in dictionaries, and `Trait.Name T` projections on run-time
   parameters.
 - `Copy` and `Drop` mapped onto descriptors.
+- **`Staple.md`:** rewrite "Traits and bounded generic functions" to
+  describe the hybrid strategy, replacing "Traits use static dispatch …
+  runtime dictionaries … are not currently supported", and allow bounded
+  polymorphic values in "Generic functions".
 - **Exit:** bounded schemes such as `<T where Debug T> T ->{IO} ()` work as
   values, including through generic `impl`s.
 
@@ -416,8 +425,9 @@ and the special `Copy`/`Drop` rules.
   hidden associated-type parameters) followed by the member's own,
   replacing `trait_parameter_arguments` (Decision 7). `_` skips trait
   parameters, as in `Visitor.visit.<_, I32>`.
-- Lift Staple.md's "an individual trait member may not independently
-  introduce parameters" rule.
+- **`Staple.md`:** lift the "an individual trait member may not
+  independently introduce parameters" rule, document member schemes and
+  implementation conformance, and add the `.<…>` order for trait members.
 - **Exit:** a trait with a generic member works through static dispatch,
   through a bounded polymorphic value, and as a member value.
 
@@ -436,6 +446,8 @@ and dictionary layout together.
   It needs lowering to choose dictionary passing even in concrete contexts.
 - Optionally, lift the signal restriction or add deep subsumption.
 
+Each item updates `Staple.md` for the restriction it lifts.
+
 **Breakdown plan: required.** The items are independent; each needs its own
 small plan, and they can be scheduled separately or dropped.
 
@@ -443,8 +455,7 @@ small plan, and they can be scheduled separately or dropped.
 
 | Stage | Breakdown plan |
 |---|---|
-| 0 — Specification | Not required |
-| 1 — `Forall` in the syntax tree | **Required** |
+| 1 — `Forall` in the syntax tree | **Required** — [written](STAGE_1_FORALL_SYNTAX_BREAKDOWN.md) |
 | 2 — Explicit checked schemes | **Required** |
 | 3 — First-class polymorphism in the checker | **Required** |
 | 4 — Core dictionary passing | **Required** (split 4a/4b) |
@@ -464,7 +475,11 @@ small plan, and they can be scheduled separately or dropped.
     implementation;
   - an unused polymorphic value produces no descriptors, dictionaries, or
     adapters.
-- Stages 1 and 2 must leave the existing suite and emitted IR unchanged.
+- Stages 1 and 2 must leave the existing suite and emitted IR unchanged,
+  checked with `scripts/compare-llvm-ir.py` against a reference binary built
+  from the stage's base commit.
+- Every stage that changes user-visible behavior updates `Staple.md` in the
+  same stage.
 - Suite command: `cargo test --workspace --quiet`.
 
 ## Decisions
