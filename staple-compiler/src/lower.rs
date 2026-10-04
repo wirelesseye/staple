@@ -12873,6 +12873,7 @@ fn intrinsic_route(intrinsic: IntrinsicFunction) -> Option<IntrinsicRoute> {
         )),
         Intrinsic::NumericConvert { .. }
         | Intrinsic::ParseNumber { .. }
+        | Intrinsic::PointerCast
         | Intrinsic::PointerAddress
         | Intrinsic::AddressPointer
         | Intrinsic::ValidateUtf8

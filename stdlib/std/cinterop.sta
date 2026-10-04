@@ -16,6 +16,10 @@ pub type CChar = opaque
 /// An opaque pointer to a C value of type `Pointee`.
 @sized_opaque
 pub type CPointer Pointee = opaque
+/// An untyped, non-owning C pointer, compatible with C `void *`.
+/// Conversions preserve the pointer without validating its target.
+@sized_opaque
+pub type COpaquePointer = opaque
 /// A null-terminated C string.
 @sized_opaque
 pub type CString = opaque
@@ -88,4 +92,27 @@ impl<T> Convert (CPointer T) USize {
 
 impl<T> Convert USize (CPointer T) {
     convert = move value => __address_pointer value
+}
+
+extern "staple-intrinsic" {
+    __pointer_opaque: <T> CPointer T -> COpaquePointer
+    __opaque_pointer: <T> COpaquePointer -> CPointer T
+    __opaque_address: COpaquePointer -> USize
+    __address_opaque: USize -> COpaquePointer
+}
+
+impl<T> Convert (CPointer T) COpaquePointer {
+    convert = move value => __pointer_opaque value
+}
+
+impl<T> Convert COpaquePointer (CPointer T) {
+    convert = move value => __opaque_pointer value
+}
+
+impl Convert COpaquePointer USize {
+    convert = move value => __opaque_address value
+}
+
+impl Convert USize COpaquePointer {
+    convert = move value => __address_opaque value
 }

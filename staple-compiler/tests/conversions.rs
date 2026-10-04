@@ -143,3 +143,36 @@ fn as_syntax_runs_for_builtin_generic_custom_and_move_only_conversions() {
     #[cfg(unix)]
     run(&lowered);
 }
+
+#[test]
+fn opaque_pointer_conversions_run_and_emit_for_32_and_64_bit_targets() {
+    let lowered = lower(include_str!("fixtures/conversions_opaque_pointer.sta"));
+    let context = Context::create();
+    let generator = CodeGenerator::new(&context);
+    for target in ["i386-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] {
+        generator
+            .compile_module_for_target(&lowered, Some(target))
+            .unwrap_or_else(|errors| panic!("{target}: {errors:?}"));
+    }
+    #[cfg(unix)]
+    run(&lowered);
+}
+
+#[test]
+fn opaque_pointer_requires_explicit_conversion() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for source in [
+        "use std.cinterop.*\ndef erase: CPointer I32 -> COpaquePointer = value => value\n",
+        "use std.cinterop.*\ndef restore: COpaquePointer -> CPointer I32 = value => value\n",
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let errors = TypeChecker::new().check(resolved).expect_err("implicit pointer conversion must fail");
+        assert!(errors.iter().any(|error| error.message.contains("expected")
+            && error.message.contains("COpaquePointer")
+            && error.message.contains("CPointer I32")), "{errors:?}");
+    }
+}

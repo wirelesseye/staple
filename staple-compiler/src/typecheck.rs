@@ -238,6 +238,7 @@ pub enum CheckedType {
     },
     CString,
     CChar,
+    COpaquePointer,
     Parameter {
         id: TypeParameterId,
         name: String,
@@ -984,6 +985,7 @@ impl CheckedType {
             | Self::String
             | Self::StringLiteralSet(_)
             | Self::CString
+            | Self::COpaquePointer
             | Self::CChar
             | Self::Opaque { .. }
             | Self::Parameter { .. } => true,
@@ -1029,6 +1031,7 @@ impl CheckedType {
             | Self::String
             | Self::StringLiteralSet(_)
             | Self::CString
+            | Self::COpaquePointer
             | Self::CChar => true,
             Self::NumberLiteral(_) => true,
         }
@@ -1071,6 +1074,7 @@ impl fmt::Display for CheckedType {
                 write!(formatter, "({element}; {count})")
             }
             Self::CString => formatter.write_str("CString"),
+            Self::COpaquePointer => formatter.write_str("COpaquePointer"),
             Self::CChar => formatter.write_str("CChar"),
             Self::Parameter { name, .. } => formatter.write_str(name),
             Self::TypeConstructor {
@@ -3851,6 +3855,7 @@ impl TypeChecker {
             let expected = match intrinsic {
                 crate::IntrinsicFunction::NumericConvert { .. }
                 | crate::IntrinsicFunction::ParseNumber { .. }
+                | crate::IntrinsicFunction::PointerCast
                 | crate::IntrinsicFunction::PointerAddress
                 | crate::IntrinsicFunction::AddressPointer
                 | crate::IntrinsicFunction::ValidateUtf8
@@ -13298,6 +13303,7 @@ impl TypeChecker {
                     name: "Buffer".to_owned(),
                     arguments: Vec::new(),
                 },
+                BuiltinType::COpaquePointer => CheckedType::COpaquePointer,
                 BuiltinType::CChar => CheckedType::CChar,
                 BuiltinType::CString => CheckedType::CString,
                 BuiltinType::CPointer => CheckedType::TypeConstructor {
@@ -13550,6 +13556,9 @@ pub(crate) fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<
             Some(CheckedType::StringLiteralSet(expected))
         }
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
+        (CheckedType::COpaquePointer, CheckedType::COpaquePointer) => {
+            Some(CheckedType::COpaquePointer)
+        }
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
         (CheckedType::NumberLiteral(_), CheckedType::USize) => Some(CheckedType::USize),
         (CheckedType::NumberLiteral(actual), CheckedType::NumberLiteral(expected))
@@ -16770,6 +16779,7 @@ pub(crate) fn is_copy_type(
         | CheckedType::NumberLiteral(_)
         | CheckedType::String
         | CheckedType::StringLiteralSet(_)
+        | CheckedType::COpaquePointer
         | CheckedType::CChar
         | CheckedType::CString
         | CheckedType::Buffer(_)
@@ -17000,13 +17010,25 @@ fn valid_conversion_intrinsic_type(
         crate::IntrinsicFunction::ParseNumber { to } => {
             *function.parameter == CheckedType::String && checked_result(to)
         }
+        crate::IntrinsicFunction::PointerCast => {
+            matches!(
+                (function.parameter.as_ref(), function.result.as_ref()),
+                (CheckedType::CPointer { .. }, CheckedType::COpaquePointer)
+                    | (CheckedType::COpaquePointer, CheckedType::CPointer { .. })
+            )
+        }
         crate::IntrinsicFunction::PointerAddress => {
-            matches!(function.parameter.as_ref(), CheckedType::CPointer { .. })
-                && *function.result == CheckedType::USize
+            matches!(
+                function.parameter.as_ref(),
+                CheckedType::CPointer { .. } | CheckedType::COpaquePointer
+            ) && *function.result == CheckedType::USize
         }
         crate::IntrinsicFunction::AddressPointer => {
             *function.parameter == CheckedType::USize
-                && matches!(function.result.as_ref(), CheckedType::CPointer { .. })
+                && matches!(
+                    function.result.as_ref(),
+                    CheckedType::CPointer { .. } | CheckedType::COpaquePointer
+                )
         }
         crate::IntrinsicFunction::ValidateUtf8 => {
             *function.parameter == CheckedType::Slice(Box::new(CheckedType::U8))

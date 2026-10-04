@@ -93,6 +93,7 @@ pub enum BuiltinType {
     Slice,
     Buffer,
     CChar,
+    COpaquePointer,
     CString,
     CPointer,
     IO,
@@ -284,6 +285,7 @@ pub enum IntrinsicFunction {
     ParseNumber {
         to: NumericType,
     },
+    PointerCast,
     PointerAddress,
     AddressPointer,
     ValidateUtf8,
@@ -1716,6 +1718,12 @@ impl NameResolver {
             self.register_builtin_type(cinterop, "std.cinterop", "CChar", BuiltinType::CChar);
             self.register_builtin_type(cinterop, "std.cinterop", "CString", BuiltinType::CString);
             self.register_builtin_type(cinterop, "std.cinterop", "CPointer", BuiltinType::CPointer);
+            self.register_builtin_type(
+                cinterop,
+                "std.cinterop",
+                "COpaquePointer",
+                BuiltinType::COpaquePointer,
+            );
             self.register_primitive_macro(cinterop, "c_string", PrimitiveMacro::CString);
         }
         if let Some(io) = program.standard_library_io() {
@@ -1867,6 +1875,26 @@ impl NameResolver {
             ));
         }
         for (module, name, intrinsic) in [
+            (
+                "std.cinterop",
+                "__pointer_opaque",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.cinterop",
+                "__opaque_pointer",
+                IntrinsicFunction::PointerCast,
+            ),
+            (
+                "std.cinterop",
+                "__opaque_address",
+                IntrinsicFunction::PointerAddress,
+            ),
+            (
+                "std.cinterop",
+                "__address_opaque",
+                IntrinsicFunction::AddressPointer,
+            ),
             (
                 "std.cinterop",
                 "__has_interior_nul",
@@ -2241,7 +2269,8 @@ impl NameResolver {
         }
         if matches!(
             builtin,
-            BuiltinType::Cancelled
+            BuiltinType::COpaquePointer
+                | BuiltinType::Cancelled
                 | BuiltinType::Scheduler
                 | BuiltinType::Tasks
                 | BuiltinType::CompletionToken

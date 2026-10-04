@@ -1,0 +1,32 @@
+use std.cinterop.(CPointer, COpaquePointer, CChar, c_string)
+
+def require: Bool -> () = condition => if condition { () } else { panic "opaque pointer assertion failed" }
+def identity: COpaquePointer -> COpaquePointer = value => value
+extern "c" {
+    strchr: (CPointer CChar, I32) -> COpaquePointer
+    strlen: COpaquePointer -> USize
+}
+
+let pointer = (USize :: 4096) as CPointer I32
+let opaque = pointer as COpaquePointer
+let restored: CPointer I32 = opaque as _
+require ((restored as USize) == 4096)
+require ((opaque as USize) == 4096)
+require (((opaque as CPointer U8) as USize) == 4096)
+require (((identity opaque) as USize) == 4096)
+let checked: Ok COpaquePointer | Never = TryConvert.try_convert pointer
+match checked { Ok value => require ((value as USize) == 4096), }
+let checked_pointer: Ok (CPointer CChar) | Never = TryConvert.try_convert opaque
+match checked_pointer { Ok value => require ((value as USize) == 4096), }
+let checked_address: Ok USize | Never = TryConvert.try_convert opaque
+match checked_address { Ok value => require (value == 4096), }
+let checked_opaque: Ok COpaquePointer | Never = TryConvert.try_convert (USize :: 4096)
+match checked_opaque { Ok value => require ((value as USize) == 4096), }
+let null = (USize :: 0) as COpaquePointer
+require ((((null as CPointer I32) as COpaquePointer) as USize) == 0)
+let text = c_string "abc"
+let found = strchr (text, 98)
+require ((found as USize) != 0)
+require (strlen found == 2)
+let missing = strchr (text, 120)
+require ((missing as USize) == 0)

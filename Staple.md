@@ -3488,7 +3488,7 @@ it, not only its start. A `Ref` to one element of a slice or buffer, or a slice
 over a frozen buffer, keeps the whole allocation alive, including the other
 elements, until no such pointer remains.
 
-`CChar`, `CString`, and the generic `CPointer` constructor are public opaque
+`CChar`, `CString`, `COpaquePointer`, and the generic `CPointer` constructor are public opaque
 types in `std.cinterop`. Source code must import them explicitly, for example
 with `use std.cinterop.*`. `CPointer T` is the language's C pointer type; the
 pointee is a compile-time argument with no runtime field. There are no `*T` or
@@ -3584,6 +3584,22 @@ consumed C string on both success and failure.
 preserves the pointer. Integer-to-pointer conversion does not validate the
 address, alignment, allocation lifetime, or whether dereferencing is permitted.
 Address arithmetic follows the existing `USize` arithmetic rules.
+
+`COpaquePointer` is a non-owning, `Copy` C pointer with no pointee type,
+compatible with C `void *` in parameters and returns. It implements `Convert`
+to and from every `CPointer T`, and to and from `USize`. These explicit
+conversions preserve the pointer, including null, without allocation,
+validation, or ownership transfer. A typed result does not establish that the
+pointer is valid or aligned for its pointee. The blanket `TryConvert`
+implementation supplies `Error = Never` for all these conversions.
+
+```staple
+let opaque = pointer as COpaquePointer
+let restored = opaque as CPointer I32
+let inferred: CPointer I32 = opaque as _
+let address = opaque as USize
+```
+
 
 `expression as Type` is syntactic sugar for `Type :: Convert.convert expression`.
 It uses `Convert`, so it requires an infallible conversion implementation.

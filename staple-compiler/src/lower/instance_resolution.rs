@@ -389,6 +389,7 @@ fn collect_referenced_parameters(value_type: &CheckedType, out: &mut BTreeSet<Ty
         | CheckedType::String
         | CheckedType::StringLiteralSet(_)
         | CheckedType::CString
+        | CheckedType::COpaquePointer
         | CheckedType::CChar => {}
     }
 }
@@ -2260,6 +2261,7 @@ impl<'a> ParameterCollector<'a> {
             | CheckedType::String
             | CheckedType::StringLiteralSet(_)
             | CheckedType::CString
+            | CheckedType::COpaquePointer
             | CheckedType::CChar => {}
             CheckedType::Parameter { id, name, .. } => self.relevant.notice_type(*id, name),
             CheckedType::Ref(payload)

@@ -48,6 +48,7 @@ pub(crate) enum CanonicalType {
     },
     CString,
     CChar,
+    COpaquePointer,
     Nominal {
         kind: CanonicalNominalKind,
         id: TypeId,
@@ -191,6 +192,7 @@ impl CanonicalType {
             },
             CheckedType::CString => CanonicalType::CString,
             CheckedType::CChar => CanonicalType::CChar,
+            CheckedType::COpaquePointer => CanonicalType::COpaquePointer,
             CheckedType::Parameter { name, .. } => {
                 return Err(origin_diagnostic(
                     origin,

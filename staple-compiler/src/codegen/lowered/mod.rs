@@ -6683,6 +6683,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_parse_number(to, *string, span)?
                     .as_any_value_enum())
             }
+            IntrinsicFunction::PointerCast => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(unsupported("pointer cast operand"));
+                };
+                Ok(pointer.as_any_value_enum())
+            }
             IntrinsicFunction::PointerAddress => {
                 let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
                     return Err(unsupported("pointer address operand"));
