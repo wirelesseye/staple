@@ -1281,6 +1281,7 @@ pub struct NameResolver {
     current_module: ModuleId,
     multiple_modules: bool,
     standard_library_core: Option<ModuleId>,
+    standard_library_ops: Option<ModuleId>,
     standard_library_prelude: Option<ModuleId>,
     standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
@@ -1315,8 +1316,18 @@ impl NameResolver {
     ) -> Result<ResolvedModule, Vec<Diagnostic>> {
         let (mut program, mut macro_analysis) = crate::macro_expand::expand_program(program)?;
         let mut next_syntax_id = macro_analysis.next_syntax_id;
-        crate::macro_expand::desugar_program(&mut program, &mut next_syntax_id);
-        crate::macro_expand::desugar_macro_analysis(&mut macro_analysis, &mut next_syntax_id);
+        let ops_module = program
+            .modules()
+            .iter()
+            .find(|module| program.module_dotted_name(module.id).as_deref() == Some("std.ops"))
+            .map(|module| module.id);
+        self.standard_library_ops = ops_module;
+        crate::macro_expand::desugar_program(&mut program, &mut next_syntax_id, ops_module);
+        crate::macro_expand::desugar_macro_analysis(
+            &mut macro_analysis,
+            &mut next_syntax_id,
+            ops_module,
+        );
         self.standard_library_core = program.standard_library_core();
         self.standard_library_prelude = program.standard_library_prelude();
         self.standard_library_syntax = program.standard_library_syntax();
@@ -1480,6 +1491,9 @@ impl NameResolver {
             .standard_library_core
             .map(|core| self.interfaces[core.0].traits.clone())
             .unwrap_or_default();
+        if let Some(ops) = self.standard_library_ops {
+            standard_traits.extend(self.interfaces[ops.0].traits.clone());
+        }
         if let Some(prelude) = self.standard_library_prelude {
             standard_traits.extend(self.interfaces[prelude.0].traits.clone());
         }
@@ -5115,6 +5129,16 @@ impl NameResolver {
 
     fn trait_id_from_expression(&self, expression: &Expression) -> Option<TraitId> {
         match expression {
+            Expression::Name(name)
+                if self.standard_library_ops.is_some()
+                    && name.syntax.definition_module()
+                        == self.standard_library_ops.map(|module| module.0) =>
+            {
+                self.interfaces[name.syntax.definition_module().unwrap()]
+                    .traits
+                    .get(&name.name)
+                    .copied()
+            }
             Expression::Name(name) => self.declared_traits[self.current_module.0]
                 .get(&name.name)
                 .copied()

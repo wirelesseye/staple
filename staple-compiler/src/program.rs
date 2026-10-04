@@ -2862,8 +2862,8 @@ mod tests {
             Some("std.io".to_owned())
         );
         assert_eq!(
-            program.module_dotted_name(module_by_suffix(&program, "std/core/ops.sta")),
-            Some("std.core.ops".to_owned())
+            program.module_dotted_name(module_by_suffix(&program, "std/ops.sta")),
+            Some("std.ops".to_owned())
         );
         assert_eq!(
             program.module_dotted_name(module_by_suffix(&program, "std/core/number/types.sta")),

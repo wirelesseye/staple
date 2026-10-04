@@ -4445,7 +4445,32 @@ fn type_checks_transparent_aliases() {
 }
 
 #[test]
-fn uses_regular_prelude_functions_for_i32_arithmetic() {
+fn operator_traits_and_methods_require_explicit_imports() {
+    for (trait_name, method, arguments) in [
+        ("Add", "add", "(1, 2)"),
+        ("Subtract", "subtract", "(4, 3)"),
+        ("Multiply", "multiply", "(2, 3)"),
+        ("Divide", "divide", "(8, 2)"),
+        ("Neg", "negate", "operand"),
+        ("Not", "not", "flag"),
+    ] {
+        for usage in [
+            format!("let answer = {trait_name}.{method} {arguments}\n"),
+            format!("let answer = {method} {arguments}\n"),
+            format!("def identity: <T where Copy T, {trait_name} T> T -> T = value => value\n"),
+        ] {
+            let usage = format!("let operand: I32 = 1\nlet flag: Bool = True\n{usage}");
+            resolve_result(&usage).expect_err_diagnostics("operator names must require imports");
+            let source = format!("use std.ops.({trait_name})\n{usage}");
+            TypeChecker::new().check(resolve(&source)).unwrap_or_else(|diagnostics| {
+                panic!("explicit import should type-check `{source}`: {diagnostics:?}")
+            });
+        }
+    }
+}
+
+#[test]
+fn arithmetic_operators_work_without_trait_imports() {
     let module = type_check(concat!(
         "let sum = 1 + 2\n",
         "let difference = 4 - 3\n",
@@ -4455,7 +4480,7 @@ fn uses_regular_prelude_functions_for_i32_arithmetic() {
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&lower(&module))
-        .expect("prelude arithmetic should compile");
+        .expect("arithmetic without trait imports should compile");
 
     assert!(llvm.contains("add i32"));
     assert!(llvm.contains("sub i32"));
@@ -8945,6 +8970,7 @@ fn compiles_logical_not_via_not_trait() {
 #[test]
 fn prefix_operators_dispatch_to_user_defined_impls() {
     let module = type_check(concat!(
+        "use std.ops.(Neg, Not)\n",
         "type Vec2 = wrap (x: I32, y: I32)\n",
         "impl Neg Vec2 { negate = (Vec2 (x, y)) => Vec2 (x: 0 - x, y: 0 - y) }\n",
         "type Flag = wrap (raised: Bool)\n",
@@ -9462,7 +9488,7 @@ fn resolves_associated_type_projections() {
         "let concrete: Container.Element I32 = \"text\"\n",
         "def generic_first: <T where Container T> T -> Container.Element T = value => Container.first value\n",
         "let from_generic: String = generic_first 1\n",
-                "let range_item: Iterator.Item (Range I32) = 5\n",
+        "let range_item: Iterator.Item (Range I32) = 5\n",
         "def next_item: <Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter) = move iter => Iterator.next iter\n",
         "let step: IterStep (Range I32, I32) = next_item (0 .. 3)\n",
     ));

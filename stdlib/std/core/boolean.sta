@@ -1,5 +1,7 @@
 pub mod
 
+use std.ops.(Not)
+
 /// The input is not a supported boolean representation.
 pub type InvalidBool
 

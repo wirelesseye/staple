@@ -575,6 +575,7 @@ fn freshened_syntax(syntax: &Syntax, next_syntax_id: &mut usize) -> Syntax {
 fn lower_binary_expression(
     binary: staple_syntax::BinaryExpression,
     next_syntax_id: &mut usize,
+    ops_module: Option<ModuleId>,
 ) -> Expression {
     let staple_syntax::BinaryExpression {
         syntax,
@@ -642,7 +643,18 @@ fn lower_binary_expression(
         | BinaryOperator::Or => unreachable!(),
     };
     let name = Expression::Name(staple_syntax::NameExpression {
-        syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+        syntax: {
+            let mut syntax = freshened_syntax(&operator_syntax, next_syntax_id);
+            if matches!(
+                trait_name,
+                "Add" | "Subtract" | "Multiply" | "Divide" | "Neg" | "Not"
+            ) {
+                // Operator syntax resolves at the standard trait definition,
+                // independently of imports and names in the calling module.
+                syntax.definition_module = ops_module.map(|module| module.0);
+            }
+            syntax
+        },
         name: trait_name.to_owned(),
     });
     let access = Expression::Access(staple_syntax::AccessExpression {
@@ -675,6 +687,7 @@ fn lower_binary_expression(
 fn lower_unary_expression(
     unary: staple_syntax::UnaryExpression,
     next_syntax_id: &mut usize,
+    ops_module: Option<ModuleId>,
 ) -> Expression {
     let staple_syntax::UnaryExpression {
         syntax,
@@ -684,7 +697,11 @@ fn lower_unary_expression(
     } = unary;
     let (trait_name, method_name) = operator.trait_method();
     let name = Expression::Name(staple_syntax::NameExpression {
-        syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+        syntax: {
+            let mut syntax = freshened_syntax(&operator_syntax, next_syntax_id);
+            syntax.definition_module = ops_module.map(|module| module.0);
+            syntax
+        },
         name: trait_name.to_owned(),
     });
     let access = Expression::Access(staple_syntax::AccessExpression {
@@ -699,23 +716,31 @@ fn lower_unary_expression(
     })
 }
 
-pub(crate) fn desugar_program(program: &mut Program, next_syntax_id: &mut usize) {
+pub(crate) fn desugar_program(
+    program: &mut Program,
+    next_syntax_id: &mut usize,
+    ops_module: Option<ModuleId>,
+) {
     for module in program.modules_mut() {
         for item in &mut module.syntax.items {
-            desugar_item(item, next_syntax_id);
+            desugar_item(item, next_syntax_id, ops_module);
         }
     }
 }
 
-pub(crate) fn desugar_macro_analysis(analysis: &mut MacroAnalysis, next_syntax_id: &mut usize) {
+pub(crate) fn desugar_macro_analysis(
+    analysis: &mut MacroAnalysis,
+    next_syntax_id: &mut usize,
+    ops_module: Option<ModuleId>,
+) {
     for (_, binding) in &mut analysis.helpers {
         if let Some(value) = &mut binding.value {
-            desugar_expression(value, next_syntax_id);
+            desugar_expression(value, next_syntax_id, ops_module);
         }
     }
 }
 
-fn desugar_item(item: &mut Item, next_syntax_id: &mut usize) {
+fn desugar_item(item: &mut Item, next_syntax_id: &mut usize, ops_module: Option<ModuleId>) {
     match item {
         Item::Modified(modified) => {
             for modifier in &mut modified.modifiers {
@@ -724,10 +749,10 @@ fn desugar_item(item: &mut Item, next_syntax_id: &mut usize) {
                     .as_mut()
                     .and_then(|argument| argument.expression.as_mut())
                 {
-                    desugar_expression(expression, next_syntax_id);
+                    desugar_expression(expression, next_syntax_id, ops_module);
                 }
             }
-            desugar_item(&mut modified.item, next_syntax_id);
+            desugar_item(&mut modified.item, next_syntax_id, ops_module);
         }
         Item::VisibilityMacroInvocation(invocation) => {
             for modifier in &mut invocation.modifiers {
@@ -736,56 +761,60 @@ fn desugar_item(item: &mut Item, next_syntax_id: &mut usize) {
                     .as_mut()
                     .and_then(|argument| argument.expression.as_mut())
                 {
-                    desugar_expression(expression, next_syntax_id);
+                    desugar_expression(expression, next_syntax_id, ops_module);
                 }
             }
-            desugar_expression(&mut invocation.expression, next_syntax_id);
+            desugar_expression(&mut invocation.expression, next_syntax_id, ops_module);
         }
-        Item::VisibilitySplice(splice) => desugar_item(&mut splice.item, next_syntax_id),
+        Item::VisibilitySplice(splice) => {
+            desugar_item(&mut splice.item, next_syntax_id, ops_module)
+        }
         Item::ExternBlock(block) => {
             for binding in &mut block.bindings {
                 if let Some(value) = &mut binding.value {
-                    desugar_expression(value, next_syntax_id);
+                    desugar_expression(value, next_syntax_id, ops_module);
                 }
             }
         }
         Item::TraitDeclaration(declaration) => {
             for member in &mut declaration.members {
                 if let Some(default) = &mut member.default {
-                    desugar_expression(default, next_syntax_id);
+                    desugar_expression(default, next_syntax_id, ops_module);
                 }
             }
         }
         Item::TraitImplementation(implementation) => {
             for member in &mut implementation.members {
-                desugar_expression(&mut member.value, next_syntax_id);
+                desugar_expression(&mut member.value, next_syntax_id, ops_module);
             }
         }
         Item::MacroDeclaration(declaration) => {
             if let Some(value) = &mut declaration.value {
-                desugar_expression(value, next_syntax_id);
+                desugar_expression(value, next_syntax_id, ops_module);
             }
         }
         Item::Binding(binding) => {
             if let Some(value) = &mut binding.value {
-                desugar_expression(value, next_syntax_id);
+                desugar_expression(value, next_syntax_id, ops_module);
             }
         }
-        Item::PatternBinding(binding) => desugar_expression(&mut binding.value, next_syntax_id),
-        Item::Assignment(assignment) => {
-            desugar_expression(&mut assignment.target, next_syntax_id);
-            desugar_expression(&mut assignment.value, next_syntax_id);
+        Item::PatternBinding(binding) => {
+            desugar_expression(&mut binding.value, next_syntax_id, ops_module)
         }
-        Item::Return(return_) => desugar_expression(&mut return_.value, next_syntax_id),
+        Item::Assignment(assignment) => {
+            desugar_expression(&mut assignment.target, next_syntax_id, ops_module);
+            desugar_expression(&mut assignment.value, next_syntax_id, ops_module);
+        }
+        Item::Return(return_) => desugar_expression(&mut return_.value, next_syntax_id, ops_module),
         Item::Break(break_) => {
             if let Some(value) = &mut break_.value {
-                desugar_expression(value, next_syntax_id);
+                desugar_expression(value, next_syntax_id, ops_module);
             }
         }
-        Item::Expression(expression) => desugar_expression(expression, next_syntax_id),
+        Item::Expression(expression) => desugar_expression(expression, next_syntax_id, ops_module),
         Item::Submodule(submodule) => {
             for item in &mut submodule.module.items {
-                desugar_item(item, next_syntax_id);
+                desugar_item(item, next_syntax_id, ops_module);
             }
         }
         Item::RepeatedItemSplice(_)
@@ -795,7 +824,11 @@ fn desugar_item(item: &mut Item, next_syntax_id: &mut usize) {
     }
 }
 
-fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
+fn desugar_expression(
+    expression: &mut Expression,
+    next_syntax_id: &mut usize,
+    ops_module: Option<ModuleId>,
+) {
     match expression {
         Expression::Binary(_) => {
             let Expression::Binary(mut binary) = std::mem::replace(
@@ -807,9 +840,9 @@ fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
             ) else {
                 unreachable!()
             };
-            desugar_expression(&mut binary.left, next_syntax_id);
-            desugar_expression(&mut binary.right, next_syntax_id);
-            *expression = lower_binary_expression(binary, next_syntax_id);
+            desugar_expression(&mut binary.left, next_syntax_id, ops_module);
+            desugar_expression(&mut binary.right, next_syntax_id, ops_module);
+            *expression = lower_binary_expression(binary, next_syntax_id, ops_module);
         }
         Expression::Unary(_) => {
             let Expression::Unary(mut unary) = std::mem::replace(
@@ -821,80 +854,88 @@ fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
             ) else {
                 unreachable!()
             };
-            desugar_expression(&mut unary.operand, next_syntax_id);
-            *expression = lower_unary_expression(unary, next_syntax_id);
+            desugar_expression(&mut unary.operand, next_syntax_id, ops_module);
+            *expression = lower_unary_expression(unary, next_syntax_id, ops_module);
         }
-        Expression::Function(function) => desugar_expression(&mut function.body, next_syntax_id),
+        Expression::Function(function) => {
+            desugar_expression(&mut function.body, next_syntax_id, ops_module)
+        }
         Expression::TypeApplication(application) => {
-            desugar_expression(&mut application.value, next_syntax_id)
+            desugar_expression(&mut application.value, next_syntax_id, ops_module)
         }
         Expression::TypeAscription(ascription) => {
-            desugar_expression(&mut ascription.value, next_syntax_id)
+            desugar_expression(&mut ascription.value, next_syntax_id, ops_module)
         }
         Expression::Match(match_) => {
-            desugar_expression(&mut match_.subject, next_syntax_id);
+            desugar_expression(&mut match_.subject, next_syntax_id, ops_module);
             for arm in &mut match_.arms {
-                desugar_expression(&mut arm.body, next_syntax_id);
+                desugar_expression(&mut arm.body, next_syntax_id, ops_module);
             }
         }
         Expression::Loop(loop_) => {
             for item in &mut loop_.body.items {
-                desugar_item(item, next_syntax_id);
+                desugar_item(item, next_syntax_id, ops_module);
             }
         }
         Expression::Coro(coro) => {
             for item in &mut coro.body.items {
-                desugar_item(item, next_syntax_id);
+                desugar_item(item, next_syntax_id, ops_module);
             }
         }
-        Expression::Await(await_) => desugar_expression(&mut await_.operand, next_syntax_id),
+        Expression::Await(await_) => {
+            desugar_expression(&mut await_.operand, next_syntax_id, ops_module)
+        }
         Expression::With(with) => {
-            desugar_expression(&mut with.value, next_syntax_id);
+            desugar_expression(&mut with.value, next_syntax_id, ops_module);
             for item in &mut with.body.items {
-                desugar_item(item, next_syntax_id);
+                desugar_item(item, next_syntax_id, ops_module);
             }
         }
         Expression::Block(block) => {
             for item in &mut block.items {
-                desugar_item(item, next_syntax_id);
+                desugar_item(item, next_syntax_id, ops_module);
             }
         }
         Expression::Product(product) => {
             for element in &mut product.elements {
-                desugar_expression(&mut element.value, next_syntax_id);
+                desugar_expression(&mut element.value, next_syntax_id, ops_module);
             }
         }
         Expression::RepeatedProduct(repeated) => {
-            desugar_expression(&mut repeated.value, next_syntax_id);
+            desugar_expression(&mut repeated.value, next_syntax_id, ops_module);
         }
         Expression::Call(call) => {
-            desugar_expression(&mut call.callee, next_syntax_id);
-            desugar_expression(&mut call.argument, next_syntax_id);
+            desugar_expression(&mut call.callee, next_syntax_id, ops_module);
+            desugar_expression(&mut call.argument, next_syntax_id, ops_module);
         }
-        Expression::Access(access) => desugar_expression(&mut access.value, next_syntax_id),
+        Expression::Access(access) => {
+            desugar_expression(&mut access.value, next_syntax_id, ops_module)
+        }
         Expression::Index(index) => {
-            desugar_expression(&mut index.value, next_syntax_id);
-            desugar_expression(&mut index.index, next_syntax_id);
+            desugar_expression(&mut index.value, next_syntax_id, ops_module);
+            desugar_expression(&mut index.index, next_syntax_id, ops_module);
         }
         Expression::Logical(logical) => {
-            desugar_expression(&mut logical.left, next_syntax_id);
-            desugar_expression(&mut logical.right, next_syntax_id);
+            desugar_expression(&mut logical.left, next_syntax_id, ops_module);
+            desugar_expression(&mut logical.right, next_syntax_id, ops_module);
         }
         Expression::StringTemplate(template) => {
             for part in &mut template.parts {
                 if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
-                    desugar_expression(&mut interpolation.expression, next_syntax_id);
+                    desugar_expression(&mut interpolation.expression, next_syntax_id, ops_module);
                 }
             }
         }
         Expression::Quote(quote) => match &mut quote.template {
             staple_syntax::QuoteTemplate::Expression(expression) => {
-                desugar_expression(expression, next_syntax_id)
+                desugar_expression(expression, next_syntax_id, ops_module)
             }
-            staple_syntax::QuoteTemplate::Item(item) => desugar_item(item, next_syntax_id),
+            staple_syntax::QuoteTemplate::Item(item) => {
+                desugar_item(item, next_syntax_id, ops_module)
+            }
             staple_syntax::QuoteTemplate::Items(items) => {
                 for item in items {
-                    desugar_item(item, next_syntax_id);
+                    desugar_item(item, next_syntax_id, ops_module);
                 }
             }
             staple_syntax::QuoteTemplate::Raw => {}
@@ -6237,7 +6278,7 @@ impl MacroExpander {
         binary: &staple_syntax::BinaryExpression,
         environment: &mut Environment,
     ) -> Option<Value> {
-        let lowered = lower_binary_expression(binary.clone(), &mut self.next_syntax_id);
+        let lowered = lower_binary_expression(binary.clone(), &mut self.next_syntax_id, None);
         self.eval_expression(module, &lowered, environment)
     }
 
@@ -6278,25 +6319,6 @@ impl MacroExpander {
         }
     }
 
-    /// Builds the `(left, right)` positional product used by lowered trait
-    /// operator calls.
-    fn operand_product(&mut self, left: Expression, right: Expression, span: Span) -> Expression {
-        let element = |this: &mut Self, value| staple_syntax::ProductElement {
-            syntax: Syntax::synthetic(this.fresh_id(), span.clone()),
-            name: None,
-            designated: false,
-            value,
-            spread: false,
-            named_spread: false,
-        };
-        let left = element(self, left);
-        let right = element(self, right);
-        Expression::Product(staple_syntax::ProductExpression {
-            syntax: Syntax::synthetic(self.fresh_id(), span),
-            elements: vec![left, right],
-        })
-    }
-
     /// Converts a compile-time `Value` produced by folding a `const`
     /// initializer back into a literal `Expression` the rest of the
     /// pipeline (resolve, typecheck, codegen) can treat like any other
@@ -6312,10 +6334,8 @@ impl MacroExpander {
                 }))
             }
             Value::Integer(integer) => {
-                // Integer literals can never carry a leading `-` and the
-                // language has no unary minus, so a negative compile-time
-                // result is represented like lowered `0 - n`:
-                // `Subtract.subtract (0, |n|)`.
+                // Literals cannot carry a leading `-`. Keep `0 - |n|` as
+                // operator syntax so desugaring binds the standard trait.
                 let zero = Expression::Integer(staple_syntax::IntegerExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     literal: "0".to_string(),
@@ -6324,18 +6344,12 @@ impl MacroExpander {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     literal: integer.unsigned_abs().to_string(),
                 });
-                let access = Expression::Access(staple_syntax::AccessExpression {
+                Some(Expression::Binary(staple_syntax::BinaryExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    value: Box::new(Expression::Name(staple_syntax::NameExpression {
-                        syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                        name: "Subtract".to_string(),
-                    })),
-                    accessor: Accessor::Name("subtract".to_string()),
-                });
-                Some(Expression::Call(staple_syntax::CallExpression {
-                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    callee: Box::new(access),
-                    argument: Box::new(self.operand_product(zero, magnitude, span.clone())),
+                    operator_syntax: Syntax::synthetic(self.fresh_id(), span),
+                    operator: BinaryOperator::Subtract,
+                    left: Box::new(zero),
+                    right: Box::new(magnitude),
                 }))
             }
             Value::Float(float) if float.is_finite() && float >= 0.0 => {
@@ -6346,7 +6360,7 @@ impl MacroExpander {
             }
             // Mirrors the `Value::Integer` case above: float literals can
             // never carry a leading `-` either, so a negative compile-time
-            // result is lowered the same way, via `Subtract.subtract`.
+            // result uses the same subtraction operator syntax.
             Value::Float(float) if float.is_finite() => {
                 let zero = Expression::Float(staple_syntax::FloatExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
@@ -6356,18 +6370,12 @@ impl MacroExpander {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     literal: format!("{:?}", float.abs()),
                 });
-                let access = Expression::Access(staple_syntax::AccessExpression {
+                Some(Expression::Binary(staple_syntax::BinaryExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    value: Box::new(Expression::Name(staple_syntax::NameExpression {
-                        syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                        name: "Subtract".to_string(),
-                    })),
-                    accessor: Accessor::Name("subtract".to_string()),
-                });
-                Some(Expression::Call(staple_syntax::CallExpression {
-                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    callee: Box::new(access),
-                    argument: Box::new(self.operand_product(zero, magnitude, span.clone())),
+                    operator_syntax: Syntax::synthetic(self.fresh_id(), span),
+                    operator: BinaryOperator::Subtract,
+                    left: Box::new(zero),
+                    right: Box::new(magnitude),
                 }))
             }
             Value::Float(float) => {

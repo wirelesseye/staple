@@ -8,7 +8,6 @@ pub use std.core.cmp.*
 pub use std.core.feature.*
 pub use std.core.index.*
 pub use std.core.number.*
-pub use std.core.ops.*
 pub use std.core.range.*
 pub use std.core.reactive.*
 pub use std.core.reference.(Ref)

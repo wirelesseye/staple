@@ -585,7 +585,7 @@ package implicitly depends on under the alias `std`; no `dependencies` entry is
 needed, and a manifest may not bind `std` itself. Paths beginning with `std`
 therefore resolve from the standard-library source root through the same
 dependency-alias machinery as any local dependency. `std.core` is the small,
-always-imported language interface: booleans, numbers, operator protocols,
+always-imported language interface: booleans, numbers, comparison and indexing protocols,
 references, reactive primitives, ranges, and compiler modifiers. The separate
 `std.prelude` interface is imported by default and provides strings, lists,
 iteration, formatting traits, defaults, results, and flow macros. Lower-level
@@ -1090,7 +1090,10 @@ environment, including private helpers used by generated syntax.
 
 Operators are fixed grammar with fixed precedence and associativity; there is
 no user-definable operator or infix-function syntax. Each operator desugars
-directly to a call against a standard prelude trait:
+directly to a call against a standard library trait. The traits in
+`std.ops` (`Add`, `Subtract`, `Multiply`, `Divide`, `Neg`, and `Not`)
+and their methods require explicit imports; operator syntax works without
+these imports:
 
 | Operator(s) | Precedence | Associativity | Desugars to |
 |---|---|---|---|
