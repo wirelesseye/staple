@@ -471,6 +471,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .add_function(name, ty, Some(Linkage::Internal)),
                     ]
                 }
+                LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
+                    // The dynamic shape without descriptor parameters.
+                    let ty = self
+                        .backend
+                        .compile_dynamic_function_type(&plan.function_type, 0)?;
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
                 LoweredArtifactPlan::DropGlue(_) => Vec::new(),
                 LoweredArtifactPlan::GcFinalizer(_) => {
                     let ty = self
@@ -1787,6 +1798,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.emit_type_descriptor(ordinal, plan, &artifact.origin.span)
             }
             LoweredArtifactPlan::CompoundDescriptorDrop(plan) => self.emit_compound_descriptor_drop(ordinal, *plan, &artifact.origin.span),
+            LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
+                self.emit_descriptor_bound_entry(ordinal, plan, &artifact.origin.span)
+            }
             LoweredArtifactPlan::DescriptorDrop(plan) => {
                 let function = self
                     .artifacts

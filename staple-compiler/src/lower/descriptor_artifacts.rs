@@ -204,6 +204,63 @@ pub(super) fn scan_instance(
             use_site: Some(super::artifact_closure::ArtifactUseSite::InstanceCompoundDrop(index)),
         });
     }
+    // A dynamic-shape closure points at a descriptor-bound entry (R-C).
+    for (_, record) in body.expressions() {
+        let super::LoweredExpressionKind::CallableValue(value_id) = &record.kind else {
+            continue;
+        };
+        let Some(callable) = body.callable_value(*value_id) else {
+            continue;
+        };
+        if !matches!(
+            callable.target,
+            super::LoweredCallableTarget::DirectFunction { .. }
+                | super::LoweredCallableTarget::TraitImplementation { .. }
+        ) {
+            continue;
+        }
+        if callable
+            .closure
+            .as_ref()
+            .is_some_and(|closure| !closure.captures.is_empty())
+        {
+            continue;
+        }
+        let Some(super::LoweredBoundTarget::Instance(callee)) = body
+            .bindings
+            .get(&super::LoweredBindingSite::CallableValue(*value_id))
+        else {
+            continue;
+        };
+        let Some(runtime) = program.instance_runtime_order(*callee) else {
+            continue;
+        };
+        if runtime.is_empty() {
+            continue;
+        }
+        let Some(ordinal) = program
+            .instances
+            .get(*callee)
+            .map(|instance| instance.ordinal)
+        else {
+            continue;
+        };
+        requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::DescriptorBoundEntry(
+                crate::specialization::DescriptorBoundEntryKey { instance: ordinal },
+            ),
+            plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
+                instance: *callee,
+                runtime,
+                function_type: callable.function_type.clone(),
+            }),
+            kind: Kind::DescriptorBoundEntry,
+            origin: record.origin.clone(),
+            use_site: Some(
+                super::artifact_closure::ArtifactUseSite::DescriptorBoundEntry(*value_id),
+            ),
+        });
+    }
     Ok(requests)
 }
 
@@ -362,6 +419,7 @@ pub(super) fn expand(
             Plan::TypeDescriptor(plan)
         }
         Plan::CompoundDescriptorDrop(plan) => Plan::CompoundDescriptorDrop(plan),
+        Plan::DescriptorBoundEntry(plan) => Plan::DescriptorBoundEntry(plan),
         Plan::DescriptorDrop(mut plan) => {
             let request = ClosureRequest::Artifact {
                 key: ArtifactRequestKey::DropGlue(

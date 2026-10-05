@@ -272,6 +272,16 @@ reachable from the branch.
   functions, constructors, externs, and structural adapters (R-B), read a
   function-typed binding's storage, and call concrete closures indirectly with
   the concrete ABI. The in-scope baseline drops to **2780**.
+- **R3 complete.** A generic `def` used as a value with a dynamic function
+  type builds a closure to a new `descriptor-bound-entry` artifact keyed by
+  the callee's dynamic instance (R-C). The closure environment is a GC block
+  holding one deep-copied descriptor per run-time parameter in R-A order
+  (R-D), resolved through the callable site's substitutions. Indirect calls
+  through dynamic-shape closures use the dynamic shape without descriptor
+  parameters, with spilled arguments and a caller-provided result slot. The
+  callable-value and indirect-closure reason rows fall to 183 and 0; the
+  in-scope union stays at 2780 because those templates are still rejected for
+  function-typed values (R5) or other reasons.
 
 ### Step 4a.1 — Keys, specialization, and validation
 

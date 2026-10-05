@@ -602,6 +602,28 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(slot)
     }
 
+    /// The trailing component count of any descriptor.
+    pub(crate) fn load_descriptor_component_count(
+        &self,
+        descriptor: inkwell::values::PointerValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        let fail = super::compiler_diagnostic;
+        let field = self
+            .builder
+            .build_struct_gep(
+                self.type_descriptor_type(0),
+                descriptor,
+                5,
+                "descriptor.count.slot",
+            )
+            .map_err(fail)?;
+        Ok(self
+            .builder
+            .build_load(self.context.i32_type(), field, "descriptor.count")
+            .map_err(fail)?
+            .into_int_value())
+    }
+
     /// Components start at the same offset for every descriptor shape.
     #[allow(dead_code)]
     pub(crate) fn load_descriptor_component(

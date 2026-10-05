@@ -34,6 +34,9 @@ pub(crate) enum LoweredArtifactPlan {
     TypeDescriptor(TypeDescriptorPlan),
     DescriptorDrop(DescriptorDropPlan),
     CompoundDescriptorDrop(crate::specialization::CompoundDescriptorDropKey),
+    /// A dynamic-shape closure's forwarding entry (R-C). The entry loads the
+    /// instance's descriptors from its environment and forwards the call.
+    DescriptorBoundEntry(DescriptorBoundEntryPlan),
     /// A garbage-collector finalizer. Expansion records the referenced drop glue.
     GcFinalizer(GcFinalizerPlan),
     /// A coroutine `resume`/`cleanup` pair. Expansion records the frame layout
@@ -50,6 +53,20 @@ pub(crate) enum LoweredArtifactPlan {
     /// foreign-symbol declaration parity facts; the callable sites that use
     /// the adapter live on their owners' use records.
     ExternAdapter(ExternAdapterPlan),
+}
+
+/// A descriptor-bound entry (R-C): the forwarding function a dynamic-shape
+/// closure points at. Its signature is the dynamic shape without descriptor
+/// parameters; the body loads the instance's descriptors from the closure
+/// environment and forwards the call.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DescriptorBoundEntryPlan {
+    /// The dynamic instance the entry forwards to.
+    pub instance: FunctionInstanceId,
+    /// The instance's run-time parameters in descriptor ABI order (R-A).
+    pub runtime: Vec<crate::TypeParameterId>,
+    /// The closure's function type: the dynamic shape without descriptors.
+    pub function_type: CheckedFunctionType,
 }
 
 /// One type a plan carries, as `LoweredArtifactPlan::visit_types` yields it.
@@ -120,6 +137,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::TypeDescriptor(_) => "type-descriptor",
             LoweredArtifactPlan::DescriptorDrop(_) => "descriptor-drop",
             LoweredArtifactPlan::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
+            LoweredArtifactPlan::DescriptorBoundEntry(_) => "descriptor-bound-entry",
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload { .. }) => {
                 "gc-finalizer-payload"
             }
@@ -194,6 +212,10 @@ impl LoweredArtifactPlan {
                 LoweredArtifactPlan::CompoundDescriptorDrop(plan),
                 ArtifactRequestKey::CompoundDescriptorDrop(key),
             ) => plan == key,
+            (
+                LoweredArtifactPlan::DescriptorBoundEntry(plan),
+                ArtifactRequestKey::DescriptorBoundEntry(key),
+            ) => plan.instance.index() == key.instance.index(),
             (LoweredArtifactPlan::DropGlue(plan), ArtifactRequestKey::DropGlue(key)) => {
                 same_type(&plan.value_type, key)
             }
@@ -298,6 +320,7 @@ impl LoweredArtifactPlan {
             }
             LoweredArtifactPlan::TypeDescriptor(plan) => plan.expanded,
             LoweredArtifactPlan::DescriptorDrop(plan) => plan.glue.is_some(),
+            LoweredArtifactPlan::DescriptorBoundEntry(_) => true,
             LoweredArtifactPlan::CompoundDescriptorDrop(_) => true,
             LoweredArtifactPlan::DropGlue(plan) => !matches!(plan.body, DropGlueBody::Unexpanded),
             LoweredArtifactPlan::GcFinalizer(plan) => match plan {
@@ -630,6 +653,13 @@ impl LoweredArtifactPlan {
                 indirect_parameters: _,
                 declaration: _,
             }) => visit(Function(callable_type)),
+            // The function type mentions the instance's run-time parameters by
+            // design; the plan is not part of the concrete closed catalog.
+            LoweredArtifactPlan::DescriptorBoundEntry(DescriptorBoundEntryPlan {
+                instance: _,
+                runtime: _,
+                function_type: _,
+            }) => {}
         }
     }
 
@@ -654,6 +684,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::CompoundDescriptorDrop(_)
+            | LoweredArtifactPlan::DescriptorBoundEntry(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
@@ -682,6 +713,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::CompoundDescriptorDrop(_)
+            | LoweredArtifactPlan::DescriptorBoundEntry(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)

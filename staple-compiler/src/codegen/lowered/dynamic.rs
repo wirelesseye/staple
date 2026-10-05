@@ -434,6 +434,27 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "missing dynamic callable instance binding",
                     ));
                 };
+                let runtime = self.view.instance_runtime_order(*instance).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "missing callable instance key")
+                })?;
+                if !runtime.is_empty() {
+                    // A dynamic-shape closure (R-C): the environment stores the
+                    // instance's descriptors and the entry forwards the call.
+                    let closure_environment = self.build_descriptor_environment(
+                        &runtime,
+                        &callable.substitutions,
+                        environment,
+                        &span,
+                    )?;
+                    let code = self.descriptor_bound_entry_code(*instance, &span)?;
+                    let closure =
+                        self.backend.build_closure_value(code, closure_environment)?;
+                    self.backend
+                        .builder
+                        .build_store(storage, closure)
+                        .map_err(compiler_diagnostic)?;
+                    return Ok(storage);
+                }
                 self.instances.get(instance).copied().ok_or_else(|| {
                     Diagnostic::new(span.clone(), "missing callable declaration")
                 })?
@@ -466,6 +487,123 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(storage)
     }
 
+    /// A GC-allocated closure environment holding one deep-copied descriptor
+    /// per run-time parameter, in descriptor ABI order (R-D).
+    fn build_descriptor_environment(
+        &self,
+        runtime: &[TypeParameterId],
+        substitutions: &crate::CallSubstitutions,
+        environment: &DynamicEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let size = self
+            .backend
+            .size_type
+            .const_int(runtime.len() as u64 * pointer_bytes, false);
+        let closure_environment =
+            self.backend
+                .build_gc_allocation(size, "closure.environment", span.clone())?;
+        for (index, parameter) in runtime.iter().enumerate() {
+            // The callee's run-time parameter is supplied at this site by the
+            // substitution's value, which may itself mention the enclosing
+            // instance's run-time parameters.
+            let value_type = substitutions
+                .types
+                .iter()
+                .find(|entry| entry.parameter == *parameter)
+                .map(|entry| entry.value_type.clone())
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "missing closure substitution")
+                })?;
+            let descriptor = self.dynamic_descriptor(&value_type, environment, span)?;
+            let copy = self.copy_descriptor_to_gc(descriptor, span)?;
+            let offset = self
+                .backend
+                .size_type
+                .const_int(index as u64 * pointer_bytes, false);
+            let slot = self.backend.dynamic_byte_offset(closure_environment, offset)?;
+            self.backend
+                .builder
+                .build_store(slot, copy)
+                .map_err(compiler_diagnostic)?;
+        }
+        Ok(closure_environment)
+    }
+
+    /// Deep-copy one descriptor into a GC block so a closure environment never
+    /// points at the building function's stack slots.
+    fn copy_descriptor_to_gc(
+        &self,
+        descriptor: PointerValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let header = self
+            .backend
+            .target_data
+            .get_store_size(&self.backend.type_descriptor_type(0));
+        let count = self
+            .backend
+            .load_descriptor_component_count(descriptor)?;
+        let count = self
+            .backend
+            .builder
+            .build_int_z_extend(count, self.backend.size_type, "descriptor.count.size")
+            .map_err(compiler_diagnostic)?;
+        let components = self
+            .backend
+            .builder
+            .build_int_mul(
+                count,
+                self.backend.size_type.const_int(pointer_bytes, false),
+                "descriptor.components.size",
+            )
+            .map_err(compiler_diagnostic)?;
+        let size = self
+            .backend
+            .builder
+            .build_int_add(
+                components,
+                self.backend.size_type.const_int(header, false),
+                "descriptor.size",
+            )
+            .map_err(compiler_diagnostic)?;
+        let copy = self
+            .backend
+            .build_gc_allocation(size, "descriptor.copy", span.clone())?;
+        self.backend
+            .builder
+            .build_memcpy(copy, 1, descriptor, 1, size)
+            .map_err(compiler_diagnostic)?;
+        Ok(copy)
+    }
+
+    /// The declared descriptor-bound entry for one dynamic instance.
+    fn descriptor_bound_entry_code(
+        &self,
+        instance: FunctionInstanceId,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        let ordinal = self
+            .view
+            .artifacts()
+            .find_map(|(_, artifact)| match &artifact.plan {
+                Some(crate::LoweredArtifactPlan::DescriptorBoundEntry(plan))
+                    if plan.instance == instance =>
+                {
+                    Some(artifact.ordinal)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing descriptor-bound entry plan"))?;
+        self.artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing descriptor-bound entry declaration"))
+    }
+
     /// An indirect call through a concrete closure value (R2). The callee's
     /// function type is concrete, so the concrete closure ABI applies; the
     /// arguments and result move between dynamic storage and the concrete ABI.
@@ -478,12 +616,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment: &mut DynamicEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let span = &call.origin.span;
-        if crate::contains_type_parameter(&CheckedType::Function(call.function_type.clone())) {
-            return Err(Diagnostic::new(
-                span.clone(),
-                "dynamic-shape closure calls are not yet implemented",
-            ));
-        }
+        let dynamic_shape =
+            crate::contains_type_parameter(&CheckedType::Function(call.function_type.clone()));
         let storage = *environment.temporaries.get(&id).ok_or_else(|| {
             Diagnostic::new(span.clone(), "missing dynamic closure call storage")
         })?;
@@ -573,11 +707,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let mut arguments = vec![closure_environment.into()];
+        if dynamic_shape {
+            // The dynamic shape has no descriptor parameters; the result goes
+            // through a caller-provided out slot and every value by pointer.
+            arguments.push(storage.into());
+        }
         for (index, slot) in slots.iter().enumerate() {
             let pointer = slot.ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing dynamic closure argument")
             })?;
-            if indirect[index] {
+            if dynamic_shape || indirect[index] {
                 arguments.push(pointer.into());
             } else {
                 let ty = self.backend.compile_type(types[index])?;
@@ -590,7 +729,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 );
             }
         }
-        let signature = self.backend.compile_closure_function_type(&call.function_type)?;
+        let signature = if dynamic_shape {
+            self.backend.compile_dynamic_function_type(&call.function_type, 0)?
+        } else {
+            self.backend.compile_closure_function_type(&call.function_type)?
+        };
         let value = self
             .backend
             .builder
@@ -1028,6 +1171,61 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         .map_err(|_| Diagnostic::new(span.clone(), "dynamic comparison result is not first-class"))
     }
 
+    /// The forwarding entry a dynamic-shape closure points at (R-C). Its
+    /// parameters are the dynamic shape without descriptors; the body loads
+    /// the instance's descriptors from the closure environment and calls the
+    /// instance with them.
+    pub(super) fn emit_descriptor_bound_entry(
+        &mut self,
+        ordinal: crate::specialization::ArtifactOrdinal,
+        plan: &crate::DescriptorBoundEntryPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let function = self
+            .artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing descriptor-bound entry declaration")
+            })?;
+        let instance = self.instances.get(&plan.instance).copied().ok_or_else(|| {
+            Diagnostic::new(span.clone(), "missing descriptor-bound entry instance")
+        })?;
+        let entry = self.backend.context.append_basic_block(function, "entry");
+        self.backend.builder.position_at_end(entry);
+        let parameters = function.get_params();
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let environment = parameters[0].into_pointer_value();
+        let mut arguments = vec![parameters[0].into()];
+        for index in 0..plan.runtime.len() {
+            let offset = self
+                .backend
+                .size_type
+                .const_int(index as u64 * pointer_bytes, false);
+            let slot = self.backend.dynamic_byte_offset(environment, offset)?;
+            let descriptor = self
+                .backend
+                .builder
+                .build_load(pointer, slot, "entry.descriptor")
+                .map_err(compiler_diagnostic)?;
+            arguments.push(descriptor.into());
+        }
+        for parameter in &parameters[1..] {
+            arguments.push((*parameter).into());
+        }
+        self.backend
+            .builder
+            .build_direct_call(instance, &arguments, "")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
     pub(super) fn emit_dynamic_instance_body(
         &mut self,
         id: FunctionInstanceId,
@@ -1141,6 +1339,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     &mut environment,
                     &record.origin.span,
                 )?;
+            }
+            if let LoweredExpressionKind::CallableValue(value_id) = &record.kind
+                && let Some(callable) =
+                    self.view.callable_value(EmissionOwner::Instance(id), *value_id)
+            {
+                for entry in &callable.substitutions.types {
+                    self.prepare_dynamic_descriptor(
+                        &entry.value_type,
+                        &mut environment,
+                        &record.origin.span,
+                    )?;
+                }
             }
         }
         // A mutable local's value lives in its own entry-block storage. The

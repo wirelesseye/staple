@@ -8,10 +8,11 @@
 
 use staple_syntax::Diagnostic;
 
+use super::ArenaId;
 use super::cleanup_artifacts::{LoweredOwnerVisitor, walk_owner};
 use super::emission::OwnerArenas;
 use super::{
-    ConstructorConstruction, DropGlueBody, IntrinsicFunction, LoweredArtifactPlan,
+    ConstructorConstruction, DropGlueBody, IntrinsicFunction, LoweredArtifactPlan, LoweredBindingSite, LoweredBoundTarget,
     LoweredAwaitKind, LoweredBindingItem, LoweredCall, LoweredCallableTarget, LoweredCallableValue,
     LoweredCallableValueId, LoweredClosureEnvironment, LoweredPattern, LoweredPatternKind,
     LoweredProgram, LoweredStringTemplate, LoweredStringTemplatePart, Origin, RuntimeRelease,
@@ -359,7 +360,8 @@ fn record_plan_requirements(
         LoweredArtifactPlan::ExternAdapter(_)
         | LoweredArtifactPlan::TypeDescriptor(_)
         | LoweredArtifactPlan::DescriptorDrop(_)
-        | LoweredArtifactPlan::CompoundDescriptorDrop(_) => {}
+        | LoweredArtifactPlan::CompoundDescriptorDrop(_)
+        | LoweredArtifactPlan::DescriptorBoundEntry(_) => {}
     }
 }
 
@@ -484,13 +486,31 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
 
     fn callable_value_site(
         &mut self,
-        _id: LoweredCallableValueId,
+        id: LoweredCallableValueId,
         value: &LoweredCallableValue,
         _origin: &Origin,
     ) -> Result<(), Vec<Diagnostic>> {
         if let Some(closure) = &value.closure
             && closure.environment == LoweredClosureEnvironment::Fresh
             && !closure.captures.is_empty()
+        {
+            self.gc();
+        }
+        // A dynamic-shape closure allocates its descriptor environment in the
+        // collector (R-D).
+        let binding = match self.owner {
+            OwnerArenas::Instance(body) => body.bindings.get(&LoweredBindingSite::CallableValue(id)),
+            OwnerArenas::Initializer(initializer) => self
+                .program
+                .initializer_bindings
+                .get(initializer.index())
+                .and_then(|bindings| bindings.get(&LoweredBindingSite::CallableValue(id))),
+        };
+        if let Some(LoweredBoundTarget::Instance(callee)) = binding
+            && self
+                .program
+                .instance_runtime_order(*callee)
+                .is_some_and(|runtime| !runtime.is_empty())
         {
             self.gc();
         }

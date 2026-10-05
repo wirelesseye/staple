@@ -766,6 +766,13 @@ pub(crate) struct CompoundDescriptorDropKey {
     pub count: u32,
 }
 
+/// The identity of one descriptor-bound entry (R-C): a dynamic-shape closure's
+/// forwarding function, keyed by the dynamic instance it calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DescriptorBoundEntryKey {
+    pub instance: InstanceOrdinal,
+}
+
 /// Generated-artifact request keys. The variant is the namespace: keys from
 /// different families can never compare or hash equal, even when their numeric
 /// IDs coincide. `RuntimeHelper` is deliberately absent: runtime symbols have
@@ -779,6 +786,7 @@ pub(crate) enum ArtifactRequestKey {
     TypeDescriptor(CanonicalType),
     DescriptorDrop(CanonicalType),
     CompoundDescriptorDrop(CompoundDescriptorDropKey),
+    DescriptorBoundEntry(DescriptorBoundEntryKey),
     GcFinalizer(GcFinalizerKey),
     CoroutineCodes(CoroutineCodesKey),
     ReactionRunner(ReactiveRunnerKey),
@@ -798,6 +806,7 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::TypeDescriptor(_) => "type-descriptor",
             ArtifactRequestKey::DescriptorDrop(_) => "descriptor-drop",
             ArtifactRequestKey::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
+            ArtifactRequestKey::DescriptorBoundEntry(_) => "descriptor-bound-entry",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => "gc-finalizer-payload",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(_)) => "gc-finalizer-cell",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment { .. }) => {
@@ -1014,6 +1023,7 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
         ArtifactRequestKey::CompoundDescriptorDrop(_) => {
             "__staple_compound_descriptor_drop".to_owned()
         }
+        ArtifactRequestKey::DescriptorBoundEntry(_) => "__staple_descriptor_bound_entry".to_owned(),
         ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => {
             "__staple_gc_finalizer_payload".to_owned()
         }

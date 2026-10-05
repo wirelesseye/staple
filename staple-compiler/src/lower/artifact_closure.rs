@@ -113,6 +113,8 @@ pub(crate) enum ArtifactUseSite {
     CellFinalizer(SymbolId),
     /// A closure environment's finalizer.
     ClosureEnvironment(LoweredCallableValueId),
+    /// A dynamic-shape closure's descriptor-bound entry (R-C).
+    DescriptorBoundEntry(LoweredCallableValueId),
     /// An `Index` call's operand temporary dropped after the call: `operand` is
     /// the flattened parameter index, or `None` for the whole-argument
     /// temporary.
@@ -309,7 +311,8 @@ impl ArtifactFamilyHooks for ProductionHooks {
             }
             ArtifactRequestKey::TypeDescriptor(_)
             | ArtifactRequestKey::DescriptorDrop(_)
-            | ArtifactRequestKey::CompoundDescriptorDrop(_) => {
+            | ArtifactRequestKey::CompoundDescriptorDrop(_)
+            | ArtifactRequestKey::DescriptorBoundEntry(_) => {
                 super::descriptor_artifacts::expand(program, artifact, plan)
             }
             ArtifactRequestKey::DropGlue(_) => {
@@ -402,6 +405,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::TypeDescriptor(_)
                 | ArtifactRequestKey::DescriptorDrop(_)
                 | ArtifactRequestKey::CompoundDescriptorDrop(_)
+                | ArtifactRequestKey::DescriptorBoundEntry(_)
                 | ArtifactRequestKey::GcFinalizer(_)
                 | ArtifactRequestKey::CoroutineCodes(_)
                 | ArtifactRequestKey::ReactionRunner(_)
@@ -1715,6 +1719,11 @@ impl LoweredProgram {
                 }
             }
             ArtifactUseSite::ClosureEnvironment(id) => {
+                if !callable_value(id) {
+                    report("callable value", id.index());
+                }
+            }
+            ArtifactUseSite::DescriptorBoundEntry(id) => {
                 if !callable_value(id) {
                     report("callable value", id.index());
                 }

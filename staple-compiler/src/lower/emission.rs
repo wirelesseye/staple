@@ -116,37 +116,12 @@ impl<'a> EmissionView<'a> {
         )
     }
 
-    /// Runtime descriptor parameters in descriptor ABI order (R-A): the
-    /// template's declared scheme order, with parameters the template does
-    /// not declare (an enclosing instance's) first, in id order.
+    /// Runtime descriptor parameters in descriptor ABI order (R-A).
     pub(crate) fn instance_runtime_order(
         &self,
         id: FunctionInstanceId,
     ) -> Option<Vec<crate::TypeParameterId>> {
-        let instance = self.program.instances.get(id)?;
-        let key = self.program.specializations.instance(instance.ordinal)?;
-        let runtime = key.runtime();
-        if runtime.is_empty() {
-            return Some(Vec::new());
-        }
-        let scheme = self
-            .program
-            .functions
-            .get(key.function())
-            .map(|function| function.scheme_type_parameters.as_slice())
-            .unwrap_or(&[]);
-        let mut order = Vec::with_capacity(runtime.len());
-        for parameter in runtime {
-            if !scheme.contains(parameter) {
-                order.push(*parameter);
-            }
-        }
-        for parameter in scheme {
-            if runtime.contains(parameter) {
-                order.push(*parameter);
-            }
-        }
-        Some(order)
+        self.program.instance_runtime_order(id)
     }
 
     /// Every interned generated artifact in ordinal order.

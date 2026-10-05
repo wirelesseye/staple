@@ -255,6 +255,7 @@ pub(crate) enum LoweredArtifactDependencyKind {
     TypeDescriptor,
     DescriptorDrop,
     CompoundDescriptorDrop,
+    DescriptorBoundEntry,
     /// A generated garbage-collector finalizer.
     GcFinalizer,
     /// A coroutine body's generated resume/cleanup pair.
@@ -279,6 +280,7 @@ impl LoweredArtifactDependencyKind {
             LoweredArtifactDependencyKind::TypeDescriptor => "type-descriptor",
             LoweredArtifactDependencyKind::DescriptorDrop => "descriptor-drop",
             LoweredArtifactDependencyKind::CompoundDescriptorDrop => "compound-descriptor-drop",
+            LoweredArtifactDependencyKind::DescriptorBoundEntry => "descriptor-bound-entry",
             LoweredArtifactDependencyKind::GcFinalizer => "gc-finalizer",
             LoweredArtifactDependencyKind::CoroutineCodes => "coroutine-codes",
             LoweredArtifactDependencyKind::ReactionRunner => "reaction-runner",
@@ -312,6 +314,9 @@ impl LoweredArtifactDependencyKind {
             ) | (
                 LoweredArtifactDependencyKind::CompoundDescriptorDrop,
                 ArtifactRequestKey::CompoundDescriptorDrop(_)
+            ) | (
+                LoweredArtifactDependencyKind::DescriptorBoundEntry,
+                ArtifactRequestKey::DescriptorBoundEntry(_)
             ) | (
                 LoweredArtifactDependencyKind::GcFinalizer,
                 ArtifactRequestKey::GcFinalizer(_)
@@ -3501,6 +3506,57 @@ mod tests {
             }
         ));
         assert_eq!(pair.body.as_ref().unwrap().bounds.len(), 2);
+    }
+
+    #[test]
+    fn dynamic_bodies_build_and_call_dynamic_closures() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def id: <U where Copy U> U -> U = value => value\n",
+                "def apply: <T where Copy T> T -> T = value => { let f: T -> T = id; f value }\n",
+                "let result = apply 42\n",
+            ),
+            "apply",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-dynamic-closure",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Apply = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *const u8);
+        let apply = unsafe { engine.get_function::<Apply>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let input = (0..17).map(|index| (index + 3) as u8).collect::<Vec<_>>();
+        let mut output = [0xff; 17];
+        unsafe {
+            apply.call(
+                std::ptr::null(),
+                &descriptor,
+                output.as_mut_ptr(),
+                input.as_ptr(),
+            );
+        }
+        assert_eq!(output, input[..]);
     }
 
     #[test]

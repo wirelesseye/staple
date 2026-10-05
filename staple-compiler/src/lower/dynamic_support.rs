@@ -48,7 +48,9 @@ pub(crate) enum RejectionReason {
     FunctionTypedSignature,
     /// A call boundary passes or returns such a function type.
     FunctionTypeAtCallBoundary,
-    /// A call through a closure value.
+    /// A call through a closure value. All indirect calls are supported since
+    /// R2/R3; kept for future restrictions.
+    #[allow(dead_code)]
     IndirectClosureCall,
     /// A closure body captures values.
     Captures,
@@ -688,24 +690,26 @@ impl SupportWalker<'_> {
             }
             LoweredExpressionKind::Index(_) => self.reject(RejectionReason::IndexExpression),
             LoweredExpressionKind::CallableValue(value) => {
-                // R2: a concrete function type builds a concrete closure. A
-                // dynamic-shape value or a captured one is R3/R4.
-                let dynamic_shape = self
-                    .program
-                    .callable_values
-                    .get(*value)
-                    .is_some_and(|callable| {
-                        contains_type_parameter(&CheckedType::Function(
-                            callable.function_type.clone(),
-                        ))
-                    });
-                let captured = self
-                    .program
-                    .callable_values
-                    .get(*value)
-                    .and_then(|callable| callable.closure.as_ref())
+                // R2 builds concrete closures; R3 builds dynamic-shape
+                // closures to a descriptor-bound entry for a generic `def` or
+                // trait implementation. Captures are R4.
+                let Some(callable) = self.program.callable_values.get(*value) else {
+                    self.reject(RejectionReason::Malformed);
+                    return;
+                };
+                let captured = callable
+                    .closure
+                    .as_ref()
                     .is_some_and(|closure| !closure.captures.is_empty());
-                if dynamic_shape || captured {
+                let dynamic_shape = contains_type_parameter(&CheckedType::Function(
+                    callable.function_type.clone(),
+                ));
+                let dynamic_target = matches!(
+                    callable.target,
+                    LoweredCallableTarget::DirectFunction { .. }
+                        | LoweredCallableTarget::TraitImplementation { .. }
+                );
+                if captured || (dynamic_shape && !dynamic_target) {
                     self.reject(RejectionReason::CallableValue);
                 }
             }
@@ -912,13 +916,10 @@ impl SupportWalker<'_> {
             LoweredCallableTarget::StructuralTraitMethod { .. } => {
                 self.reject(RejectionReason::StructuralTraitDispatch)
             }
-            LoweredCallableTarget::IndirectClosure { .. } => {
-                // R2: a concrete function type uses the concrete ABI. A
-                // dynamic-shape closure is R3.
-                if mentions_parameters {
-                    self.reject(RejectionReason::IndirectClosureCall);
-                }
-            }
+            // R2: a concrete function type uses the concrete ABI. R3: a
+            // dynamic-shape closure uses the dynamic shape without descriptor
+            // parameters. Both are supported.
+            LoweredCallableTarget::IndirectClosure { .. } => {}
             LoweredCallableTarget::ExternalFunction { .. } => {
                 if mentions_parameters {
                     self.reject(RejectionReason::ExternWithParameters);

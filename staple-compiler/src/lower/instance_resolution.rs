@@ -2037,6 +2037,38 @@ pub(crate) struct InstanceResolutionRequest<'a> {
 }
 
 impl LoweredProgram {
+    /// Runtime descriptor parameters in descriptor ABI order (R-A): the
+    /// template's declared scheme order, with parameters the template does
+    /// not declare (an enclosing instance's) first, in id order.
+    pub(crate) fn instance_runtime_order(
+        &self,
+        id: FunctionInstanceId,
+    ) -> Option<Vec<TypeParameterId>> {
+        let instance = self.instances.get(id)?;
+        let key = self.specializations.instance(instance.ordinal)?;
+        let runtime = key.runtime();
+        if runtime.is_empty() {
+            return Some(Vec::new());
+        }
+        let scheme = self
+            .functions
+            .get(key.function())
+            .map(|function| function.scheme_type_parameters.as_slice())
+            .unwrap_or(&[]);
+        let mut order = Vec::with_capacity(runtime.len());
+        for parameter in runtime {
+            if !scheme.contains(parameter) {
+                order.push(*parameter);
+            }
+        }
+        for parameter in scheme {
+            if runtime.contains(parameter) {
+                order.push(*parameter);
+            }
+        }
+        Some(order)
+    }
+
     /// Resolves one request end to end: composed environment, selected
     /// evidence, concrete key, and the relevant environment for specialization.
     ///
