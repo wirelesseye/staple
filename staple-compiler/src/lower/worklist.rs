@@ -3509,6 +3509,72 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_closures_capture_runtime_values() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def make: <T where Copy T> T -> (() -> T) = value => () => value\n",
+                "let result = make 42\n",
+            ),
+            "make",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-capture",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        #[repr(C)]
+        struct Closure {
+            code: *const u8,
+            environment: *const u8,
+        }
+        type Make = unsafe extern "C" fn(*const u8, *const Descriptor, *mut Closure, *const u8);
+        let make = unsafe { engine.get_function::<Make>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let input = (0..17).map(|index| (index + 9) as u8).collect::<Vec<_>>();
+        let mut closure = Closure {
+            code: std::ptr::null(),
+            environment: std::ptr::null(),
+        };
+        unsafe {
+            make.call(
+                std::ptr::null(),
+                &descriptor,
+                &mut closure,
+                input.as_ptr(),
+            );
+        }
+        assert!(!closure.code.is_null());
+        assert!(!closure.environment.is_null());
+        type Call = unsafe extern "C" fn(*const u8, *mut u8);
+        let call = unsafe { std::mem::transmute::<*const u8, Call>(closure.code) };
+        let mut output = [0xff; 17];
+        unsafe {
+            call(closure.environment, output.as_mut_ptr());
+        }
+        assert_eq!(output, input[..]);
+    }
+
+    #[test]
     fn dynamic_bodies_build_and_call_dynamic_closures() {
         let (text, name) = dynamic_test_module(
             concat!(

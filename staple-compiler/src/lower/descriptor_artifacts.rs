@@ -80,6 +80,9 @@ pub(super) fn concrete_body_types(body: &super::LoweredInstanceBody) -> Vec<Chec
     for (_, place) in body.places.iter() {
         collect(&place.value_type, &mut types);
     }
+    for capture in &body.captures {
+        collect(&capture.value_type, &mut types);
+    }
     if let Some(coercion) = &body.body_coercion {
         collect(&coercion.source, &mut types);
         collect(&coercion.target, &mut types);
@@ -219,13 +222,6 @@ pub(super) fn scan_instance(
         ) {
             continue;
         }
-        if callable
-            .closure
-            .as_ref()
-            .is_some_and(|closure| !closure.captures.is_empty())
-        {
-            continue;
-        }
         let Some(super::LoweredBoundTarget::Instance(callee)) = body
             .bindings
             .get(&super::LoweredBindingSite::CallableValue(*value_id))
@@ -251,7 +247,7 @@ pub(super) fn scan_instance(
             ),
             plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
                 instance: *callee,
-                runtime,
+                runtime: runtime.clone(),
                 function_type: callable.function_type.clone(),
             }),
             kind: Kind::DescriptorBoundEntry,
@@ -260,6 +256,36 @@ pub(super) fn scan_instance(
                 super::artifact_closure::ArtifactUseSite::DescriptorBoundEntry(*value_id),
             ),
         });
+        // Captured dynamic closures install a descriptor-based finalizer (R-D).
+        if let Some(closure) = &callable.closure
+            && !closure.captures.is_empty()
+        {
+            requests.push(ClosureRequest::Artifact {
+                key: ArtifactRequestKey::GcFinalizer(
+                    crate::specialization::GcFinalizerKey::DynamicClosureEnvironment {
+                        closure: ordinal,
+                    },
+                ),
+                plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicClosureEnvironment {
+                    closure: *callee,
+                    runtime,
+                    captures: closure
+                        .captures
+                        .iter()
+                        .map(|capture| crate::DynamicCapture {
+                            value_type: capture.value_type.clone(),
+                            access: capture.access,
+                            owns: capture.owns_value,
+                        })
+                        .collect(),
+                }),
+                kind: Kind::GcFinalizer,
+                origin: record.origin.clone(),
+                use_site: Some(super::artifact_closure::ArtifactUseSite::ClosureEnvironment(
+                    *value_id,
+                )),
+            });
+        }
     }
     Ok(requests)
 }

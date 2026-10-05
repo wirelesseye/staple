@@ -107,7 +107,7 @@ pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredIn
 // Family-specific plan types are also used within the lowering subtree.
 pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
-    DescriptorBoundEntryPlan,
+    DescriptorBoundEntryPlan, DynamicCapture,
     CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorDropPlan,
     DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement, ExternAdapterPlan,
     ExternDeclaration, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlanType,

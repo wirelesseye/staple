@@ -714,6 +714,10 @@ pub(crate) enum GcFinalizerKey {
     },
     /// A buffer keyed by its element type.
     Buffer(CanonicalType),
+    /// A dynamic closure environment keyed by the closure's function instance.
+    /// Its captures are dropped through the descriptors the environment holds
+    /// (R-D).
+    DynamicClosureEnvironment { closure: InstanceOrdinal },
 }
 
 /// The identity of one coroutine body's `resume`/`cleanup` pair, keyed by the
@@ -813,6 +817,9 @@ impl ArtifactRequestKey {
                 "gc-finalizer-closure-environment"
             }
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(_)) => "gc-finalizer-buffer",
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicClosureEnvironment {
+                ..
+            }) => "gc-finalizer-dynamic-closure-environment",
             ArtifactRequestKey::CoroutineCodes(_) => "coroutine-codes",
             ArtifactRequestKey::ReactionRunner(_) => "reaction-runner",
             ArtifactRequestKey::UntilRunner(_) => "until-runner",
@@ -1035,6 +1042,9 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
         }
         ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(_)) => {
             "__staple_gc_finalizer_buffer".to_owned()
+        }
+        ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicClosureEnvironment { .. }) => {
+            "__staple_gc_finalizer_dynamic_closure".to_owned()
         }
         ArtifactRequestKey::CoroutineCodes(_) => "__staple_coroutine_codes".to_owned(),
         ArtifactRequestKey::ReactionRunner(_) => "__staple_reaction_runner".to_owned(),

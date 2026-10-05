@@ -282,6 +282,15 @@ reachable from the branch.
   callable-value and indirect-closure reason rows fall to 183 and 0; the
   in-scope union stays at 2780 because those templates are still rejected for
   function-typed values (R5) or other reasons.
+- **R4 complete (by-value and borrowed captures).** Dynamic closures store
+  descriptors first in R-A order, then captures at descriptor-computed
+  offsets, all in one GC environment with a
+  `gc-finalizer-dynamic-closure-environment` finalizer that drops owned
+  captures through the stored descriptors. Closure bodies seed capture
+  bindings from the environment, and curried generics now lower through
+  dynamic implementations. The captures row falls from 189 to 2 (the two
+  remaining are shared-cell captures, handled with dynamic GC payloads in
+  R6), and the in-scope baseline drops to **2596**.
 
 ### Step 4a.1 — Keys, specialization, and validation
 

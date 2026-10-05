@@ -404,16 +404,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let storage = *environment.temporaries.get(&id).ok_or_else(|| {
             Diagnostic::new(span.clone(), "missing dynamic callable storage")
         })?;
-        if callable
-            .closure
-            .as_ref()
-            .is_some_and(|closure| !closure.captures.is_empty())
-        {
-            return Err(Diagnostic::new(
-                span,
-                "dynamic closure captures are not yet implemented",
-            ));
-        }
         if let Some(symbol) = self.callable_symbol(&callable)
             && let Some(binding) = environment.bindings.get(&symbol).filter(|binding| binding.live)
         {
@@ -440,9 +430,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if !runtime.is_empty() {
                     // A dynamic-shape closure (R-C): the environment stores the
                     // instance's descriptors and the entry forwards the call.
+                    let captures = callable
+                        .closure
+                        .as_ref()
+                        .map_or(&[][..], |closure| closure.captures.as_slice());
                     let closure_environment = self.build_descriptor_environment(
+                        *instance,
                         &runtime,
                         &callable.substitutions,
+                        captures,
                         environment,
                         &span,
                     )?;
@@ -488,23 +484,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// A GC-allocated closure environment holding one deep-copied descriptor
-    /// per run-time parameter, in descriptor ABI order (R-D).
+    /// per run-time parameter, in descriptor ABI order (R-D), then the
+    /// captures at descriptor-computed offsets.
     fn build_descriptor_environment(
         &self,
+        instance: FunctionInstanceId,
         runtime: &[TypeParameterId],
         substitutions: &crate::CallSubstitutions,
+        captures: &[crate::LoweredClosureCapture],
         environment: &DynamicEnvironment<'context>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
-        let size = self
-            .backend
-            .size_type
-            .const_int(runtime.len() as u64 * pointer_bytes, false);
-        let closure_environment =
-            self.backend
-                .build_gc_allocation(size, "closure.environment", span.clone())?;
-        for (index, parameter) in runtime.iter().enumerate() {
+        let mut descriptors = Vec::with_capacity(runtime.len());
+        for parameter in runtime {
             // The callee's run-time parameter is supplied at this site by the
             // substitution's value, which may itself mention the enclosing
             // instance's run-time parameters.
@@ -516,8 +509,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .ok_or_else(|| {
                     Diagnostic::new(span.clone(), "missing closure substitution")
                 })?;
-            let descriptor = self.dynamic_descriptor(&value_type, environment, span)?;
-            let copy = self.copy_descriptor_to_gc(descriptor, span)?;
+            descriptors.push(self.dynamic_descriptor(&value_type, environment, span)?);
+        }
+        let capture_descriptors = captures
+            .iter()
+            .map(|capture| {
+                self.capture_descriptor(&capture.value_type, runtime, &descriptors, span)
+            })
+            .collect::<CodeGenerationResult<Vec<_>>>()?;
+        let accesses = captures
+            .iter()
+            .map(|capture| capture.access)
+            .collect::<Vec<_>>();
+        let (offsets, total) =
+            self.dynamic_capture_offsets(runtime.len(), &accesses, &capture_descriptors)?;
+        let closure_environment =
+            self.backend
+                .build_gc_allocation(total, "closure.environment", span.clone())?;
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            let copy = self.copy_descriptor_to_gc(*descriptor, span)?;
             let offset = self
                 .backend
                 .size_type
@@ -528,7 +538,230 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .build_store(slot, copy)
                 .map_err(compiler_diagnostic)?;
         }
+        for (index, capture) in captures.iter().enumerate() {
+            let field = self.backend.dynamic_byte_offset(closure_environment, offsets[index])?;
+            let binding = environment
+                .bindings
+                .get(&capture.capture.symbol)
+                .filter(|binding| binding.live)
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "missing captured dynamic binding")
+                })?;
+            match capture.access {
+                crate::LoweredCaptureAccess::ByValue => {
+                    let descriptor = capture_descriptors[index].ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "missing by-value capture descriptor")
+                    })?;
+                    self.backend
+                        .copy_dynamic_value(descriptor, binding.pointer, field)?;
+                }
+                crate::LoweredCaptureAccess::Borrowed => {
+                    self.backend
+                        .builder
+                        .build_store(field, binding.pointer)
+                        .map_err(compiler_diagnostic)?;
+                }
+                crate::LoweredCaptureAccess::SharedCell => {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "dynamic shared-cell captures are not yet implemented",
+                    ));
+                }
+            }
+        }
+        if !captures.is_empty() {
+            let finalizer = self.dynamic_closure_finalizer_code(instance, span)?;
+            self.backend
+                .set_gc_finalizer(closure_environment, finalizer)?;
+        }
         Ok(closure_environment)
+    }
+
+    /// The declared dynamic closure-environment finalizer for one closure
+    /// instance.
+    fn dynamic_closure_finalizer_code(
+        &self,
+        instance: FunctionInstanceId,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        let ordinal = self
+            .view
+            .artifacts()
+            .find_map(|(_, artifact)| match &artifact.plan {
+                Some(crate::LoweredArtifactPlan::GcFinalizer(
+                    crate::GcFinalizerPlan::DynamicClosureEnvironment { closure, .. },
+                )) if *closure == instance => Some(artifact.ordinal),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing dynamic closure finalizer plan")
+            })?;
+        self.artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing dynamic closure finalizer declaration")
+            })
+    }
+
+    /// The descriptor one capture's storage uses: the stored run-time
+    /// descriptor for a bare parameter, a static descriptor for a concrete
+    /// type, or the pointer layout for a borrowed capture.
+    fn capture_descriptor(
+        &self,
+        value_type: &CheckedType,
+        runtime: &[TypeParameterId],
+        descriptors: &[PointerValue<'context>],
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<Option<PointerValue<'context>>> {
+        match value_type {
+            CheckedType::Parameter { id, .. } => {
+                let index = runtime.iter().position(|parameter| parameter == id).ok_or_else(
+                    || Diagnostic::new(span.clone(), "capture parameter is not run-time"),
+                )?;
+                Ok(Some(descriptors[index]))
+            }
+            ty if !crate::contains_type_parameter(ty) => {
+                Ok(Some(self.static_dynamic_descriptor(ty, span)?))
+            }
+            _ => Err(Diagnostic::new(
+                span.clone(),
+                "dynamic captures of compound run-time types are not yet implemented",
+            )),
+        }
+    }
+
+    /// Capture offsets after the descriptor region, following the concrete
+    /// environment's alignment rule. A `None` descriptor is a borrowed
+    /// pointer capture.
+    fn dynamic_capture_offsets(
+        &self,
+        runtime_count: usize,
+        accesses: &[crate::LoweredCaptureAccess],
+        descriptors: &[Option<PointerValue<'context>>],
+    ) -> CodeGenerationResult<(
+        Vec<inkwell::values::IntValue<'context>>,
+        inkwell::values::IntValue<'context>,
+    )> {
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let mut offset = self
+            .backend
+            .size_type
+            .const_int(runtime_count as u64 * pointer_bytes, false);
+        let mut offsets = Vec::with_capacity(accesses.len());
+        for (index, access) in accesses.iter().enumerate() {
+            let (size, align) = match (access, descriptors.get(index).copied().flatten()) {
+                (crate::LoweredCaptureAccess::Borrowed, _) => (
+                    self.backend.size_type.const_int(pointer_bytes, false),
+                    self.backend.size_type.const_int(pointer_bytes, false),
+                ),
+                (_, Some(descriptor)) => {
+                    let layout = self.backend.load_descriptor_layout(descriptor)?;
+                    (layout.store_size, layout.align)
+                }
+                (_, None) => {
+                    return Err(Diagnostic::new(
+                        staple_syntax::Span::Compiler,
+                        "missing dynamic capture descriptor",
+                    ));
+                }
+            };
+            offset = self.runtime_align_up(offset, align)?;
+            offsets.push(offset);
+            offset = self
+                .backend
+                .builder
+                .build_int_add(offset, size, "environment.offset")
+                .map_err(compiler_diagnostic)?;
+        }
+        Ok((offsets, offset))
+    }
+
+    fn runtime_align_up(
+        &self,
+        value: inkwell::values::IntValue<'context>,
+        alignment: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        let one = self.backend.size_type.const_int(1, false);
+        let padding = self
+            .backend
+            .builder
+            .build_int_sub(alignment, one, "environment.padding")
+            .map_err(compiler_diagnostic)?;
+        let padded = self
+            .backend
+            .builder
+            .build_int_add(value, padding, "environment.padded")
+            .map_err(compiler_diagnostic)?;
+        let units = self
+            .backend
+            .builder
+            .build_int_unsigned_div(padded, alignment, "environment.units")
+            .map_err(compiler_diagnostic)?;
+        Ok(self
+            .backend
+            .builder
+            .build_int_mul(units, alignment, "environment.aligned")
+            .map_err(compiler_diagnostic)?)
+    }
+
+    /// The dynamic closure environment's finalizer (R-D): drop every owned
+    /// capture through the descriptor stored in the environment.
+    pub(super) fn emit_dynamic_closure_finalizer(
+        &mut self,
+        plan: &crate::GcFinalizerPlan,
+        environment: PointerValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let crate::GcFinalizerPlan::DynamicClosureEnvironment {
+            runtime,
+            captures,
+            ..
+        } = plan
+        else {
+            return Err(Diagnostic::new(span.clone(), "mismatched dynamic finalizer plan"));
+        };
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let mut descriptors = Vec::with_capacity(runtime.len());
+        for index in 0..runtime.len() {
+            let offset = self
+                .backend
+                .size_type
+                .const_int(index as u64 * pointer_bytes, false);
+            let slot = self.backend.dynamic_byte_offset(environment, offset)?;
+            descriptors.push(
+                self.backend
+                    .builder
+                    .build_load(pointer, slot, "finalizer.descriptor")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value(),
+            );
+        }
+        let capture_descriptors = captures
+            .iter()
+            .map(|capture| {
+                self.capture_descriptor(&capture.value_type, runtime, &descriptors, span)
+            })
+            .collect::<CodeGenerationResult<Vec<_>>>()?;
+        let accesses = captures
+            .iter()
+            .map(|capture| capture.access)
+            .collect::<Vec<_>>();
+        let (offsets, _) =
+            self.dynamic_capture_offsets(runtime.len(), &accesses, &capture_descriptors)?;
+        for (index, capture) in captures.iter().enumerate().rev() {
+            if !capture.owns || capture.access != crate::LoweredCaptureAccess::ByValue {
+                continue;
+            }
+            let Some(descriptor) = capture_descriptors[index] else {
+                continue;
+            };
+            let field = self.backend.dynamic_byte_offset(environment, offsets[index])?;
+            self.backend.drop_dynamic_value(descriptor, field)?;
+        }
+        Ok(())
     }
 
     /// Deep-copy one descriptor into a GC block so a closure environment never
@@ -1239,8 +1472,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 format!("dynamic implementation does not yet support {detail}"),
             )
         };
-        if !body.captures.is_empty() || !body.signature.effects.resources.is_empty() {
-            return Err(unsupported("captures or resources"));
+        if !body.signature.effects.resources.is_empty() {
+            return Err(unsupported("resources"));
         }
         let runtime = self
             .view
@@ -1274,6 +1507,89 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
+        // Seed capture bindings from the closure environment (R-D). The
+        // descriptor region holds one descriptor per run-time parameter in
+        // R-A order; captures follow at descriptor-computed offsets.
+        if !body.captures.is_empty() {
+            let runtime_descriptors = runtime
+                .iter()
+                .map(|parameter| {
+                    environment.descriptors.get(parameter).copied().ok_or_else(|| {
+                        Diagnostic::new(
+                            body.origin.span.clone(),
+                            "missing capture runtime descriptor",
+                        )
+                    })
+                })
+                .collect::<CodeGenerationResult<Vec<_>>>()?;
+            let accesses = body
+                .captures
+                .iter()
+                .map(|capture| {
+                    if capture.requires_initialization_state
+                        || capture.mutable_storage
+                        || capture.derived
+                    {
+                        crate::LoweredCaptureAccess::SharedCell
+                    } else if capture.capture.borrowed {
+                        crate::LoweredCaptureAccess::Borrowed
+                    } else {
+                        crate::LoweredCaptureAccess::ByValue
+                    }
+                })
+                .collect::<Vec<_>>();
+            let capture_descriptors = body
+                .captures
+                .iter()
+                .map(|capture| {
+                    self.capture_descriptor(
+                        &capture.value_type,
+                        &runtime,
+                        &runtime_descriptors,
+                        &body.origin.span,
+                    )
+                })
+                .collect::<CodeGenerationResult<Vec<_>>>()?;
+            let (offsets, _) = self.dynamic_capture_offsets(
+                runtime.len(),
+                &accesses,
+                &capture_descriptors,
+            )?;
+            for (index, capture) in body.captures.iter().enumerate() {
+                let field = self
+                    .backend
+                    .dynamic_byte_offset(environment.closure, offsets[index])?;
+                let pointer = match accesses[index] {
+                    crate::LoweredCaptureAccess::ByValue => field,
+                    crate::LoweredCaptureAccess::Borrowed => self
+                        .backend
+                        .builder
+                        .build_load(
+                            self.backend.context.ptr_type(AddressSpace::default()),
+                            field,
+                            "capture.pointer",
+                        )
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value(),
+                    crate::LoweredCaptureAccess::SharedCell => {
+                        return Err(unsupported("shared-cell captures"));
+                    }
+                };
+                let descriptor = capture_descriptors[index].ok_or_else(|| {
+                    Diagnostic::new(body.origin.span.clone(), "missing capture descriptor")
+                })?;
+                environment.bindings.insert(
+                    capture.capture.symbol,
+                    DynamicBinding {
+                        pointer,
+                        descriptor,
+                        owned: false,
+                        live: true,
+                    },
+                );
+                environment.binding_order.push(capture.capture.symbol);
+            }
+        }
         self.prepare_dynamic_descriptor(
             &body.signature.parameter,
             &mut environment,

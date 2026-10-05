@@ -2003,6 +2003,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     self.emit_drop_glue(value, drop_plan, span)?;
                 }
             }
+            GcFinalizerPlan::DynamicClosureEnvironment { .. } => {
+                self.emit_dynamic_closure_finalizer(plan, body.payload, span)?;
+            }
             GcFinalizerPlan::Buffer { element, glue } => {
                 let drop_plan = self.finalizer_glue(glue, span)?;
                 let llvm_element = self.backend.compile_type(element)?;

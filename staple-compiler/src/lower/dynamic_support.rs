@@ -406,8 +406,21 @@ impl LoweredProgram {
             walker.reject(RejectionReason::Malformed);
             return (walker.reasons, walker.dependencies);
         };
-        if !template.captures.is_empty() {
-            walker.reject(RejectionReason::Captures);
+        // Captures are supported by value or by borrow when their types are a
+        // bare run-time parameter or concrete (R4). Shared cells, compound
+        // run-time types, and dynamic function values are later work.
+        for capture in &template.captures {
+            let simple = self
+                .symbols
+                .get(capture.symbol)
+                .is_some_and(|symbol| {
+                    !contains_polymorphic_function(&symbol.value_type)
+                        && (matches!(&symbol.value_type, CheckedType::Parameter { .. })
+                            || !contains_type_parameter(&symbol.value_type))
+                });
+            if capture.requires_cell || !simple {
+                walker.reject(RejectionReason::Captures);
+            }
         }
         if template.signature.effects.variable.is_some() {
             walker.reject(RejectionReason::EffectVariable);
@@ -697,10 +710,15 @@ impl SupportWalker<'_> {
                     self.reject(RejectionReason::Malformed);
                     return;
                 };
-                let captured = callable
-                    .closure
-                    .as_ref()
-                    .is_some_and(|closure| !closure.captures.is_empty());
+                let captures = callable.closure.as_ref().map_or(&[][..], |closure| {
+                    closure.captures.as_slice()
+                });
+                let captures_eligible = captures.iter().all(|capture| {
+                    capture.access != crate::LoweredCaptureAccess::SharedCell
+                        && !contains_polymorphic_function(&capture.value_type)
+                        && (matches!(&capture.value_type, CheckedType::Parameter { .. })
+                            || !contains_type_parameter(&capture.value_type))
+                });
                 let dynamic_shape = contains_type_parameter(&CheckedType::Function(
                     callable.function_type.clone(),
                 ));
@@ -709,7 +727,10 @@ impl SupportWalker<'_> {
                     LoweredCallableTarget::DirectFunction { .. }
                         | LoweredCallableTarget::TraitImplementation { .. }
                 );
-                if captured || (dynamic_shape && !dynamic_target) {
+                if !captures_eligible
+                    || (!captures.is_empty() && !dynamic_shape)
+                    || (dynamic_shape && !dynamic_target)
+                {
                     self.reject(RejectionReason::CallableValue);
                 }
             }
@@ -960,7 +981,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 2780;
+    const IN_SCOPE_BASELINE: usize = 2596;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.

@@ -148,6 +148,9 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Buffer { .. }) => {
                 "gc-finalizer-buffer"
             }
+            LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::DynamicClosureEnvironment {
+                ..
+            }) => "gc-finalizer-dynamic-closure-environment",
             LoweredArtifactPlan::CoroutineCodes(_) => "coroutine-codes",
             LoweredArtifactPlan::ReactionRunner(_) => "reaction-runner",
             LoweredArtifactPlan::UntilRunner(_) => "until-runner",
@@ -249,6 +252,12 @@ impl LoweredArtifactPlan {
                                 .zip(expected_captures)
                                 .all(|(capture, expected)| same_type(capture, expected))
                     }
+                    (
+                        GcFinalizerPlan::DynamicClosureEnvironment { closure, .. },
+                        GcFinalizerKey::DynamicClosureEnvironment {
+                            closure: expected_closure,
+                        },
+                    ) => closure.index() == expected_closure.index(),
                     _ => false,
                 }
             }
@@ -328,6 +337,7 @@ impl LoweredArtifactPlan {
                 | GcFinalizerPlan::Cell { glue, .. }
                 | GcFinalizerPlan::Buffer { glue, .. } => glue.is_some(),
                 GcFinalizerPlan::ClosureEnvironment { drops, .. } => drops.is_some(),
+                GcFinalizerPlan::DynamicClosureEnvironment { .. } => true,
             },
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.frame.is_some(),
             LoweredArtifactPlan::ReactionRunner(plan)
@@ -559,6 +569,11 @@ impl LoweredArtifactPlan {
                     element: value_type,
                     glue: _,
                 } => visit(Value(value_type)),
+                GcFinalizerPlan::DynamicClosureEnvironment {
+                    closure: _,
+                    runtime: _,
+                    captures: _,
+                } => {}
                 GcFinalizerPlan::ClosureEnvironment {
                     closure: _,
                     captures,
@@ -1206,6 +1221,26 @@ pub(crate) enum GcFinalizerPlan {
         /// The element's drop glue, absent only in the request-time marker.
         glue: Option<PlannedArtifact>,
     },
+    /// A dynamic closure environment (R-D): drops each owned capture through
+    /// the descriptors the environment holds.
+    DynamicClosureEnvironment {
+        /// The closure's own function instance; its position is the key's
+        /// instance ordinal.
+        closure: FunctionInstanceId,
+        /// The instance's run-time parameters in descriptor ABI order (R-A).
+        runtime: Vec<crate::TypeParameterId>,
+        /// The captures in environment order.
+        captures: Vec<DynamicCapture>,
+    },
+}
+
+/// One capture of a dynamic closure environment.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DynamicCapture {
+    pub value_type: CheckedType,
+    pub access: crate::LoweredCaptureAccess,
+    /// The finalizer drops the capture.
+    pub owns: bool,
 }
 
 /// One capture dropped by a closure-environment finalizer.
@@ -1232,6 +1267,7 @@ impl GcFinalizerPlan {
                     visit(PlannedCalleeRef::Artifact(&drop.glue));
                 }
             }
+            GcFinalizerPlan::DynamicClosureEnvironment { .. } => {}
         }
     }
 
@@ -1249,6 +1285,7 @@ impl GcFinalizerPlan {
                     visit(PlannedCalleeRefMut::Artifact(&mut drop.glue));
                 }
             }
+            GcFinalizerPlan::DynamicClosureEnvironment { .. } => {}
         }
     }
 }
