@@ -223,6 +223,11 @@ Breakdown-level decisions, in addition to the main plan's. Decisions 10 and
 
 ## Stage 4a — Dynamic implementations
 
+The remaining 4a work, its exit gate, and the issues found in the review
+of `6a44dfa` are planned in
+[STAGE_4A_REMAINDER_BREAKDOWN.md](STAGE_4A_REMAINDER_BREAKDOWN.md). Its R0.5
+step replaces the status log below.
+
 ### Implementation status (partial)
 
 Implemented foundations:
