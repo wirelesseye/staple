@@ -148,6 +148,15 @@ impl DescriptorLayout {
     }
 }
 
+/// Layout words carried by a descriptor in generated code.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // Used by the forthcoming dynamic value emitter.
+pub(crate) struct RuntimeDescriptorLayout<'context> {
+    pub store_size: inkwell::values::IntValue<'context>,
+    pub stride: inkwell::values::IntValue<'context>,
+    pub align: inkwell::values::IntValue<'context>,
+}
+
 /// The layout facts `compile_type` needs, sourced from the lowered program
 /// (`LoweredSemanticIds`, the type catalog, and `runtime_opaque_kind`) so the
 /// the emitter and lowered emitters cannot disagree.
@@ -352,6 +361,268 @@ impl<'program, 'context> Backend<'program, 'context> {
             ],
             false,
         )
+    }
+
+    /// Read the layout prefix through the common descriptor header, independent
+    /// of the number of trailing components.
+    #[allow(dead_code)]
+    pub(crate) fn load_descriptor_layout(
+        &self,
+        descriptor: inkwell::values::PointerValue<'context>,
+    ) -> CodeGenerationResult<RuntimeDescriptorLayout<'context>> {
+        let mut words = Vec::new();
+        for index in 0..3 {
+            let pointer = self
+                .builder
+                .build_struct_gep(
+                    self.type_descriptor_type(0),
+                    descriptor,
+                    index,
+                    "descriptor.layout.word",
+                )
+                .map_err(super::compiler_diagnostic)?;
+            words.push(
+                self.builder
+                    .build_load(self.size_type, pointer, "descriptor.layout")
+                    .map_err(super::compiler_diagnostic)?
+                    .into_int_value(),
+            );
+        }
+        Ok(RuntimeDescriptorLayout {
+            store_size: words[0],
+            stride: words[1],
+            align: words[2],
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn runtime_product_layout(
+        &self,
+        fields: &[RuntimeDescriptorLayout<'context>],
+    ) -> CodeGenerationResult<RuntimeDescriptorLayout<'context>> {
+        let mut size = self.size_type.const_zero();
+        for field in fields {
+            size = self
+                .builder
+                .build_int_add(size, field.store_size, "product.size")
+                .map_err(super::compiler_diagnostic)?;
+        }
+        Ok(RuntimeDescriptorLayout {
+            store_size: size,
+            stride: size,
+            align: self.size_type.const_int(1, false),
+        })
+    }
+
+    /// Preserve the concrete sum's first-widest carrier selection. Its store
+    /// size controls the element count, while its stride controls allocation.
+    #[allow(dead_code)]
+    pub(crate) fn runtime_sum_layout(
+        &self,
+        alternatives: &[RuntimeDescriptorLayout<'context>],
+    ) -> CodeGenerationResult<(
+        RuntimeDescriptorLayout<'context>,
+        inkwell::values::IntValue<'context>,
+    )> {
+        use inkwell::IntPredicate;
+        let fail = super::compiler_diagnostic;
+        let one = self.size_type.const_int(1, false);
+        let maximum = |left, right| -> CodeGenerationResult<_> {
+            let larger = self
+                .builder
+                .build_int_compare(IntPredicate::UGT, left, right, "layout.larger")
+                .map_err(fail)?;
+            Ok(self
+                .builder
+                .build_select(larger, left, right, "layout.maximum")
+                .map_err(fail)?
+                .into_int_value())
+        };
+        let round_up = |size, alignment| -> CodeGenerationResult<_> {
+            let padding = self
+                .builder
+                .build_int_sub(alignment, one, "layout.padding")
+                .map_err(fail)?;
+            let padded = self
+                .builder
+                .build_int_add(size, padding, "layout.padded")
+                .map_err(fail)?;
+            let count = self
+                .builder
+                .build_int_unsigned_div(padded, alignment, "layout.units")
+                .map_err(fail)?;
+            Ok(self
+                .builder
+                .build_int_mul(count, alignment, "layout.rounded")
+                .map_err(fail)?)
+        };
+        let mut carrier = RuntimeDescriptorLayout {
+            store_size: one,
+            stride: one,
+            align: one,
+        };
+        let mut size = one;
+        for alternative in alternatives {
+            size = maximum(size, alternative.store_size)?;
+            let wider = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::UGT,
+                    alternative.align,
+                    carrier.align,
+                    "sum.wider",
+                )
+                .map_err(fail)?;
+            let select = |new, old| -> CodeGenerationResult<_> {
+                Ok(self
+                    .builder
+                    .build_select(wider, new, old, "sum.carrier")
+                    .map_err(fail)?
+                    .into_int_value())
+            };
+            carrier = RuntimeDescriptorLayout {
+                store_size: select(alternative.store_size, carrier.store_size)?,
+                stride: select(alternative.stride, carrier.stride)?,
+                align: select(alternative.align, carrier.align)?,
+            };
+        }
+        let carrier_size = maximum(carrier.store_size, one)?;
+        let rounded = round_up(size, carrier_size)?;
+        let count = self
+            .builder
+            .build_int_unsigned_div(rounded, carrier_size, "sum.count")
+            .map_err(fail)?;
+        let payload = self
+            .builder
+            .build_int_mul(count, carrier.stride, "sum.payload.size")
+            .map_err(fail)?;
+        let tag = self.descriptor_layout(&CheckedType::I32)?;
+        let offset = round_up(
+            self.size_type.const_int(tag.store_size, false),
+            carrier.align,
+        )?;
+        let align = maximum(
+            carrier.align,
+            self.size_type.const_int(tag.align as u64, false),
+        )?;
+        let size = self
+            .builder
+            .build_int_add(offset, payload, "sum.unpadded.size")
+            .map_err(fail)?;
+        let size = round_up(size, align)?;
+        Ok((
+            RuntimeDescriptorLayout {
+                store_size: size,
+                stride: size,
+                align,
+            },
+            offset,
+        ))
+    }
+
+    /// Materialize a compound descriptor in a fixed-size entry allocation.
+    /// The caller supplies its planned drop entry point; a null entry means
+    /// the value requires no cleanup. These descriptors belong to this call
+    /// frame and must be copied to persistent storage before a GC escape.
+    #[allow(dead_code)]
+    pub(crate) fn build_runtime_descriptor(
+        &self,
+        layout: RuntimeDescriptorLayout<'context>,
+        components: &[inkwell::values::PointerValue<'context>],
+        drop: inkwell::values::PointerValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let fail = super::compiler_diagnostic;
+        let count = u32::try_from(components.len())
+            .map_err(|_| Diagnostic::new(Span::Compiler, "too many type descriptor components"))?;
+        let ty = self.type_descriptor_type(count);
+        let slot = self
+            .entry_builder()
+            .build_alloca(ty, "type.descriptor")
+            .map_err(fail)?;
+        let no_drop = self
+            .builder
+            .build_is_null(drop, "descriptor.no.drop")
+            .map_err(fail)?;
+        let flags = self
+            .builder
+            .build_int_z_extend(no_drop, self.context.i32_type(), "descriptor.flags")
+            .map_err(fail)?;
+        let words: [inkwell::values::BasicValueEnum<'context>; 6] = [
+            layout.store_size.into(),
+            layout.stride.into(),
+            layout.align.into(),
+            flags.into(),
+            drop.into(),
+            self.context
+                .i32_type()
+                .const_int(count as u64, false)
+                .into(),
+        ];
+        for (index, word) in words.into_iter().enumerate() {
+            let field = self
+                .builder
+                .build_struct_gep(ty, slot, index as u32, "descriptor.field")
+                .map_err(fail)?;
+            self.builder.build_store(field, word).map_err(fail)?;
+        }
+        let array = self
+            .builder
+            .build_struct_gep(ty, slot, 6, "descriptor.components")
+            .map_err(fail)?;
+        let array_type = self
+            .context
+            .ptr_type(AddressSpace::default())
+            .array_type(count);
+        for (index, component) in components.iter().enumerate() {
+            let field = unsafe {
+                self.builder.build_gep(
+                    array_type,
+                    array,
+                    &[
+                        self.context.i32_type().const_zero(),
+                        self.context.i32_type().const_int(index as u64, false),
+                    ],
+                    "descriptor.component",
+                )
+            }
+            .map_err(fail)?;
+            self.builder.build_store(field, *component).map_err(fail)?;
+        }
+        Ok(slot)
+    }
+
+    /// Components start at the same offset for every descriptor shape.
+    #[allow(dead_code)]
+    pub(crate) fn load_descriptor_component(
+        &self,
+        descriptor: inkwell::values::PointerValue<'context>,
+        index: u32,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let fail = super::compiler_diagnostic;
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let array = self
+            .builder
+            .build_struct_gep(
+                self.type_descriptor_type(0),
+                descriptor,
+                6,
+                "descriptor.components",
+            )
+            .map_err(fail)?;
+        let field = unsafe {
+            self.builder.build_gep(
+                pointer,
+                array,
+                &[self.size_type.const_int(index as u64, false)],
+                "descriptor.component",
+            )
+        }
+        .map_err(fail)?;
+        Ok(self
+            .builder
+            .build_load(pointer, field, "descriptor.component.value")
+            .map_err(fail)?
+            .into_pointer_value())
     }
 
     pub(crate) fn compile_integer_type(
@@ -676,6 +947,361 @@ mod tests {
                 8
             )
         );
+    }
+
+    #[test]
+    fn dynamic_copy_and_drop_use_descriptor_entries() {
+        use super::Backend;
+        use crate::codegen::create_target_machine;
+        use inkwell::{AddressSpace, OptimizationLevel};
+        let root = standard_library_root();
+        let loaded = ProgramLoader::new()
+            .with_standard_library_root(root.clone())
+            .load_source("let value = 1", &root)
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(loaded).unwrap())
+            .unwrap();
+        let module = Lowerer::new().lower(&typed).unwrap();
+        let context = inkwell::context::Context::create();
+        let target = create_target_machine(None).unwrap();
+        let backend = Backend::new(&context, &target, LayoutContext::new(module.program()));
+        let pointer = context.ptr_type(AddressSpace::default());
+        let drop = backend.llvm_module.add_function(
+            "drop",
+            context
+                .void_type()
+                .fn_type(&[pointer.into(), pointer.into()], false),
+            None,
+        );
+        backend
+            .builder
+            .position_at_end(context.append_basic_block(drop, "entry"));
+        let value = drop.get_nth_param(1).unwrap().into_pointer_value();
+        let byte = backend
+            .builder
+            .build_load(context.i8_type(), value, "byte")
+            .unwrap()
+            .into_int_value();
+        let increment = backend
+            .builder
+            .build_int_add(byte, context.i8_type().const_int(1, false), "increment")
+            .unwrap();
+        backend.builder.build_store(value, increment).unwrap();
+        backend.builder.build_return(None).unwrap();
+        let function = backend.llvm_module.add_function(
+            "copy_drop",
+            context
+                .void_type()
+                .fn_type(&[pointer.into(), pointer.into(), pointer.into()], false),
+            None,
+        );
+        backend
+            .builder
+            .position_at_end(context.append_basic_block(function, "entry"));
+        let descriptor = function.get_nth_param(0).unwrap().into_pointer_value();
+        let source = function.get_nth_param(1).unwrap().into_pointer_value();
+        let destination = function.get_nth_param(2).unwrap().into_pointer_value();
+        backend
+            .copy_dynamic_value(descriptor, source, destination)
+            .unwrap();
+        backend.drop_dynamic_value(descriptor, destination).unwrap();
+        backend.builder.build_return(None).unwrap();
+        backend.llvm_module.verify().unwrap();
+        let engine = backend
+            .llvm_module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            store_size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type CopyDrop = unsafe extern "C" fn(*const Descriptor, *const u8, *mut u8);
+        let call = unsafe { engine.get_function::<CopyDrop>("copy_drop") }.unwrap();
+        let drop = engine.get_function_address("drop").unwrap();
+        for drop in [0, drop] {
+            // Store size differs from stride: bytes after the stored value must
+            // remain untouched, and the source may be unaligned.
+            let descriptor = Descriptor {
+                store_size: 3,
+                stride: 8,
+                align: 8,
+                flags: u32::from(drop == 0),
+                drop,
+                count: 0,
+            };
+            let source = [99, 10, 20, 30, 99];
+            let mut destination = [77; 10];
+            unsafe {
+                call.call(
+                    &descriptor,
+                    source.as_ptr().add(1),
+                    destination.as_mut_ptr().add(1),
+                );
+            }
+            let mut expected = [77; 10];
+            expected[1..4].copy_from_slice(&[10 + u8::from(drop != 0), 20, 30]);
+            assert_eq!(destination, expected);
+            assert_eq!(source, [99, 10, 20, 30, 99]);
+        }
+    }
+
+    #[test]
+    fn runtime_layout_calculations_match_concrete_layouts() {
+        use super::{Backend, DescriptorLayout};
+        use crate::codegen::create_target_machine;
+        use inkwell::OptimizationLevel;
+        let root = standard_library_root();
+        let loaded = ProgramLoader::new()
+            .with_standard_library_root(root.clone())
+            .load_source(
+                "def choose: (I32, I32) -> I32 = (a, b) => a\nlet value = choose (1, 2)",
+                &root,
+            )
+            .unwrap();
+        let typed = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(loaded).unwrap())
+            .unwrap();
+        let module = Lowerer::new().lower(&typed).unwrap();
+        let context = inkwell::context::Context::create();
+        let target = create_target_machine(None).unwrap();
+        let backend = Backend::new(&context, &target, LayoutContext::new(module.program()));
+        let mut signature = module.program().instances().find_map(|(id, _)| {
+            let signature = module.program().instance_signature(id)?;
+            matches!(signature.parameter.as_ref(), CheckedType::Product(product) if product.elements.len() == 2)
+                .then(|| signature.clone())
+        }).expect("two-argument instance");
+        assert_eq!(
+            backend
+                .compile_dynamic_function_type(&signature, 2)
+                .unwrap()
+                .count_param_types(),
+            6 + signature.effects.resources.len() as u32
+        );
+        signature.mutations = vec![crate::CheckedMutation::Whole];
+        assert_eq!(
+            backend
+                .compile_dynamic_function_type(&signature, 2)
+                .unwrap()
+                .count_param_types(),
+            5 + signature.effects.resources.len() as u32
+        );
+        signature.parameter = Box::new(CheckedType::I32);
+        signature.effects.resources.push(crate::CheckedResource {
+            value_type: CheckedType::I32,
+            mutable: false,
+        });
+        assert!(
+            backend
+                .compile_dynamic_function_type(&signature, 2)
+                .unwrap()
+                .get_return_type()
+                .is_none()
+        );
+        // Read actual descriptor pointers at execution time, rather than relying
+        // on LLVM constant folding to test these calculations.
+        let pointer = context.ptr_type(inkwell::AddressSpace::default());
+        let function = backend.llvm_module.add_function(
+            "layout",
+            context
+                .void_type()
+                .fn_type(&[pointer.into(), pointer.into(), pointer.into()], false),
+            None,
+        );
+        backend
+            .builder
+            .position_at_end(context.append_basic_block(function, "entry"));
+        let left = backend
+            .load_descriptor_layout(function.get_nth_param(0).unwrap().into_pointer_value())
+            .unwrap();
+        let right = backend
+            .load_descriptor_layout(function.get_nth_param(1).unwrap().into_pointer_value())
+            .unwrap();
+        let product = backend.runtime_product_layout(&[left, right]).unwrap();
+        let (sum, offset) = backend.runtime_sum_layout(&[left, right]).unwrap();
+        let inputs = [
+            function.get_nth_param(0).unwrap().into_pointer_value(),
+            function.get_nth_param(1).unwrap().into_pointer_value(),
+        ];
+        let descriptor = backend
+            .build_runtime_descriptor(product, &inputs, pointer.const_null())
+            .unwrap();
+        let built = backend.load_descriptor_layout(descriptor).unwrap();
+        let mut header = Vec::new();
+        for index in [3, 5] {
+            let slot = backend
+                .builder
+                .build_struct_gep(
+                    backend.type_descriptor_type(0),
+                    descriptor,
+                    index,
+                    "header.slot",
+                )
+                .unwrap();
+            let value = backend
+                .builder
+                .build_load(context.i32_type(), slot, "header.value")
+                .unwrap()
+                .into_int_value();
+            header.push(
+                backend
+                    .builder
+                    .build_int_z_extend(value, backend.size_type, "header.word")
+                    .unwrap(),
+            );
+        }
+        let mut component_matches = Vec::new();
+        for (index, input) in inputs.into_iter().enumerate() {
+            let component = backend
+                .load_descriptor_component(descriptor, index as u32)
+                .unwrap();
+            let actual = backend
+                .builder
+                .build_ptr_to_int(component, backend.size_type, "component.address")
+                .unwrap();
+            let expected = backend
+                .builder
+                .build_ptr_to_int(input, backend.size_type, "input.address")
+                .unwrap();
+            let equal = backend
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    actual,
+                    expected,
+                    "component.matches",
+                )
+                .unwrap();
+            component_matches.push(
+                backend
+                    .builder
+                    .build_int_z_extend(equal, backend.size_type, "component.match.word")
+                    .unwrap(),
+            );
+        }
+        let output = function.get_nth_param(2).unwrap().into_pointer_value();
+        for (index, value) in [
+            product.store_size,
+            product.stride,
+            product.align,
+            sum.store_size,
+            sum.stride,
+            sum.align,
+            offset,
+            built.store_size,
+            built.stride,
+            built.align,
+            component_matches[0],
+            component_matches[1],
+            header[0],
+            header[1],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let slot = unsafe {
+                backend.builder.build_gep(
+                    backend.size_type,
+                    output,
+                    &[backend.size_type.const_int(index as u64, false)],
+                    "output",
+                )
+            }
+            .unwrap();
+            backend.builder.build_store(slot, value).unwrap();
+        }
+        backend.builder.build_return(None).unwrap();
+        backend.llvm_module.verify().unwrap();
+        let engine = backend
+            .llvm_module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        type Calculate = unsafe extern "C" fn(*const usize, *const usize, *mut usize);
+        let calculate = unsafe { engine.get_function::<Calculate>("layout") }.unwrap();
+        let layouts = [
+            DescriptorLayout {
+                store_size: 0,
+                stride: 0,
+                align: 1,
+            },
+            DescriptorLayout {
+                store_size: 1,
+                stride: 1,
+                align: 1,
+            },
+            DescriptorLayout {
+                store_size: 3,
+                stride: 3,
+                align: 1,
+            },
+            DescriptorLayout {
+                store_size: 4,
+                stride: 4,
+                align: 4,
+            },
+            DescriptorLayout {
+                store_size: 8,
+                stride: 8,
+                align: 8,
+            },
+            DescriptorLayout {
+                store_size: 9,
+                stride: 16,
+                align: 8,
+            },
+            DescriptorLayout {
+                store_size: 24,
+                stride: 24,
+                align: 8,
+            },
+        ];
+        let tag = backend.descriptor_layout(&CheckedType::I32).unwrap();
+        for left in layouts {
+            for right in layouts {
+                let words = |layout: DescriptorLayout| {
+                    [
+                        layout.store_size as usize,
+                        layout.stride as usize,
+                        layout.align as usize,
+                    ]
+                };
+                let mut output = [0; 14];
+                unsafe {
+                    calculate.call(
+                        words(left).as_ptr(),
+                        words(right).as_ptr(),
+                        output.as_mut_ptr(),
+                    );
+                }
+                let product = DescriptorLayout::packed_product(&[left, right]);
+                let (sum, offset) = DescriptorLayout::sum(&[left, right], tag);
+                assert_eq!(
+                    output,
+                    [
+                        product.store_size as usize,
+                        product.stride as usize,
+                        product.align as usize,
+                        sum.store_size as usize,
+                        sum.stride as usize,
+                        sum.align as usize,
+                        offset as usize,
+                        product.store_size as usize,
+                        product.stride as usize,
+                        product.align as usize,
+                        1,
+                        1,
+                        1,
+                        2
+                    ],
+                    "{left:?}, {right:?}"
+                );
+            }
+        }
     }
 
     #[test]

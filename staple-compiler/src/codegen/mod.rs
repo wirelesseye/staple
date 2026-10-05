@@ -41,6 +41,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 mod conversions;
 mod abi;
+mod dynamic;
 #[doc(hidden)]
 pub mod corpus;
 mod ir;

@@ -235,15 +235,23 @@ Implemented foundations:
 - Descriptor layout rules for packed products, sums, and wrappers, with a
   corpus sweep against LLVM `TargetData`, including product and sum offsets.
 
+- Backend runtime descriptor primitives: header/component loads, fixed-size
+  entry slots, runtime product/sum layout calculations, descriptor-sized byte
+  copies, nullable descriptor drop calls, and the dynamic ABI function type.
+  Execution tests exercise padded strides, carrier ties, unaligned copies,
+  component order, and both cleanup branches. These primitives are not yet
+  connected to instance body emission or artifact planning.
+
 Stage 4a is **not complete**. Still required: the differential lowering option
-and transitive restriction analysis; runtime compound descriptor builders;
+and transitive restriction analysis; compound builder/drop artifact planning;
 dynamic value emission and ABI/calls; reabstraction; dynamic GC payloads and
 intrinsics; and the differential exit gate. Stage 3's polymorphic-value gate
 remains in place.
 
-Validation: `cargo test --workspace --quiet` passes; all 104 corpus/example
-inputs report `same` against the `50565d8` release build without a differential
-lowering option.
+Foundation validation (commit `8c86d8c`): `cargo test --workspace --quiet`
+passes; all 104 corpus/example inputs report `same` against the `50565d8`
+release build without a differential lowering option. The subsequent backend
+primitives have focused LLVM verification and JIT execution tests.
 
 ### Step 4a.1 — Keys, specialization, and validation
 

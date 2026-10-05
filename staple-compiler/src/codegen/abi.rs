@@ -88,6 +88,49 @@ impl<'program, 'context> Backend<'program, 'context> {
         Ok(call_arguments)
     }
 
+    /// Dynamic entries always return through storage and receive each resource
+    /// and flattened argument by address. Descriptor order is the sorted
+    /// runtime-parameter order recorded in the instance key.
+    #[allow(dead_code)]
+    pub(crate) fn compile_dynamic_function_type(
+        &self,
+        function_type: &CheckedFunctionType,
+        runtime_parameter_count: usize,
+    ) -> CodeGenerationResult<inkwell::types::FunctionType<'context>> {
+        if function_type.effects.variable.is_some() {
+            return Err(Diagnostic::new(
+                Span::Compiler,
+                "dynamic implementations do not support effect variables",
+            ));
+        }
+        let arguments = if function_type.mutations.contains(&CheckedMutation::Whole) {
+            1
+        } else {
+            match function_type.parameter.as_ref() {
+                CheckedType::Product(product) if product.variadic => {
+                    return Err(Diagnostic::new(
+                        Span::Compiler,
+                        "dynamic implementations do not support variadic parameters",
+                    ));
+                }
+                CheckedType::ParameterProduct(_) => {
+                    return Err(Diagnostic::new(
+                        Span::Compiler,
+                        "dynamic implementations require a fixed parameter shape",
+                    ));
+                }
+                parameter => flattened_parameter_types(parameter).len(),
+            }
+        };
+        // Environment, descriptors, result storage, resources, value arguments.
+        let count = 2 + runtime_parameter_count + function_type.effects.resources.len() + arguments;
+        let pointer = self.context.ptr_type(AddressSpace::default()).into();
+        Ok(self
+            .context
+            .void_type()
+            .fn_type(&vec![pointer; count], false))
+    }
+
     pub(crate) fn compile_native_function_type(
         &self,
         function_type: &CheckedFunctionType,
