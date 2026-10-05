@@ -140,7 +140,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 91] = [
+static CORPUS: [CorpusProgram; 92] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -2521,6 +2521,25 @@ let value = at (Ref (1, 2), (USize :: 5))
             &["first"],
         )),
         "3\n",
+    ),
+    // A string template inside a generic body: the interpolations have
+    // concrete types, so the dynamic body calls the concrete formatter ABI
+    // (R7).
+    expect_stdout(
+        must_run(inline(
+            "generic_string_template",
+            concat!(
+                "use std.io.println\n",
+                "def describe: <T where Copy T> T -> String = value => {\n",
+                "    let n = 3\n",
+                "    \"n=${n}\"\n",
+                "}\n",
+                "println (describe 1)\n",
+                "println (describe (U8 :: 2))\n",
+            ),
+            "core",
+        )),
+        "n=3\nn=3\n",
     ),
 ];
 

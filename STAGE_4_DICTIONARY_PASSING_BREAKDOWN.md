@@ -320,6 +320,19 @@ reachable from the branch.
   zero of a component-less pointer descriptor, so `let List(mut source) =
   list` bound a garbage descriptor and the finalizer drop segfaulted. Wrapper
   projections now pass the base descriptor and pointer through unchanged.
+- **R7 in progress.** Dynamic string templates whose interpolations have
+  concrete types call the concrete formatter ABI: the constructor, literal
+  writes, interpolation dispatches, and finish are concrete functions, each
+  interpolated value is loaded from dynamic storage as its concrete type, and
+  the resulting `String` is stored into dynamic storage. A template with a
+  run-time-typed interpolation moves from the in-scope "string template"
+  reason to the allowed "trait call with run-time arguments" reason (it needs
+  `Display`/`Debug` dispatch, Stage 6). The corpus gains
+  `generic_string_template`, and the full differential run covers it. The
+  string-template row reaches zero, but the in-scope template count stays
+  **11** because those templates also carry resource, callable-value, capture,
+  or function-typed reasons. Resource effects, resource calls, `with` scopes,
+  and implicit thunk arguments remain.
 
 ### Step 4a.1 — Keys, specialization, and validation
 

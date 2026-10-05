@@ -72,8 +72,6 @@ pub(crate) enum RejectionReason {
     WithExpression,
     /// A signature declares resource effects.
     ResourceEffects,
-    /// A string template.
-    StringTemplate,
     /// An index expression (trait-dispatched).
     IndexExpression,
     /// An implicit thunk argument.
@@ -189,7 +187,6 @@ impl RejectionReason {
             RejectionReason::ResourcePlace => "resource place",
             RejectionReason::WithExpression => "with scope",
             RejectionReason::ResourceEffects => "resource effects in the signature",
-            RejectionReason::StringTemplate => "string template",
             RejectionReason::IndexExpression => "index expression",
             RejectionReason::ImplicitThunkArgument => "implicit thunk argument",
             RejectionReason::PropagatingBinding => "propagating binding",
@@ -750,8 +747,22 @@ impl SupportWalker<'_> {
         match &expression.kind {
             LoweredExpressionKind::String(_) | LoweredExpressionKind::CString(_) => {}
             LoweredExpressionKind::Deferred(_) => self.reject(RejectionReason::Deferred),
-            LoweredExpressionKind::StringTemplate(_) => {
-                self.reject(RejectionReason::StringTemplate)
+            LoweredExpressionKind::StringTemplate(template) => {
+                // R7: concrete interpolations use the concrete formatter ABI.
+                // A run-time-typed interpolation needs `Display`/`Debug`
+                // dispatch at run time and is an allowed Stage 6 reason.
+                let mut runtime_typed = false;
+                for part in &template.parts {
+                    if let crate::LoweredStringTemplatePart::Interpolation(interpolation) = part {
+                        if crate::contains_type_parameter(&interpolation.value_type) {
+                            runtime_typed = true;
+                        }
+                        self.expression(interpolation.expression);
+                    }
+                }
+                if runtime_typed {
+                    self.reject(RejectionReason::TraitCallRuntime);
+                }
             }
             LoweredExpressionKind::Index(_) => self.reject(RejectionReason::IndexExpression),
             LoweredExpressionKind::CallableValue(value) => {

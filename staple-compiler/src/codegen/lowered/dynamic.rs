@@ -497,6 +497,169 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing reabstraction declaration"))
     }
 
+    /// The declared function of one binding site in a dynamic body. Formatting
+    /// helpers and interpolation dispatches are concrete functions, so the
+    /// dynamic body calls them with the concrete ABI.
+    fn dynamic_bound_function(
+        &self,
+        owner: EmissionOwner,
+        site: LoweredBindingSite,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        let binding = self
+            .view
+            .binding(owner, site)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "lowered site has no binding"))?;
+        match binding {
+            LoweredBoundTarget::Instance(instance) => self
+                .instances
+                .get(instance)
+                .copied()
+                .ok_or_else(|| Diagnostic::new(span.clone(), "bound instance is not declared")),
+            LoweredBoundTarget::Artifact(ordinal) => self
+                .artifacts
+                .get(ordinal)
+                .and_then(|functions| functions.first())
+                .copied()
+                .ok_or_else(|| Diagnostic::new(span.clone(), "bound artifact is not declared")),
+            LoweredBoundTarget::Route(_) => Err(Diagnostic::new(
+                span.clone(),
+                "bound site is not a function",
+            )),
+        }
+    }
+
+    /// A string template whose interpolations have concrete types (R7). The
+    /// formatter constructor, literal writes, interpolation dispatches, and
+    /// finish are concrete functions called with the concrete ABI; each
+    /// interpolated value is loaded from dynamic storage as its concrete type
+    /// and the resulting `String` is stored into dynamic storage.
+    fn emit_dynamic_string_template(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        template: &crate::LoweredStringTemplate,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let span = self
+            .view
+            .expression(owner, id)
+            .map(|expression| expression.origin.span.clone())
+            .unwrap_or(staple_syntax::Span::Compiler);
+        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "missing dynamic template storage")
+        })?;
+        let null = self
+            .backend
+            .context
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        let constructor = self.dynamic_bound_function(
+            owner,
+            LoweredBindingSite::FormattingConstructor(id),
+            &span,
+        )?;
+        let formatter = self
+            .backend
+            .builder
+            .build_direct_call(constructor, &[null.into()], "template.formatter")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic();
+        let formatter_storage = self
+            .backend
+            .entry_builder()
+            .build_alloca(formatter.get_type(), "template.formatter.storage")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(formatter_storage, formatter)
+            .map_err(compiler_diagnostic)?;
+        let mut write = None;
+        for (part_index, part) in template.parts.iter().enumerate() {
+            match part {
+                crate::LoweredStringTemplatePart::Literal(literal) => {
+                    let function = match write {
+                        Some(function) => function,
+                        None => {
+                            let function = self.dynamic_bound_function(
+                                owner,
+                                LoweredBindingSite::FormattingWrite(id),
+                                &span,
+                            )?;
+                            write = Some(function);
+                            function
+                        }
+                    };
+                    self.backend.build_formatter_write_literal(
+                        function,
+                        formatter_storage.into(),
+                        literal,
+                        span.clone(),
+                    )?;
+                }
+                crate::LoweredStringTemplatePart::Interpolation(interpolation) => {
+                    let value = self.emit_dynamic_expression(
+                        owner,
+                        interpolation.expression,
+                        environment,
+                    )?;
+                    if environment.returned {
+                        return Ok(storage);
+                    }
+                    let ty = self.backend.compile_type(&interpolation.value_type)?;
+                    let value = self
+                        .backend
+                        .builder
+                        .build_load(ty, value, "template.value")
+                        .map_err(compiler_diagnostic)?;
+                    let function = self.dynamic_bound_function(
+                        owner,
+                        LoweredBindingSite::Interpolation {
+                            template: id,
+                            part: part_index,
+                        },
+                        &span,
+                    )?;
+                    self.backend
+                        .builder
+                        .build_direct_call(
+                            function,
+                            &[null.into(), value.into(), formatter_storage.into()],
+                            "template.fmt",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                }
+            }
+        }
+        let finish = self.dynamic_bound_function(
+            owner,
+            LoweredBindingSite::FormattingFinish(id),
+            &span,
+        )?;
+        let formatter = self
+            .backend
+            .builder
+            .build_load(
+                formatter.get_type(),
+                formatter_storage,
+                "template.finished.formatter",
+            )
+            .map_err(compiler_diagnostic)?;
+        let result = self
+            .backend
+            .builder
+            .build_direct_call(finish, &[null.into(), formatter.into()], "template.finish")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic();
+        self.backend
+            .builder
+            .build_store(storage, result)
+            .map_err(compiler_diagnostic)?;
+        Ok(storage)
+    }
+
     /// A structural constructor builds its product or wrapper representation
     /// from one flattened slot per written field. The result storage was
     /// reserved from the call's result descriptor at entry.
@@ -2645,6 +2808,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 | LoweredExpressionKind::Float(_)
                 | LoweredExpressionKind::String(_)
                 | LoweredExpressionKind::CString(_)
+                | LoweredExpressionKind::StringTemplate(_)
                 | LoweredExpressionKind::CallableValue(_) => {
                     let descriptor = self.dynamic_descriptor(
                         record
@@ -4952,11 +5116,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "deferred dynamic expression is not yet implemented",
                 ));
             }
-            LoweredExpressionKind::StringTemplate(_) => {
-                return Err(Diagnostic::new(
-                    expression.origin.span.clone(),
-                    "dynamic string templates are not yet implemented",
-                ));
+            LoweredExpressionKind::StringTemplate(template) => {
+                return self.emit_dynamic_string_template(owner, id, &template, environment);
             }
             LoweredExpressionKind::Index(_) => {
                 return Err(Diagnostic::new(
