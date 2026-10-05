@@ -190,6 +190,11 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::IntegerCompare { .. }
             | IntrinsicFunction::FloatBinary { .. }
             | IntrinsicFunction::FloatCompare { .. }
+            | IntrinsicFunction::SliceLength
+            | IntrinsicFunction::SliceGetRef
+            | IntrinsicFunction::RefReplace
+            | IntrinsicFunction::BufferLength
+            | IntrinsicFunction::BufferCapacity
     )
 }
 

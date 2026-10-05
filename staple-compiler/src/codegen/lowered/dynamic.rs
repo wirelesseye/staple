@@ -542,11 +542,163 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 );
             }
         }
+        let slot_pointer = |index: usize| -> CodeGenerationResult<PointerValue<'context>> {
+            slots
+                .get(index)
+                .and_then(|slot| *slot)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic intrinsic argument"))
+        };
+        // Descriptor-sized intrinsics operate on storage pointers, not on
+        // loaded SSA values.
+        match intrinsic {
+            crate::IntrinsicFunction::SliceLength => {
+                let slice = slot_pointer(0)?;
+                let length = self
+                    .backend
+                    .builder
+                    .build_struct_gep(self.backend.slice_type(), slice, 1, "slice.length.slot")
+                    .map_err(compiler_diagnostic)?;
+                let length = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, length, "slice.length")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(storage, length)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::SliceGetRef => {
+                let slice = slot_pointer(0)?;
+                let position = slot_pointer(1)?;
+                let slice_type = self.backend.slice_type();
+                let data = self
+                    .backend
+                    .builder
+                    .build_struct_gep(slice_type, slice, 0, "slice.data")
+                    .map_err(compiler_diagnostic)?;
+                let data = self
+                    .backend
+                    .builder
+                    .build_load(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        data,
+                        "slice.pointer",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let length = self
+                    .backend
+                    .builder
+                    .build_struct_gep(slice_type, slice, 1, "slice.length.slot")
+                    .map_err(compiler_diagnostic)?;
+                let length = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, length, "slice.length")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let position = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, position, "slice.position")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let out_of_bounds = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::UGE,
+                        position,
+                        length,
+                        "slice.out_of_bounds",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .build_trap_if(out_of_bounds, span.clone())?;
+                let crate::CheckedType::Ref(payload) = &call.result_type else {
+                    return Err(Diagnostic::new(span.clone(), "get_ref result is not a Ref"));
+                };
+                let descriptor =
+                    self.dynamic_descriptor(payload, environment, span)?;
+                let layout = self.backend.load_descriptor_layout(descriptor)?;
+                let offset = self
+                    .backend
+                    .builder
+                    .build_int_mul(position, layout.stride, "slice.offset")
+                    .map_err(compiler_diagnostic)?;
+                let element = self.backend.dynamic_byte_offset(data, offset)?;
+                self.backend
+                    .builder
+                    .build_store(storage, element)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::RefReplace => {
+                let reference = slot_pointer(0)?;
+                let replacement = slot_pointer(1)?;
+                let payload = self
+                    .backend
+                    .builder
+                    .build_load(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        reference,
+                        "ref.replace.reference",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let descriptor =
+                    self.dynamic_descriptor(&call.result_type, environment, span)?;
+                self.backend
+                    .copy_dynamic_value(descriptor, payload, storage)?;
+                self.backend
+                    .copy_dynamic_value(descriptor, replacement, payload)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::BufferLength | crate::IntrinsicFunction::BufferCapacity => {
+                let buffer = slot_pointer(0)?;
+                let buffer = self
+                    .backend
+                    .builder
+                    .build_load(
+                        self.backend.context.ptr_type(AddressSpace::default()),
+                        buffer,
+                        "buffer.pointer",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let field = if intrinsic == crate::IntrinsicFunction::BufferLength {
+                    0
+                } else {
+                    1
+                };
+                let slot = self
+                    .backend
+                    .builder
+                    .build_struct_gep(
+                        self.backend.buffer_header_type(self.backend.context.i8_type().into()),
+                        buffer,
+                        field,
+                        "buffer.metadata.slot",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let value = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, slot, "buffer.metadata")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(storage, value)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            _ => {}
+        }
         let mut values = Vec::with_capacity(slots.len());
-        for (index, slot) in slots.iter().enumerate() {
-            let pointer = slot.ok_or_else(|| {
-                Diagnostic::new(span.clone(), "missing dynamic intrinsic argument")
-            })?;
+        for index in 0..slots.len() {
+            let pointer = slot_pointer(index)?;
             let ty = self.backend.compile_type(types[index])?;
             values.push(
                 self.backend

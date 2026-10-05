@@ -303,6 +303,13 @@ continuation):
 - Slice access (`values.0` through a `Ref (Slice T)`) loads the runtime data
   pointer and length, bounds-checks, and strides by the element descriptor, so
   the element address is correct for any run-time element layout.
+- Descriptor-sized intrinsics operate on storage pointers: `__slice_length`,
+  `__slice_get_ref` (bounds-checked with the element descriptor's stride),
+  `__ref_replace` (copies the old payload out and the replacement in), and the
+  `__buffer_length`/`__buffer_capacity` metadata reads. They are not yet
+  reachable from a dynamic body through the standard-library companion methods,
+  because those methods are used as callable values (indirect closures), which
+  remain unimplemented.
 - The hidden differential option (Decision 11) is connected: a transitive
   greatest-fixed-point support analysis excludes unsupported templates and
   their parameter-dependent callers; the worklist, instance-body builder, and
@@ -311,9 +318,10 @@ continuation):
   concrete-to-dynamic bridge needs. `LoweredModule::differential_dynamic_call_count`
   reports redirected call sites.
 - Exit-gate coverage: a compiler test lowers and strictly emits every corpus
-  program with the option (all 89 use dynamic instances), and a CLI test runs
-  every runnable corpus program in both modes and requires identical stdout and
-  exit status (86/86 programs, 9044 redirected call sites).
+  program with the option (all 89 use dynamic instances, 368 in total), and a
+  CLI test runs every runnable corpus program in both modes and requires
+  identical stdout and exit status (86/86 programs, 9660 redirected call
+  sites).
 
 Stage 4a is **not complete**. Still required: reabstraction between concrete
 and dynamic function values (function-typed parameters, results, and nested
@@ -339,8 +347,8 @@ checks and all eleven dynamic execution tests. Adding the concrete boundary
 passes workspace checks and all twelve dynamic execution tests.
 
 Current continuation validation: `cargo test --workspace --quiet` passes
-(compiler library 380 passed, two ignored; CLI 232 passed). The differential
-run matches default behavior on all 86 runnable corpus programs with 9044
+(compiler library 382 passed, two ignored; CLI 232 passed). The differential
+run matches default behavior on all 86 runnable corpus programs with 9660
 dynamic call sites. Rebuilt default-mode LLVM output matches the `50565d8`
 release build for all 104 corpus/example inputs (four compilations per binary
 per input), verified for `325d637`; every new path is gated on the hidden
