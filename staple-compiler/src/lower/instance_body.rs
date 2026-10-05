@@ -300,6 +300,10 @@ impl LoweredInstanceBody {
         self.expressions.iter()
     }
 
+    pub(crate) fn items(&self) -> impl Iterator<Item = (ItemId, &LoweredItem)> {
+        self.items.iter()
+    }
+
     pub(crate) fn expression(&self, id: ExpressionId) -> Option<&LoweredExpression> {
         self.expressions.get(id)
     }

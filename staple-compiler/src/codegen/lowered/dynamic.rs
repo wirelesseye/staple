@@ -13,7 +13,7 @@ use crate::{
     BlockId, CheckedType, ExpressionId, FunctionInstanceId, LoweredBindingSite, LoweredBoundTarget,
     LoweredCallEnvironment, LoweredCallStep, LoweredCallableTarget, LoweredCoercionPlan,
     LoweredExpressionKind, LoweredInstanceBody, LoweredItemKind, LoweredPatternKind, PatternId,
-    SymbolId, TypeParameterId,
+    PlaceId, SymbolId, TypeParameterId,
 };
 
 #[derive(Clone, Copy)]
@@ -55,6 +55,7 @@ struct DynamicEnvironment<'context> {
     packed_arguments: HashMap<ExpressionId, PointerValue<'context>>,
     coercions: HashMap<ExpressionId, PointerValue<'context>>,
     loop_results: HashMap<ExpressionId, PointerValue<'context>>,
+    cells: HashMap<SymbolId, PointerValue<'context>>,
     loops: Vec<DynamicLoopContext<'context>>,
     closure: PointerValue<'context>,
     result: PointerValue<'context>,
@@ -416,6 +417,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             packed_arguments: HashMap::new(),
             coercions: HashMap::new(),
             loop_results: HashMap::new(),
+            cells: HashMap::new(),
             loops: Vec::new(),
             closure: parameters[0].into_pointer_value(),
             result: parameters[1 + runtime.len()].into_pointer_value(),
@@ -497,6 +499,35 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     &record.origin.span,
                 )?;
             }
+        }
+        // A mutable local's value lives in its own entry-block storage. The
+        // cell is allocated before any body control flow so assignments in
+        // loops never repeat stack allocation.
+        let owner = EmissionOwner::Instance(id);
+        for (_, item) in body.items() {
+            let LoweredItemKind::Binding(binding) = &item.kind else {
+                continue;
+            };
+            if !binding.cell
+                || binding.signal
+                || binding.derived
+                || binding.generic
+                || binding.compile_time_only
+            {
+                continue;
+            }
+            let Some(symbol) = binding.symbol else {
+                continue;
+            };
+            let ty = self
+                .view
+                .owner_symbol_type(owner, symbol)
+                .ok_or_else(|| Diagnostic::new(item.origin.span.clone(), "missing cell type"))?
+                .clone();
+            self.prepare_dynamic_descriptor(&ty, &mut environment, &item.origin.span)?;
+            let descriptor = self.dynamic_descriptor(&ty, &environment, &item.origin.span)?;
+            let cell = self.backend.allocate_dynamic_value(descriptor)?;
+            environment.cells.insert(symbol, cell);
         }
         // Reserve call results before any body control flow. Descriptor-derived
         // sizes dominate every alloca and each slot is allocated once per call.
@@ -1646,6 +1677,74 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(result)
     }
 
+    /// Resolve a mutation target to its storage pointer and descriptor.
+    fn emit_dynamic_place(
+        &mut self,
+        owner: EmissionOwner,
+        place_id: PlaceId,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<(PointerValue<'context>, PointerValue<'context>)> {
+        let place = self
+            .view
+            .place(owner, place_id)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(staple_syntax::Span::Compiler, "missing place"))?;
+        match &place.kind {
+            crate::LoweredPlaceKind::Symbol { symbol }
+            | crate::LoweredPlaceKind::CapturedCell { symbol } => {
+                let binding = environment
+                    .bindings
+                    .get(symbol)
+                    .ok_or_else(|| Diagnostic::new(place.origin.span.clone(), "missing place root"))?;
+                Ok((binding.pointer, binding.descriptor))
+            }
+            crate::LoweredPlaceKind::Temporary { expression } => {
+                let pointer =
+                    self.emit_dynamic_expression(owner, *expression, environment)?;
+                let descriptor =
+                    self.dynamic_descriptor(&place.value_type, environment, &place.origin.span)?;
+                Ok((pointer, descriptor))
+            }
+            crate::LoweredPlaceKind::Dereference {
+                reference,
+                dereference,
+            } => {
+                let mut pointer = self.emit_dynamic_expression(owner, *reference, environment)?;
+                for _ in dereference {
+                    pointer = self
+                        .backend
+                        .builder
+                        .build_load(
+                            self.backend.context.ptr_type(AddressSpace::default()),
+                            pointer,
+                            "place.payload",
+                        )
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value();
+                }
+                let descriptor =
+                    self.dynamic_descriptor(&place.value_type, environment, &place.origin.span)?;
+                Ok((pointer, descriptor))
+            }
+            crate::LoweredPlaceKind::ProductElement {
+                base,
+                index,
+                slice: false,
+            } => {
+                let (base_pointer, base_descriptor) =
+                    self.emit_dynamic_place(owner, *base, environment)?;
+                self.dynamic_product_field(base_descriptor, base_pointer, *index as u32)
+            }
+            crate::LoweredPlaceKind::Representation { base } => {
+                self.emit_dynamic_place(owner, *base, environment)
+            }
+            _ => Err(Diagnostic::new(
+                place.origin.span.clone(),
+                "dynamic mutation target is not yet implemented",
+            )),
+        }
+    }
+
     fn dynamic_product_field(
         &self,
         descriptor: PointerValue<'context>,
@@ -1830,7 +1929,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })?;
             match &item.kind {
                 LoweredItemKind::Binding(binding)
-                    if !binding.cell && !binding.signal && !binding.derived && !binding.generic =>
+                    if !binding.signal && !binding.derived && !binding.generic =>
                 {
                     if binding.compile_time_only {
                         continue;
@@ -1851,12 +1950,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         })?;
                         let descriptor =
                             self.dynamic_descriptor(ty, environment, &item.origin.span)?;
+                        let pointer = if binding.cell {
+                            let cell = environment.cells.get(&symbol).copied().ok_or_else(|| {
+                                Diagnostic::new(
+                                    item.origin.span.clone(),
+                                    "missing dynamic binding cell",
+                                )
+                            })?;
+                            self.backend.copy_dynamic_value(descriptor, pointer, cell)?;
+                            cell
+                        } else {
+                            pointer
+                        };
+                        let owned = self.dynamic_symbol_owned(symbol, true);
                         environment.bindings.insert(
                             symbol,
                             DynamicBinding {
                                 pointer,
                                 descriptor,
-                                owned: true,
+                                owned,
                                 live: true,
                             },
                         );
@@ -1971,6 +2083,27 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         context.breaks = true;
                     }
                     environment.returned = true;
+                }
+                LoweredItemKind::Assignment(assignment) => {
+                    if assignment.mutate_index.is_some() {
+                        return Err(Diagnostic::new(
+                            item.origin.span.clone(),
+                            "dynamic indexed assignment is not yet implemented",
+                        ));
+                    }
+                    let (target, descriptor) =
+                        self.emit_dynamic_place(owner, assignment.target, environment)?;
+                    let value =
+                        self.emit_dynamic_expression(owner, assignment.value, environment)?;
+                    if assignment.drop_previous {
+                        self.backend.drop_dynamic_value(descriptor, target)?;
+                    }
+                    self.backend.copy_dynamic_value(descriptor, value, target)?;
+                    if let Some(symbol) = assignment.initialization_symbol
+                        && let Some(binding) = environment.bindings.get_mut(&symbol)
+                    {
+                        binding.live = true;
+                    }
                 }
                 LoweredItemKind::Continue(continue_item) => {
                     let Some((header, binding_mark)) = environment
@@ -2160,7 +2293,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 storage
             }
-            LoweredExpressionKind::Name(name) if !name.mutable && name.reactive.is_none() => {
+            LoweredExpressionKind::Name(name) if name.reactive.is_none() => {
                 environment
                     .bindings
                     .get(&name.symbol)
@@ -2173,14 +2306,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         )
                     })?
             }
-            LoweredExpressionKind::Block(block) => self
-                .emit_dynamic_block(owner, block, environment)?
-                .ok_or_else(|| {
-                    Diagnostic::new(
-                        expression.origin.span.clone(),
-                        "divergent dynamic expression is not yet implemented",
-                    )
-                })?,
+            LoweredExpressionKind::Block(block) => {
+                match self.emit_dynamic_block(owner, block, environment)? {
+                    Some(value) => value,
+                    // A divergent block already emitted its terminator; the
+                    // caller stops on `returned` before using this value.
+                    None => self
+                        .backend
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .const_null(),
+                }
+            }
             LoweredExpressionKind::Call(call_id) => {
                 let call = self.view.call(owner, call_id).ok_or_else(|| {
                     Diagnostic::new(expression.origin.span.clone(), "missing dynamic call")
@@ -2194,14 +2331,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "recursive dynamic construction is not yet implemented",
                     ));
                 }
-                let LoweredCallableTarget::DirectFunction {
-                    environment: route, ..
-                } = call.target
-                else {
-                    return Err(Diagnostic::new(
-                        call.origin.span.clone(),
-                        "dynamic call route is not yet implemented",
-                    ));
+                let route = match &call.target {
+                    LoweredCallableTarget::DirectFunction { environment, .. } => *environment,
+                    LoweredCallableTarget::TraitImplementation { .. }
+                    | LoweredCallableTarget::StructuralTraitMethod { .. } => {
+                        LoweredCallEnvironment::None
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            call.origin.span.clone(),
+                            "dynamic call route is not yet implemented",
+                        ));
+                    }
                 };
                 let Some(LoweredBoundTarget::Instance(callee)) =
                     self.view.binding(owner, LoweredBindingSite::Call(call_id))

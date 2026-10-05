@@ -70,6 +70,9 @@ pub(super) fn concrete_body_types(body: &super::LoweredInstanceBody) -> Vec<Chec
             collect(&coercion.target, &mut types);
         }
     }
+    for (_, place) in body.places.iter() {
+        collect(&place.value_type, &mut types);
+    }
     if let Some(coercion) = &body.body_coercion {
         collect(&coercion.source, &mut types);
         collect(&coercion.target, &mut types);

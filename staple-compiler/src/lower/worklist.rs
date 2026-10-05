@@ -4068,6 +4068,60 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_mutable_locals_iterate_and_assign() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def sum_to: <T where Copy T> T -> I32 = value => {\n",
+                "    let mut total: I32 = 0\n",
+                "    let mut index: I32 = 0\n",
+                "    loop {\n",
+                "        if (index > 4) { break total }\n",
+                "        total = total + index\n",
+                "        index = index + 1\n",
+                "        continue\n",
+                "    }\n",
+                "}\n",
+                "let result = sum_to 42\n",
+            ),
+            "sum_to",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-mutation",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type SumTo = unsafe extern "C" fn(*const u8, *const Descriptor, *mut i32, *const u8);
+        let sum_to = unsafe { engine.get_function::<SumTo>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let value = [42u8; 17];
+        let mut result = 0;
+        unsafe {
+            sum_to.call(std::ptr::null(), &descriptor, &mut result, value.as_ptr());
+        }
+        assert_eq!(result, 10);
+    }
+
+    #[test]
     fn dynamic_loops_return_break_values() {
         let (text, name) = dynamic_test_module(
             concat!(
