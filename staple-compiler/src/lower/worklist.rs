@@ -4195,6 +4195,56 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_literals_build_strings_and_c_strings() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "use std.cinterop.(CString, c_string)\n",
+                "def label: <T where Copy T> T -> I32 = value => {\n",
+                "    let text = \"hello\"\n",
+                "    let owned = c_string \"world\"\n",
+                "    7\n",
+                "}\n",
+                "let result = label 42\n",
+            ),
+            "label",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-literals",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Label = unsafe extern "C" fn(*const u8, *const Descriptor, *mut i32, *const u8);
+        let label = unsafe { engine.get_function::<Label>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let value = [42u8; 17];
+        let mut result = 0;
+        unsafe {
+            label.call(std::ptr::null(), &descriptor, &mut result, value.as_ptr());
+        }
+        assert_eq!(result, 7);
+    }
+
+    #[test]
     fn dynamic_conditions_select_runtime_sum_alternatives() {
         let (text, name) = dynamic_test_module(
             concat!(

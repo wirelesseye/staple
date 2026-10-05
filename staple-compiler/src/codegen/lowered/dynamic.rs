@@ -803,7 +803,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 | LoweredExpressionKind::Product(_)
                 | LoweredExpressionKind::RepeatedProduct(_)
                 | LoweredExpressionKind::Integer(_)
-                | LoweredExpressionKind::Float(_) => {
+                | LoweredExpressionKind::Float(_)
+                | LoweredExpressionKind::String(_)
+                | LoweredExpressionKind::CString(_) => {
                     let descriptor = self.dynamic_descriptor(
                         record
                             .coercion
@@ -2607,6 +2609,41 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             LoweredExpressionKind::Match(match_) => {
                 self.emit_dynamic_match(owner, &expression.origin.span, &match_, environment)?
+            }
+            LoweredExpressionKind::String(string) => {
+                let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+                    Diagnostic::new(expression.origin.span.clone(), "missing literal storage")
+                })?;
+                let value = self
+                    .backend
+                    .build_string_literal(&string.value, expression.origin.span.clone())?;
+                self.backend
+                    .builder
+                    .build_store(storage, value)
+                    .map_err(compiler_diagnostic)?;
+                storage
+            }
+            LoweredExpressionKind::CString(string) => {
+                let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+                    Diagnostic::new(expression.origin.span.clone(), "missing literal storage")
+                })?;
+                let text = std::str::from_utf8(&string.bytes[..string.bytes.len() - 1]).map_err(
+                    |_| {
+                        Diagnostic::new(expression.origin.span.clone(), "invalid C string payload")
+                    },
+                )?;
+                let value = inkwell::values::BasicValueEnum::try_from(
+                    self.backend
+                        .build_owned_c_string(text, expression.origin.span.clone())?,
+                )
+                .map_err(|_| {
+                    Diagnostic::new(expression.origin.span.clone(), "invalid C string value")
+                })?;
+                self.backend
+                    .builder
+                    .build_store(storage, value)
+                    .map_err(compiler_diagnostic)?;
+                storage
             }
             LoweredExpressionKind::Integer(integer) => {
                 let storage = *environment.temporaries.get(&id).ok_or_else(|| {

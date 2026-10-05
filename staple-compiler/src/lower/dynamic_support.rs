@@ -413,9 +413,8 @@ impl SupportWalker<'_> {
             self.reject("function-typed coercion");
         }
         match &expression.kind {
+            LoweredExpressionKind::String(_) | LoweredExpressionKind::CString(_) => {}
             LoweredExpressionKind::Deferred(_)
-            | LoweredExpressionKind::String(_)
-            | LoweredExpressionKind::CString(_)
             | LoweredExpressionKind::StringTemplate(_)
             | LoweredExpressionKind::Index(_)
             | LoweredExpressionKind::CallableValue(_)

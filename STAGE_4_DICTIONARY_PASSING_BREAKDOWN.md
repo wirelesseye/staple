@@ -297,6 +297,9 @@ continuation):
   `Bool` results stored in their sum representation. Concrete extern calls in
   dynamic bodies follow the concrete pass modes and store their result into the
   call's reserved slot.
+- `String` and `CString` literals build through the concrete backend helpers and
+  store their static-layout values into reserved dynamic slots; a bound
+  `CString` drops through its static descriptor at scope exit.
 - The hidden differential option (Decision 11) is connected: a transitive
   greatest-fixed-point support analysis excludes unsupported templates and
   their parameter-dependent callers; the worklist, instance-body builder, and
