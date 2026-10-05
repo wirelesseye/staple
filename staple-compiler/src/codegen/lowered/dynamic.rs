@@ -1945,6 +1945,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         result_layout.store_size,
                     )
                     .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(
+                        storage,
+                        self.backend
+                            .context
+                            .i32_type()
+                            .const_int(alternatives.none as u64, false),
+                    )
+                    .map_err(compiler_diagnostic)?;
                 let function = self.current_dynamic_function(span)?;
                 let some = self
                     .backend
@@ -1989,10 +1999,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_int_mul(next, layout.stride, "buffer.pop.offset")
                     .map_err(compiler_diagnostic)?;
                 let field = self.backend.dynamic_byte_offset(data, offset)?;
-                let payload_count = match &call.result_type {
-                    CheckedType::Sum(sum) => sum.alternatives.len(),
-                    _ => 1,
-                };
+                let payload_count = alternatives.none.max(alternatives.some) + 1;
                 let payload = self.dynamic_sum_payload(descriptor, storage, payload_count)?;
                 self.backend.copy_dynamic_value(element, field, payload)?;
                 self.backend
@@ -3905,6 +3912,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             } => {
                 let (base_pointer, base_descriptor) =
                     self.emit_dynamic_place(owner, *base, environment)?;
+                let base_type = self
+                    .view
+                    .place(owner, *base)
+                    .map(|place| place.value_type.clone())
+                    .unwrap_or(CheckedType::Error);
+                if matches!(base_type, CheckedType::Wrapper { .. }) {
+                    return Ok((base_pointer, base_descriptor));
+                }
                 self.dynamic_product_field(base_descriptor, base_pointer, *index as u32)
             }
             crate::LoweredPlaceKind::Representation { base } => {
@@ -3953,6 +3968,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         })?;
         match &pattern.kind {
             LoweredPatternKind::Product { elements, .. } => {
+                if elements.len() == 1 {
+                    return self.bind_dynamic_pattern(
+                        owner,
+                        elements[0],
+                        pointer,
+                        descriptor,
+                        owned,
+                        environment,
+                    );
+                }
                 for (index, pattern) in elements.iter().enumerate() {
                     let (field, component) =
                         self.dynamic_product_field(descriptor, pointer, index as u32)?;

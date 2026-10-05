@@ -235,10 +235,8 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         IntrinsicFunction::SliceFromRef => RejectionReason::SliceFromRef,
         IntrinsicFunction::BufferWithCapacity
         | IntrinsicFunction::BufferPush
-        | IntrinsicFunction::BufferPop
         | IntrinsicFunction::BufferGet
-        | IntrinsicFunction::BufferFreeze
-        | IntrinsicFunction::BufferTransfer => RejectionReason::BufferIntrinsic,
+        | IntrinsicFunction::BufferFreeze => RejectionReason::BufferIntrinsic,
         IntrinsicFunction::ParseNumber { .. }
         | IntrinsicFunction::ValidateUtf8
         | IntrinsicFunction::CStringBytes
@@ -481,8 +479,10 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::BufferCapacity
             | IntrinsicFunction::BufferWithCapacity
             | IntrinsicFunction::BufferPush
+            | IntrinsicFunction::BufferPop
             | IntrinsicFunction::BufferGet
             | IntrinsicFunction::BufferFreeze
+            | IntrinsicFunction::BufferTransfer
     )
 }
 
@@ -1083,7 +1083,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 648;
+    const IN_SCOPE_BASELINE: usize = 11;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.

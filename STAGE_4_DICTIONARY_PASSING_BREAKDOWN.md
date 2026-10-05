@@ -306,16 +306,20 @@ reachable from the branch.
   `returns_function`, and the baseline is **1194** over the larger corpus
   (1168 before the two programs, whose standard-library dependencies add 26
   in-scope templates).
-- **R6 in progress.** Dynamic buffers get a runtime header offset, element
+- **R6 complete.** Dynamic buffers get a runtime header offset, element
   stride, and store size from the element descriptor; `__buffer_with_capacity`
   allocates the header, elements, and a trailing element-descriptor word and
   installs one shared `gc-finalizer-dynamic-buffer` finalizer that drops every
-  live element. `__buffer_push`, `__buffer_get`, and `__buffer_freeze` operate
-  through the runtime layout. The in-scope baseline drops from 1194 to **648**.
-  `__buffer_pop` and `__buffer_transfer` are implemented (sum construction and
-  element movement) but are not yet routed: they misbehave at run time for some
-  element types, so the support analysis keeps them as in-scope reasons until
-  the runtime issue is fixed.
+  live element. `__buffer_push`, `__buffer_pop`, `__buffer_get`,
+  `__buffer_freeze`, and `__buffer_transfer` operate through the runtime
+  layout. `__buffer_pop` builds its `Option T` result from the recorded
+  alternatives (the payload offset comes from the alternative count, and the
+  `None` tag is stored explicitly). The in-scope baseline drops from 1194 to
+  **11**. Routing `Buffer.transfer` exposed a wrapper-representation place
+  bug: a `wrap` projection (`List T` -> `Buffer T`) was read as product field
+  zero of a component-less pointer descriptor, so `let List(mut source) =
+  list` bound a garbage descriptor and the finalizer drop segfaulted. Wrapper
+  projections now pass the base descriptor and pointer through unchanged.
 
 ### Step 4a.1 — Keys, specialization, and validation
 
