@@ -4068,6 +4068,57 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_wrappers_share_their_representation_layout() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "type Box T = wrap (T)\n",
+                "def pack: <T where Copy T> T -> Box T = value => Box value\n",
+                "let result = pack 42\n",
+            ),
+            "pack",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-wrapper",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Pack = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *const u8);
+        let pack = unsafe { engine.get_function::<Pack>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let input = (0..17).map(|index| (index + 5) as u8).collect::<Vec<_>>();
+        let mut output = [0xff; 17];
+        unsafe {
+            pack.call(
+                std::ptr::null(),
+                &descriptor,
+                output.as_mut_ptr(),
+                input.as_ptr(),
+            );
+        }
+        assert_eq!(output, input[..]);
+    }
+
+    #[test]
     fn dynamic_scope_exit_drops_an_owned_runtime_parameter() {
         for (index, body) in [
             "7",

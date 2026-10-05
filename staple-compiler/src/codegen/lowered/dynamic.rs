@@ -258,6 +258,89 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_any_value_enum())
     }
 
+    /// A structural constructor builds its product or wrapper representation
+    /// from one flattened slot per written field. The result storage was
+    /// reserved from the call's result descriptor at entry.
+    fn emit_dynamic_constructor_call(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        call: &crate::LoweredCall,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let span = &call.origin.span;
+        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "missing dynamic constructor storage")
+        })?;
+        let mut slots = vec![None; super::flattened_parameter_types(&call.function_type.parameter).len()];
+        let mut unplaced = Vec::new();
+        for step in &call.steps {
+            match step {
+                LoweredCallStep::Argument { argument } => {
+                    let record = &call.arguments[*argument];
+                    let value = record.expression.ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "dynamic thunk argument is not yet implemented")
+                    })?;
+                    let value = self.emit_dynamic_expression(owner, value, environment)?;
+                    match record.slot {
+                        Some(slot) => slots[slot] = Some(value),
+                        None => unplaced.push(value),
+                    }
+                }
+                LoweredCallStep::ProductElement {
+                    expression, slot, ..
+                }
+                | LoweredCallStep::Default {
+                    expression, slot, ..
+                } => {
+                    let value = self.emit_dynamic_expression(owner, *expression, environment)?;
+                    slots[*slot] = Some(value);
+                }
+                LoweredCallStep::Invoke => break,
+                _ => {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "dynamic constructor argument step is not yet implemented",
+                    ));
+                }
+            }
+        }
+        if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
+            let descriptor =
+                self.dynamic_descriptor(&call.function_type.parameter, environment, span)?;
+            for (index, slot) in slots.iter_mut().enumerate() {
+                *slot = Some(
+                    self.dynamic_product_field(descriptor, unplaced[0], index as u32)?
+                        .0,
+                );
+            }
+        }
+        let representation = match &call.result_type {
+            CheckedType::Wrapper { representation, .. } => representation.as_ref(),
+            other => other,
+        };
+        let descriptor = self.dynamic_descriptor(&call.result_type, environment, span)?;
+        match representation {
+            CheckedType::Product(product) => {
+                for (index, _) in product.elements.iter().enumerate() {
+                    let value = slots.get(index).and_then(|slot| *slot).ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "missing dynamic constructor field")
+                    })?;
+                    let (field, component) =
+                        self.dynamic_product_field(descriptor, storage, index as u32)?;
+                    self.backend.copy_dynamic_value(component, value, field)?;
+                }
+            }
+            _ => {
+                let value = slots.first().and_then(|slot| *slot).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "missing dynamic constructor value")
+                })?;
+                self.backend.copy_dynamic_value(descriptor, value, storage)?;
+            }
+        }
+        Ok(storage)
+    }
+
     pub(super) fn emit_dynamic_instance_body(
         &mut self,
         id: FunctionInstanceId,
@@ -558,6 +641,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 CompoundDescriptorShape::Sum,
                 sum.alternatives.iter().collect(),
             ),
+            CheckedType::Wrapper { representation, .. } => {
+                let descriptor =
+                    self.prepare_dynamic_descriptor(representation, environment, span)?;
+                environment.compound_descriptors.push((ty.clone(), descriptor));
+                return Ok(descriptor);
+            }
             _ => {
                 return Err(Diagnostic::new(
                     span.clone(),
@@ -657,6 +746,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .get(id)
                 .copied()
                 .ok_or_else(|| Diagnostic::new(span.clone(), "missing runtime type descriptor")),
+            CheckedType::Wrapper { representation, .. } => {
+                self.dynamic_descriptor(representation, environment, span)
+            }
             ty if !crate::contains_type_parameter(ty) => self.static_dynamic_descriptor(ty, span),
             _ => Err(Diagnostic::new(
                 span.clone(),
@@ -763,6 +855,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     &sum.alternatives[*alternative],
                     payload,
                     storage,
+                    environment,
+                    span,
+                )
+            }
+            LoweredCoercionPlan::Wrap { payload } => {
+                let CheckedType::Wrapper { representation, .. } = target else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "invalid dynamic wrapper coercion target",
+                    ));
+                };
+                self.coerce_dynamic_value(
+                    value,
+                    source,
+                    representation,
+                    payload,
+                    destination,
                     environment,
                     span,
                 )
@@ -882,10 +991,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend.builder.position_at_end(done);
                 Ok(())
             }
-            _ => Err(Diagnostic::new(
-                span.clone(),
-                "this dynamic coercion is not yet implemented",
-            )),
         }
     }
 
@@ -1282,6 +1387,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let call = self.view.call(owner, call_id).ok_or_else(|| {
                     Diagnostic::new(expression.origin.span.clone(), "missing dynamic call")
                 })?;
+                if let LoweredCallableTarget::Constructor { recursive, .. } = &call.target {
+                    if recursive.is_none() {
+                        return self.emit_dynamic_constructor_call(owner, id, call, environment);
+                    }
+                    return Err(Diagnostic::new(
+                        call.origin.span.clone(),
+                        "recursive dynamic construction is not yet implemented",
+                    ));
+                }
                 let LoweredCallableTarget::DirectFunction {
                     environment: route, ..
                 } = call.target
