@@ -4068,6 +4068,112 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_loops_return_break_values() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def first: <T where Copy T> T -> I32 = value => loop { break 7 }\n",
+                "let result = first 42\n",
+            ),
+            "first",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-loop",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type First = unsafe extern "C" fn(*const u8, *const Descriptor, *mut i32, *const u8);
+        let first = unsafe { engine.get_function::<First>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let value = [42u8; 17];
+        let mut result = 0;
+        unsafe {
+            first.call(std::ptr::null(), &descriptor, &mut result, value.as_ptr());
+        }
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn dynamic_conditions_select_runtime_sum_alternatives() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def choose: <T where Copy T> (T, Bool) -> I32 = (value, flag) => if flag { 1 } else { 0 }\n",
+                "let result = choose (7, True)\n",
+            ),
+            "choose",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-condition",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Choose = unsafe extern "C" fn(
+            *const u8,
+            *const Descriptor,
+            *mut i32,
+            *const u8,
+            *const u8,
+        );
+        let choose = unsafe { engine.get_function::<Choose>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let value = [42u8; 17];
+        for (tag, expected) in [(0u32, 1), (1u32, 0)] {
+            let mut flag = [0u8; 8];
+            flag[..4].copy_from_slice(&tag.to_ne_bytes());
+            let mut result = 0;
+            unsafe {
+                choose.call(
+                    std::ptr::null(),
+                    &descriptor,
+                    &mut result,
+                    value.as_ptr(),
+                    flag.as_ptr(),
+                );
+            }
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
     fn dynamic_wrappers_share_their_representation_layout() {
         let (text, name) = dynamic_test_module(
             concat!(

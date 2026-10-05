@@ -24,6 +24,28 @@ struct DynamicBinding<'context> {
     live: bool,
 }
 
+/// One active dynamic loop. `break` writes its value into `result` (allocated
+/// once in the entry block) and branches to `exit`; `breaks` proves the exit
+/// is reachable.
+struct DynamicLoopContext<'context> {
+    depth: usize,
+    header: inkwell::basic_block::BasicBlock<'context>,
+    exit: inkwell::basic_block::BasicBlock<'context>,
+    result: Option<PointerValue<'context>>,
+    result_descriptor: PointerValue<'context>,
+    binding_mark: usize,
+    breaks: bool,
+}
+
+/// The branch-local part of the dynamic environment. Match arms and loop
+/// bodies restore it so bindings introduced on one path never leak to another.
+#[derive(Clone)]
+struct DynamicState<'context> {
+    bindings: HashMap<SymbolId, DynamicBinding<'context>>,
+    binding_order: Vec<SymbolId>,
+    returned: bool,
+}
+
 struct DynamicEnvironment<'context> {
     descriptors: HashMap<TypeParameterId, PointerValue<'context>>,
     compound_descriptors: Vec<(CheckedType, PointerValue<'context>)>,
@@ -32,10 +54,28 @@ struct DynamicEnvironment<'context> {
     temporaries: HashMap<ExpressionId, PointerValue<'context>>,
     packed_arguments: HashMap<ExpressionId, PointerValue<'context>>,
     coercions: HashMap<ExpressionId, PointerValue<'context>>,
+    loop_results: HashMap<ExpressionId, PointerValue<'context>>,
+    loops: Vec<DynamicLoopContext<'context>>,
     closure: PointerValue<'context>,
     result: PointerValue<'context>,
     result_descriptor: PointerValue<'context>,
     returned: bool,
+}
+
+impl<'context> DynamicEnvironment<'context> {
+    fn snapshot(&self) -> DynamicState<'context> {
+        DynamicState {
+            bindings: self.bindings.clone(),
+            binding_order: self.binding_order.clone(),
+            returned: self.returned,
+        }
+    }
+
+    fn restore(&mut self, state: &DynamicState<'context>) {
+        self.bindings = state.bindings.clone();
+        self.binding_order = state.binding_order.clone();
+        self.returned = state.returned;
+    }
 }
 
 impl<'program, 'context> LoweredEmitter<'program, 'context> {
@@ -375,6 +415,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             temporaries: HashMap::new(),
             packed_arguments: HashMap::new(),
             coercions: HashMap::new(),
+            loop_results: HashMap::new(),
+            loops: Vec::new(),
             closure: parameters[0].into_pointer_value(),
             result: parameters[1 + runtime.len()].into_pointer_value(),
             result_descriptor: self
@@ -448,29 +490,48 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )?;
                 }
             }
+            if let LoweredExpressionKind::Loop(loop_) = &record.kind {
+                self.prepare_dynamic_descriptor(
+                    &loop_.result_type,
+                    &mut environment,
+                    &record.origin.span,
+                )?;
+            }
         }
         // Reserve call results before any body control flow. Descriptor-derived
         // sizes dominate every alloca and each slot is allocated once per call.
         for (expression, record) in body.expressions() {
-            if matches!(
-                record.kind,
+            match &record.kind {
                 LoweredExpressionKind::Call(_)
-                    | LoweredExpressionKind::Product(_)
-                    | LoweredExpressionKind::RepeatedProduct(_)
-                    | LoweredExpressionKind::Integer(_)
-                    | LoweredExpressionKind::Float(_)
-            ) {
-                let descriptor = self.dynamic_descriptor(
-                    record
-                        .coercion
-                        .as_ref()
-                        .map_or(&record.value_type, |coercion| &coercion.source),
-                    &environment,
-                    &record.origin.span,
-                )?;
-                environment
-                    .temporaries
-                    .insert(expression, self.backend.allocate_dynamic_value(descriptor)?);
+                | LoweredExpressionKind::Product(_)
+                | LoweredExpressionKind::RepeatedProduct(_)
+                | LoweredExpressionKind::Integer(_)
+                | LoweredExpressionKind::Float(_) => {
+                    let descriptor = self.dynamic_descriptor(
+                        record
+                            .coercion
+                            .as_ref()
+                            .map_or(&record.value_type, |coercion| &coercion.source),
+                        &environment,
+                        &record.origin.span,
+                    )?;
+                    environment.temporaries.insert(
+                        expression,
+                        self.backend.allocate_dynamic_value(descriptor)?,
+                    );
+                }
+                LoweredExpressionKind::Loop(loop_) => {
+                    let descriptor = self.dynamic_descriptor(
+                        &loop_.result_type,
+                        &environment,
+                        &record.origin.span,
+                    )?;
+                    environment.loop_results.insert(
+                        expression,
+                        self.backend.allocate_dynamic_value(descriptor)?,
+                    );
+                }
+                _ => {}
             }
         }
         for (expression, record) in body.expressions() {
@@ -994,6 +1055,597 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
+    /// Short-circuit `&&`/`||` over dynamic `Bool` storage. Both arms produce
+    /// the pointer to the operand's storage; the tag lives at offset zero of
+    /// the sum representation.
+    fn emit_dynamic_logical(
+        &mut self,
+        owner: EmissionOwner,
+        span: &staple_syntax::Span,
+        logical: &crate::LoweredLogical,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        use inkwell::values::BasicValue;
+        let left = self.emit_dynamic_expression(owner, logical.left, environment)?;
+        if environment.returned {
+            return Ok(left);
+        }
+        let tag = self
+            .backend
+            .builder
+            .build_load(self.backend.context.i32_type(), left, "logical.tag")
+            .map_err(compiler_diagnostic)?;
+        tag.as_instruction_value()
+            .expect("logical tag load")
+            .set_alignment(1)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let is_true = self
+            .backend
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag.into_int_value(),
+                self.backend
+                    .context
+                    .i32_type()
+                    .const_int(logical.true_index as u64, false),
+                "logical.is_true",
+            )
+            .map_err(compiler_diagnostic)?;
+        let function = self.current_dynamic_function(span)?;
+        let merge = self
+            .backend
+            .context
+            .append_basic_block(function, "logical.merge");
+        let right_block = self
+            .backend
+            .context
+            .append_basic_block(function, "logical.right");
+        let short_circuit = self
+            .backend
+            .context
+            .append_basic_block(function, "logical.short_circuit");
+        let (true_target, false_target) = match logical.operator {
+            staple_syntax::LogicalOperator::And => (right_block, short_circuit),
+            staple_syntax::LogicalOperator::Or => (short_circuit, right_block),
+        };
+        self.backend
+            .builder
+            .build_conditional_branch(is_true, true_target, false_target)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(short_circuit);
+        self.backend
+            .builder
+            .build_unconditional_branch(merge)
+            .map_err(compiler_diagnostic)?;
+        let mut incoming = vec![(left, short_circuit)];
+        self.backend.builder.position_at_end(right_block);
+        let base = environment.snapshot();
+        environment.returned = false;
+        let right = self.emit_dynamic_expression(owner, logical.right, environment)?;
+        if !environment.returned {
+            // Bindings introduced by the right operand are dropped by its own
+            // block; only the conditionally set liveness of outer symbols is
+            // restored at the merge.
+            environment.restore(&base);
+            self.backend
+                .builder
+                .build_unconditional_branch(merge)
+                .map_err(compiler_diagnostic)?;
+            let predecessor = self
+                .backend
+                .builder
+                .get_insert_block()
+                .ok_or_else(|| Diagnostic::new(span.clone(), "logical outside a function"))?;
+            incoming.push((right, predecessor));
+        } else {
+            environment.restore(&base);
+        }
+        self.backend.builder.position_at_end(merge);
+        environment.returned = false;
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        Ok(self
+            .backend
+            .builder
+            .build_phi(pointer, "logical.value")
+            .map_err(compiler_diagnostic)?)
+        .map(|phi| {
+            let values = incoming
+                .iter()
+                .map(|(value, block)| (value as &dyn inkwell::values::BasicValue<'context>, *block))
+                .collect::<Vec<_>>();
+            phi.add_incoming(&values);
+            phi.as_basic_value().into_pointer_value()
+        })
+    }
+
+    /// Evaluate the subject once and emit each arm's recorded pattern test.
+    /// The arm result is the pointer to its storage; all arms share the
+    /// pointer type, so the merge is a pointer phi.
+    fn emit_dynamic_match(
+        &mut self,
+        owner: EmissionOwner,
+        span: &staple_syntax::Span,
+        match_: &crate::LoweredMatch,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let subject_expression = self
+            .view
+            .expression(owner, match_.subject)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing match subject"))?;
+        let subject_owned = match &subject_expression.kind {
+            LoweredExpressionKind::Name(name) => {
+                subject_expression.moved_symbols.contains(&name.symbol)
+            }
+            _ => true,
+        };
+        let subject = self.emit_dynamic_expression(owner, match_.subject, environment)?;
+        if environment.returned {
+            return Ok(subject);
+        }
+        let descriptor =
+            self.dynamic_descriptor(&match_.source, environment, span)?;
+        let function = self.current_dynamic_function(span)?;
+        let merge = self
+            .backend
+            .context
+            .append_basic_block(function, "match.merge");
+        let base = environment.snapshot();
+        let mut incoming = Vec::new();
+        let mut continuing = None;
+        for arm in &match_.arms {
+            environment.restore(&base);
+            environment.returned = false;
+            let arm_block = self
+                .backend
+                .context
+                .append_basic_block(function, "match.arm");
+            let failure = self
+                .backend
+                .context
+                .append_basic_block(function, "match.next");
+            self.test_dynamic_pattern(
+                owner,
+                arm.pattern,
+                subject,
+                descriptor,
+                subject_owned,
+                arm_block,
+                failure,
+                environment,
+            )?;
+            self.backend.builder.position_at_end(arm_block);
+            environment.returned = false;
+            let mark = environment.binding_order.len();
+            let value = self.emit_dynamic_expression(owner, arm.body, environment)?;
+            if !environment.returned {
+                self.drop_dynamic_bindings(environment, mark)?;
+                self.backend
+                    .builder
+                    .build_unconditional_branch(merge)
+                    .map_err(compiler_diagnostic)?;
+                let predecessor = self
+                    .backend
+                    .builder
+                    .get_insert_block()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "match outside a function"))?;
+                incoming.push((value, predecessor));
+                continuing = Some(environment.snapshot());
+            }
+            self.backend.builder.position_at_end(failure);
+        }
+        self.backend
+            .builder
+            .build_unreachable()
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(merge);
+        if incoming.is_empty() {
+            self.backend
+                .builder
+                .build_unreachable()
+                .map_err(compiler_diagnostic)?;
+            environment.returned = true;
+            if let Some(state) = continuing {
+                environment.restore(&state);
+            }
+            return Ok(subject);
+        }
+        environment.returned = false;
+        if let Some(state) = &continuing {
+            environment.restore(state);
+        }
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let phi = self
+            .backend
+            .builder
+            .build_phi(pointer, "match.value")
+            .map_err(compiler_diagnostic)?;
+        let values = incoming
+            .iter()
+            .map(|(value, block)| (value as &dyn inkwell::values::BasicValue<'context>, *block))
+            .collect::<Vec<_>>();
+        phi.add_incoming(&values);
+        Ok(phi.as_basic_value().into_pointer_value())
+    }
+
+    /// Emits one match arm's pattern test as conditional branches, binding the
+    /// pattern's symbols on the success path. The builder is left at whichever
+    /// block continues the test.
+    #[allow(clippy::too_many_arguments)]
+    fn test_dynamic_pattern(
+        &mut self,
+        owner: EmissionOwner,
+        pattern_id: PatternId,
+        pointer: PointerValue<'context>,
+        descriptor: PointerValue<'context>,
+        owned: bool,
+        success: inkwell::basic_block::BasicBlock<'context>,
+        failure: inkwell::basic_block::BasicBlock<'context>,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let pattern = self
+            .view
+            .pattern(owner, pattern_id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(staple_syntax::Span::Compiler, "missing dynamic pattern")
+            })?;
+        let span = &pattern.origin.span;
+        match &pattern.kind {
+            LoweredPatternKind::At {
+                binding,
+                pattern: nested,
+            } => {
+                self.bind_dynamic_pattern(owner, *binding, pointer, descriptor, owned, environment)?;
+                self.test_dynamic_pattern(
+                    owner,
+                    *nested,
+                    pointer,
+                    descriptor,
+                    owned,
+                    success,
+                    failure,
+                    environment,
+                )
+            }
+            LoweredPatternKind::Binding { symbol, .. } => {
+                if let Some(index) = pattern.test.sum_alternative {
+                    let tag = self.dynamic_sum_tag(pointer, span)?;
+                    let matches = self
+                        .backend
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            tag,
+                            self.backend.context.i32_type().const_int(index as u64, false),
+                            "match.tag",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    if symbol.is_some() {
+                        let function = self.current_dynamic_function(span)?;
+                        let selected = self
+                            .backend
+                            .context
+                            .append_basic_block(function, "match.selected");
+                        self.backend
+                            .builder
+                            .build_conditional_branch(matches, selected, failure)
+                            .map_err(compiler_diagnostic)?;
+                        self.backend.builder.position_at_end(selected);
+                        let CheckedType::Sum(sum) = &pattern.test.subject else {
+                            return Err(Diagnostic::new(
+                                span.clone(),
+                                "dynamic sum pattern has a non-sum subject",
+                            ));
+                        };
+                        let payload_count = sum.alternatives.len();
+                        let payload = self.dynamic_sum_payload(descriptor, pointer, payload_count)?;
+                        let component = self
+                            .backend
+                            .load_descriptor_component(descriptor, index as u32)?;
+                        self.bind_dynamic_pattern(
+                            owner,
+                            pattern_id,
+                            payload,
+                            component,
+                            owned,
+                            environment,
+                        )?;
+                        self.backend
+                            .builder
+                            .build_unconditional_branch(success)
+                            .map_err(compiler_diagnostic)?;
+                    } else {
+                        self.backend
+                            .builder
+                            .build_conditional_branch(matches, success, failure)
+                            .map_err(compiler_diagnostic)?;
+                    }
+                    Ok(())
+                } else {
+                    self.bind_dynamic_pattern(
+                        owner,
+                        pattern_id,
+                        pointer,
+                        descriptor,
+                        owned,
+                        environment,
+                    )?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(success)
+                        .map_err(compiler_diagnostic)?;
+                    Ok(())
+                }
+            }
+            LoweredPatternKind::Wildcard => {
+                if owned {
+                    self.backend.drop_dynamic_value(descriptor, pointer)?;
+                }
+                self.backend
+                    .builder
+                    .build_unconditional_branch(success)
+                    .map_err(compiler_diagnostic)?;
+                Ok(())
+            }
+            LoweredPatternKind::Product { elements, .. } if elements.len() == 1 => self
+                .test_dynamic_pattern(
+                    owner,
+                    elements[0],
+                    pointer,
+                    descriptor,
+                    owned,
+                    success,
+                    failure,
+                    environment,
+                ),
+            LoweredPatternKind::Product { elements, .. } => {
+                if elements.is_empty() {
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(success)
+                        .map_err(compiler_diagnostic)?;
+                    return Ok(());
+                }
+                let function = self.current_dynamic_function(span)?;
+                for (index, element) in elements.iter().enumerate() {
+                    let (field, component) =
+                        self.dynamic_product_field(descriptor, pointer, index as u32)?;
+                    let next = if index + 1 == elements.len() {
+                        success
+                    } else {
+                        self.backend
+                            .context
+                            .append_basic_block(function, "match.pattern")
+                    };
+                    self.test_dynamic_pattern(
+                        owner,
+                        *element,
+                        field,
+                        component,
+                        owned,
+                        next,
+                        failure,
+                        environment,
+                    )?;
+                    if next != success {
+                        self.backend.builder.position_at_end(next);
+                    }
+                }
+                Ok(())
+            }
+            LoweredPatternKind::Nominal { argument, .. } => match &pattern.test.subject {
+                CheckedType::Ref(_) => {
+                    let payload = self
+                        .backend
+                        .builder
+                        .build_load(
+                            self.backend.context.ptr_type(AddressSpace::default()),
+                            pointer,
+                            "match.payload",
+                        )
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value();
+                    let payload_type = self
+                        .view
+                        .pattern(owner, *argument)
+                        .map(|argument| argument.test.subject.clone())
+                        .unwrap_or(CheckedType::Error);
+                    let payload_descriptor =
+                        self.dynamic_descriptor(&payload_type, environment, span)?;
+                    self.test_dynamic_pattern(
+                        owner,
+                        *argument,
+                        payload,
+                        payload_descriptor,
+                        owned,
+                        success,
+                        failure,
+                        environment,
+                    )
+                }
+                CheckedType::Wrapper { .. } => self.test_dynamic_pattern(
+                    owner,
+                    *argument,
+                    pointer,
+                    descriptor,
+                    owned,
+                    success,
+                    failure,
+                    environment,
+                ),
+                CheckedType::Sum(sum) => {
+                    let Some(index) = pattern.test.sum_alternative else {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "dynamic sum pattern does not select an alternative",
+                        ));
+                    };
+                    let tag = self.dynamic_sum_tag(pointer, span)?;
+                    let matches = self
+                        .backend
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            tag,
+                            self.backend.context.i32_type().const_int(index as u64, false),
+                            "match.tag",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    let function = self.current_dynamic_function(span)?;
+                    let selected = self
+                        .backend
+                        .context
+                        .append_basic_block(function, "match.selected");
+                    self.backend
+                        .builder
+                        .build_conditional_branch(matches, selected, failure)
+                        .map_err(compiler_diagnostic)?;
+                    self.backend.builder.position_at_end(selected);
+                    let payload =
+                        self.dynamic_sum_payload(descriptor, pointer, sum.alternatives.len())?;
+                    let component = self
+                        .backend
+                        .load_descriptor_component(descriptor, index as u32)?;
+                    self.test_dynamic_pattern(
+                        owner,
+                        *argument,
+                        payload,
+                        component,
+                        owned,
+                        success,
+                        failure,
+                        environment,
+                    )
+                }
+                _ => Err(Diagnostic::new(
+                    span.clone(),
+                    "dynamic nominal pattern subject is not yet supported",
+                )),
+            },
+            LoweredPatternKind::Literal { .. } => Err(Diagnostic::new(
+                span.clone(),
+                "dynamic literal patterns are not yet implemented",
+            )),
+        }
+    }
+
+    fn dynamic_sum_tag(
+        &self,
+        pointer: PointerValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        use inkwell::values::BasicValue;
+        let tag = self
+            .backend
+            .builder
+            .build_load(self.backend.context.i32_type(), pointer, "match.tag")
+            .map_err(compiler_diagnostic)?;
+        tag.as_instruction_value()
+            .expect("sum tag load")
+            .set_alignment(1)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        Ok(tag.into_int_value())
+    }
+
+    fn current_dynamic_function(
+        &self,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        self.backend
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "dynamic expression outside a function"))
+    }
+
+    /// Emit a loop with a preallocated entry-block result slot. `break`
+    /// copies into the slot and branches to the exit; the body repeats until a
+    /// break reaches the exit.
+    fn emit_dynamic_loop(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        span: &staple_syntax::Span,
+        loop_: &crate::LoweredLoop,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let function = self.current_dynamic_function(span)?;
+        let header = self
+            .backend
+            .context
+            .append_basic_block(function, "loop.body");
+        let exit = self
+            .backend
+            .context
+            .append_basic_block(function, "loop.exit");
+        let result = environment.loop_results.get(&id).copied();
+        let result_descriptor = self.dynamic_descriptor(&loop_.result_type, environment, span)?;
+        self.backend
+            .builder
+            .build_unconditional_branch(header)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(header);
+        environment.returned = false;
+        environment.loops.push(DynamicLoopContext {
+            depth: loop_.depth,
+            header,
+            exit,
+            result,
+            result_descriptor,
+            binding_mark: environment.binding_order.len(),
+            breaks: false,
+        });
+        let value = self.emit_dynamic_block(owner, loop_.body, environment)?;
+        if !environment.returned {
+            if loop_.drops_body_result {
+                if let Some(value) = value {
+                    let result_type = self
+                        .view
+                        .block(owner, loop_.body)
+                        .and_then(|block| block.result)
+                        .and_then(|result| self.view.expression(owner, result))
+                        .map(|expression| {
+                            expression
+                                .coercion
+                                .as_ref()
+                                .map_or(&expression.value_type, |coercion| &coercion.target)
+                                .clone()
+                        })
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "loop body result is missing")
+                        })?;
+                    let descriptor =
+                        self.dynamic_descriptor(&result_type, environment, span)?;
+                    self.backend.drop_dynamic_value(descriptor, value)?;
+                }
+            }
+            self.backend
+                .builder
+                .build_unconditional_branch(header)
+                .map_err(compiler_diagnostic)?;
+        }
+        let context = environment
+            .loops
+            .pop()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "loop context is missing"))?;
+        self.backend.builder.position_at_end(exit);
+        let Some(result) = context.result else {
+            return Err(Diagnostic::new(span.clone(), "loop result slot is missing"));
+        };
+        if !context.breaks {
+            self.backend
+                .builder
+                .build_unreachable()
+                .map_err(compiler_diagnostic)?;
+            environment.returned = true;
+            return Ok(result);
+        }
+        environment.returned = false;
+        Ok(result)
+    }
+
     fn dynamic_product_field(
         &self,
         descriptor: PointerValue<'context>,
@@ -1044,10 +1696,73 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 Ok(())
             }
+            LoweredPatternKind::Nominal { argument, .. } => {
+                if pattern.test.identity == crate::LoweredPatternIdentity::Ref {
+                    let payload = self
+                        .backend
+                        .builder
+                        .build_load(
+                            self.backend.context.ptr_type(AddressSpace::default()),
+                            pointer,
+                            "pattern.payload",
+                        )
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value();
+                    let payload_type = self
+                        .view
+                        .pattern(owner, *argument)
+                        .map(|argument| argument.test.subject.clone())
+                        .unwrap_or(CheckedType::Error);
+                    let payload_descriptor = self.dynamic_descriptor(
+                        &payload_type,
+                        environment,
+                        &pattern.origin.span,
+                    )?;
+                    self.bind_dynamic_pattern(
+                        owner,
+                        *argument,
+                        payload,
+                        payload_descriptor,
+                        owned,
+                        environment,
+                    )
+                } else {
+                    self.bind_dynamic_pattern(
+                        owner,
+                        *argument,
+                        pointer,
+                        descriptor,
+                        owned,
+                        environment,
+                    )
+                }
+            }
+            LoweredPatternKind::At {
+                binding,
+                pattern: nested,
+            } => {
+                self.bind_dynamic_pattern(
+                    owner,
+                    *binding,
+                    pointer,
+                    descriptor,
+                    owned,
+                    environment,
+                )?;
+                self.bind_dynamic_pattern(
+                    owner,
+                    *nested,
+                    pointer,
+                    descriptor,
+                    owned,
+                    environment,
+                )
+            }
             LoweredPatternKind::Binding {
                 symbol: Some(symbol),
                 ..
             } => {
+                let owned = self.dynamic_symbol_owned(*symbol, owned);
                 environment.bindings.insert(
                     *symbol,
                     DynamicBinding {
@@ -1060,13 +1775,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 environment.binding_order.push(*symbol);
                 Ok(())
             }
+            LoweredPatternKind::Binding { symbol: None, .. }
+            | LoweredPatternKind::Literal { .. } => Ok(()),
             LoweredPatternKind::Wildcard if !owned => Ok(()),
             LoweredPatternKind::Wildcard => self.backend.drop_dynamic_value(descriptor, pointer),
-            _ => Err(Diagnostic::new(
-                pattern.origin.span.clone(),
-                "dynamic destructuring is not yet implemented",
-            )),
         }
+    }
+
+    /// A pattern symbol owns its value only when the subject is owned and the
+    /// symbol itself is not a borrow.
+    fn dynamic_symbol_owned(&self, symbol: SymbolId, subject_owned: bool) -> bool {
+        subject_owned
+            && self
+                .view
+                .symbol(symbol)
+                .is_some_and(|record| !record.non_owning && !record.mutated_parameter)
     }
 
     fn drop_dynamic_bindings(
@@ -1203,6 +1926,72 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic)?;
                     environment.returned = true;
                 }
+                LoweredItemKind::Break(break_item) => {
+                    let Some((exit, result, result_descriptor, binding_mark)) = environment
+                        .loops
+                        .iter()
+                        .rev()
+                        .find(|context| context.depth == break_item.loop_depth)
+                        .map(|context| {
+                            (
+                                context.exit,
+                                context.result,
+                                context.result_descriptor,
+                                context.binding_mark,
+                            )
+                        })
+                    else {
+                        return Err(Diagnostic::new(
+                            item.origin.span.clone(),
+                            "dynamic break has no loop target",
+                        ));
+                    };
+                    if let Some(expression) = break_item.value {
+                        let value =
+                            self.emit_dynamic_expression(owner, expression, environment)?;
+                        if let Some(result) = result {
+                            self.backend.copy_dynamic_value(
+                                result_descriptor,
+                                value,
+                                result,
+                            )?;
+                        }
+                    }
+                    self.drop_dynamic_bindings(environment, binding_mark)?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(exit)
+                        .map_err(compiler_diagnostic)?;
+                    if let Some(context) = environment
+                        .loops
+                        .iter_mut()
+                        .rev()
+                        .find(|context| context.depth == break_item.loop_depth)
+                    {
+                        context.breaks = true;
+                    }
+                    environment.returned = true;
+                }
+                LoweredItemKind::Continue(continue_item) => {
+                    let Some((header, binding_mark)) = environment
+                        .loops
+                        .iter()
+                        .rev()
+                        .find(|context| context.depth == continue_item.loop_depth)
+                        .map(|context| (context.header, context.binding_mark))
+                    else {
+                        return Err(Diagnostic::new(
+                            item.origin.span.clone(),
+                            "dynamic continue has no loop target",
+                        ));
+                    };
+                    self.drop_dynamic_bindings(environment, binding_mark)?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(header)
+                        .map_err(compiler_diagnostic)?;
+                    environment.returned = true;
+                }
                 _ => {
                     return Err(Diagnostic::new(
                         item.origin.span.clone(),
@@ -1333,6 +2122,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             LoweredExpressionKind::TypeAscription(ascription) => {
                 self.emit_dynamic_expression(owner, ascription.value, environment)?
+            }
+            LoweredExpressionKind::Logical(logical) => {
+                self.emit_dynamic_logical(owner, &expression.origin.span, &logical, environment)?
+            }
+            LoweredExpressionKind::Loop(loop_) => {
+                self.emit_dynamic_loop(owner, id, &expression.origin.span, &loop_, environment)?
+            }
+            LoweredExpressionKind::Match(match_) => {
+                self.emit_dynamic_match(owner, &expression.origin.span, &match_, environment)?
             }
             LoweredExpressionKind::Integer(integer) => {
                 let storage = *environment.temporaries.get(&id).ok_or_else(|| {
