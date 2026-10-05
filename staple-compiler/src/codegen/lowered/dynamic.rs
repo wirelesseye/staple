@@ -1921,6 +1921,164 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
+            crate::IntrinsicFunction::BufferPop => {
+                let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
+                let Some(alternatives) = call.buffer_pop else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "buffer pop is missing its option alternatives",
+                    ));
+                };
+                let element = self.intrinsic_element_descriptor(call, environment, span)?;
+                let layout = self.dynamic_buffer_layout(element)?;
+                self.trap_if_buffer_frozen(buffer, span)?;
+                let length = self.load_buffer_metadata(buffer, 0)?;
+                let descriptor =
+                    self.dynamic_descriptor(&call.result_type, environment, span)?;
+                let result_layout = self.backend.load_descriptor_layout(descriptor)?;
+                self.backend
+                    .builder
+                    .build_memset(
+                        storage,
+                        1,
+                        self.backend.context.i8_type().const_zero(),
+                        result_layout.store_size,
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let function = self.current_dynamic_function(span)?;
+                let some = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.pop.some");
+                let done = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.pop.done");
+                let empty = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        length,
+                        self.backend.size_type.const_zero(),
+                        "buffer.pop.empty",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_conditional_branch(empty, done, some)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(some);
+                let next = self
+                    .backend
+                    .builder
+                    .build_int_sub(
+                        length,
+                        self.backend.size_type.const_int(1, false),
+                        "buffer.pop.length",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(buffer, next)
+                    .map_err(compiler_diagnostic)?;
+                let data = self.backend.dynamic_byte_offset(buffer, layout.header_offset)?;
+                let offset = self
+                    .backend
+                    .builder
+                    .build_int_mul(next, layout.stride, "buffer.pop.offset")
+                    .map_err(compiler_diagnostic)?;
+                let field = self.backend.dynamic_byte_offset(data, offset)?;
+                let payload_count = match &call.result_type {
+                    CheckedType::Sum(sum) => sum.alternatives.len(),
+                    _ => 1,
+                };
+                let payload = self.dynamic_sum_payload(descriptor, storage, payload_count)?;
+                self.backend.copy_dynamic_value(element, field, payload)?;
+                self.backend
+                    .builder
+                    .build_store(
+                        storage,
+                        self.backend
+                            .context
+                            .i32_type()
+                            .const_int(alternatives.some as u64, false),
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_unconditional_branch(done)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(done);
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::BufferTransfer => {
+                let source = self.load_buffer_pointer(slot_pointer(0)?)?;
+                let destination = self.load_buffer_pointer(slot_pointer(1)?)?;
+                let element = self.intrinsic_element_descriptor(call, environment, span)?;
+                let layout = self.dynamic_buffer_layout(element)?;
+                self.trap_if_buffer_frozen(source, span)?;
+                self.trap_if_buffer_frozen(destination, span)?;
+                let source_length = self.load_buffer_metadata(source, 0)?;
+                let destination_length = self.load_buffer_metadata(destination, 0)?;
+                let destination_capacity = self.load_buffer_metadata(destination, 1)?;
+                let required = self
+                    .backend
+                    .builder
+                    .build_int_add(
+                        destination_length,
+                        source_length,
+                        "buffer.transfer.required",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let overflow = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::UGT,
+                        required,
+                        destination_capacity,
+                        "buffer.transfer.overflow",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend.build_trap_if(overflow, span.clone())?;
+                let source_data = self.backend.dynamic_byte_offset(source, layout.header_offset)?;
+                let destination_data =
+                    self.backend.dynamic_byte_offset(destination, layout.header_offset)?;
+                let destination_offset = self
+                    .backend
+                    .builder
+                    .build_int_mul(
+                        destination_length,
+                        layout.stride,
+                        "buffer.transfer.offset",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let destination_field =
+                    self.backend.dynamic_byte_offset(destination_data, destination_offset)?;
+                let bytes = self
+                    .backend
+                    .builder
+                    .build_int_mul(
+                        source_length,
+                        layout.stride,
+                        "buffer.transfer.bytes",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_memcpy(destination_field, 1, source_data, 1, bytes)
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(destination, required)
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(source, self.backend.size_type.const_zero())
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
             _ => {}
         }
         let mut values = Vec::with_capacity(slots.len());

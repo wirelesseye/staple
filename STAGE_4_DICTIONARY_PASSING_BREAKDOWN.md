@@ -311,8 +311,11 @@ reachable from the branch.
   allocates the header, elements, and a trailing element-descriptor word and
   installs one shared `gc-finalizer-dynamic-buffer` finalizer that drops every
   live element. `__buffer_push`, `__buffer_get`, and `__buffer_freeze` operate
-  through the runtime layout. The in-scope baseline drops from 1194 to **648**
-  (`__buffer_pop` and `__buffer_transfer` remain).
+  through the runtime layout. The in-scope baseline drops from 1194 to **648**.
+  `__buffer_pop` and `__buffer_transfer` are implemented (sum construction and
+  element movement) but are not yet routed: they misbehave at run time for some
+  element types, so the support analysis keeps them as in-scope reasons until
+  the runtime issue is fixed.
 
 ### Step 4a.1 — Keys, specialization, and validation
 
