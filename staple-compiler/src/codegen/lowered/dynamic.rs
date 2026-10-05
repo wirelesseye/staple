@@ -71,14 +71,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         match plan.shape {
             CompoundDescriptorShape::Product => {
                 let mut offset = self.backend.size_type.const_zero();
+                let mut fields = Vec::with_capacity(components.len());
                 for (component, layout) in components.into_iter().zip(layouts) {
                     let field = self.backend.dynamic_byte_offset(value, offset)?;
-                    self.backend.drop_dynamic_value(component, field)?;
+                    fields.push((component, field));
                     offset = self
                         .backend
                         .builder
                         .build_int_add(offset, layout.store_size, "product.drop.offset")
                         .map_err(compiler_diagnostic)?;
+                }
+                for (component, field) in fields.into_iter().rev() {
+                    self.backend.drop_dynamic_value(component, field)?;
                 }
             }
             CompoundDescriptorShape::Sum => {
@@ -126,6 +130,132 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         self.backend.finish_finalizer_function(&body)
+    }
+
+    /// Reuse concrete argument evaluation and ownership bookkeeping, then
+    /// translate the concrete ABI slots into descriptor ABI storage pointers.
+    pub(super) fn emit_concrete_dynamic_call(
+        &self,
+        instance: FunctionInstanceId,
+        call: &crate::LoweredCall,
+        closure: PointerValue<'context>,
+        values: &[inkwell::values::BasicMetadataValueEnum<'context>],
+    ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
+        use inkwell::values::{AnyValue, BasicValueEnum};
+        let span = &call.origin.span;
+        let runtime = self
+            .view
+            .instance_runtime_parameters(instance)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic callee key"))?;
+        let signature = self
+            .view
+            .instance_signature(instance)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic callee signature"))?;
+        if !call.resource_bindings.is_empty() {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "concrete-to-dynamic resource calls are not yet implemented",
+            ));
+        }
+        let mut arguments = vec![closure.into()];
+        for parameter in runtime {
+            let ty = call
+                .substitutions
+                .types
+                .iter()
+                .find(|entry| entry.parameter == *parameter)
+                .map(|entry| &entry.value_type)
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "missing concrete runtime substitution")
+                })?;
+            arguments.push(self.static_dynamic_descriptor(ty, span)?.into());
+        }
+        let result_type = self.backend.compile_type(&call.result_type)?;
+        let result = self
+            .backend
+            .entry_builder()
+            .build_alloca(result_type, "dynamic.call.result")
+            .map_err(compiler_diagnostic)?;
+        arguments.push(result.into());
+        let parameter_types = super::flattened_parameter_types(&call.function_type.parameter);
+        let indirect = self.backend.indirect_parameter_mask(&call.function_type);
+        let whole = call
+            .function_type
+            .mutations
+            .contains(&crate::CheckedMutation::Whole);
+        let pack = !whole
+            && !matches!(signature.parameter.as_ref(), CheckedType::Product(_))
+            && matches!(
+                call.function_type.parameter.as_ref(),
+                CheckedType::Product(_)
+            );
+        if pack {
+            let fields = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let value = BasicValueEnum::try_from(*value)
+                        .map_err(|_| Diagnostic::new(span.clone(), "invalid concrete argument"))?;
+                    if indirect[index] {
+                        self.backend
+                            .builder
+                            .build_load(
+                                self.backend.compile_type(parameter_types[index])?,
+                                value.into_pointer_value(),
+                                "dynamic.argument.value",
+                            )
+                            .map_err(compiler_diagnostic)
+                    } else {
+                        Ok(value)
+                    }
+                })
+                .collect::<CodeGenerationResult<Vec<_>>>()?;
+            let product = self.backend.build_product_value(&fields, span.clone())?;
+            let storage = self
+                .backend
+                .entry_builder()
+                .build_alloca(product.get_type(), "dynamic.packed.argument")
+                .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_store(storage, product)
+                .map_err(compiler_diagnostic)?;
+            arguments.push(storage.into());
+        } else {
+            for (index, value) in values.iter().enumerate() {
+                let value = BasicValueEnum::try_from(*value)
+                    .map_err(|_| Diagnostic::new(span.clone(), "invalid concrete argument"))?;
+                let pointer = if whole || indirect[index] {
+                    value.into_pointer_value()
+                } else {
+                    let storage = self
+                        .backend
+                        .entry_builder()
+                        .build_alloca(value.get_type(), "dynamic.argument")
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_store(storage, value)
+                        .map_err(compiler_diagnostic)?;
+                    storage
+                };
+                arguments.push(pointer.into());
+            }
+        }
+        let function =
+            self.instances.get(&instance).copied().ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing dynamic callee declaration")
+            })?;
+        self.backend
+            .builder
+            .build_direct_call(function, &arguments, "")
+            .map_err(compiler_diagnostic)?;
+        Ok(self
+            .backend
+            .builder
+            .build_load(result_type, result, "dynamic.call.value")
+            .map_err(compiler_diagnostic)?
+            .as_any_value_enum())
     }
 
     pub(super) fn emit_dynamic_instance_body(
@@ -243,6 +373,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 record.kind,
                 LoweredExpressionKind::Call(_)
                     | LoweredExpressionKind::Product(_)
+                    | LoweredExpressionKind::RepeatedProduct(_)
                     | LoweredExpressionKind::Integer(_)
                     | LoweredExpressionKind::Float(_)
             ) {
@@ -534,7 +665,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    fn static_dynamic_descriptor(
+    pub(super) fn static_dynamic_descriptor(
         &self,
         ty: &CheckedType,
         span: &staple_syntax::Span,
@@ -904,6 +1035,55 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         environment.binding_order.push(symbol);
                     }
                 }
+                LoweredItemKind::PatternBinding(binding)
+                    if !binding.propagating && !binding.asserting =>
+                {
+                    let pointer =
+                        self.emit_dynamic_expression(owner, binding.value, environment)?;
+                    let expression =
+                        self.view.expression(owner, binding.value).ok_or_else(|| {
+                            Diagnostic::new(
+                                item.origin.span.clone(),
+                                "missing dynamic pattern initializer",
+                            )
+                        })?;
+                    let value_type = expression
+                        .coercion
+                        .as_ref()
+                        .map_or(&expression.value_type, |coercion| &coercion.target);
+                    let descriptor =
+                        self.dynamic_descriptor(value_type, environment, &item.origin.span)?;
+                    self.bind_dynamic_pattern(
+                        owner,
+                        binding.pattern,
+                        pointer,
+                        descriptor,
+                        true,
+                        environment,
+                    )?;
+                }
+                LoweredItemKind::Expression(statement) => {
+                    let value =
+                        self.emit_dynamic_expression(owner, statement.expression, environment)?;
+                    let expression = self
+                        .view
+                        .expression(owner, statement.expression)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                item.origin.span.clone(),
+                                "missing discarded dynamic expression",
+                            )
+                        })?;
+                    let value_type = expression
+                        .coercion
+                        .as_ref()
+                        .map_or(&expression.value_type, |coercion| &coercion.target);
+                    if statement.drop_result || crate::contains_type_parameter(value_type) {
+                        let descriptor =
+                            self.dynamic_descriptor(value_type, environment, &item.origin.span)?;
+                        self.backend.drop_dynamic_value(descriptor, value)?;
+                    }
+                }
                 LoweredItemKind::Return(item) => {
                     let value = self.emit_dynamic_expression(owner, item.value, environment)?;
                     self.backend.copy_dynamic_value(
@@ -981,6 +1161,37 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             }
                         };
                         let value = self.emit_dynamic_expression(owner, value, environment)?;
+                        let (field, component) =
+                            self.dynamic_product_field(descriptor, storage, index as u32)?;
+                        self.backend.copy_dynamic_value(component, value, field)?;
+                    }
+                    storage
+                }
+            }
+            LoweredExpressionKind::RepeatedProduct(repeated) => {
+                let count = match repeated.count {
+                    crate::LoweredRepeatCount::Fixed(count) => count,
+                    crate::LoweredRepeatCount::Symbolic(_) => {
+                        return Err(Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "runtime repeat counts are not supported",
+                        ));
+                    }
+                };
+                let value =
+                    self.emit_dynamic_expression(owner, repeated.expression, environment)?;
+                if repeated.collapsed {
+                    value
+                } else {
+                    let descriptor =
+                        self.dynamic_descriptor(raw_type, environment, &expression.origin.span)?;
+                    let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+                        Diagnostic::new(
+                            expression.origin.span.clone(),
+                            "missing repeated product storage",
+                        )
+                    })?;
+                    for index in 0..count {
                         let (field, component) =
                             self.dynamic_product_field(descriptor, storage, index as u32)?;
                         self.backend.copy_dynamic_value(component, value, field)?;

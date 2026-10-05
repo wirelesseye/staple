@@ -153,16 +153,24 @@ pub(super) fn scan_instance(
     let Some(instance) = program.instances.get(id) else {
         return Ok(Vec::new());
     };
-    if program
-        .specializations
-        .instance(instance.ordinal)
-        .is_none_or(|key| key.runtime().is_empty())
-    {
-        return Ok(Vec::new());
-    }
     let Some(body) = &instance.body else {
         return Ok(Vec::new());
     };
+    let dynamic = program
+        .specializations
+        .instance(instance.ordinal)
+        .is_some_and(|key| !key.runtime().is_empty());
+    let dynamic_call = body.bindings.values().any(|target| match target {
+        super::LoweredBoundTarget::Instance(id) => program
+            .instances
+            .get(*id)
+            .and_then(|callee| program.specializations.instance(callee.ordinal))
+            .is_some_and(|key| !key.runtime().is_empty()),
+        _ => false,
+    });
+    if !dynamic && !dynamic_call {
+        return Ok(Vec::new());
+    }
     let mut requests = concrete_body_types(body)
         .iter()
         .enumerate()

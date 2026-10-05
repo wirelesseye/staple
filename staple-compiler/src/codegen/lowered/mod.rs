@@ -5286,6 +5286,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .closure_environment
                         .ok_or_else(|| unsupported("current closure environment"))?,
                 };
+                if self
+                    .view
+                    .instance_runtime_parameters(*instance)
+                    .is_some_and(|runtime| !runtime.is_empty())
+                {
+                    let value = self.emit_concrete_dynamic_call(*instance, &call, pointer, &values)?;
+                    self.emit_call_cleanup(owner, id, cleanups, &call.origin.span)?;
+                    return Ok(value);
+                }
                 let mut arguments = vec![pointer.into()];
                 arguments.extend(values);
                 let result = self

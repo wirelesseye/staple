@@ -3476,6 +3476,14 @@ mod tests {
     }
 
     fn dynamic_test_module(source: &str, function_name: &str) -> (String, String) {
+        dynamic_test_module_with_boundary(source, function_name, None)
+    }
+
+    fn dynamic_test_module_with_boundary(
+        source: &str,
+        function_name: &str,
+        caller_name: Option<&str>,
+    ) -> (String, String) {
         let (_, mut program) = lower(source);
         let function = function_id(&program, function_name);
         let call = program
@@ -3513,6 +3521,32 @@ mod tests {
         program.install_graph(parts);
         let diagnostics = program.materialize_instance_bodies();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        // Request and connect this one concrete caller through the production
+        // graph. The hidden lowering option will perform this selection for
+        // every eligible call; these tests isolate the ABI boundary first.
+        let caller = caller_name.map(|name| {
+            let template = function_id(&program, name);
+            let caller = program.instances.iter().find_map(|(id, instance)| {
+                (instance.template == template).then_some(id)
+            }).unwrap();
+            let instance = program.instances.get_mut(caller).unwrap();
+            let body = instance.body.as_mut().unwrap();
+            let calls = body.calls.iter().filter_map(|(id, call)| {
+                matches!(call.target, LoweredCallableTarget::DirectFunction { function: target, .. } if target == function)
+                    .then_some(id)
+            }).collect::<Vec<_>>();
+            assert!(!calls.is_empty());
+            for call in calls {
+                let site = super::super::LoweredBindingSite::Call(call);
+                let Some(super::super::LoweredBoundTarget::Instance(previous)) = body.bindings.insert(site, super::super::LoweredBoundTarget::Instance(dynamic)) else { panic!("missing direct call binding") };
+                for edge in &mut instance.dependencies {
+                    if edge.instance == previous && edge.kind == LoweredInstanceDependencyKind::DirectCall {
+                        edge.instance = dynamic;
+                    }
+                }
+            }
+            caller
+        });
         let diagnostics =
             program.close_artifact_catalog(&super::super::artifact_closure::ProductionHooks);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -3522,12 +3556,62 @@ mod tests {
         let diagnostics =
             program.validate_artifact_closure(&super::super::artifact_closure::ProductionHooks);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let name = program.instances.get(dynamic).unwrap().name.clone();
+        let name = program
+            .instances
+            .get(caller.unwrap_or(dynamic))
+            .unwrap()
+            .name
+            .clone();
         let context = inkwell::context::Context::create();
         let text = crate::CodeGenerator::new(&context)
             .compile_module(&super::super::LoweredModule { program })
             .unwrap();
         (text, name)
+    }
+
+    #[test]
+    fn dynamic_boundaries_accept_concrete_callers() {
+        for source in [
+            concat!(
+                "def identity: <T where Copy T> T -> T = value => value\n",
+                "def concrete: I32 -> I32 = value => identity value\n",
+                "let result = concrete 42\n",
+            ),
+            concat!(
+                "def identity: <T where Copy T> T -> T = value => value\n",
+                "def first: <A, B where Copy A, Copy B> (A, B) -> A = (first, second) => first\n",
+                "def concrete: I32 -> I32 = value => { let held = identity (value, 7); first held }\n",
+                "let result = concrete 42\n",
+            ),
+            concat!(
+                "def identity: <T> move T -> T = move value => value\n",
+                "def concrete: I32 -> I32 = value => identity value\n",
+                "let result = concrete 42\n",
+            ),
+            concat!(
+                "def identity: <A, B where Copy A, Copy B> (A, B) -> A = (first, second) => first\n",
+                "def concrete: I32 -> I32 = value => identity (value, U8 :: 7)\n",
+                "let result = concrete 42\n",
+            ),
+        ] {
+            let (text, name) =
+                dynamic_test_module_with_boundary(source, "identity", Some("concrete"));
+            let context = inkwell::context::Context::create();
+            let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+                text.as_bytes(),
+                "concrete-dynamic-boundary",
+            );
+            let llvm = context.create_module_from_ir(buffer).unwrap();
+            let engine = llvm
+                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                .unwrap();
+            type Concrete = unsafe extern "C" fn(*const u8, i32) -> i32;
+            let concrete = unsafe { engine.get_function::<Concrete>(&name) }.unwrap();
+            assert_eq!(
+                unsafe { concrete.call(std::ptr::null(), 0x12345678) },
+                0x12345678
+            );
+        }
     }
 
     #[test]
@@ -3586,6 +3670,136 @@ mod tests {
                 assert!(output[5 + size..].iter().all(|byte| *byte == 0xff));
             }
         }
+    }
+
+    #[test]
+    fn dynamic_repeated_products_use_packed_component_sizes() {
+        for count in [0_usize, 1, 3] {
+            let source = format!(
+                "def repeat: <T where Copy T> T -> (T; {count}) = value => (value; {count})\nlet result = repeat 42\n"
+            );
+            let (text, name) = dynamic_test_module(&source, "repeat");
+            let context = inkwell::context::Context::create();
+            let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+                text.as_bytes(),
+                "dynamic-repetition",
+            );
+            let llvm = context.create_module_from_ir(buffer).unwrap();
+            let engine = llvm
+                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                .unwrap();
+            #[repr(C)]
+            struct Descriptor {
+                size: usize,
+                stride: usize,
+                align: usize,
+                flags: u32,
+                drop: usize,
+                count: u32,
+            }
+            type Repeat = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *const u8);
+            let repeat = unsafe { engine.get_function::<Repeat>(&name) }.unwrap();
+            for size in [0_usize, 1, 3, 17] {
+                let descriptor = Descriptor {
+                    size,
+                    stride: size.div_ceil(16) * 16,
+                    align: 16,
+                    flags: 1,
+                    drop: 0,
+                    count: 0,
+                };
+                let input = (0..size)
+                    .map(|index| (index + 21) as u8)
+                    .collect::<Vec<_>>();
+                let mut output = [0xff; 64];
+                unsafe {
+                    repeat.call(
+                        std::ptr::null(),
+                        &descriptor,
+                        output.as_mut_ptr().add(1),
+                        input.as_ptr(),
+                    );
+                }
+                for index in 0..count {
+                    assert_eq!(&output[1 + index * size..1 + (index + 1) * size], &input);
+                }
+                assert_eq!(output[0], 0xff);
+                assert!(output[1 + count * size..].iter().all(|byte| *byte == 0xff));
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_product_cleanup_matches_concrete_reverse_field_order() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def consume: <A, B where Sized A, Sized B> move (A, B) -> I32 = move value => { let held = value; 7 }\n",
+                "let result = consume (1, U8 :: 2)\n",
+            ),
+            "consume",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-product-drop-order",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        static DROPS: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        unsafe extern "C" fn drop_value(_: *const Descriptor, value: *mut u8) {
+            DROPS.lock().unwrap().push(unsafe { *value });
+        }
+        type Consume = unsafe extern "C" fn(
+            *const u8,
+            *const Descriptor,
+            *const Descriptor,
+            *mut i32,
+            *mut u8,
+            *mut u8,
+        );
+        let consume = unsafe { engine.get_function::<Consume>(&name) }.unwrap();
+        let first_descriptor = Descriptor {
+            size: 3,
+            stride: 4,
+            align: 4,
+            flags: 0,
+            drop: drop_value as *const () as usize,
+            count: 0,
+        };
+        let second_descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 0,
+            drop: drop_value as *const () as usize,
+            count: 0,
+        };
+        let mut first = [21; 3];
+        let mut second = [42; 17];
+        let mut result = 0;
+        unsafe {
+            consume.call(
+                std::ptr::null(),
+                &first_descriptor,
+                &second_descriptor,
+                &mut result,
+                first.as_mut_ptr(),
+                second.as_mut_ptr(),
+            );
+        }
+        assert_eq!(result, 7);
+        assert_eq!(*DROPS.lock().unwrap(), vec![42, 21]);
     }
 
     #[test]
@@ -3862,6 +4076,10 @@ mod tests {
             "borrow { identity value }",
             "borrow (identity value)",
             "{ let held = (identity value, 1); 7 }",
+            "{ let (held, marker) = (identity value, 1); 7 }",
+            "{ identity value; 7 }",
+            "{ (identity value, 1); 7 }",
+            "{ value; 7 }",
             "{ let held: T | I32 = identity value; 7 }",
             "{ let held: T | I32 = 7; 7 }",
             "{ let held: (T, I32) | Bool = (identity value, 1); 7 }",

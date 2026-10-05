@@ -257,6 +257,21 @@ Implemented foundations:
   product construction/access, and sum injection/widening coercions. Execution tests
   cover packed output, guarded sum payload storage, and exactly-once cleanup
   for both active sum alternatives.
+- Fixed repeated products (including zero and collapsed single repeats),
+  expression-statement cleanup for runtime values, and ordinary local product
+  destructuring. Structural product cleanup follows concrete reverse field
+  order; a native execution test records that order with differently sized
+  components.
+
+- Concrete-to-dynamic direct call emission reuses concrete argument evaluation,
+  spills direct ABI values, packs flattened products when the generic parameter
+  is scalar-shaped, passes static descriptors in callee order, and loads the
+  caller-provided result slot. Concrete instance owners with dynamic call bindings demand
+  descriptors through the closure scanner. Native execution tests cover scalar,
+  packed product, moved, and mixed-size two-descriptor calls; graph and closure
+  validation run on each connected boundary. Resource arguments and function
+  reabstraction remain unimplemented on this path. The hidden selection option
+  is not yet connected.
 
 Stage 4a is **not complete**. Still required: the differential lowering option
 and transitive restriction analysis; arrays/wrappers and remaining compound
@@ -274,7 +289,10 @@ corpus layout sweep). The compound descriptor continuation passes the compiler
 library suite (370 passed, one ignored) and all nine dynamic execution tests
 including the later flattened-parameter and sum-widening additions. Rebuilt
 default-mode LLVM output matches `50565d8` for all 104 corpus/example inputs
-(four compilations per binary per input).
+(four compilations per binary per input), verified for `db53462`.
+The subsequent repetition/statement/destructuring continuation passes workspace
+checks and all eleven dynamic execution tests. Adding the concrete boundary
+passes workspace checks and all twelve dynamic execution tests.
 
 ### Step 4a.1 — Keys, specialization, and validation
 
