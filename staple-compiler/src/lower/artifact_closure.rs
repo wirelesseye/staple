@@ -85,6 +85,8 @@ pub(super) enum ClosureRequest {
 /// Matches stay exhaustive and IDs resolve in the owning body's arenas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ArtifactUseSite {
+    /// Index into the dynamic body's deterministic concrete descriptor list.
+    InstanceTypeDescriptor(usize),
     /// A scripted test site identified by its position in the hook table.
     #[cfg(test)]
     Test(u32),
@@ -239,6 +241,9 @@ impl ArtifactFamilyHooks for ProductionHooks {
             program, instance,
         )?);
         requests.extend(super::extern_artifacts::scan_instance(program, instance)?);
+        requests.extend(super::descriptor_artifacts::scan_instance(
+            program, instance,
+        )?);
         Ok(requests)
     }
     fn expand(
@@ -1610,6 +1615,17 @@ impl LoweredProgram {
             UseSiteOwner::Initializer => self.reactive_callbacks.get(id).is_some(),
         };
         match site {
+            ArtifactUseSite::InstanceTypeDescriptor(index) => {
+                let valid = match site_owner {
+                    UseSiteOwner::Instance(body) => {
+                        index < super::descriptor_artifacts::concrete_body_types(body).len()
+                    }
+                    UseSiteOwner::Initializer => false,
+                };
+                if !valid {
+                    report("instance descriptor", index);
+                }
+            }
             #[cfg(test)]
             ArtifactUseSite::Test(_) => {}
             ArtifactUseSite::DiscardedResult(id) => {

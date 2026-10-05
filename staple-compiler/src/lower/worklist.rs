@@ -3470,6 +3470,184 @@ mod tests {
         assert_eq!(pair.body.as_ref().unwrap().bounds.len(), 2);
     }
 
+    fn dynamic_test_module(source: &str, function_name: &str) -> (String, String) {
+        let (_, mut program) = lower(source);
+        let function = function_id(&program, function_name);
+        let call = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| match call.target {
+                LoweredCallableTarget::DirectFunction {
+                    function: target, ..
+                } if target == function => Some(call),
+                _ => None,
+            })
+            .unwrap();
+        let runtime = program
+            .relevant_parameters(function)
+            .type_parameters()
+            .collect();
+        let resolved = program
+            .resolve_instance_request_with_runtime(
+                &InstanceResolutionRequest {
+                    function,
+                    origin: call.origin.clone(),
+                    function_type: call.function_type.clone(),
+                    substitutions: call.substitutions.clone(),
+                    evidence: call.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                },
+                &runtime,
+            )
+            .unwrap();
+        let mut recorder = GraphRecorder::from_parts(program.take_graph());
+        let (dynamic, _) =
+            recorder.intern_resolved(&program, resolved, LoweredInstanceRequest::EagerTemplate);
+        let parts =
+            WorklistBuilder::resume(&program, recorder.into_parts(), vec![dynamic]).unwrap();
+        program.install_graph(parts);
+        let diagnostics = program.materialize_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics =
+            program.close_artifact_catalog(&super::super::artifact_closure::ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        program.assign_initializer_names();
+        let diagnostics = program.validate_specialization_graph();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics =
+            program.validate_artifact_closure(&super::super::artifact_closure::ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let name = program.instances.get(dynamic).unwrap().name.clone();
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&super::super::LoweredModule { program })
+            .unwrap();
+        (text, name)
+    }
+
+    #[test]
+    fn dynamic_moved_values_transfer_without_cleanup() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def identity: <T> move T -> T = move value => value\n",
+                "def forward: <T> move T -> T = move value => { let held = identity value; held }\n",
+                "let first = forward 42\n",
+            ),
+            "forward",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-move",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        unsafe extern "C" fn drop_value(_: *const Descriptor, _: *mut u8) {
+            DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        type Forward = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *mut u8);
+        let forward = unsafe { engine.get_function::<Forward>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 0,
+            drop: drop_value as *const () as usize,
+            count: 0,
+        };
+        let mut input = [42; 17];
+        let mut output = [0; 17];
+        unsafe {
+            forward.call(
+                std::ptr::null(),
+                &descriptor,
+                output.as_mut_ptr(),
+                input.as_mut_ptr(),
+            );
+        }
+        assert_eq!(output, input);
+        assert_eq!(
+            DROPS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "both the caller and callee transferred their owned value"
+        );
+    }
+
+    #[test]
+    fn dynamic_scope_exit_drops_an_owned_runtime_parameter() {
+        for (index, body) in [
+            "7",
+            "{ return 7 }",
+            "identity 7",
+            "borrow { identity value }",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let source = format!(
+                "def identity: <U> move U -> U = move value => value\ndef borrow: <U where Sized U> U -> I32 = value => 7\ndef consume: <T where Sized T> move T -> I32 = move value => {body}\nlet result = consume 42\n"
+            );
+            let (text, name) = dynamic_test_module(&source, "consume");
+            let context = inkwell::context::Context::create();
+            let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+                text.as_bytes(),
+                "dynamic-drop",
+            );
+            let llvm = context.create_module_from_ir(buffer).unwrap();
+            let engine = llvm
+                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                .unwrap();
+            #[repr(C)]
+            struct Descriptor {
+                size: usize,
+                stride: usize,
+                align: usize,
+                flags: u32,
+                drop: usize,
+                count: u32,
+            }
+            static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            unsafe extern "C" fn drop_value(_: *const Descriptor, value: *mut u8) {
+                assert_eq!(unsafe { *value }, 42);
+                DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            type Consume = unsafe extern "C" fn(*const u8, *const Descriptor, *mut i32, *mut u8);
+            let consume = unsafe { engine.get_function::<Consume>(&name) }.unwrap();
+            let descriptor = Descriptor {
+                size: 17,
+                stride: 32,
+                align: 16,
+                flags: 0,
+                drop: drop_value as *const () as usize,
+                count: 0,
+            };
+            let mut input = [42; 17];
+            let mut output = 0;
+            unsafe {
+                consume.call(
+                    std::ptr::null(),
+                    &descriptor,
+                    &mut output,
+                    input.as_mut_ptr(),
+                );
+            }
+            assert_eq!(output, 7);
+            assert_eq!(DROPS.load(std::sync::atomic::Ordering::SeqCst), index + 1);
+        }
+    }
+
     #[test]
     fn dynamic_instances_discover_and_materialize_runtime_callees() {
         use std::collections::BTreeSet;
@@ -3541,6 +3719,66 @@ mod tests {
                 .len(),
             1
         );
+        // Execute the materialized runtime caller and callee with descriptor
+        // layouts that were never part of the source's concrete call sites.
+        let dynamic_name = record.name.clone();
+        let mut executable = program.clone();
+        assert!(executable.materialize_instance_bodies().is_empty());
+        let diagnostics =
+            executable.close_artifact_catalog(&super::super::artifact_closure::ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        executable.assign_initializer_names();
+        let context = inkwell::context::Context::create();
+        let llvm = crate::CodeGenerator::new(&context)
+            .compile_module(&super::super::LoweredModule {
+                program: executable,
+            })
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            llvm.as_bytes(),
+            "dynamic",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            store_size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Forward = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *const u8);
+        let forward = unsafe { engine.get_function::<Forward>(&dynamic_name) }.unwrap();
+        for size in [0, 1, 3, 8, 17, 33] {
+            for align in [1, 2, 4, 8, 16, 32] {
+                let descriptor = Descriptor {
+                    store_size: size,
+                    stride: size.div_ceil(align) * align,
+                    align,
+                    flags: 1,
+                    drop: 0,
+                    count: 0,
+                };
+                let input = (0..128).map(|byte| byte as u8).collect::<Vec<_>>();
+                let mut output = [0xff; 128];
+                unsafe {
+                    forward.call(
+                        std::ptr::null(),
+                        &descriptor,
+                        output.as_mut_ptr().add(1),
+                        input.as_ptr().add(1),
+                    );
+                }
+                assert_eq!(&output[1..1 + size], &input[1..1 + size]);
+                assert_eq!(output[0], 0xff);
+                assert!(output[1 + size..].iter().all(|byte| *byte == 0xff));
+            }
+        }
         // Descriptor scope is local to the instance, never module-wide.
         let body = program
             .instances

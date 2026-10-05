@@ -2,7 +2,8 @@
 //!
 //! Codegen consumes only lowered records through their read-only emission view.
 //! It declares catalog functions using planned names and linkage, emits concrete
-//! instance and initializer bodies, expands recorded drop glue inline, and emits
+//! instance and initializer bodies, emits descriptor ABI bodies, expands recorded
+//! drop glue inline, and emits
 //! validated adapters, finalizers, coroutine pairs, and reactive runners. Recorded
 //! runtime requirements select the runtime modules to link. No source AST or
 //! checker query participates in emission; trait selection, coercion choices,

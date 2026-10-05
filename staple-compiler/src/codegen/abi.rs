@@ -91,7 +91,6 @@ impl<'program, 'context> Backend<'program, 'context> {
     /// Dynamic entries always return through storage and receive each resource
     /// and flattened argument by address. Descriptor order is the sorted
     /// runtime-parameter order recorded in the instance key.
-    #[allow(dead_code)]
     pub(crate) fn compile_dynamic_function_type(
         &self,
         function_type: &CheckedFunctionType,

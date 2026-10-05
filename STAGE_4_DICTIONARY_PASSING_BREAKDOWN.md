@@ -234,24 +234,37 @@ Implemented foundations:
   component descriptors, and concrete descriptor drop entry points.
 - Descriptor layout rules for packed products, sums, and wrappers, with a
   corpus sweep against LLVM `TargetData`, including product and sum offsets.
-
 - Backend runtime descriptor primitives: header/component loads, fixed-size
   entry slots, runtime product/sum layout calculations, descriptor-sized byte
   copies, nullable descriptor drop calls, and the dynamic ABI function type.
   Execution tests exercise padded strides, carrier ties, unaligned copies,
-  component order, and both cleanup branches. These primitives are not yet
-  connected to instance body emission or artifact planning.
+  component order, and both cleanup branches.
+- Executable descriptor ABI entries for single-parameter dynamic bodies:
+  parameter/name reads, scalar literals, immutable local bindings, blocks,
+  explicit returns, owned scope cleanup, borrowed temporary cleanup, and
+  direct calls to dynamic and concrete instances. Call-result storage is aligned from runtime descriptors
+  and allocated once in the entry block. Runtime argument descriptor order
+  follows each callee's key, and results use caller-provided storage.
+- Dynamic bodies demand concrete leaf descriptors through closure scanner
+  use records. Closure validation checks their owner-local descriptor indices.
+  JIT tests exercise runtime caller/callee layouts, ownership transfer without
+  premature cleanup, and exactly-once drops after borrowing temporaries and
+  on normal and explicit returns.
+  Compound descriptor construction is not yet connected to body emission.
 
 Stage 4a is **not complete**. Still required: the differential lowering option
 and transitive restriction analysis; compound builder/drop artifact planning;
-dynamic value emission and ABI/calls; reabstraction; dynamic GC payloads and
+compound/flattened value emission, control flow, resources and remaining
+ABI/call routes; reabstraction; dynamic GC payloads and
 intrinsics; and the differential exit gate. Stage 3's polymorphic-value gate
 remains in place.
 
 Foundation validation (commit `8c86d8c`): `cargo test --workspace --quiet`
 passes; all 104 corpus/example inputs report `same` against the `50565d8`
-release build without a differential lowering option. The subsequent backend
-primitives have focused LLVM verification and JIT execution tests.
+release build without a differential lowering option. Backend primitives are
+committed as `ed91238`. Subsequent body emission changes pass workspace checks,
+focused dynamic execution tests, and the descriptor tests (including the
+corpus layout sweep).
 
 ### Step 4a.1 — Keys, specialization, and validation
 

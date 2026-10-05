@@ -1,6 +1,7 @@
 //! LLVM emitter over the read-only lowered program view.
 
 mod coroutines;
+mod dynamic;
 mod reactive;
 mod structural;
 
@@ -290,7 +291,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "missing planned instance name",
                 )
             })?;
-            let function_type = self.backend.compile_closure_function_type(signature)?;
+            let runtime = self.view.instance_runtime_parameters(id).ok_or_else(|| {
+                Diagnostic::new(instance.origin.span.clone(), "missing instance key")
+            })?;
+            let function_type = if runtime.is_empty() {
+                self.backend.compile_closure_function_type(signature)?
+            } else {
+                self.backend.compile_dynamic_function_type(signature, runtime.len())?
+            };
             let linkage = instance
                 .requires_internal_linkage
                 .then_some(Linkage::Internal);
@@ -887,6 +895,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let Some(root) = body.root else {
             return Ok(());
         };
+        if self.view.instance_runtime_parameters(id).is_some_and(|runtime| !runtime.is_empty()) {
+            return self.emit_dynamic_instance_body(id, function, body, root);
+        }
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         let mut environment = FunctionEnvironment::default();

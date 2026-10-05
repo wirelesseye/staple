@@ -102,6 +102,20 @@ impl<'a> EmissionView<'a> {
         self.program.instances.get(id)
     }
 
+    /// Runtime descriptor parameters, in the key's canonical ABI order.
+    pub(crate) fn instance_runtime_parameters(
+        &self,
+        id: FunctionInstanceId,
+    ) -> Option<&'a std::collections::BTreeSet<crate::TypeParameterId>> {
+        let instance = self.program.instances.get(id)?;
+        Some(
+            self.program
+                .specializations
+                .instance(instance.ordinal)?
+                .runtime(),
+        )
+    }
+
     /// Every interned generated artifact in ordinal order.
     pub(crate) fn artifacts(
         &self,
@@ -485,7 +499,7 @@ impl<'a> EmissionView<'a> {
             .map(|body| body.parameters.as_slice())
     }
 
-    /// The concrete signature of one instance body.
+    /// The specialized signature of one instance body.
     pub(crate) fn instance_signature(
         &self,
         instance: FunctionInstanceId,

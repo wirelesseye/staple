@@ -163,7 +163,7 @@ pub(crate) struct LoweredInstanceBody {
     pub template: FunctionId,
     /// The template declaration origin.
     pub origin: Origin,
-    /// The concrete function signature; every checked value is substituted.
+    /// The instance signature, retaining the parameters supplied at runtime.
     pub signature: CheckedFunctionType,
     /// Substituted bounds used by the body.
     pub bounds: Vec<CheckedTraitBound>,
@@ -283,7 +283,7 @@ impl LoweredInstanceBody {
             .chain(self.places.iter().map(|(_, place)| &place.value_type))
     }
 
-    /// The body's concrete signature.
+    /// The specialized body signature.
     pub(crate) fn signature(&self) -> &CheckedFunctionType {
         &self.signature
     }
@@ -294,6 +294,10 @@ impl LoweredInstanceBody {
 
     pub(crate) fn item(&self, id: ItemId) -> Option<&LoweredItem> {
         self.items.get(id)
+    }
+
+    pub(crate) fn expressions(&self) -> impl Iterator<Item = (ExpressionId, &LoweredExpression)> {
+        self.expressions.iter()
     }
 
     pub(crate) fn expression(&self, id: ExpressionId) -> Option<&LoweredExpression> {

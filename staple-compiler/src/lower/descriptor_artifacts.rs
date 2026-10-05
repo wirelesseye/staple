@@ -27,6 +27,86 @@ pub(super) fn descriptor_request(
     })
 }
 
+/// Concrete leaves used by a dynamic body. The deterministic order also names
+/// scanner use sites, so closure validation can prove each descriptor is owned.
+pub(super) fn concrete_body_types(body: &super::LoweredInstanceBody) -> Vec<CheckedType> {
+    fn collect(ty: &CheckedType, types: &mut Vec<CheckedType>) {
+        if matches!(
+            ty,
+            CheckedType::Forall(_)
+                | CheckedType::ParameterProduct(_)
+                | CheckedType::TypeConstructor { .. }
+        ) {
+            return;
+        }
+        if !crate::contains_type_parameter(ty) {
+            if !types.contains(ty) {
+                types.push(ty.clone());
+            }
+            return;
+        }
+        match ty {
+            CheckedType::Product(product) => {
+                for field in &product.elements {
+                    collect(&field.value_type, types);
+                }
+            }
+            CheckedType::Sum(sum) => {
+                for alternative in &sum.alternatives {
+                    collect(alternative, types);
+                }
+            }
+            CheckedType::Wrapper { representation, .. } => collect(representation, types),
+            _ => {}
+        }
+    }
+    let mut types = Vec::new();
+    collect(&body.signature.parameter, &mut types);
+    collect(&body.signature.result, &mut types);
+    for (_, expression) in body.expressions() {
+        collect(&expression.value_type, &mut types);
+    }
+    for (_, call) in body.calls.iter() {
+        for entry in &call.substitutions.types {
+            collect(&entry.value_type, &mut types);
+        }
+    }
+    types
+}
+
+pub(super) fn scan_instance(
+    program: &LoweredProgram,
+    id: super::FunctionInstanceId,
+) -> super::artifact_closure::ScanResult {
+    let Some(instance) = program.instances.get(id) else {
+        return Ok(Vec::new());
+    };
+    if program
+        .specializations
+        .instance(instance.ordinal)
+        .is_none_or(|key| key.runtime().is_empty())
+    {
+        return Ok(Vec::new());
+    }
+    let Some(body) = &instance.body else {
+        return Ok(Vec::new());
+    };
+    concrete_body_types(body)
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            let mut request =
+                descriptor_request(ty, &body.origin).map_err(|diagnostic| vec![diagnostic])?;
+            let ClosureRequest::Artifact { use_site, .. } = &mut request else {
+                unreachable!()
+            };
+            *use_site =
+                Some(super::artifact_closure::ArtifactUseSite::InstanceTypeDescriptor(index));
+            Ok(request)
+        })
+        .collect()
+}
+
 fn planned(request: &ClosureRequest) -> PlannedArtifact {
     let ClosureRequest::Artifact { key, kind, .. } = request else {
         unreachable!()

@@ -150,7 +150,6 @@ impl DescriptorLayout {
 
 /// Layout words carried by a descriptor in generated code.
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // Used by the forthcoming dynamic value emitter.
 pub(crate) struct RuntimeDescriptorLayout<'context> {
     pub store_size: inkwell::values::IntValue<'context>,
     pub stride: inkwell::values::IntValue<'context>,
@@ -365,7 +364,6 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     /// Read the layout prefix through the common descriptor header, independent
     /// of the number of trailing components.
-    #[allow(dead_code)]
     pub(crate) fn load_descriptor_layout(
         &self,
         descriptor: inkwell::values::PointerValue<'context>,
