@@ -99,6 +99,55 @@ pub(crate) struct SumStorage<'context> {
     pub(crate) alignment: u32,
 }
 
+/// The descriptor's layout words. Store size and array stride are distinct:
+/// packed aggregates can contain values whose ABI allocation size is padded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DescriptorLayout {
+    pub store_size: u64,
+    pub stride: u64,
+    pub align: u32,
+}
+
+impl DescriptorLayout {
+    fn packed_product(fields: &[Self]) -> Self {
+        let store_size = fields.iter().map(|field| field.store_size).sum();
+        Self {
+            store_size,
+            stride: store_size,
+            align: 1,
+        }
+    }
+
+    /// Mirror `compile_sum_type`, including its initial i8 carrier and the
+    /// tag's alignment. Even a sum of byte-aligned alternatives aligns to i32.
+    fn sum(alternatives: &[Self], tag: Self) -> (Self, u64) {
+        let mut carrier = Self {
+            store_size: 1,
+            stride: 1,
+            align: 1,
+        };
+        let mut maximum_size = 0;
+        for alternative in alternatives {
+            maximum_size = maximum_size.max(alternative.store_size);
+            if alternative.align > carrier.align {
+                carrier = *alternative;
+            }
+        }
+        let length = maximum_size.max(1).div_ceil(carrier.store_size.max(1));
+        let offset = tag.store_size.div_ceil(carrier.align as u64) * carrier.align as u64;
+        let align = tag.align.max(carrier.align);
+        let store_size = (offset + length * carrier.stride).div_ceil(align as u64) * align as u64;
+        (
+            Self {
+                store_size,
+                stride: store_size,
+                align,
+            },
+            offset,
+        )
+    }
+}
+
 /// The layout facts `compile_type` needs, sourced from the lowered program
 /// (`LoweredSemanticIds`, the type catalog, and `runtime_opaque_kind`) so the
 /// the emitter and lowered emitters cannot disagree.
@@ -248,6 +297,61 @@ impl<'program, 'context> Backend<'program, 'context> {
             CheckedType::F64 => Ok(self.compile_float_type(FloatType::F64).into()),
             CheckedType::Wrapper { representation, .. } => self.compile_type(representation),
         }
+    }
+
+    pub(crate) fn descriptor_layout(
+        &self,
+        value_type: &CheckedType,
+    ) -> CodeGenerationResult<DescriptorLayout> {
+        let layout = match value_type {
+            CheckedType::Product(product) => {
+                let fields = product
+                    .elements
+                    .iter()
+                    .map(|field| self.descriptor_layout(&field.value_type))
+                    .collect::<CodeGenerationResult<Vec<_>>>()?;
+                DescriptorLayout::packed_product(&fields)
+            }
+            CheckedType::Sum(sum) => {
+                let alternatives = sum
+                    .alternatives
+                    .iter()
+                    .map(|alternative| self.descriptor_layout(alternative))
+                    .collect::<CodeGenerationResult<Vec<_>>>()?;
+                let tag = self.descriptor_layout(&CheckedType::I32)?;
+                DescriptorLayout::sum(&alternatives, tag).0
+            }
+            CheckedType::Wrapper { representation, .. } => {
+                self.descriptor_layout(representation)?
+            }
+            _ => {
+                let ty = self.compile_type(value_type)?;
+                DescriptorLayout {
+                    store_size: self.target_data.get_store_size(&ty),
+                    stride: self.target_data.get_abi_size(&ty),
+                    align: self.target_data.get_abi_alignment(&ty),
+                }
+            }
+        };
+        Ok(layout)
+    }
+
+    /// The fixed descriptor prefix is shared by static constants and stack-built
+    /// compound descriptors. Component pointers follow in semantic field order.
+    pub(crate) fn type_descriptor_type(&self, count: u32) -> inkwell::types::StructType<'context> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        self.context.struct_type(
+            &[
+                self.size_type.into(),
+                self.size_type.into(),
+                self.size_type.into(),
+                self.context.i32_type().into(),
+                pointer.into(),
+                self.context.i32_type().into(),
+                pointer.array_type(count).into(),
+            ],
+            false,
+        )
     }
 
     pub(crate) fn compile_integer_type(
@@ -513,6 +617,174 @@ mod tests {
             }
         }
         types
+    }
+
+    #[test]
+    fn descriptor_sum_layout_keeps_the_first_maximally_aligned_carrier() {
+        use super::DescriptorLayout as L;
+        let tag = L {
+            store_size: 4,
+            stride: 4,
+            align: 4,
+        };
+        let byte = L {
+            store_size: 1,
+            stride: 1,
+            align: 1,
+        };
+        assert_eq!(
+            L::sum(&[byte], tag),
+            (
+                L {
+                    store_size: 8,
+                    stride: 8,
+                    align: 4
+                },
+                4
+            )
+        );
+        let eight = L {
+            store_size: 8,
+            stride: 8,
+            align: 4,
+        };
+        let twelve = L {
+            store_size: 12,
+            stride: 12,
+            align: 4,
+        };
+        assert_eq!(L::sum(&[eight, twelve], tag).0.store_size, 20);
+        assert_eq!(L::sum(&[twelve, eight], tag).0.store_size, 16);
+        let wide = L {
+            store_size: 8,
+            stride: 8,
+            align: 8,
+        };
+        let packed = L {
+            store_size: 17,
+            stride: 17,
+            align: 1,
+        };
+        assert_eq!(
+            L::sum(&[packed, wide], tag),
+            (
+                L {
+                    store_size: 32,
+                    stride: 32,
+                    align: 8
+                },
+                8
+            )
+        );
+    }
+
+    #[test]
+    fn descriptor_layouts_match_target_data_for_the_corpus() {
+        use super::{Backend, DescriptorLayout};
+        use crate::codegen::{CorpusSource, codegen_corpus, create_target_machine};
+        fn verify(backend: &Backend<'_, '_>, value_type: &CheckedType) {
+            if matches!(
+                value_type,
+                CheckedType::ParameterProduct(_)
+                    | CheckedType::Forall(_)
+                    | CheckedType::TypeConstructor { .. }
+            ) || crate::contains_type_parameter(value_type)
+            {
+                return;
+            }
+            let ty = backend.compile_type(value_type).unwrap();
+            let layout = backend.descriptor_layout(value_type).unwrap();
+            assert_eq!(
+                layout.store_size,
+                backend.target_data.get_store_size(&ty),
+                "store size: {value_type}"
+            );
+            assert_eq!(
+                layout.stride,
+                backend.target_data.get_abi_size(&ty),
+                "stride: {value_type}"
+            );
+            assert_eq!(
+                layout.align,
+                backend.target_data.get_abi_alignment(&ty),
+                "alignment: {value_type}"
+            );
+            match value_type {
+                CheckedType::Product(product) => {
+                    let mut offset = 0;
+                    let llvm = ty.into_struct_type();
+                    for (index, field) in product.elements.iter().enumerate() {
+                        assert_eq!(
+                            backend.target_data.offset_of_element(&llvm, index as u32),
+                            Some(offset)
+                        );
+                        offset += backend
+                            .descriptor_layout(&field.value_type)
+                            .unwrap()
+                            .store_size;
+                        verify(backend, &field.value_type);
+                    }
+                }
+                CheckedType::Sum(sum) => {
+                    let alternatives = sum
+                        .alternatives
+                        .iter()
+                        .map(|alternative| backend.descriptor_layout(alternative).unwrap())
+                        .collect::<Vec<_>>();
+                    let tag = backend.descriptor_layout(&CheckedType::I32).unwrap();
+                    let (_, payload_offset) = DescriptorLayout::sum(&alternatives, tag);
+                    assert_eq!(
+                        backend
+                            .target_data
+                            .offset_of_element(&ty.into_struct_type(), 1),
+                        Some(payload_offset),
+                        "payload: {value_type}"
+                    );
+                    for alternative in &sum.alternatives {
+                        verify(backend, alternative);
+                    }
+                }
+                CheckedType::Wrapper { representation, .. } => verify(backend, representation),
+                _ => {}
+            }
+        }
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let context = inkwell::context::Context::create();
+        let target = create_target_machine(None).unwrap();
+        let mut checked = 0;
+        for fixture in codegen_corpus() {
+            let (source, root) = match fixture.source {
+                CorpusSource::Inline(source) => (source.to_owned(), workspace.to_path_buf()),
+                CorpusSource::File(path) => {
+                    let full = workspace.join(path);
+                    (
+                        std::fs::read_to_string(&full).unwrap(),
+                        full.parent().unwrap().to_path_buf(),
+                    )
+                }
+            };
+            let loaded = ProgramLoader::new()
+                .with_standard_library_root(workspace.join("stdlib"))
+                .load_source(&source, &root)
+                .unwrap();
+            let typed = TypeChecker::new()
+                .check(NameResolver::new().resolve_program(loaded).unwrap())
+                .unwrap();
+            let module = Lowerer::new().lower(&typed).unwrap();
+            let backend = Backend::new(&context, &target, LayoutContext::new(module.program()));
+            let mut types = signature_types(&module);
+            types.extend(module.program().initializer_layout_value_types().cloned());
+            for (_, instance) in module.program().instances() {
+                if let Some(body) = &instance.body {
+                    types.extend(body.layout_value_types().cloned());
+                }
+            }
+            for value_type in types {
+                verify(&backend, &value_type);
+                checked += 1;
+            }
+        }
+        assert!(checked > 1000, "the test must sweep the full corpus");
     }
 
     /// The emission `LayoutContext` must select exactly the representations

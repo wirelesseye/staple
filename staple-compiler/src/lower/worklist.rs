@@ -252,6 +252,8 @@ pub(crate) enum LoweredArtifactDependencyKind {
     StructuralMethod,
     /// A generated drop-glue plan.
     DropGlue,
+    TypeDescriptor,
+    DescriptorDrop,
     /// A generated garbage-collector finalizer.
     GcFinalizer,
     /// A coroutine body's generated resume/cleanup pair.
@@ -273,6 +275,8 @@ impl LoweredArtifactDependencyKind {
             LoweredArtifactDependencyKind::ConstructorAdapter => "constructor-adapter",
             LoweredArtifactDependencyKind::StructuralMethod => "structural-method",
             LoweredArtifactDependencyKind::DropGlue => "drop-glue",
+            LoweredArtifactDependencyKind::TypeDescriptor => "type-descriptor",
+            LoweredArtifactDependencyKind::DescriptorDrop => "descriptor-drop",
             LoweredArtifactDependencyKind::GcFinalizer => "gc-finalizer",
             LoweredArtifactDependencyKind::CoroutineCodes => "coroutine-codes",
             LoweredArtifactDependencyKind::ReactionRunner => "reaction-runner",
@@ -297,6 +301,12 @@ impl LoweredArtifactDependencyKind {
             ) | (
                 LoweredArtifactDependencyKind::DropGlue,
                 ArtifactRequestKey::DropGlue(_)
+            ) | (
+                LoweredArtifactDependencyKind::TypeDescriptor,
+                ArtifactRequestKey::TypeDescriptor(_)
+            ) | (
+                LoweredArtifactDependencyKind::DescriptorDrop,
+                ArtifactRequestKey::DescriptorDrop(_)
             ) | (
                 LoweredArtifactDependencyKind::GcFinalizer,
                 ArtifactRequestKey::GcFinalizer(_)
@@ -2034,7 +2044,8 @@ impl LoweredProgram {
         key: &InstanceKey,
         reserved: &HashSet<String>,
     ) -> Option<String> {
-        if !key.substitutions().is_empty() || key.evidence().is_some() {
+        if !key.runtime().is_empty() || !key.substitutions().is_empty() || key.evidence().is_some()
+        {
             return None;
         }
         self.functions
@@ -3391,6 +3402,160 @@ mod tests {
             new_body.root.is_some(),
             "the resumed instance has a concrete body"
         );
+    }
+
+    #[test]
+    fn dynamic_callees_keep_independent_arguments_concrete() {
+        use std::collections::BTreeSet;
+        let (_, mut program) = lower(concat!(
+            "def pair: <A, B where Copy A, Copy B> (A, B) -> (A, B) = value => value\n",
+            "def forward: <T where Copy T> T -> (T, I32) = value => pair (value, 1)\n",
+            "let first = forward 42\n",
+        ));
+        let function = function_id(&program, "forward");
+        let call = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| match call.target {
+                LoweredCallableTarget::DirectFunction {
+                    function: target, ..
+                } if target == function => Some(call),
+                _ => None,
+            })
+            .unwrap();
+        let runtime = program
+            .relevant_parameters(function)
+            .type_parameters()
+            .collect::<BTreeSet<_>>();
+        let resolved = program
+            .resolve_instance_request_with_runtime(
+                &InstanceResolutionRequest {
+                    function,
+                    origin: call.origin.clone(),
+                    function_type: call.function_type.clone(),
+                    substitutions: call.substitutions.clone(),
+                    evidence: call.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                },
+                &runtime,
+            )
+            .unwrap();
+        let mut recorder = GraphRecorder::from_parts(program.take_graph());
+        let (dynamic, _) =
+            recorder.intern_resolved(&program, resolved, LoweredInstanceRequest::EagerTemplate);
+        let parts =
+            WorklistBuilder::resume(&program, recorder.into_parts(), vec![dynamic]).unwrap();
+        program.install_graph(parts);
+        let problems = program.materialize_pending_instance_bodies();
+        assert!(problems.is_empty(), "{problems:?}");
+        let problems = program.validate_instance_bodies();
+        assert!(problems.is_empty(), "{problems:?}");
+        let problems = program.validate_specialization_graph();
+        assert!(problems.is_empty(), "{problems:?}");
+        let record = program.instances.get(dynamic).unwrap();
+        let pair = program
+            .instances
+            .get(record.dependencies[0].instance)
+            .unwrap();
+        let key = program.specializations.instance(pair.ordinal).unwrap();
+        assert_eq!(key.runtime().len(), 1);
+        assert_eq!(key.substitutions().len(), 1);
+        assert!(matches!(
+            &key.substitutions()[0],
+            crate::specialization::InstanceSubstitution::Type {
+                value: crate::specialization::CanonicalType::I32,
+                ..
+            }
+        ));
+        assert_eq!(pair.body.as_ref().unwrap().bounds.len(), 2);
+    }
+
+    #[test]
+    fn dynamic_instances_discover_and_materialize_runtime_callees() {
+        use std::collections::BTreeSet;
+        let source = concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "def forward: <T where Copy T> T -> T = value => identity value\n",
+            "let first: I32 = forward 1\n",
+        );
+        let (_, mut program) = lower(source);
+        let function = function_id(&program, "forward");
+        let call = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| match call.target {
+                LoweredCallableTarget::DirectFunction {
+                    function: target, ..
+                } if target == function => Some(call),
+                _ => None,
+            })
+            .unwrap();
+        let runtime = program
+            .relevant_parameters(function)
+            .type_parameters()
+            .collect::<BTreeSet<_>>();
+        let resolved = program
+            .resolve_instance_request_with_runtime(
+                &InstanceResolutionRequest {
+                    function,
+                    origin: call.origin.clone(),
+                    function_type: call.function_type.clone(),
+                    substitutions: call.substitutions.clone(),
+                    evidence: call.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                },
+                &runtime,
+            )
+            .unwrap();
+        assert_eq!(resolved.key.runtime(), &runtime);
+        assert!(resolved.key.substitutions().is_empty());
+        let mut recorder = GraphRecorder::from_parts(program.take_graph());
+        let (dynamic, created) =
+            recorder.intern_resolved(&program, resolved, LoweredInstanceRequest::EagerTemplate);
+        assert!(created);
+        let parts =
+            WorklistBuilder::resume(&program, recorder.into_parts(), vec![dynamic]).unwrap();
+        program.install_graph(parts);
+        assert!(program.materialize_pending_instance_bodies().is_empty());
+        let problems = program.validate_instance_bodies();
+        assert!(problems.is_empty(), "{problems:?}");
+        let problems = program.validate_specialization_graph();
+        assert!(problems.is_empty(), "{problems:?}");
+        let record = program.instances.get(dynamic).unwrap();
+        assert!(record.name.ends_with("_dynamic"));
+        let body = record.body.as_ref().unwrap();
+        assert!(contains_type_parameter(&CheckedType::Function(
+            body.signature.clone()
+        )));
+        let callee = program
+            .instances
+            .get(record.dependencies[0].instance)
+            .unwrap();
+        assert_eq!(callee.template, function_id(&program, "identity"));
+        assert_eq!(
+            program
+                .specializations
+                .instance(callee.ordinal)
+                .unwrap()
+                .runtime()
+                .len(),
+            1
+        );
+        // Descriptor scope is local to the instance, never module-wide.
+        let body = program
+            .instances
+            .get_mut(dynamic)
+            .unwrap()
+            .body
+            .as_mut()
+            .unwrap();
+        body.signature.result = Box::new(CheckedType::Parameter {
+            id: TypeParameterId(999999),
+            name: "Foreign".to_owned(),
+            sized: true,
+            parameter_product_capable: false,
+        });
+        assert!(!program.validate_instance_bodies().is_empty());
     }
 
     #[test]

@@ -31,6 +31,8 @@ pub(crate) enum LoweredArtifactPlan {
     /// Drop glue for one concrete value type. Expansion records the selected
     /// `Drop` method and the ordered representation cleanup steps.
     DropGlue(DropGluePlan),
+    TypeDescriptor(TypeDescriptorPlan),
+    DescriptorDrop(DescriptorDropPlan),
     /// A garbage-collector finalizer. Expansion records the referenced drop glue.
     GcFinalizer(GcFinalizerPlan),
     /// A coroutine `resume`/`cleanup` pair. Expansion records the frame layout
@@ -114,6 +116,8 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::ConstructorAdapter(_) => "constructor-adapter",
             LoweredArtifactPlan::StructuralMethod(_) => "structural-method",
             LoweredArtifactPlan::DropGlue(_) => "drop-glue",
+            LoweredArtifactPlan::TypeDescriptor(_) => "type-descriptor",
+            LoweredArtifactPlan::DescriptorDrop(_) => "descriptor-drop",
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload { .. }) => {
                 "gc-finalizer-payload"
             }
@@ -176,6 +180,14 @@ impl LoweredArtifactPlan {
                         .all(|(argument, expected)| same_type(argument, expected))
                     && same_function(&plan.callable_type, &key.callable_type)
             }
+            (
+                LoweredArtifactPlan::TypeDescriptor(plan),
+                ArtifactRequestKey::TypeDescriptor(key),
+            ) => same_type(&plan.value_type, key),
+            (
+                LoweredArtifactPlan::DescriptorDrop(plan),
+                ArtifactRequestKey::DescriptorDrop(key),
+            ) => same_type(&plan.value_type, key),
             (LoweredArtifactPlan::DropGlue(plan), ArtifactRequestKey::DropGlue(key)) => {
                 same_type(&plan.value_type, key)
             }
@@ -260,6 +272,8 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::ConstructorAdapter(_)
                 | LoweredArtifactPlan::StructuralMethod(_)
                 | LoweredArtifactPlan::DropGlue(_)
+                | LoweredArtifactPlan::TypeDescriptor(_)
+                | LoweredArtifactPlan::DescriptorDrop(_)
                 | LoweredArtifactPlan::GcFinalizer(_)
                 | LoweredArtifactPlan::CoroutineCodes(_)
         )
@@ -275,6 +289,8 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::StructuralMethod(plan) => {
                 !matches!(plan.body, StructuralBody::Unexpanded)
             }
+            LoweredArtifactPlan::TypeDescriptor(plan) => plan.expanded,
+            LoweredArtifactPlan::DescriptorDrop(plan) => plan.glue.is_some(),
             LoweredArtifactPlan::DropGlue(plan) => !matches!(plan.body, DropGlueBody::Unexpanded),
             LoweredArtifactPlan::GcFinalizer(plan) => match plan {
                 GcFinalizerPlan::Payload { glue, .. }
@@ -465,6 +481,8 @@ impl LoweredArtifactPlan {
                     }
                 }
             }
+            LoweredArtifactPlan::TypeDescriptor(plan) => visit(Value(&plan.value_type)),
+            LoweredArtifactPlan::DescriptorDrop(plan) => visit(Value(&plan.value_type)),
             LoweredArtifactPlan::DropGlue(DropGluePlan { value_type, body }) => {
                 visit(Value(value_type));
                 match body {
@@ -610,6 +628,19 @@ impl LoweredArtifactPlan {
         match self {
             LoweredArtifactPlan::ConstructorAdapter(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees(visit),
+            LoweredArtifactPlan::TypeDescriptor(plan) => {
+                for component in &plan.components {
+                    visit(PlannedCalleeRef::Artifact(component));
+                }
+                if let Some(drop) = &plan.drop {
+                    visit(PlannedCalleeRef::Artifact(drop));
+                }
+            }
+            LoweredArtifactPlan::DescriptorDrop(plan) => {
+                if let Some(glue) = &plan.glue {
+                    visit(PlannedCalleeRef::Artifact(glue));
+                }
+            }
             LoweredArtifactPlan::DropGlue(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees(visit),
@@ -624,6 +655,19 @@ impl LoweredArtifactPlan {
         match self {
             LoweredArtifactPlan::ConstructorAdapter(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees_mut(visit),
+            LoweredArtifactPlan::TypeDescriptor(plan) => {
+                for component in &mut plan.components {
+                    visit(PlannedCalleeRefMut::Artifact(component));
+                }
+                if let Some(drop) = &mut plan.drop {
+                    visit(PlannedCalleeRefMut::Artifact(drop));
+                }
+            }
+            LoweredArtifactPlan::DescriptorDrop(plan) => {
+                if let Some(glue) = &mut plan.glue {
+                    visit(PlannedCalleeRefMut::Artifact(glue));
+                }
+            }
             LoweredArtifactPlan::DropGlue(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees_mut(visit),
@@ -1317,4 +1361,19 @@ pub(crate) struct ExternDeclaration {
     /// every non-variadic extern binding, used or not. The artifact records
     /// which adapters a callable-value site actually reaches.
     pub eagerly_declared: bool,
+}
+
+/// A demand-driven static descriptor. Layout is target-specific and stays in codegen.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TypeDescriptorPlan {
+    pub value_type: CheckedType,
+    pub components: Vec<PlannedArtifact>,
+    pub drop: Option<PlannedArtifact>,
+    pub expanded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DescriptorDropPlan {
+    pub value_type: CheckedType,
+    pub glue: Option<PlannedArtifact>,
 }

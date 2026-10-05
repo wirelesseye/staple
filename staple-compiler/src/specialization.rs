@@ -1,4 +1,4 @@
-//! Canonical structural identities for concrete specialization.
+//! Canonical structural identities for concrete and dynamic specialization.
 //!
 //! Instance and artifact keys contain semantic IDs and concrete structural types
 //! and evidence. Display names, spans, contextual defaults, and expanded nominal
@@ -7,7 +7,7 @@
 //! names with collision checks. Runtime surfaces with fixed names are recorded
 //! separately from generated artifacts.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use staple_syntax::Diagnostic;
 
@@ -415,6 +415,7 @@ impl InstanceSubstitution {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct InstanceKey {
     function: FunctionId,
+    runtime: BTreeSet<TypeParameterId>,
     substitutions: Vec<InstanceSubstitution>,
     evidence: Option<CanonicalEvidence>,
 }
@@ -425,11 +426,17 @@ pub(crate) enum InstanceKeyError {
     DuplicateParameter(TypeParameterId),
     /// A parameter appeared as both a type and an effect entry.
     ConflictingParameter(TypeParameterId),
+    /// A run-time parameter also has a compile-time substitution.
+    RuntimeSubstitution(TypeParameterId),
 }
 
 impl InstanceKeyError {
     pub(crate) fn message(self) -> String {
         match self {
+            InstanceKeyError::RuntimeSubstitution(parameter) => format!(
+                "instance key gives run-time parameter {} a compile-time substitution",
+                parameter.0
+            ),
             InstanceKeyError::DuplicateParameter(parameter) => format!(
                 "instance key repeats the substitution for parameter {}",
                 parameter.0
@@ -448,9 +455,28 @@ impl InstanceKey {
     /// unresolved request never masquerades as a concrete key.
     pub(crate) fn new(
         function: FunctionId,
-        mut substitutions: Vec<InstanceSubstitution>,
+        substitutions: Vec<InstanceSubstitution>,
         evidence: Option<CanonicalEvidence>,
     ) -> Result<Self, InstanceKeyError> {
+        Self::with_runtime(function, substitutions, evidence, BTreeSet::new())
+    }
+
+    /// Runtime parameters are identified by their template IDs and never carry
+    /// concrete substitutions. Descriptor values belong to call sites, so two
+    /// concrete callers can share the same dynamic implementation key.
+    pub(crate) fn with_runtime(
+        function: FunctionId,
+        mut substitutions: Vec<InstanceSubstitution>,
+        evidence: Option<CanonicalEvidence>,
+        runtime: BTreeSet<TypeParameterId>,
+    ) -> Result<Self, InstanceKeyError> {
+        for substitution in &substitutions {
+            if runtime.contains(&substitution.parameter()) {
+                return Err(InstanceKeyError::RuntimeSubstitution(
+                    substitution.parameter(),
+                ));
+            }
+        }
         substitutions.sort_by_key(|substitution| substitution.parameter().0);
         for pair in substitutions.windows(2) {
             if pair[0].parameter() == pair[1].parameter() {
@@ -473,9 +499,14 @@ impl InstanceKey {
         }
         Ok(InstanceKey {
             function,
+            runtime,
             substitutions,
             evidence,
         })
+    }
+
+    pub(crate) fn runtime(&self) -> &BTreeSet<TypeParameterId> {
+        &self.runtime
     }
 
     pub(crate) fn function(&self) -> FunctionId {
@@ -731,6 +762,8 @@ pub(crate) enum ArtifactRequestKey {
     ConstructorAdapter(ConstructorAdapterKey),
     StructuralMethod(StructuralMethodKey),
     DropGlue(DropGlueKey),
+    TypeDescriptor(CanonicalType),
+    DescriptorDrop(CanonicalType),
     GcFinalizer(GcFinalizerKey),
     CoroutineCodes(CoroutineCodesKey),
     ReactionRunner(ReactiveRunnerKey),
@@ -747,6 +780,8 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::ConstructorAdapter(_) => "constructor-adapter",
             ArtifactRequestKey::StructuralMethod(_) => "structural-method",
             ArtifactRequestKey::DropGlue(_) => "drop-glue",
+            ArtifactRequestKey::TypeDescriptor(_) => "type-descriptor",
+            ArtifactRequestKey::DescriptorDrop(_) => "descriptor-drop",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => "gc-finalizer-payload",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(_)) => "gc-finalizer-cell",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment { .. }) => {
@@ -927,6 +962,9 @@ impl SpecializationCatalog {
         declared: &impl Fn(&InstanceKey) -> Option<String>,
         seen: &HashSet<String>,
     ) -> String {
+        if !key.runtime().is_empty() {
+            return format!("{}_dynamic", instance_ordinal_name(ordinal));
+        }
         if key.substitutions().is_empty() && key.evidence().is_none() {
             if let Some(candidate) = declared(key) {
                 if !candidate.is_empty() && !seen.contains(&candidate) {
@@ -955,6 +993,8 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
             format!("__staple_structural_{}", structural_name(method.structural))
         }
         ArtifactRequestKey::DropGlue(_) => "__staple_drop_glue".to_owned(),
+        ArtifactRequestKey::TypeDescriptor(_) => "__staple_type_descriptor".to_owned(),
+        ArtifactRequestKey::DescriptorDrop(_) => "__staple_descriptor_drop".to_owned(),
         ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => {
             "__staple_gc_finalizer_payload".to_owned()
         }
@@ -1557,6 +1597,48 @@ mod tests {
     ) -> InstanceKey {
         InstanceKey::new(FunctionId(function), substitutions, evidence)
             .expect("well-formed instance key")
+    }
+
+    #[test]
+    fn runtime_instance_keys_are_distinct_and_keep_concrete_names() {
+        let concrete = instance_key(1, vec![], None);
+        let dynamic = InstanceKey::with_runtime(
+            FunctionId(1),
+            vec![],
+            None,
+            BTreeSet::from([TypeParameterId(2), TypeParameterId(1)]),
+        )
+        .unwrap();
+        let reordered = InstanceKey::with_runtime(
+            FunctionId(1),
+            vec![],
+            None,
+            [TypeParameterId(1), TypeParameterId(2)]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(dynamic, reordered);
+        assert_ne!(concrete, dynamic);
+        let mut catalog = SpecializationCatalog::default();
+        catalog.reserve_instance(concrete);
+        catalog.reserve_instance(dynamic);
+        assert_eq!(
+            catalog
+                .planned_names_with(|_| Some("identity".to_owned()))
+                .unwrap(),
+            vec!["identity", "__staple_instance_1_dynamic"]
+        );
+        assert_eq!(
+            InstanceKey::with_runtime(
+                FunctionId(1),
+                vec![type_substitution(1, CheckedType::I32)],
+                None,
+                BTreeSet::from([TypeParameterId(1)])
+            )
+            .unwrap_err(),
+            InstanceKeyError::RuntimeSubstitution(TypeParameterId(1))
+        );
     }
 
     #[test]

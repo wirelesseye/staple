@@ -44,6 +44,7 @@ mod artifact_validation;
 pub(crate) mod census;
 mod cleanup_artifacts;
 mod coroutine_artifacts;
+mod descriptor_artifacts;
 mod emission;
 mod extern_artifacts;
 pub(crate) mod graph_validation;
@@ -105,12 +106,12 @@ pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredIn
 // Family-specific plan types are also used within the lowering subtree.
 pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
-    CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DropGlueBody,
-    DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement, ExternAdapterPlan,
+    CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorDropPlan,
+    DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement, ExternAdapterPlan,
     ExternDeclaration, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlanType,
     PlannedArtifact, PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance,
     ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody,
-    StructuralMethodPlan, SumAlternative, TraitDelegate,
+    StructuralMethodPlan, SumAlternative, TraitDelegate, TypeDescriptorPlan,
 };
 
 // Runtime requirements. Fixed-named runtime surfaces are not an
@@ -14205,6 +14206,8 @@ pub enum PlannedArtifactFamily {
     GcBufferFinalizer,
     ExternAdapter,
     CoroutineCodes,
+    TypeDescriptor,
+    DescriptorDrop,
 }
 
 impl LoweredModule {
@@ -14263,7 +14266,9 @@ impl LoweredModule {
                 )
                 | (GcBufferFinalizer, ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Buffer(_)))
                 | (ExternAdapter, ArtifactRequestKey::ExternAdapter(_))
-                | (CoroutineCodes, ArtifactRequestKey::CoroutineCodes(_)) => true,
+                | (CoroutineCodes, ArtifactRequestKey::CoroutineCodes(_))
+                | (TypeDescriptor, ArtifactRequestKey::TypeDescriptor(_))
+                | (DescriptorDrop, ArtifactRequestKey::DescriptorDrop(_)) => true,
                 _ => false,
             };
             if !selected {

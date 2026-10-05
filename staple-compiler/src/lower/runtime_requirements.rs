@@ -356,7 +356,9 @@ fn record_plan_requirements(
                 requirements.record(RuntimeRequirement::GarbageCollector);
             }
         }
-        LoweredArtifactPlan::ExternAdapter(_) => {}
+        LoweredArtifactPlan::ExternAdapter(_)
+        | LoweredArtifactPlan::TypeDescriptor(_)
+        | LoweredArtifactPlan::DescriptorDrop(_) => {}
     }
 }
 

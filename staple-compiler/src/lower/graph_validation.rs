@@ -16,6 +16,7 @@ use crate::{
 };
 
 use super::instance_body::LoweredInstanceBody;
+use super::instance_resolution::contains_parameter_outside_scope;
 use super::{ArenaId, LoweredFunctionInstance, LoweredItemKind, LoweredProgram};
 
 impl LoweredProgram {
@@ -147,6 +148,16 @@ impl<'a> GraphValidator<'a> {
         };
         let mut substitutions = Vec::new();
         let mut complete = true;
+        if !key
+            .runtime()
+            .is_subset(&instance.relevant.type_parameters().collect())
+        {
+            self.report(
+                &instance.origin,
+                "instance run-time set includes a non-relevant type parameter",
+            );
+            complete = false;
+        }
         for parameter in instance.relevant.type_parameters() {
             let Some(value_type) = instance.environment.type_value(parameter) else {
                 self.report(
@@ -160,6 +171,17 @@ impl<'a> GraphValidator<'a> {
                 complete = false;
                 continue;
             };
+            if key.runtime().contains(&parameter) {
+                if !matches!(value_type, crate::CheckedType::Parameter { id, .. } if *id == parameter)
+                {
+                    self.report(
+                        &instance.origin,
+                        "run-time parameter does not retain its own identity",
+                    );
+                    complete = false;
+                }
+                continue;
+            }
             if contains_type_parameter(value_type) {
                 self.report(
                     &instance.origin,
@@ -227,7 +249,12 @@ impl<'a> GraphValidator<'a> {
         if !complete {
             return;
         }
-        match InstanceKey::new(instance.template, substitutions, evidence) {
+        match InstanceKey::with_runtime(
+            instance.template,
+            substitutions,
+            evidence,
+            key.runtime().clone(),
+        ) {
             Ok(rebuilt) if &rebuilt == key => {}
             Ok(_) => self.report(
                 &instance.origin,
@@ -311,14 +338,26 @@ impl<'a> GraphValidator<'a> {
             );
             return;
         }
+        let runtime = self
+            .program
+            .specializations
+            .instance(record.ordinal)
+            .map(|key| key.runtime())
+            .cloned()
+            .unwrap_or_default();
         for (_, call) in body.calls.iter() {
-            self.check_substitutions(&call.origin, &call.substitutions, "call");
+            self.check_substitutions(&call.origin, &call.substitutions, "call", &runtime);
             if let Some(evidence) = &call.evidence {
                 self.check_evidence(&call.origin, evidence);
             }
         }
         for (_, value) in body.callable_values.iter() {
-            self.check_substitutions(&value.origin, &value.substitutions, "callable value");
+            self.check_substitutions(
+                &value.origin,
+                &value.substitutions,
+                "callable value",
+                &runtime,
+            );
             if let Some(evidence) = &value.evidence {
                 self.check_evidence(&value.origin, evidence);
             }
@@ -329,9 +368,10 @@ impl<'a> GraphValidator<'a> {
                 &value.origin,
                 &closure.substitutions,
                 "closure construction",
+                &runtime,
             );
             for capture in &closure.captures {
-                if contains_type_parameter(&capture.value_type) {
+                if contains_parameter_outside_scope(&capture.value_type, &runtime) {
                     self.report(
                         &value.origin,
                         format!(
@@ -378,9 +418,10 @@ impl<'a> GraphValidator<'a> {
         origin: &Origin,
         substitutions: &CallSubstitutions,
         what: &str,
+        runtime: &BTreeSet<crate::TypeParameterId>,
     ) {
         for entry in &substitutions.types {
-            if contains_type_parameter(&entry.value_type) {
+            if contains_parameter_outside_scope(&entry.value_type, runtime) {
                 self.report(
                     origin,
                     format!(

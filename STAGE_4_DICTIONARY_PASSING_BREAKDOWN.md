@@ -223,6 +223,28 @@ Breakdown-level decisions, in addition to the main plan's. Decisions 10 and
 
 ## Stage 4a — Dynamic implementations
 
+### Implementation status (partial)
+
+Implemented foundations:
+- Runtime instance keys, distinct name planning, nested runtime-parameter
+  classification, and instance-local validation. Specialization preserves
+  runtime parameters and marker bounds, while retaining independent concrete
+  substitutions.
+- Demand-driven static `type-descriptor` and `descriptor-drop` artifacts,
+  component descriptors, and concrete descriptor drop entry points.
+- Descriptor layout rules for packed products, sums, and wrappers, with a
+  corpus sweep against LLVM `TargetData`, including product and sum offsets.
+
+Stage 4a is **not complete**. Still required: the differential lowering option
+and transitive restriction analysis; runtime compound descriptor builders;
+dynamic value emission and ABI/calls; reabstraction; dynamic GC payloads and
+intrinsics; and the differential exit gate. Stage 3's polymorphic-value gate
+remains in place.
+
+Validation: `cargo test --workspace --quiet` passes; all 104 corpus/example
+inputs report `same` against the `50565d8` release build without a differential
+lowering option.
+
 ### Step 4a.1 — Keys, specialization, and validation
 
 - Add the `runtime` set to `InstanceKey` (Decision 1), with stable name

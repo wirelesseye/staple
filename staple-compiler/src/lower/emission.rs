@@ -78,6 +78,19 @@ impl<'a> EmissionView<'a> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn initializer_layout_value_types(
+        &self,
+    ) -> impl Iterator<Item = &'a crate::CheckedType> + 'a {
+        self.program
+            .expressions
+            .iter()
+            .filter(|(_, expression)| {
+                matches!(expression.key.owner, super::ExpressionOwner::Module(_))
+            })
+            .map(|(_, expression)| &expression.value_type)
+    }
+
     /// Every interned source-function instance in catalog order.
     pub(crate) fn instances(
         &self,

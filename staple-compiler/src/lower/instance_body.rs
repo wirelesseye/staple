@@ -275,6 +275,14 @@ impl LoweredInstanceBody {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn layout_value_types(&self) -> impl Iterator<Item = &CheckedType> {
+        self.expressions
+            .iter()
+            .map(|(_, expression)| &expression.value_type)
+            .chain(self.places.iter().map(|(_, place)| &place.value_type))
+    }
+
     /// The body's concrete signature.
     pub(crate) fn signature(&self) -> &CheckedFunctionType {
         &self.signature
@@ -617,6 +625,27 @@ impl<'a> BodyCloner<'a> {
                     .iter()
                     .any(|argument| contains_type_parameter(&self.ty(argument)))
                 {
+                    let marker = Some(bound.trait_id) == self.program.semantic_ids.copy_trait
+                        || Some(bound.trait_id) == self.program.semantic_ids.sized_trait;
+                    let runtime = self.enclosing.key.runtime();
+                    if marker
+                        && !runtime.is_empty()
+                        && bound.arguments.iter().all(|argument| {
+                            !super::instance_resolution::contains_parameter_outside_scope(
+                                &self.ty(argument),
+                                runtime,
+                            )
+                        })
+                    {
+                        return Some(CheckedTraitBound {
+                            trait_id: bound.trait_id,
+                            arguments: bound
+                                .arguments
+                                .iter()
+                                .map(|argument| self.ty(argument))
+                                .collect(),
+                        });
+                    }
                     return None;
                 }
                 match self.program.complete_declared_bound(
@@ -3412,7 +3441,14 @@ impl<'a> BodyValidator<'a> {
     }
 
     fn check_concrete_type(&mut self, origin: &Origin, value_type: &CheckedType, what: &str) {
-        if contains_type_parameter(value_type) {
+        let runtime = self
+            .program
+            .specializations
+            .instance(self.instance.ordinal)
+            .map(|key| key.runtime())
+            .cloned()
+            .unwrap_or_default();
+        if super::instance_resolution::contains_parameter_outside_scope(value_type, &runtime) {
             self.report(
                 origin.span.clone(),
                 format!(

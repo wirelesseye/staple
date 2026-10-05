@@ -442,6 +442,27 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .compile_closure_function_type(&plan.callable_type)?;
                     vec![self.backend.llvm_module.add_function(name, ty, None)]
                 }
+                LoweredArtifactPlan::TypeDescriptor(plan) => {
+                    let ty = self
+                        .backend
+                        .type_descriptor_type(plan.components.len() as u32);
+                    let global = self.backend.llvm_module.add_global(ty, None, name);
+                    global.set_linkage(Linkage::Internal);
+                    global.set_constant(true);
+                    Vec::new()
+                }
+                LoweredArtifactPlan::DescriptorDrop(_) => {
+                    let ty = self
+                        .backend
+                        .context
+                        .void_type()
+                        .fn_type(&[pointer.into(), pointer.into()], false);
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
                 LoweredArtifactPlan::DropGlue(_) => Vec::new(),
                 LoweredArtifactPlan::GcFinalizer(_) => {
                     let ty = self
@@ -1751,6 +1772,38 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::GcFinalizer(plan) => {
                 self.emit_gc_finalizer_body(ordinal, plan, &artifact.origin.span)
             }
+            LoweredArtifactPlan::TypeDescriptor(plan) => {
+                self.emit_type_descriptor(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::DescriptorDrop(plan) => {
+                let function = self
+                    .artifacts
+                    .get(&ordinal)
+                    .and_then(|functions| functions.first())
+                    .copied()
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            artifact.origin.span.clone(),
+                            "missing descriptor drop declaration",
+                        )
+                    })?;
+                let body = self
+                    .backend
+                    .enter_finalizer_function(function, artifact.origin.span.clone())?;
+                let payload = function
+                    .get_nth_param(1)
+                    .expect("descriptor drop has two parameters")
+                    .into_pointer_value();
+                let ty = self.backend.compile_type(&plan.value_type)?;
+                let value = self
+                    .backend
+                    .builder
+                    .build_load(ty, payload, "descriptor.drop.value")
+                    .map_err(compiler_diagnostic)?;
+                let glue = self.finalizer_glue(&plan.glue, &artifact.origin.span)?;
+                self.emit_drop_glue(value, glue, &artifact.origin.span)?;
+                self.backend.finish_finalizer_function(&body)
+            }
             // Drop glue expands inline at recorded use sites.
             LoweredArtifactPlan::DropGlue(_) => Ok(()),
             LoweredArtifactPlan::CoroutineCodes(plan) => {
@@ -1762,6 +1815,85 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.emit_runner_body(ordinal, plan, &artifact.origin.span)
             }
         }
+    }
+
+    fn descriptor_global(
+        &self,
+        ordinal: ArtifactOrdinal,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<GlobalValue<'context>> {
+        let name = self
+            .view
+            .planned_artifact_name(ordinal)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing descriptor name"))?;
+        self.backend
+            .llvm_module
+            .get_global(name)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing descriptor declaration"))
+    }
+
+    fn emit_type_descriptor(
+        &self,
+        ordinal: ArtifactOrdinal,
+        plan: &crate::TypeDescriptorPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let layout = self.backend.descriptor_layout(&plan.value_type)?;
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let mut components = Vec::new();
+        for component in &plan.components {
+            let ordinal = component
+                .artifact
+                .ok_or_else(|| Diagnostic::new(span.clone(), "unbound component descriptor"))?;
+            components.push(self.descriptor_global(ordinal, span)?.as_pointer_value());
+        }
+        let drop = match &plan.drop {
+            Some(drop) => {
+                let ordinal = drop
+                    .artifact
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "unbound descriptor drop"))?;
+                self.artifacts
+                    .get(&ordinal)
+                    .and_then(|functions| functions.first())
+                    .copied()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "missing descriptor drop entry"))?
+                    .as_global_value()
+                    .as_pointer_value()
+            }
+            None => pointer.const_null(),
+        };
+        let descriptor = self
+            .backend
+            .type_descriptor_type(components.len() as u32)
+            .const_named_struct(&[
+                self.backend
+                    .size_type
+                    .const_int(layout.store_size, false)
+                    .into(),
+                self.backend
+                    .size_type
+                    .const_int(layout.stride, false)
+                    .into(),
+                self.backend
+                    .size_type
+                    .const_int(layout.align as u64, false)
+                    .into(),
+                self.backend
+                    .context
+                    .i32_type()
+                    .const_int(u64::from(plan.drop.is_none()), false)
+                    .into(),
+                drop.into(),
+                self.backend
+                    .context
+                    .i32_type()
+                    .const_int(components.len() as u64, false)
+                    .into(),
+                pointer.const_array(&components).into(),
+            ]);
+        self.descriptor_global(ordinal, span)?
+            .set_initializer(&descriptor);
+        Ok(())
     }
 
     /// Emits the recorded payload, cell, closure-environment, or buffer finalizer.

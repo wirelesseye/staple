@@ -296,6 +296,9 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 };
                 super::structural_artifacts::expand_structural_method(program, artifact, plan)
             }
+            ArtifactRequestKey::TypeDescriptor(_) | ArtifactRequestKey::DescriptorDrop(_) => {
+                super::descriptor_artifacts::expand(program, artifact, plan)
+            }
             ArtifactRequestKey::DropGlue(_) => {
                 let LoweredArtifactPlan::DropGlue(plan) = plan else {
                     return Err(vec![Diagnostic::new(
@@ -383,6 +386,8 @@ impl ArtifactFamilyHooks for ProductionHooks {
             ArtifactRequestKey::ConstructorAdapter(_)
                 | ArtifactRequestKey::StructuralMethod(_)
                 | ArtifactRequestKey::DropGlue(_)
+                | ArtifactRequestKey::TypeDescriptor(_)
+                | ArtifactRequestKey::DescriptorDrop(_)
                 | ArtifactRequestKey::GcFinalizer(_)
                 | ArtifactRequestKey::CoroutineCodes(_)
                 | ArtifactRequestKey::ReactionRunner(_)

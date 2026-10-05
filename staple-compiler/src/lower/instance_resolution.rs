@@ -338,7 +338,10 @@ impl SubstitutionEnvironment {
     }
 }
 
-fn collect_referenced_parameters(value_type: &CheckedType, out: &mut BTreeSet<TypeParameterId>) {
+pub(super) fn collect_referenced_parameters(
+    value_type: &CheckedType,
+    out: &mut BTreeSet<TypeParameterId>,
+) {
     match value_type {
         // Lowering never sees a scheme in Stage 2 (canonicalization reports one
         // as an invariant violation); collect only its free parameters.
@@ -916,6 +919,33 @@ pub(crate) fn unresolved_type_problem(value_type: &CheckedType) -> Option<&'stat
         return Some("its value contains an inferred or error placeholder");
     }
     None
+}
+
+/// True when a type refers to a parameter without a descriptor in this scope.
+pub(super) fn contains_parameter_outside_scope(
+    value_type: &CheckedType,
+    runtime: &BTreeSet<TypeParameterId>,
+) -> bool {
+    if runtime.is_empty() {
+        return contains_type_parameter(value_type);
+    }
+    let mut referenced = BTreeSet::new();
+    collect_referenced_parameters(value_type, &mut referenced);
+    !referenced.is_subset(runtime)
+}
+
+/// Parameters are legal only in the owning dynamic instance's descriptor scope.
+/// Replace those parameters before using the normal concrete validator, which
+/// still rejects placeholders and any parameter outside the scope.
+pub(super) fn unresolved_type_problem_in_scope(
+    value_type: &CheckedType,
+    runtime: &BTreeSet<TypeParameterId>,
+) -> Option<&'static str> {
+    if runtime.is_empty() {
+        return unresolved_type_problem(value_type);
+    }
+    let map = runtime.iter().map(|id| (*id, CheckedType::Never)).collect();
+    unresolved_type_problem(&substitute_type(value_type.clone(), &map))
 }
 
 fn contains_placeholder(value_type: &CheckedType) -> bool {
@@ -2018,19 +2048,85 @@ impl LoweredProgram {
         &self,
         request: &InstanceResolutionRequest<'_>,
     ) -> Result<ResolvedInstanceRequest, Diagnostic> {
+        self.resolve_instance_request_with_runtime(request, &BTreeSet::new())
+    }
+
+    /// Requests an implementation whose selected parameters arrive as descriptors.
+    /// Nested requests infer their run-time set from the caller's descriptor scope.
+    pub(crate) fn resolve_instance_request_with_runtime(
+        &self,
+        request: &InstanceResolutionRequest<'_>,
+        requested_runtime: &BTreeSet<TypeParameterId>,
+    ) -> Result<ResolvedInstanceRequest, Diagnostic> {
         let enclosing = match request.target {
             InstanceResolutionTarget::Root => None,
             InstanceResolutionTarget::Nested(enclosing)
             | InstanceResolutionTarget::Current(enclosing) => Some(enclosing),
         };
         let resolved = (|| {
-            let (environment, relevant) = self.resolve_substitutions(
-                request.function,
-                &request.origin,
-                &request.function_type,
-                &request.substitutions,
-                enclosing.map(|enclosing| &enclosing.environment),
-            )?;
+            let caller_runtime = enclosing
+                .map(|owner| owner.key.runtime())
+                .cloned()
+                .unwrap_or_default();
+            let (mut environment, relevant) =
+                if caller_runtime.is_empty() && requested_runtime.is_empty() {
+                    self.resolve_substitutions(
+                        request.function,
+                        &request.origin,
+                        &request.function_type,
+                        &request.substitutions,
+                        enclosing.map(|owner| &owner.environment),
+                    )?
+                } else {
+                    self.resolve_substitutions_in_scope(
+                        request.function,
+                        &request.origin,
+                        &request.function_type,
+                        &request.substitutions,
+                        enclosing.map(|enclosing| &enclosing.environment),
+                        &caller_runtime,
+                        requested_runtime,
+                    )?
+                };
+            let mut runtime = requested_runtime.clone();
+            if !caller_runtime.is_empty() {
+                for parameter in relevant.type_parameters() {
+                    if let Some(value) = environment.type_value(parameter) {
+                        let mut referenced = BTreeSet::new();
+                        collect_referenced_parameters(value, &mut referenced);
+                        if !referenced.is_disjoint(&caller_runtime) {
+                            runtime.insert(parameter);
+                        }
+                    } else if caller_runtime.contains(&parameter) {
+                        runtime.insert(parameter);
+                    }
+                }
+            }
+            for parameter in &runtime {
+                if !relevant.types.contains(parameter) {
+                    return Err(Diagnostic::new(
+                        request.origin.span.clone(),
+                        format!(
+                            "run-time parameter {} is not a relevant type parameter",
+                            parameter.0
+                        ),
+                    ));
+                }
+                // Never retain a caller's parameter identity in a callee body.
+                // The call site supplies the descriptor for the original argument.
+                environment.entries.insert(
+                    *parameter,
+                    SubstitutionEntry {
+                        source: SubstitutionSource::Site,
+                        value: SubstitutionValue::Type(CheckedType::Parameter {
+                            id: *parameter,
+                            name: relevant.name(*parameter).unwrap_or("").to_owned(),
+                            sized: true,
+                            parameter_product_capable: false,
+                        }),
+                    },
+                );
+            }
             let evidence = self.resolve_trait_evidence(
                 &request.origin,
                 request.evidence.as_ref(),
@@ -2042,6 +2138,7 @@ impl LoweredProgram {
                 &relevant,
                 evidence.as_ref(),
                 &request.origin,
+                &runtime,
             )?;
             Ok::<_, Diagnostic>((environment, relevant, evidence, key))
         })();
@@ -2106,9 +2203,13 @@ fn build_instance_key(
     relevant: &RelevantParameters,
     evidence: Option<&TraitEvidence>,
     origin: &Origin,
+    runtime: &BTreeSet<TypeParameterId>,
 ) -> Result<InstanceKey, Diagnostic> {
     let mut substitutions = Vec::new();
     for parameter in relevant.type_parameters() {
+        if runtime.contains(&parameter) {
+            continue;
+        }
         let Some(value_type) = environment.type_value(parameter) else {
             return Err(Diagnostic::new(
                 origin.span.clone(),
@@ -2141,8 +2242,12 @@ fn build_instance_key(
     let evidence = evidence
         .map(|evidence| canonical_evidence(evidence, origin))
         .transpose()?;
-    InstanceKey::new(function, substitutions, evidence)
-        .map_err(|error| Diagnostic::new(origin.span.clone(), error.message()))
+    let key = if runtime.is_empty() {
+        InstanceKey::new(function, substitutions, evidence)
+    } else {
+        InstanceKey::with_runtime(function, substitutions, evidence, runtime.clone())
+    };
+    key.map_err(|error| Diagnostic::new(origin.span.clone(), error.message()))
 }
 
 struct ParameterCollector<'a> {
@@ -2975,6 +3080,28 @@ impl LoweredProgram {
         substitutions: &CallSubstitutions,
         enclosing: Option<&SubstitutionEnvironment>,
     ) -> Result<(SubstitutionEnvironment, RelevantParameters), Diagnostic> {
+        self.resolve_substitutions_in_scope(
+            function,
+            origin,
+            function_type,
+            substitutions,
+            enclosing,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_substitutions_in_scope(
+        &self,
+        function: FunctionId,
+        origin: &Origin,
+        function_type: &CheckedFunctionType,
+        substitutions: &CallSubstitutions,
+        enclosing: Option<&SubstitutionEnvironment>,
+        caller_runtime: &BTreeSet<TypeParameterId>,
+        requested_runtime: &BTreeSet<TypeParameterId>,
+    ) -> Result<(SubstitutionEnvironment, RelevantParameters), Diagnostic> {
         let Some(template) = self.functions.get(function) else {
             return Err(Diagnostic::new(
                 origin.span.clone(),
@@ -3012,7 +3139,31 @@ impl LoweredProgram {
         }
         builder.add_inferred(inferred);
         let environment = builder.resolve()?;
-        require_concrete_substitutions(&environment, &relevant, origin)?;
+        let mut concrete = environment.clone();
+        let mut scope = caller_runtime.clone();
+        scope.extend(requested_runtime);
+        for parameter in relevant.type_parameters() {
+            if requested_runtime.contains(&parameter) || caller_runtime.contains(&parameter) {
+                concrete.entries.insert(
+                    parameter,
+                    SubstitutionEntry {
+                        source: SubstitutionSource::Site,
+                        value: SubstitutionValue::Type(CheckedType::Never),
+                    },
+                );
+            } else if let Some(entry) = concrete.entries.get_mut(&parameter) {
+                if let SubstitutionValue::Type(value) = &entry.value {
+                    if let Some(problem) = unresolved_type_problem_in_scope(value, &scope) {
+                        return Err(unresolved_parameter_diagnostic(
+                            origin, &relevant, parameter, "type", problem,
+                        ));
+                    }
+                    let map = scope.iter().map(|id| (*id, CheckedType::Never)).collect();
+                    entry.value = SubstitutionValue::Type(substitute_type(value.clone(), &map));
+                }
+            }
+        }
+        require_concrete_substitutions(&concrete, &relevant, origin)?;
         Ok((environment, relevant))
     }
 
@@ -4712,6 +4863,118 @@ mod tests {
             keys[0], keys[1],
             "different captured outer arguments separate the closure instances"
         );
+    }
+
+    #[test]
+    fn runtime_requests_deduplicate_concrete_call_sites() {
+        let (_, program) = lower(concat!(
+            "def identity: <T where Copy T> T -> T = value => value\n",
+            "let first: I32 = identity 1\n",
+            "let second: U8 = identity (U8 :: 2)\n",
+        ));
+        let function = function_id(&program, "identity");
+        let runtime = program
+            .relevant_parameters(function)
+            .type_parameters()
+            .collect();
+        let requests = direct_calls(&program, "identity")
+            .into_iter()
+            .map(|(function, call)| {
+                program
+                    .resolve_instance_request_with_runtime(
+                        &InstanceResolutionRequest {
+                            function,
+                            origin: call.origin.clone(),
+                            function_type: call.function_type.clone(),
+                            substitutions: call.substitutions.clone(),
+                            evidence: call.evidence.clone(),
+                            target: InstanceResolutionTarget::Root,
+                        },
+                        &runtime,
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].key, requests[1].key);
+        let parameter = *runtime.iter().next().unwrap();
+        assert!(matches!(requests[0].environment.type_value(parameter),
+            Some(CheckedType::Parameter { id, .. }) if *id == parameter));
+        let (function, call) = direct_call(&program, "identity");
+        let error = program
+            .resolve_instance_request_with_runtime(
+                &InstanceResolutionRequest {
+                    function,
+                    origin: call.origin.clone(),
+                    function_type: call.function_type.clone(),
+                    substitutions: call.substitutions.clone(),
+                    evidence: call.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                },
+                &BTreeSet::from([TypeParameterId(999999)]),
+            )
+            .unwrap_err();
+        assert!(error.message.contains("not a relevant type parameter"));
+    }
+
+    #[test]
+    fn runtime_recursion_reuses_the_current_instance() {
+        let (_, program) = lower(concat!(
+            "def recursive: <T where Copy T> T -> T = value => recursive value\n",
+            "let result: I32 = recursive 1\n",
+        ));
+        let (function, call) = direct_calls(&program, "recursive")
+            .into_iter()
+            .find(|(_, call)| {
+                !matches!(
+                    call.target,
+                    LoweredCallableTarget::DirectFunction {
+                        environment: LoweredCallEnvironment::Current,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let runtime = program
+            .relevant_parameters(function)
+            .type_parameters()
+            .collect();
+        let outer = program
+            .resolve_instance_request_with_runtime(
+                &InstanceResolutionRequest {
+                    function,
+                    origin: call.origin.clone(),
+                    function_type: call.function_type.clone(),
+                    substitutions: call.substitutions.clone(),
+                    evidence: call.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                },
+                &runtime,
+            )
+            .unwrap();
+        let (_, inner) = direct_calls(&program, "recursive")
+            .into_iter()
+            .find(|(_, call)| {
+                matches!(
+                    call.target,
+                    LoweredCallableTarget::DirectFunction {
+                        environment: LoweredCallEnvironment::Current,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let recursive = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function,
+                origin: inner.origin.clone(),
+                function_type: inner.function_type.clone(),
+                substitutions: inner.substitutions.clone(),
+                evidence: inner.evidence.clone(),
+                target: InstanceResolutionTarget::Current(&outer),
+            })
+            .unwrap();
+        assert_eq!(recursive.key, outer.key);
     }
 
     #[test]
