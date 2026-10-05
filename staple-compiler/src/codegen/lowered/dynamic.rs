@@ -2568,13 +2568,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let dereference = match &access.kind {
                     crate::LoweredAccessKind::Product { dereference, .. }
                     | crate::LoweredAccessKind::Scalar { dereference }
-                    | crate::LoweredAccessKind::Representation { dereference } => dereference,
-                    crate::LoweredAccessKind::Slice { .. } => {
-                        return Err(Diagnostic::new(
-                            expression.origin.span.clone(),
-                            "dynamic slice access is not yet implemented",
-                        ));
-                    }
+                    | crate::LoweredAccessKind::Representation { dereference }
+                    | crate::LoweredAccessKind::Slice { dereference, .. } => dereference,
                 };
                 let container_type = dereference
                     .last()
@@ -2595,7 +2590,60 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     }
                     crate::LoweredAccessKind::Scalar { .. }
                     | crate::LoweredAccessKind::Representation { .. } => base,
-                    crate::LoweredAccessKind::Slice { .. } => unreachable!(),
+                    crate::LoweredAccessKind::Slice { index, .. } => {
+                        let slice = self.backend.slice_type();
+                        let data = self
+                            .backend
+                            .builder
+                            .build_struct_gep(slice, base, 0, "slice.data")
+                            .map_err(compiler_diagnostic)?;
+                        let data = self
+                            .backend
+                            .builder
+                            .build_load(
+                                self.backend.context.ptr_type(AddressSpace::default()),
+                                data,
+                                "slice.pointer",
+                            )
+                            .map_err(compiler_diagnostic)?
+                            .into_pointer_value();
+                        let length = self
+                            .backend
+                            .builder
+                            .build_struct_gep(slice, base, 1, "slice.length.slot")
+                            .map_err(compiler_diagnostic)?;
+                        let length = self
+                            .backend
+                            .builder
+                            .build_load(self.backend.size_type, length, "slice.length")
+                            .map_err(compiler_diagnostic)?
+                            .into_int_value();
+                        let position = self.backend.size_type.const_int(*index as u64, false);
+                        let out_of_bounds = self
+                            .backend
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::UGE,
+                                position,
+                                length,
+                                "slice.out_of_bounds",
+                            )
+                            .map_err(compiler_diagnostic)?;
+                        self.backend
+                            .build_trap_if(out_of_bounds, expression.origin.span.clone())?;
+                        let element_descriptor = self.dynamic_descriptor(
+                            raw_type,
+                            environment,
+                            &expression.origin.span,
+                        )?;
+                        let layout = self.backend.load_descriptor_layout(element_descriptor)?;
+                        let offset = self
+                            .backend
+                            .builder
+                            .build_int_mul(position, layout.stride, "slice.offset")
+                            .map_err(compiler_diagnostic)?;
+                        self.backend.dynamic_byte_offset(data, offset)?
+                    }
                 }
             }
             LoweredExpressionKind::TypeAscription(ascription) => {

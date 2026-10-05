@@ -4195,6 +4195,69 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_slice_access_reads_runtime_strides() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "use std.slice.Slice\n",
+                "def head: <T where Copy T> Ref (Slice T) -> T = values => values.0\n",
+                "def unused: Ref (Slice I32) -> I32 = values => head values\n",
+                "let result = 0\n",
+            ),
+            "head",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-slice",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Head = unsafe extern "C" fn(*const u8, *const Descriptor, *mut i32, *const u8);
+        let head = unsafe { engine.get_function::<Head>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 4,
+            stride: 4,
+            align: 4,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let data = 42i32;
+        #[repr(C)]
+        struct Slice {
+            data: *const u8,
+            length: usize,
+        }
+        let slice = Slice {
+            data: &data as *const i32 as *const u8,
+            length: 1,
+        };
+        let payload: *const Slice = &slice;
+        let storage: *const *const Slice = &payload;
+        let mut result = 0;
+        unsafe {
+            head.call(
+                std::ptr::null(),
+                &descriptor,
+                &mut result,
+                storage as *const u8,
+            );
+        }
+        assert_eq!(result, 42);
+    }
+
+    #[test]
     fn dynamic_literals_build_strings_and_c_strings() {
         let (text, name) = dynamic_test_module(
             concat!(

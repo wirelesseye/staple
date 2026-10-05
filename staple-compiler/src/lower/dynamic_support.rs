@@ -14,7 +14,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::lower::{
-    BlockId, ExpressionId, ItemId, LoweredAccessKind, LoweredCallableTarget,
+    BlockId, ExpressionId, ItemId, LoweredCallableTarget,
     LoweredExpressionKind, LoweredItemKind, LoweredPatternKind, LoweredProductStep, LoweredProgram,
     PatternId, PlaceId,
 };
@@ -430,9 +430,6 @@ impl SupportWalker<'_> {
             }
             LoweredExpressionKind::Integer(_) | LoweredExpressionKind::Float(_) => {}
             LoweredExpressionKind::Access(access) => {
-                if matches!(access.kind, LoweredAccessKind::Slice { .. }) {
-                    self.reject("slice access");
-                }
                 self.expression(access.base);
             }
             LoweredExpressionKind::Product(product) => {

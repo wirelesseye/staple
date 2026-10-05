@@ -300,6 +300,9 @@ continuation):
 - `String` and `CString` literals build through the concrete backend helpers and
   store their static-layout values into reserved dynamic slots; a bound
   `CString` drops through its static descriptor at scope exit.
+- Slice access (`values.0` through a `Ref (Slice T)`) loads the runtime data
+  pointer and length, bounds-checks, and strides by the element descriptor, so
+  the element address is correct for any run-time element layout.
 - The hidden differential option (Decision 11) is connected: a transitive
   greatest-fixed-point support analysis excludes unsupported templates and
   their parameter-dependent callers; the worklist, instance-body builder, and
