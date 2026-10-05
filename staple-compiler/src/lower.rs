@@ -2800,6 +2800,9 @@ pub(crate) struct LoweredProgram {
     dictionary_pass_generic_calls: bool,
     /// Per-template transitive dynamic support, computed once per lowering.
     dynamic_support: std::collections::HashMap<FunctionId, dynamic_support::DynamicSupport>,
+    /// Test-only: the first exclusion reason per template.
+    #[cfg(test)]
+    pub(crate) dynamic_support_reasons: std::collections::HashMap<FunctionId, &'static str>,
     /// The ordered, deduplicated runtime surfaces the closed catalog needs.
     /// Recorded after the closure fixed point; emission installs each surface
     /// only when present.
@@ -14295,6 +14298,36 @@ impl LoweredModule {
     /// The read-only backend view of the owned lowered program.
     pub(crate) fn program(&self) -> emission::EmissionView<'_> {
         self.program.emission_view()
+    }
+
+    /// The number of call sites the hidden differential option redirected
+    /// from a concrete owner into a dynamic implementation. Used by the
+    /// Stage 4a exit gate; never part of normal compilation.
+    #[doc(hidden)]
+    pub fn differential_dynamic_call_count(&self) -> usize {
+        let view = self.program();
+        let mut count = 0;
+        for (id, _) in view.instances() {
+            if view
+                .instance_runtime_parameters(id)
+                .map_or(true, |runtime| !runtime.is_empty())
+            {
+                continue;
+            }
+            let Some(bindings) = view.instance_bindings(id) else {
+                continue;
+            };
+            count += bindings
+                .values()
+                .filter(|target| match target {
+                    LoweredBoundTarget::Instance(callee) => view
+                        .instance_runtime_parameters(*callee)
+                        .is_some_and(|runtime| !runtime.is_empty()),
+                    _ => false,
+                })
+                .count();
+        }
+        count
     }
 }
 

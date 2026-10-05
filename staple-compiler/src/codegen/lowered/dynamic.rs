@@ -382,6 +382,173 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(storage)
     }
 
+    /// Scalar intrinsics evaluate their concrete arguments from storage and
+    /// store the SSA result back into the call's reserved slot. The set
+    /// mirrors Decision 9's supported scalar operations; anything needing the
+    /// GC or run-time descriptors stays with the concrete emitter.
+    fn emit_dynamic_intrinsic(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        call: &crate::LoweredCall,
+        intrinsic: crate::IntrinsicFunction,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        use inkwell::values::BasicValue;
+        let span = &call.origin.span;
+        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "missing dynamic intrinsic storage")
+        })?;
+        let types = super::flattened_parameter_types(&call.function_type.parameter);
+        let mut slots = vec![None; types.len()];
+        let mut unplaced = Vec::new();
+        for step in &call.steps {
+            match step {
+                LoweredCallStep::Argument { argument } => {
+                    let record = &call.arguments[*argument];
+                    let value = record.expression.ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "dynamic intrinsic thunk argument")
+                    })?;
+                    let value = self.emit_dynamic_expression(owner, value, environment)?;
+                    match record.slot {
+                        Some(slot) => slots[slot] = Some(value),
+                        None => unplaced.push(value),
+                    }
+                }
+                LoweredCallStep::ProductElement {
+                    expression, slot, ..
+                }
+                | LoweredCallStep::Default {
+                    expression, slot, ..
+                } => {
+                    let value = self.emit_dynamic_expression(owner, *expression, environment)?;
+                    slots[*slot] = Some(value);
+                }
+                LoweredCallStep::Invoke => break,
+                _ => {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "dynamic intrinsic argument step is not yet implemented",
+                    ));
+                }
+            }
+        }
+        if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
+            let descriptor =
+                self.dynamic_descriptor(&call.function_type.parameter, environment, span)?;
+            for (index, slot) in slots.iter_mut().enumerate() {
+                *slot = Some(
+                    self.dynamic_product_field(descriptor, unplaced[0], index as u32)?
+                        .0,
+                );
+            }
+        }
+        let mut values = Vec::with_capacity(slots.len());
+        for (index, slot) in slots.iter().enumerate() {
+            let pointer = slot.ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing dynamic intrinsic argument")
+            })?;
+            let ty = self.backend.compile_type(types[index])?;
+            values.push(
+                self.backend
+                    .builder
+                    .build_load(ty, pointer, "intrinsic.argument")
+                    .map_err(compiler_diagnostic)?,
+            );
+        }
+        let result = match intrinsic {
+            crate::IntrinsicFunction::NumericConvert { from, to } => self
+                .backend
+                .build_numeric_conversion(from, to, values[0])?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::PointerCast => values[0],
+            crate::IntrinsicFunction::PointerAddress => self
+                .backend
+                .builder
+                .build_ptr_to_int(
+                    values[0].into_pointer_value(),
+                    self.backend.size_type,
+                    "pointer.address",
+                )
+                .map_err(compiler_diagnostic)?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::AddressPointer => self
+                .backend
+                .builder
+                .build_int_to_ptr(
+                    values[0].into_int_value(),
+                    self.backend.context.ptr_type(AddressSpace::default()),
+                    "address.pointer",
+                )
+                .map_err(compiler_diagnostic)?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::IntegerBinary { integer, operation } => self
+                .backend
+                .build_integer_binary(
+                    integer,
+                    operation,
+                    values[0].into_int_value(),
+                    values[1].into_int_value(),
+                )?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::IntegerCompare { integer, operation } => {
+                let condition = self.backend.build_integer_compare(
+                    integer,
+                    operation,
+                    values[0].into_int_value(),
+                    values[1].into_int_value(),
+                )?;
+                self.dynamic_bool_value(condition, &call.result_type, span)?
+            }
+            crate::IntrinsicFunction::FloatBinary { float, operation } => self
+                .backend
+                .build_float_binary(
+                    float,
+                    operation,
+                    values[0].into_float_value(),
+                    values[1].into_float_value(),
+                )?
+                .as_basic_value_enum(),
+            crate::IntrinsicFunction::FloatCompare { float, operation } => {
+                let condition = self.backend.build_float_compare(
+                    float,
+                    operation,
+                    values[0].into_float_value(),
+                    values[1].into_float_value(),
+                )?;
+                self.dynamic_bool_value(condition, &call.result_type, span)?
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "this dynamic intrinsic is not yet implemented",
+                ));
+            }
+        };
+        self.backend
+            .builder
+            .build_store(storage, result)
+            .map_err(compiler_diagnostic)?;
+        Ok(storage)
+    }
+
+    fn dynamic_bool_value(
+        &self,
+        condition: inkwell::values::IntValue<'context>,
+        result_type: &CheckedType,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
+        let sum = crate::typecheck::sum_through_implicit_wrapper(result_type).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "dynamic comparison result must be Bool")
+        })?;
+        let sum_type = self.backend.compile_sum_type(sum)?;
+        inkwell::values::BasicValueEnum::try_from(
+            self.backend
+                .build_bool_value(condition, sum_type, span.clone())?,
+        )
+        .map_err(|_| Diagnostic::new(span.clone(), "dynamic comparison result is not first-class"))
+    }
+
     pub(super) fn emit_dynamic_instance_body(
         &mut self,
         id: FunctionInstanceId,
@@ -562,6 +729,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         self.backend.allocate_dynamic_value(descriptor)?,
                     );
                 }
+                LoweredExpressionKind::Name(name) if name.singleton.is_some() => {
+                    let descriptor = self.dynamic_descriptor(
+                        record
+                            .coercion
+                            .as_ref()
+                            .map_or(&record.value_type, |coercion| &coercion.source),
+                        &environment,
+                        &record.origin.span,
+                    )?;
+                    environment.temporaries.insert(
+                        expression,
+                        self.backend.allocate_dynamic_value(descriptor)?,
+                    );
+                }
                 _ => {}
             }
         }
@@ -720,6 +901,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if !crate::contains_type_parameter(ty) || matches!(ty, CheckedType::Parameter { .. }) {
             return self.dynamic_descriptor(ty, environment, span);
         }
+        if is_static_layout_type(ty) {
+            let layout = self.backend.descriptor_layout(ty)?;
+            let runtime = self.backend.static_runtime_layout(layout);
+            let descriptor = self.backend.build_runtime_descriptor(
+                runtime,
+                &[],
+                self.backend
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .const_null(),
+            )?;
+            environment.compound_descriptors.push((ty.clone(), descriptor));
+            return Ok(descriptor);
+        }
         let (shape, children): (CompoundDescriptorShape, Vec<&CheckedType>) = match ty {
             CheckedType::Product(product) => (
                 CompoundDescriptorShape::Product,
@@ -842,6 +1037,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.dynamic_descriptor(representation, environment, span)
             }
             ty if !crate::contains_type_parameter(ty) => self.static_dynamic_descriptor(ty, span),
+            ty if is_static_layout_type(ty) => {
+                let layout = self.backend.descriptor_layout(ty)?;
+                let runtime = self.backend.static_runtime_layout(layout);
+                self.backend.build_runtime_descriptor(
+                    runtime,
+                    &[],
+                    self.backend
+                        .context
+                        .ptr_type(AddressSpace::default())
+                        .const_null(),
+                )
+            }
             _ => Err(Diagnostic::new(
                 span.clone(),
                 "dynamic compound descriptors are not yet connected to emission",
@@ -1562,6 +1769,30 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
+    /// Cross one `Ref` payload per recorded dereference. Every pointer-like
+    /// representation stores the payload pointer in its own storage.
+    fn dereference_dynamic_pointer(
+        &self,
+        mut pointer: PointerValue<'context>,
+        dereference: &[CheckedType],
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        for _ in dereference {
+            pointer = self
+                .backend
+                .builder
+                .build_load(
+                    self.backend.context.ptr_type(AddressSpace::default()),
+                    pointer,
+                    "access.payload",
+                )
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+        }
+        let _ = span;
+        Ok(pointer)
+    }
+
     fn dynamic_sum_tag(
         &self,
         pointer: PointerValue<'context>,
@@ -2227,30 +2458,43 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
             LoweredExpressionKind::Access(access) => {
-                let base_type = &self
+                let base_type = self
                     .view
                     .expression(owner, access.base)
                     .expect("access base")
-                    .value_type;
-                let descriptor =
-                    self.dynamic_descriptor(base_type, environment, &expression.origin.span)?;
-                let base = self.emit_dynamic_expression(owner, access.base, environment)?;
-                match access.kind {
-                    crate::LoweredAccessKind::Product { index, dereference }
-                        if dereference.is_empty() =>
-                    {
-                        self.dynamic_product_field(descriptor, base, index as u32)?
-                            .0
-                    }
-                    crate::LoweredAccessKind::Scalar { dereference } if dereference.is_empty() => {
-                        base
-                    }
-                    _ => {
+                    .value_type
+                    .clone();
+                let dereference = match &access.kind {
+                    crate::LoweredAccessKind::Product { dereference, .. }
+                    | crate::LoweredAccessKind::Scalar { dereference }
+                    | crate::LoweredAccessKind::Representation { dereference } => dereference,
+                    crate::LoweredAccessKind::Slice { .. } => {
                         return Err(Diagnostic::new(
                             expression.origin.span.clone(),
-                            "dynamic access path is not yet implemented",
+                            "dynamic slice access is not yet implemented",
                         ));
                     }
+                };
+                let container_type = dereference
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| base_type.clone());
+                let descriptor = self.dynamic_descriptor(
+                    &container_type,
+                    environment,
+                    &expression.origin.span,
+                )?;
+                let base = self.emit_dynamic_expression(owner, access.base, environment)?;
+                let base =
+                    self.dereference_dynamic_pointer(base, dereference, &expression.origin.span)?;
+                match &access.kind {
+                    crate::LoweredAccessKind::Product { index, .. } => {
+                        self.dynamic_product_field(descriptor, base, *index as u32)?
+                            .0
+                    }
+                    crate::LoweredAccessKind::Scalar { .. }
+                    | crate::LoweredAccessKind::Representation { .. } => base,
+                    crate::LoweredAccessKind::Slice { .. } => unreachable!(),
                 }
             }
             LoweredExpressionKind::TypeAscription(ascription) => {
@@ -2293,6 +2537,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 storage
             }
+            LoweredExpressionKind::Name(name)
+                if name.singleton.is_some() && name.reactive.is_none() =>
+            {
+                *environment.temporaries.get(&id).ok_or_else(|| {
+                    Diagnostic::new(expression.origin.span.clone(), "missing singleton storage")
+                })?
+            }
             LoweredExpressionKind::Name(name) if name.reactive.is_none() => {
                 environment
                     .bindings
@@ -2330,6 +2581,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         call.origin.span.clone(),
                         "recursive dynamic construction is not yet implemented",
                     ));
+                }
+                if let LoweredCallableTarget::Intrinsic { intrinsic, .. } = &call.target {
+                    return self.emit_dynamic_intrinsic(owner, id, call, *intrinsic, environment);
                 }
                 let route = match &call.target {
                     LoweredCallableTarget::DirectFunction { environment, .. } => *environment,
@@ -2660,4 +2914,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         Ok(value)
     }
+}
+
+/// Whether a type's representation is the same whatever its type arguments.
+/// Pointer-like values keep their static layout inside a dynamic body, so
+/// their descriptor comes from the concrete layout rules rather than from
+/// component descriptors.
+fn is_static_layout_type(value_type: &CheckedType) -> bool {
+    matches!(
+        value_type,
+        CheckedType::Ref(_)
+            | CheckedType::Slice(_)
+            | CheckedType::Buffer(_)
+            | CheckedType::CPointer { .. }
+            | CheckedType::COpaquePointer
+            | CheckedType::Function(_)
+    )
 }

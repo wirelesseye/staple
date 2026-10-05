@@ -273,11 +273,48 @@ Implemented foundations:
   reabstraction remain unimplemented on this path. The hidden selection option
   is not yet connected.
 
-Stage 4a is **not complete**. Still required: the differential lowering option
-and transitive restriction analysis; arrays/wrappers and remaining compound
-value emission, control flow, resources and remaining
-ABI/call routes; reabstraction; dynamic GC payloads and
-intrinsics; and the differential exit gate. Stage 3's polymorphic-value gate
+Added since the foundation (commits `dabb384`..`d93c53f` and the current
+continuation):
+- Dynamic wrappers and constructors: wrapper descriptors delegate to their
+  representation, `Wrap` coercions copy the representation, and structural
+  constructor calls build product/wrapper results from flattened argument
+  slots. Singleton names produce unit storage before their sum-injection
+  coercion.
+- Dynamic control flow: `&&`/`||` short-circuit over dynamic `Bool` storage;
+  `match` with sum tag tests, payload extraction, product/nominal/at/wildcard
+  pattern tests and bindings; `loop` with preallocated entry-block break slots;
+  `break`/`continue` cleanup; and branch-local environment snapshots for match
+  arms and loop bodies.
+- Dynamic mutable storage: entry-block binding cells, reads through the cell,
+  and assignment to symbol, temporary, dereferenced, product-element, and
+  representation places with `drop_previous` cleanup and liveness restore.
+- Pointer-like descriptors: `Ref`, `Slice`, `Buffer`, `CPointer`,
+  `COpaquePointer`, and function types keep their static layout and get
+  component-free run-time descriptors. Access supports representation, scalar,
+  and product paths plus `Ref` dereference chains.
+- Scalar intrinsics in dynamic bodies: numeric conversion, pointer cast and
+  address conversions, integer/float binary and compare operations, including
+  `Bool` results stored in their sum representation.
+- The hidden differential option (Decision 11) is connected: a transitive
+  greatest-fixed-point support analysis excludes unsupported templates and
+  their parameter-dependent callers; the worklist, instance-body builder, and
+  initializer binder all select dynamic instances for direct calls from
+  concrete owners; initializer scanners request the descriptors the
+  concrete-to-dynamic bridge needs. `LoweredModule::differential_dynamic_call_count`
+  reports redirected call sites.
+- Exit-gate coverage: a compiler test lowers and strictly emits every corpus
+  program with the option (all 89 use dynamic instances), and a CLI test runs
+  every runnable corpus program in both modes and requires identical stdout and
+  exit status (86/86 programs, 9044 redirected call sites).
+
+Stage 4a is **not complete**. Still required: reabstraction between concrete
+and dynamic function values (function-typed parameters, results, and nested
+products currently fall back through the support analysis); resources and
+`with` scopes; dynamic GC payloads (trailing descriptor words, dynamic
+finalizers, dynamic closure environments); the remaining Decision 9 intrinsics
+(slice, buffer, and `Ref` operations); string, `CString`, template, index, and
+product-spread expression forms; callable values and dynamic closures; and the
+default-mode IR comparison against `50565d8`. Stage 3's polymorphic-value gate
 remains in place.
 
 Foundation validation (commit `8c86d8c`): `cargo test --workspace --quiet`
@@ -293,6 +330,11 @@ default-mode LLVM output matches `50565d8` for all 104 corpus/example inputs
 The subsequent repetition/statement/destructuring continuation passes workspace
 checks and all eleven dynamic execution tests. Adding the concrete boundary
 passes workspace checks and all twelve dynamic execution tests.
+
+Current continuation validation: `cargo test --workspace --quiet` passes
+(compiler library 380 passed, two ignored; CLI 232 passed). Default-mode IR is
+unaffected because every new path is gated on the hidden option or on dynamic
+instances, which only exist when it is on.
 
 ### Step 4a.1 — Keys, specialization, and validation
 

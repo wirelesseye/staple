@@ -83,10 +83,21 @@ impl LoweredProgram {
             .map(|function| (*function, DynamicSupport::Supported))
             .collect::<HashMap<_, _>>();
         let mut dependencies = HashMap::new();
+        #[cfg(test)]
+        let mut reasons = HashMap::new();
         for function in &functions {
-            let (scan, deps) = self.scan_dynamic_support(*function);
+            let (scan, deps, reason) = self.scan_dynamic_support(*function);
+            let _ = reason;
             support.insert(*function, scan);
             dependencies.insert(*function, deps);
+            #[cfg(test)]
+            if let Some(reason) = reason {
+                reasons.insert(*function, reason);
+            }
+        }
+        #[cfg(test)]
+        {
+            self.dynamic_support_reasons = reasons;
         }
         loop {
             let mut changed = false;
@@ -114,10 +125,11 @@ impl LoweredProgram {
     fn scan_dynamic_support(
         &self,
         function: FunctionId,
-    ) -> (DynamicSupport, HashSet<FunctionId>) {
+    ) -> (DynamicSupport, HashSet<FunctionId>, Option<&'static str>) {
         let mut walker = SupportWalker {
             program: self,
             unsupported: false,
+            reason: None,
             dependencies: HashSet::new(),
             visited_blocks: HashSet::new(),
             visited_items: HashSet::new(),
@@ -127,22 +139,29 @@ impl LoweredProgram {
             visited_calls: HashSet::new(),
         };
         let Some(template) = self.functions.get(function) else {
-            return (DynamicSupport::Unsupported, HashSet::new());
+            return (DynamicSupport::Unsupported, HashSet::new(), None);
         };
-        if !template.captures.is_empty()
-            || template.signature.effects.variable.is_some()
+        if !template.captures.is_empty() {
+            walker.reject("captures");
+        }
+        if template.signature.effects.variable.is_some()
             || !template.signature.effects.resources.is_empty()
-            || contains_parameter_product(&CheckedType::Function(template.signature.clone()))
-            || contains_polymorphic_function(&template.signature.parameter)
-            || contains_polymorphic_function(&template.signature.result)
         {
-            walker.unsupported = true;
+            walker.reject("effects");
+        }
+        if contains_parameter_product(&CheckedType::Function(template.signature.clone())) {
+            walker.reject("parameter products");
+        }
+        if contains_nested_polymorphic_function(&template.signature.parameter)
+            || contains_nested_polymorphic_function(&template.signature.result)
+        {
+            walker.reject("function-typed signature");
         }
         let copy = self.semantic_ids.copy_trait;
         let sized = self.semantic_ids.sized_trait;
         for bound in &template.bounds {
             if Some(bound.trait_id) != copy && Some(bound.trait_id) != sized {
-                walker.unsupported = true;
+                walker.reject("trait bound other than Copy/Sized");
             }
         }
         if let Some(body) = template.body {
@@ -153,8 +172,25 @@ impl LoweredProgram {
         } else {
             DynamicSupport::Supported
         };
-        (support, walker.dependencies)
+        (support, walker.dependencies, walker.reason)
     }
+}
+
+/// The scalar intrinsics the dynamic emitter handles without the GC or
+/// run-time descriptors.
+fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
+    use crate::IntrinsicFunction;
+    matches!(
+        intrinsic,
+        IntrinsicFunction::NumericConvert { .. }
+            | IntrinsicFunction::PointerCast
+            | IntrinsicFunction::PointerAddress
+            | IntrinsicFunction::AddressPointer
+            | IntrinsicFunction::IntegerBinary { .. }
+            | IntrinsicFunction::IntegerCompare { .. }
+            | IntrinsicFunction::FloatBinary { .. }
+            | IntrinsicFunction::FloatCompare { .. }
+    )
 }
 
 /// Whether a type mentions a function type that still contains a run-time
@@ -185,6 +221,52 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
         } => {
             arguments.iter().any(contains_polymorphic_function)
                 || contains_polymorphic_function(representation)
+        }
+        _ => false,
+    }
+}
+
+/// Like [`contains_polymorphic_function`] but a top-level function type is
+/// treated as the container to inspect rather than as a nested function value.
+/// Used for callable signatures, where a parameter or result that is itself a
+/// function value still needs reabstraction.
+fn contains_nested_polymorphic_function(ty: &CheckedType) -> bool {
+    match ty {
+        CheckedType::Function(function) => {
+            contains_polymorphic_function(&function.parameter)
+                || contains_polymorphic_function(&function.result)
+                || function
+                    .effects
+                    .resources
+                    .iter()
+                    .any(|resource| contains_polymorphic_function(&resource.value_type))
+        }
+        CheckedType::CPointer { pointee } => contains_nested_polymorphic_function(pointee),
+        CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
+            contains_nested_polymorphic_function(value)
+        }
+        CheckedType::Array { element, count } => {
+            contains_nested_polymorphic_function(element)
+                || contains_nested_polymorphic_function(count)
+        }
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
+            arguments.iter().any(contains_nested_polymorphic_function)
+        }
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|field| contains_nested_polymorphic_function(&field.value_type)),
+        CheckedType::Sum(sum) => sum
+            .alternatives
+            .iter()
+            .any(contains_nested_polymorphic_function),
+        CheckedType::Wrapper {
+            arguments,
+            representation,
+            ..
+        } => {
+            arguments.iter().any(contains_nested_polymorphic_function)
+                || contains_nested_polymorphic_function(representation)
         }
         _ => false,
     }
@@ -235,6 +317,8 @@ fn contains_parameter_product(ty: &CheckedType) -> bool {
 struct SupportWalker<'program> {
     program: &'program LoweredProgram,
     unsupported: bool,
+    #[allow(dead_code)]
+    reason: Option<&'static str>,
     dependencies: HashSet<FunctionId>,
     visited_blocks: HashSet<BlockId>,
     visited_items: HashSet<ItemId>,
@@ -245,12 +329,19 @@ struct SupportWalker<'program> {
 }
 
 impl SupportWalker<'_> {
+    fn reject(&mut self, reason: &'static str) {
+        self.unsupported = true;
+        if self.reason.is_none() {
+            self.reason = Some(reason);
+        }
+    }
+
     fn block(&mut self, id: BlockId) {
         if !self.visited_blocks.insert(id) {
             return;
         }
         let Some(block) = self.program.blocks.get(id) else {
-            self.unsupported = true;
+            self.reject("missing block");
             return;
         };
         let items = block.items.clone();
@@ -268,13 +359,13 @@ impl SupportWalker<'_> {
             return;
         }
         let Some(item) = self.program.items.get(id) else {
-            self.unsupported = true;
+            self.reject("missing item");
             return;
         };
         match &item.kind {
             LoweredItemKind::Binding(binding) => {
                 if binding.signal || binding.derived || binding.generic || binding.reactive.is_some() {
-                    self.unsupported = true;
+                    self.reject("signal/derived/generic binding");
                 }
                 if let Some(value) = binding.value {
                     self.expression(value);
@@ -282,13 +373,13 @@ impl SupportWalker<'_> {
             }
             LoweredItemKind::PatternBinding(binding) => {
                 if binding.propagating || binding.asserting {
-                    self.unsupported = true;
+                    self.reject("propagating binding");
                 }
                 self.expression(binding.value);
             }
             LoweredItemKind::Assignment(assignment) => {
                 if assignment.mutate_index.is_some() || assignment.signal_notify.is_some() {
-                    self.unsupported = true;
+                    self.reject("indexed or signal assignment");
                 }
                 self.place(assignment.target);
                 self.expression(assignment.value);
@@ -309,17 +400,17 @@ impl SupportWalker<'_> {
             return;
         }
         let Some(expression) = self.program.expressions.get(id) else {
-            self.unsupported = true;
+            self.reject("missing expression");
             return;
         };
         if contains_polymorphic_function(&expression.value_type) {
-            self.unsupported = true;
+            self.reject("function-typed value");
         }
         if let Some(coercion) = &expression.coercion
             && (contains_polymorphic_function(&coercion.source)
                 || contains_polymorphic_function(&coercion.target))
         {
-            self.unsupported = true;
+            self.reject("function-typed coercion");
         }
         match &expression.kind {
             LoweredExpressionKind::Deferred(_)
@@ -331,24 +422,17 @@ impl SupportWalker<'_> {
             | LoweredExpressionKind::Resource(_)
             | LoweredExpressionKind::With(_)
             | LoweredExpressionKind::Coro(_)
-            | LoweredExpressionKind::Await(_) => self.unsupported = true,
+            | LoweredExpressionKind::Await(_) => self.reject("string/index/callable/resource expression"),
             LoweredExpressionKind::Block(block) => self.block(*block),
             LoweredExpressionKind::Name(name) => {
                 if name.reactive.is_some() {
-                    self.unsupported = true;
+                    self.reject("reactive name read");
                 }
             }
             LoweredExpressionKind::Integer(_) | LoweredExpressionKind::Float(_) => {}
             LoweredExpressionKind::Access(access) => {
-                let supported = match &access.kind {
-                    LoweredAccessKind::Product { dereference, .. }
-                    | LoweredAccessKind::Scalar { dereference } => dereference.is_empty(),
-                    LoweredAccessKind::Representation { .. } | LoweredAccessKind::Slice { .. } => {
-                        false
-                    }
-                };
-                if !supported {
-                    self.unsupported = true;
+                if matches!(access.kind, LoweredAccessKind::Slice { .. }) {
+                    self.reject("slice access");
                 }
                 self.expression(access.base);
             }
@@ -361,7 +445,7 @@ impl SupportWalker<'_> {
                             self.expression(*expression);
                         }
                         LoweredProductStep::PositionalSpread { .. }
-                        | LoweredProductStep::NamedSpread { .. } => self.unsupported = true,
+                        | LoweredProductStep::NamedSpread { .. } => self.reject("product spread"),
                     }
                 }
                 for field in &product.fields {
@@ -370,7 +454,7 @@ impl SupportWalker<'_> {
             }
             LoweredExpressionKind::RepeatedProduct(product) => {
                 if matches!(product.count, crate::lower::LoweredRepeatCount::Symbolic(_)) {
-                    self.unsupported = true;
+                    self.reject("run-time repeat count");
                 }
                 self.expression(product.expression);
             }
@@ -396,11 +480,11 @@ impl SupportWalker<'_> {
             return;
         }
         let Some(pattern) = self.program.patterns.get(id) else {
-            self.unsupported = true;
+            self.reject("missing pattern");
             return;
         };
         match &pattern.kind {
-            LoweredPatternKind::Literal { .. } => self.unsupported = true,
+            LoweredPatternKind::Literal { .. } => self.reject("literal pattern"),
             LoweredPatternKind::Wildcard | LoweredPatternKind::Binding { .. } => {}
             LoweredPatternKind::Product { elements, .. } => {
                 for element in elements {
@@ -412,7 +496,7 @@ impl SupportWalker<'_> {
                     &pattern.test.subject,
                     CheckedType::String | CheckedType::StringLiteralSet(_)
                 ) {
-                    self.unsupported = true;
+                    self.reject("string pattern");
                 }
                 self.pattern(*argument);
             }
@@ -431,26 +515,26 @@ impl SupportWalker<'_> {
             return;
         }
         let Some(place) = self.program.places.get(id) else {
-            self.unsupported = true;
+            self.reject("missing place");
             return;
         };
         match &place.kind {
             crate::lower::LoweredPlaceKind::Symbol { .. }
             | crate::lower::LoweredPlaceKind::CapturedCell { .. } => {}
             crate::lower::LoweredPlaceKind::Temporary { expression } => self.expression(*expression),
-            crate::lower::LoweredPlaceKind::Resource { .. } => self.unsupported = true,
+            crate::lower::LoweredPlaceKind::Resource { .. } => self.reject("resource place"),
             crate::lower::LoweredPlaceKind::Dereference { reference, .. } => {
                 self.expression(*reference)
             }
             crate::lower::LoweredPlaceKind::ProductElement { base, slice, .. } => {
                 if *slice {
-                    self.unsupported = true;
+                    self.reject("slice mutation");
                 }
                 self.place(*base);
             }
             crate::lower::LoweredPlaceKind::Representation { base } => self.place(*base),
             crate::lower::LoweredPlaceKind::Indexed { base, index } => {
-                self.unsupported = true;
+                self.reject("indexed mutation");
                 self.place(*base);
                 self.expression(*index);
             }
@@ -462,20 +546,21 @@ impl SupportWalker<'_> {
             return;
         }
         let Some(call) = self.program.calls.get(id) else {
-            self.unsupported = true;
+            self.reject("missing call");
             return;
         };
         if call.reactive.is_some() || !call.resource_bindings.is_empty() {
-            self.unsupported = true;
+            self.reject("resource or reactive call");
         }
-        if contains_polymorphic_function(&CheckedType::Function(call.function_type.clone()))
+        if contains_nested_polymorphic_function(&call.function_type.parameter)
+            || contains_nested_polymorphic_function(&call.function_type.result)
             || call
                 .substitutions
                 .types
                 .iter()
                 .any(|entry| contains_polymorphic_function(&entry.value_type))
         {
-            self.unsupported = true;
+            self.reject("function type at a call boundary");
         }
         for step in &call.steps {
             match step {
@@ -515,26 +600,32 @@ impl SupportWalker<'_> {
                     if generic {
                         self.dependencies.insert(*function);
                     } else {
-                        self.unsupported = true;
+                        self.reject("parameter-dependent call to a non-generic function");
                     }
                 }
             }
             LoweredCallableTarget::Constructor { recursive, .. } => {
                 if recursive.is_some() {
-                    self.unsupported = true;
+                    self.reject("recursive construction");
                 }
             }
             // A concrete trait call dispatches to a monomorphized implementation
             // and needs no dictionary; a parameter-dependent one is Stage 6.
             LoweredCallableTarget::TraitImplementation { .. } => {
                 if mentions_parameters {
-                    self.unsupported = true;
+                    self.reject("trait call with run-time arguments");
                 }
             }
-            LoweredCallableTarget::StructuralTraitMethod { .. }
-            | LoweredCallableTarget::IndirectClosure { .. }
-            | LoweredCallableTarget::ExternalFunction { .. }
-            | LoweredCallableTarget::Intrinsic { .. } => self.unsupported = true,
+            LoweredCallableTarget::StructuralTraitMethod { .. } => {
+                self.reject("structural trait dispatch")
+            }
+            LoweredCallableTarget::IndirectClosure { .. } => self.reject("indirect closure call"),
+            LoweredCallableTarget::ExternalFunction { .. } => self.reject("extern call"),
+            LoweredCallableTarget::Intrinsic { intrinsic, .. } => {
+                if !dynamic_scalar_intrinsic(*intrinsic) {
+                    self.reject("intrinsic call");
+                }
+            }
         }
     }
 
@@ -543,13 +634,70 @@ impl SupportWalker<'_> {
             return;
         };
         if argument.thunk.is_some() {
-            self.unsupported = true;
+            self.reject("implicit thunk argument");
         }
         if let Some(expression) = argument.expression {
             self.expression(expression);
         }
         if let Some(place) = argument.place {
             self.place(place);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    use super::*;
+    use crate::codegen::corpus::{CorpusSource, codegen_corpus};
+    use crate::{Lowerer, NameResolver, ProgramLoader, TypeChecker};
+
+    #[test]
+    #[ignore = "development diagnostic; run with --ignored --nocapture"]
+    fn report_dynamic_support_reasons() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut counts: HashMap<&'static str, usize> = HashMap::new();
+        let mut unsupported = 0usize;
+        for program in codegen_corpus() {
+            let (source, root) = match program.source {
+                CorpusSource::Inline(source) => (source.to_owned(), workspace.to_path_buf()),
+                CorpusSource::File(path) => {
+                    let full = workspace.join(path);
+                    let source = std::fs::read_to_string(&full).unwrap();
+                    (source, full.parent().unwrap().to_path_buf())
+                }
+            };
+            let loaded = ProgramLoader::new()
+                .with_standard_library_root(workspace.join("stdlib"))
+                .load_source(&source, &root)
+                .unwrap();
+            let resolved = NameResolver::new().resolve_program(loaded).unwrap();
+            let checked = TypeChecker::new().check(resolved).unwrap();
+            let lowered = match Lowerer::new()
+                .with_dictionary_pass_generic_calls(true)
+                .lower(&checked)
+            {
+                Ok(lowered) => lowered,
+                Err(_) => continue,
+            };
+            let program = &lowered.program;
+            for (_, _, function) in program.functions.iter() {
+                if program.relevant_parameters(function.semantic_id).type_parameters().next().is_none() {
+                    continue;
+                }
+                if let Some(reason) = program.dynamic_support_reasons.get(&function.semantic_id) {
+                    unsupported += 1;
+                    *counts.entry(reason).or_default() += 1;
+                }
+            }
+        }
+        let mut counts = counts.into_iter().collect::<Vec<_>>();
+        counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        eprintln!("unsupported generic templates: {unsupported}");
+        for (reason, count) in counts {
+            eprintln!("{count:5}  {reason}");
         }
     }
 }

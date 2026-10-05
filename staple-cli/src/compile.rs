@@ -4667,6 +4667,88 @@ mod tests {
         );
     }
 
+    /// The Stage 4a exit gate: run every runnable corpus program in both the
+    /// default and differential modes and require identical stdout and exit
+    /// status. Also reports how many call sites each program sent through
+    /// dynamic implementations.
+    #[cfg(unix)]
+    #[test]
+    fn codegen_corpus_differential_run_matches_default() {
+        use std::path::Path;
+
+        use staple_compiler::{
+            CorpusExpectation, CorpusSource, LoweredModule, Lowerer, NameResolver, ProgramLoader,
+            TypeChecker,
+        };
+
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = workspace_root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")])
+            .expect("corpus link options should parse");
+
+        let lower = |source: &str, root: &Path, differential: bool| -> LoweredModule {
+            let loaded = ProgramLoader::new()
+                .with_standard_library_root(&standard_library)
+                .load_source(source, root)
+                .expect("corpus source should load");
+            let resolved = NameResolver::new()
+                .resolve_program(loaded)
+                .expect("corpus source should resolve");
+            let checked = TypeChecker::new()
+                .check(resolved)
+                .expect("corpus source should type check");
+            Lowerer::new()
+                .with_dictionary_pass_generic_calls(differential)
+                .lower(&checked)
+                .expect("corpus source should lower")
+        };
+
+        let mut runnable = 0usize;
+        let mut programs_with_dynamic_calls = 0usize;
+        let mut dynamic_calls = 0usize;
+        for program in staple_compiler::codegen_corpus() {
+            let (source, root) = match program.source {
+                CorpusSource::Inline(source) => (source.to_owned(), workspace_root.to_path_buf()),
+                CorpusSource::File(path) => {
+                    let full = workspace_root.join(path);
+                    let source = std::fs::read_to_string(&full)
+                        .unwrap_or_else(|error| panic!("`{path}` should read: {error}"));
+                    let root = full
+                        .parent()
+                        .expect("a corpus file has a parent directory")
+                        .to_path_buf();
+                    (source, root)
+                }
+            };
+            if program.expectation == CorpusExpectation::CompileOnly {
+                continue;
+            }
+            let default = compile_link_run(&lower(&source, &root, false), &options)
+                .unwrap_or_else(|error| panic!("`{}` should run: {error}", program.name));
+            let lowered = lower(&source, &root, true);
+            let count = lowered.differential_dynamic_call_count();
+            dynamic_calls += count;
+            if count > 0 {
+                programs_with_dynamic_calls += 1;
+            }
+            let differential = compile_link_run(&lowered, &options)
+                .unwrap_or_else(|error| panic!("`{}` should run: {error}", program.name));
+            assert_eq!(
+                default, differential,
+                "`{}` differs between default and differential modes",
+                program.name
+            );
+            runnable += 1;
+        }
+        eprintln!(
+            "differential run: {programs_with_dynamic_calls}/{runnable} programs used dynamic calls ({dynamic_calls} call sites)"
+        );
+        assert!(
+            programs_with_dynamic_calls * 2 > runnable,
+            "dynamic calls must be non-zero for most runnable programs"
+        );
+    }
+
     /// Compile one lowered program, emit an object, link it, run
     /// it, and return `(exit code, stdout)`.
     #[cfg(unix)]

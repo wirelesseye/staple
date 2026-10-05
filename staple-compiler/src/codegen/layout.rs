@@ -518,6 +518,19 @@ impl<'program, 'context> Backend<'program, 'context> {
         ))
     }
 
+    /// The runtime words of a statically known layout, for pointer-like types
+    /// whose representation does not depend on their type arguments.
+    pub(crate) fn static_runtime_layout(
+        &self,
+        layout: DescriptorLayout,
+    ) -> RuntimeDescriptorLayout<'context> {
+        RuntimeDescriptorLayout {
+            store_size: self.size_type.const_int(layout.store_size, false),
+            stride: self.size_type.const_int(layout.stride, false),
+            align: self.size_type.const_int(layout.align as u64, false),
+        }
+    }
+
     /// Materialize a compound descriptor in a fixed-size entry allocation.
     /// The caller supplies its planned drop entry point; a null entry means
     /// the value requires no cleanup. These descriptors belong to this call

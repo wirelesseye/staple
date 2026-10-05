@@ -1,7 +1,7 @@
 //! Demand-driven type descriptors and their concrete drop entry points.
 use super::artifact_closure::{ClosureRequest, ExpansionResult};
 use super::{
-    ArenaId, DescriptorDropPlan, DropGlueBody, DropGluePlan, LoweredArtifactDependencyKind as Kind,
+    DescriptorDropPlan, DropGlueBody, DropGluePlan, LoweredArtifactDependencyKind as Kind,
     LoweredArtifactPlan as Plan, LoweredArtifactRequestId, LoweredProgram, PlannedArtifact,
     TypeDescriptorPlan,
 };
