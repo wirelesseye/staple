@@ -482,6 +482,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .add_function(name, ty, Some(Linkage::Internal)),
                     ]
                 }
+                LoweredArtifactPlan::ReabstractionThunk(plan) => {
+                    let ty = match plan.direction {
+                        crate::specialization::ReabstractionDirection::ConcreteToDynamic => self
+                            .backend
+                            .compile_dynamic_function_type(&plan.dynamic, 0)?,
+                        crate::specialization::ReabstractionDirection::DynamicToConcrete => self
+                            .backend
+                            .compile_closure_function_type(&plan.concrete)?,
+                    };
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
                 LoweredArtifactPlan::DropGlue(_) => Vec::new(),
                 LoweredArtifactPlan::GcFinalizer(_) => {
                     let ty = self
@@ -1800,6 +1815,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::CompoundDescriptorDrop(plan) => self.emit_compound_descriptor_drop(ordinal, *plan, &artifact.origin.span),
             LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
                 self.emit_descriptor_bound_entry(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::ReabstractionThunk(plan) => {
+                self.emit_reabstraction_thunk(ordinal, plan, &artifact.origin.span)
             }
             LoweredArtifactPlan::DescriptorDrop(plan) => {
                 let function = self
@@ -5308,7 +5326,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .instance_runtime_parameters(*instance)
                     .is_some_and(|runtime| !runtime.is_empty())
                 {
-                    let value = self.emit_concrete_dynamic_call(*instance, &call, pointer, &values)?;
+                    let value = self.emit_concrete_dynamic_call(owner, id, *instance, &call, pointer, &values)?;
                     self.emit_call_cleanup(owner, id, cleanups, &call.origin.span)?;
                     return Ok(value);
                 }

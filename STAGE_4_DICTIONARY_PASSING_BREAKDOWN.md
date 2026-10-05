@@ -291,6 +291,19 @@ reachable from the branch.
   dynamic implementations. The captures row falls from 189 to 2 (the two
   remaining are shared-cell captures, handled with dynamic GC payloads in
   R6), and the in-scope baseline drops to **2596**.
+- **R5 complete for direct function types.** Lowering records a
+  `LoweredReabstraction` on every concrete-to-dynamic call boundary whose
+  dynamic type is a function type, and new `reabstraction-thunk` artifacts
+  convert a closure between the concrete and dynamic ABIs in both
+  directions. The concrete bridge builds a GC environment holding the source
+  closure and a `{thunk, environment}` closure at the boundary; the
+  initializer path resolves its callee through the differential option so its
+  conversions are recorded too. A call site whose types name a parameter
+  product stays monomorphized. The function-typed rows fall to one each;
+  nested function types, by-value aggregates containing functions, and the
+  dynamic emitter's dynamic-to-concrete direction remain and fall back with
+  an in-scope reason. The in-scope baseline drops to **1168**, and the corpus
+  gains `higher_order_map` and `returns_function`.
 
 ### Step 4a.1 — Keys, specialization, and validation
 

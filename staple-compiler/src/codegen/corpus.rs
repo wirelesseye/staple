@@ -140,7 +140,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 89] = [
+static CORPUS: [CorpusProgram; 91] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -2484,6 +2484,44 @@ let value = at (Ref (1, 2), (USize :: 5))
         ),
         "100000\n",
     )),
+    // A map-style higher-order generic called from concrete code: the
+    // concrete closure is reabstracted into a dynamic one (R5).
+    expect_stdout(
+        must_run(emits(
+            inline(
+                "higher_order_map",
+                concat!(
+                    "use std.io.println\n",
+                    "def map3: <T where Copy T> (T -> T, (T; 3)) -> (T; 3) = (f, values) => (f values.0, f values.1, f values.2)\n",
+                    "def inc: I32 -> I32 = value => value + 1\n",
+                    "let mapped = map3.<I32> (inc, (1, 2, 3))\n",
+                    "println \"${mapped.0} ${mapped.1} ${mapped.2}\"\n",
+                ),
+                "regressions",
+            ),
+            &["map3", "inc"],
+        )),
+        "2 3 4\n",
+    ),
+    // A generic that returns a function: the dynamic result is reabstracted
+    // back into a concrete closure (R5).
+    expect_stdout(
+        must_run(emits(
+            inline(
+                "returns_function",
+                concat!(
+                    "use std.io.println\n",
+                    "def first: <T where Copy T> T -> T -> T = start => end => end\n",
+                    "let f = first 7\n",
+                    "let result = f 3\n",
+                    "println \"${result}\"\n",
+                ),
+                "regressions",
+            ),
+            &["first"],
+        )),
+        "3\n",
+    ),
 ];
 
 /// Extract every `define`d function body from one module's IR text, keyed by

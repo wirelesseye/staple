@@ -177,6 +177,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// translate the concrete ABI slots into descriptor ABI storage pointers.
     pub(super) fn emit_concrete_dynamic_call(
         &self,
+        owner: EmissionOwner,
+        call_id: crate::LoweredCallId,
         instance: FunctionInstanceId,
         call: &crate::LoweredCall,
         closure: PointerValue<'context>,
@@ -197,6 +199,27 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 span.clone(),
                 "concrete-to-dynamic resource calls are not yet implemented",
             ));
+        }
+        let mut argument_conversions = std::collections::BTreeMap::new();
+        let mut result_conversion = None;
+        if let Some(conversions) = self.view.conversions(owner) {
+            for ((site, argument), conversion) in conversions {
+                if *site != call_id {
+                    continue;
+                }
+                match argument {
+                    Some(index) => {
+                        if let Some(slot) = call
+                            .arguments
+                            .get(*index)
+                            .and_then(|argument| argument.slot)
+                        {
+                            argument_conversions.insert(slot, conversion);
+                        }
+                    }
+                    None => result_conversion = Some(conversion),
+                }
+            }
         }
         let mut arguments = vec![closure.into()];
         for parameter in &runtime {
@@ -231,6 +254,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 CheckedType::Product(_)
             );
         if pack {
+            if !argument_conversions.is_empty() {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "reabstraction inside a packed argument is not yet implemented",
+                ));
+            }
             let fields = values
                 .iter()
                 .enumerate()
@@ -264,8 +293,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             arguments.push(storage.into());
         } else {
             for (index, value) in values.iter().enumerate() {
-                let value = BasicValueEnum::try_from(*value)
+                let mut value = BasicValueEnum::try_from(*value)
                     .map_err(|_| Diagnostic::new(span.clone(), "invalid concrete argument"))?;
+                if let Some(conversion) = argument_conversions.get(&index) {
+                    if conversion.direction
+                        != crate::LoweredReabstractionDirection::ConcreteToDynamic
+                    {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "dynamic-to-concrete argument conversion at a concrete caller",
+                        ));
+                    }
+                    value = self.convert_concrete_to_dynamic_closure(
+                        value,
+                        owner,
+                        call_id,
+                        Some(index),
+                        span,
+                    )?;
+                }
                 let pointer = if whole || indirect[index] {
                     value.into_pointer_value()
                 } else {
@@ -291,12 +337,157 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_direct_call(function, &arguments, "")
             .map_err(compiler_diagnostic)?;
-        Ok(self
+        let value = self
             .backend
             .builder
             .build_load(result_type, result, "dynamic.call.value")
+            .map_err(compiler_diagnostic)?;
+        if let Some(conversion) = result_conversion {
+            if conversion.direction != crate::LoweredReabstractionDirection::DynamicToConcrete {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "concrete-to-dynamic result conversion at a concrete caller",
+                ));
+            }
+            return Ok(self
+                .convert_dynamic_to_concrete_closure(value, owner, call_id, None, span)?
+                .as_any_value_enum());
+        }
+        Ok(value.as_any_value_enum())
+    }
+
+    /// Build a dynamic closure from a concrete one (R5): a GC environment
+    /// holds the concrete closure's code and environment, and the closure
+    /// points at the concrete-to-dynamic reabstraction thunk.
+    fn convert_concrete_to_dynamic_closure(
+        &self,
+        concrete: inkwell::values::BasicValueEnum<'context>,
+        owner: EmissionOwner,
+        call: crate::LoweredCallId,
+        argument: Option<usize>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
+        use inkwell::values::{BasicValue, BasicValueEnum};
+        let BasicValueEnum::StructValue(closure) = concrete else {
+            return Err(Diagnostic::new(span.clone(), "reabstraction source is not a closure"));
+        };
+        let code = self
+            .backend
+            .builder
+            .build_extract_value(closure, 0, "reabstraction.code")
             .map_err(compiler_diagnostic)?
-            .as_any_value_enum())
+            .into_pointer_value();
+        let environment = self
+            .backend
+            .builder
+            .build_extract_value(closure, 1, "reabstraction.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let storage = self.backend.build_gc_allocation(
+            self.backend
+                .size_type
+                .const_int(2 * pointer_bytes, false),
+            "reabstraction.environment",
+            span.clone(),
+        )?;
+        self.backend
+            .builder
+            .build_store(storage, code)
+            .map_err(compiler_diagnostic)?;
+        let slot = self.backend.dynamic_byte_offset(
+            storage,
+            self.backend.size_type.const_int(pointer_bytes, false),
+        )?;
+        self.backend
+            .builder
+            .build_store(slot, environment)
+            .map_err(compiler_diagnostic)?;
+        let thunk = self.reabstraction_thunk_code(owner, call, argument, span)?;
+        Ok(self
+            .backend
+            .build_closure_value(thunk, storage)?
+            .as_basic_value_enum())
+    }
+
+    /// Build a concrete closure from a dynamic one (R5): a GC environment
+    /// holds the dynamic closure's code and environment, and the closure
+    /// points at the dynamic-to-concrete reabstraction thunk.
+    fn convert_dynamic_to_concrete_closure(
+        &self,
+        dynamic: inkwell::values::BasicValueEnum<'context>,
+        owner: EmissionOwner,
+        call: crate::LoweredCallId,
+        argument: Option<usize>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
+        use inkwell::values::{BasicValue, BasicValueEnum};
+        let BasicValueEnum::StructValue(closure) = dynamic else {
+            return Err(Diagnostic::new(span.clone(), "reabstraction source is not a closure"));
+        };
+        let code = self
+            .backend
+            .builder
+            .build_extract_value(closure, 0, "reabstraction.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let environment = self
+            .backend
+            .builder
+            .build_extract_value(closure, 1, "reabstraction.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let storage = self.backend.build_gc_allocation(
+            self.backend
+                .size_type
+                .const_int(2 * pointer_bytes, false),
+            "reabstraction.environment",
+            span.clone(),
+        )?;
+        self.backend
+            .builder
+            .build_store(storage, code)
+            .map_err(compiler_diagnostic)?;
+        let slot = self.backend.dynamic_byte_offset(
+            storage,
+            self.backend.size_type.const_int(pointer_bytes, false),
+        )?;
+        self.backend
+            .builder
+            .build_store(slot, environment)
+            .map_err(compiler_diagnostic)?;
+        let thunk = self.reabstraction_thunk_code(owner, call, argument, span)?;
+        Ok(self
+            .backend
+            .build_closure_value(thunk, storage)?
+            .as_basic_value_enum())
+    }
+
+    /// The declared reabstraction thunk for one boundary conversion.
+    fn reabstraction_thunk_code(
+        &self,
+        owner: EmissionOwner,
+        call: crate::LoweredCallId,
+        argument: Option<usize>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        let uses = self.view.artifact_uses(owner).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "missing reabstraction use records")
+        })?;
+        let ordinal = uses
+            .iter()
+            .find_map(|use_| {
+                (use_.site
+                    == crate::ArtifactUseSite::ReabstractionThunk { call, argument })
+                .then_some(use_.artifact)
+            })
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing reabstraction plan"))?;
+        self.artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing reabstraction declaration"))
     }
 
     /// A structural constructor builds its product or wrapper representation
@@ -1402,6 +1593,154 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .build_bool_value(condition, sum_type, span.clone())?,
         )
         .map_err(|_| Diagnostic::new(span.clone(), "dynamic comparison result is not first-class"))
+    }
+
+    /// A reabstraction thunk (R5): converts one closure between the concrete
+    /// and dynamic ABIs. The environment holds the source closure's two
+    /// pointers; the body converts the value arguments and the result.
+    pub(super) fn emit_reabstraction_thunk(
+        &mut self,
+        ordinal: crate::specialization::ArtifactOrdinal,
+        plan: &crate::ReabstractionThunkPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        use crate::specialization::ReabstractionDirection;
+        let function = self
+            .artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing reabstraction declaration"))?;
+        if !plan.dynamic.effects.resources.is_empty()
+            || !plan.concrete.effects.resources.is_empty()
+        {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "reabstraction with resources is not yet implemented",
+            ));
+        }
+        if contains_nested_function(&plan.concrete) {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "nested reabstraction is not yet implemented",
+            ));
+        }
+        let entry = self.backend.context.append_basic_block(function, "entry");
+        self.backend.builder.position_at_end(entry);
+        let parameters = function.get_params();
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let environment = parameters[0].into_pointer_value();
+        let code = self
+            .backend
+            .builder
+            .build_load(pointer, environment, "reabstraction.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let closure_slot = self.backend.dynamic_byte_offset(
+            environment,
+            self.backend.size_type.const_int(pointer_bytes, false),
+        )?;
+        let closure_environment = self
+            .backend
+            .builder
+            .build_load(pointer, closure_slot, "reabstraction.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        match plan.direction {
+            ReabstractionDirection::ConcreteToDynamic => {
+                // Dynamic shape: env, result*, value pointers.
+                let result = parameters[1].into_pointer_value();
+                let concrete_types = super::flattened_parameter_types(&plan.concrete.parameter);
+                let concrete_indirect = self.backend.indirect_parameter_mask(&plan.concrete);
+                let mut arguments = vec![closure_environment.into()];
+                for index in 0..concrete_types.len() {
+                    let dynamic = parameters[2 + index].into_pointer_value();
+                    if concrete_indirect[index] {
+                        arguments.push(dynamic.into());
+                    } else {
+                        let ty = self.backend.compile_type(concrete_types[index])?;
+                        arguments.push(
+                            self.backend
+                                .builder
+                                .build_load(ty, dynamic, "reabstraction.argument")
+                                .map_err(compiler_diagnostic)?
+                                .into(),
+                        );
+                    }
+                }
+                let signature = self.backend.compile_closure_function_type(&plan.concrete)?;
+                let value = self
+                    .backend
+                    .builder
+                    .build_indirect_call(signature, code, &arguments, "reabstraction.call")
+                    .map_err(compiler_diagnostic)?
+                    .try_as_basic_value()
+                    .basic();
+                if let Some(value) = value {
+                    self.backend
+                        .builder
+                        .build_store(result, value)
+                        .map_err(compiler_diagnostic)?;
+                }
+            }
+            ReabstractionDirection::DynamicToConcrete => {
+                // Concrete ABI: env, resources, value parameters; returns the
+                // concrete result.
+                let result_type = self.backend.compile_type(&plan.concrete.result)?;
+                let result = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(result_type, "reabstraction.result")
+                    .map_err(compiler_diagnostic)?;
+                let concrete_types = super::flattened_parameter_types(&plan.concrete.parameter);
+                let concrete_indirect = self.backend.indirect_parameter_mask(&plan.concrete);
+                let mut arguments = vec![closure_environment.into(), result.into()];
+                for index in 0..concrete_types.len() {
+                    let parameter = parameters[1 + index];
+                    if concrete_indirect[index] {
+                        arguments.push(parameter.into());
+                    } else {
+                        let value = inkwell::values::BasicValueEnum::try_from(parameter)
+                            .map_err(|_| {
+                                Diagnostic::new(span.clone(), "reabstraction argument")
+                            })?;
+                        let slot = self
+                            .backend
+                            .entry_builder()
+                            .build_alloca(value.get_type(), "reabstraction.argument")
+                            .map_err(compiler_diagnostic)?;
+                        self.backend
+                            .builder
+                            .build_store(slot, value)
+                            .map_err(compiler_diagnostic)?;
+                        arguments.push(slot.into());
+                    }
+                }
+                let signature =
+                    self.backend
+                        .compile_dynamic_function_type(&plan.dynamic, 0)?;
+                self.backend
+                    .builder
+                    .build_indirect_call(signature, code, &arguments, "")
+                    .map_err(compiler_diagnostic)?;
+                let value = self
+                    .backend
+                    .builder
+                    .build_load(result_type, result, "reabstraction.result.value")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_return(Some(&value))
+                    .map_err(compiler_diagnostic)?;
+                return Ok(());
+            }
+        }
+        self.backend
+            .builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
     }
 
     /// The forwarding entry a dynamic-shape closure points at (R-C). Its
@@ -4084,4 +4423,33 @@ fn is_static_layout_type(value_type: &CheckedType) -> bool {
             | CheckedType::COpaquePointer
             | CheckedType::Function(_)
     )
+}
+
+/// Whether a concrete function type's written parameter or result contains a
+/// function type. Nested reabstraction is a later R5 step.
+fn contains_nested_function(function_type: &crate::CheckedFunctionType) -> bool {
+    fn contains(ty: &CheckedType) -> bool {
+        match ty {
+            CheckedType::Function(_) => true,
+            CheckedType::CPointer { pointee } => contains(pointee),
+            CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
+                contains(value)
+            }
+            CheckedType::Product(product) => product
+                .elements
+                .iter()
+                .any(|field| contains(&field.value_type)),
+            CheckedType::Sum(sum) => sum.alternatives.iter().any(contains),
+            CheckedType::Wrapper {
+                arguments,
+                representation,
+                ..
+            } => arguments.iter().any(contains) || contains(representation),
+            CheckedType::Array { element, count } => contains(element) || contains(count),
+            CheckedType::Opaque { arguments, .. }
+            | CheckedType::TypeConstructor { arguments, .. } => arguments.iter().any(contains),
+            _ => false,
+        }
+    }
+    contains(&function_type.parameter) || contains(&function_type.result)
 }

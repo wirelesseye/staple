@@ -107,7 +107,7 @@ pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredIn
 // Family-specific plan types are also used within the lowering subtree.
 pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
-    DescriptorBoundEntryPlan, DynamicCapture,
+    DescriptorBoundEntryPlan, DynamicCapture, ReabstractionThunkPlan,
     CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorDropPlan,
     DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement, ExternAdapterPlan,
     ExternDeclaration, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlanType,
@@ -702,6 +702,25 @@ impl LoweredCoercionPlan {
             }
         }
     }
+}
+
+/// A reabstraction at a concrete-to-dynamic call boundary (R-E). Lowering
+/// records one for every function-typed argument or result whose dynamic type
+/// mentions run-time parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoweredReabstraction {
+    pub direction: LoweredReabstractionDirection,
+    /// The concrete function type on the concrete side.
+    pub concrete: CheckedFunctionType,
+    /// The dynamic function type on the dynamic side, which mentions the
+    /// run-time parameters the closure's type does.
+    pub dynamic: CheckedFunctionType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredReabstractionDirection {
+    ConcreteToDynamic,
+    DynamicToConcrete,
 }
 
 #[derive(Debug, Clone)]
@@ -2791,6 +2810,10 @@ pub(crate) struct LoweredProgram {
     /// `InitializerId`. Built at the closure fixed point; instance bodies carry
     /// the same table per body.
     initializer_bindings: Vec<std::collections::BTreeMap<LoweredBindingSite, LoweredBoundTarget>>,
+    /// Reabstraction plans at concrete-to-dynamic boundaries in module
+    /// initializers, indexed by `InitializerId` (R-E).
+    initializer_conversions:
+        Vec<std::collections::BTreeMap<(LoweredCallId, Option<usize>), LoweredReabstraction>>,
     /// Resolved trait evidence for the initializer sites that need it, indexed
     /// by `InitializerId`.
     initializer_evidence: Vec<std::collections::BTreeMap<LoweredBindingSite, TraitEvidence>>,
@@ -14447,6 +14470,9 @@ impl Lowerer {
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.materialize_instance_bodies());
+        }
+        if diagnostics.is_empty() {
+            program.record_reabstractions();
         }
         if diagnostics.is_empty() {
             diagnostics.extend(program.close_artifact_catalog(&ProductionHooks));

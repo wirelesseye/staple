@@ -194,6 +194,8 @@ impl<'a> InitializerBinder<'a> {
             } else {
                 (function_type, substitutions, evidence)
             };
+        let call_function_type = function_type.clone();
+        let call_substitutions = substitutions.clone();
         let request = InstanceResolutionRequest {
             function,
             origin: origin.clone(),
@@ -203,8 +205,13 @@ impl<'a> InitializerBinder<'a> {
             target: InstanceResolutionTarget::Root,
         };
         let runtime = if differential {
-            self.program
-                .differential_call_runtime(function, &BTreeSet::new(), false)
+            self.program.differential_call_runtime(
+                function,
+                &BTreeSet::new(),
+                false,
+                &call_function_type,
+                &call_substitutions,
+            )
         } else {
             None
         };

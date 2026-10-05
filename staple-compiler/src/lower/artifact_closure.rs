@@ -115,6 +115,11 @@ pub(crate) enum ArtifactUseSite {
     ClosureEnvironment(LoweredCallableValueId),
     /// A dynamic-shape closure's descriptor-bound entry (R-C).
     DescriptorBoundEntry(LoweredCallableValueId),
+    /// A reabstraction conversion at a call boundary (R5).
+    ReabstractionThunk {
+        call: LoweredCallId,
+        argument: Option<usize>,
+    },
     /// An `Index` call's operand temporary dropped after the call: `operand` is
     /// the flattened parameter index, or `None` for the whole-argument
     /// temporary.
@@ -315,6 +320,15 @@ impl ArtifactFamilyHooks for ProductionHooks {
             | ArtifactRequestKey::DescriptorBoundEntry(_) => {
                 super::descriptor_artifacts::expand(program, artifact, plan)
             }
+            ArtifactRequestKey::ReabstractionThunk(_) => {
+                let LoweredArtifactPlan::ReabstractionThunk(plan) = plan else {
+                    return Err(vec![Diagnostic::new(
+                        record.origin.span.clone(),
+                        "reabstraction-thunk artifact carries a mismatched plan".to_string(),
+                    )]);
+                };
+                Ok((LoweredArtifactPlan::ReabstractionThunk(plan), Vec::new()))
+            }
             ArtifactRequestKey::DropGlue(_) => {
                 let LoweredArtifactPlan::DropGlue(plan) = plan else {
                     return Err(vec![Diagnostic::new(
@@ -406,6 +420,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::DescriptorDrop(_)
                 | ArtifactRequestKey::CompoundDescriptorDrop(_)
                 | ArtifactRequestKey::DescriptorBoundEntry(_)
+                | ArtifactRequestKey::ReabstractionThunk(_)
                 | ArtifactRequestKey::GcFinalizer(_)
                 | ArtifactRequestKey::CoroutineCodes(_)
                 | ArtifactRequestKey::ReactionRunner(_)
@@ -1726,6 +1741,11 @@ impl LoweredProgram {
             ArtifactUseSite::DescriptorBoundEntry(id) => {
                 if !callable_value(id) {
                     report("callable value", id.index());
+                }
+            }
+            ArtifactUseSite::ReabstractionThunk { call: id, .. } => {
+                if !call(id) {
+                    report("call", id.index());
                 }
             }
             ArtifactUseSite::RefConstruction(id) => {

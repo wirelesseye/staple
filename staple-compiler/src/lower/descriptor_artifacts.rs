@@ -1,11 +1,14 @@
 //! Demand-driven type descriptors and their concrete drop entry points.
 use super::artifact_closure::{ClosureRequest, ExpansionResult};
 use super::{
-    DescriptorDropPlan, DropGlueBody, DropGluePlan, LoweredArtifactDependencyKind as Kind,
+    ArenaId, DescriptorDropPlan, DropGlueBody, DropGluePlan, LoweredArtifactDependencyKind as Kind,
     LoweredArtifactPlan as Plan, LoweredArtifactRequestId, LoweredProgram, PlannedArtifact,
     TypeDescriptorPlan,
 };
-use crate::specialization::{ArtifactRequestKey, CanonicalType};
+use crate::specialization::{
+    ArtifactRequestKey, CanonicalFunctionType, CanonicalType, ReabstractionDirection,
+    ReabstractionThunkKey,
+};
 use crate::{CheckedType, Origin};
 use staple_syntax::Diagnostic;
 
@@ -159,6 +162,50 @@ pub(super) fn compound_body_shapes(
     shapes
 }
 
+/// Reabstraction-thunk requests for one owner's recorded boundary
+/// conversions (R5).
+fn reabstraction_requests(
+    conversions: &std::collections::BTreeMap<
+        (super::LoweredCallId, Option<usize>),
+        super::LoweredReabstraction,
+    >,
+    origin: &Origin,
+) -> Result<Vec<ClosureRequest>, Vec<Diagnostic>> {
+    let mut requests = Vec::new();
+    for ((call, argument), conversion) in conversions {
+        let direction = match conversion.direction {
+            super::LoweredReabstractionDirection::ConcreteToDynamic => {
+                ReabstractionDirection::ConcreteToDynamic
+            }
+            super::LoweredReabstractionDirection::DynamicToConcrete => {
+                ReabstractionDirection::DynamicToConcrete
+            }
+        };
+        let concrete = CanonicalFunctionType::concrete(&conversion.concrete, origin)
+            .map_err(|diagnostic| vec![diagnostic])?;
+        requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::ReabstractionThunk(ReabstractionThunkKey {
+                concrete,
+                direction,
+            }),
+            plan: Plan::ReabstractionThunk(crate::ReabstractionThunkPlan {
+                concrete: conversion.concrete.clone(),
+                dynamic: conversion.dynamic.clone(),
+                direction,
+            }),
+            kind: Kind::ReabstractionThunk,
+            origin: origin.clone(),
+            use_site: Some(
+                super::artifact_closure::ArtifactUseSite::ReabstractionThunk {
+                    call: *call,
+                    argument: *argument,
+                },
+            ),
+        });
+    }
+    Ok(requests)
+}
+
 pub(super) fn scan_instance(
     program: &LoweredProgram,
     id: super::FunctionInstanceId,
@@ -287,6 +334,7 @@ pub(super) fn scan_instance(
             });
         }
     }
+    requests.extend(reabstraction_requests(&body.conversions, &body.origin)?);
     Ok(requests)
 }
 
@@ -342,6 +390,9 @@ pub(super) fn scan_initializer(
             Some(super::artifact_closure::ArtifactUseSite::InstanceTypeDescriptor(index));
         requests.push(request);
     }
+    if let Some(conversions) = program.initializer_conversions.get(id.index()) {
+        requests.extend(reabstraction_requests(conversions, &origin)?);
+    }
     Ok(requests)
 }
 
@@ -365,7 +416,13 @@ impl super::cleanup_artifacts::LoweredOwnerVisitor for InitializerDescriptorVisi
         };
         if self
             .program
-            .differential_call_runtime(function, &std::collections::BTreeSet::new(), false)
+            .differential_call_runtime(
+                function,
+                &std::collections::BTreeSet::new(),
+                false,
+                &call.function_type,
+                &call.substitutions,
+            )
             .is_none()
         {
             return Ok(());
@@ -446,6 +503,7 @@ pub(super) fn expand(
         }
         Plan::CompoundDescriptorDrop(plan) => Plan::CompoundDescriptorDrop(plan),
         Plan::DescriptorBoundEntry(plan) => Plan::DescriptorBoundEntry(plan),
+        Plan::ReabstractionThunk(plan) => Plan::ReabstractionThunk(plan),
         Plan::DescriptorDrop(mut plan) => {
             let request = ClosureRequest::Artifact {
                 key: ArtifactRequestKey::DropGlue(

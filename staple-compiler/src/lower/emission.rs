@@ -386,6 +386,25 @@ impl<'a> EmissionView<'a> {
         self.program.planned_coroutine_pair_names(ordinal)
     }
 
+    /// Reabstraction plans at one owner's concrete-to-dynamic boundaries
+    /// (R5).
+    pub(crate) fn conversions(
+        &self,
+        owner: EmissionOwner,
+    ) -> Option<&'a std::collections::BTreeMap<(super::LoweredCallId, Option<usize>), super::LoweredReabstraction>> {
+        match owner {
+            EmissionOwner::Instance(id) => self
+                .program
+                .instances
+                .get(id)
+                .and_then(|record| record.body.as_ref())
+                .map(|body| &body.conversions),
+            EmissionOwner::Initializer(id) => {
+                self.program.initializer_conversions.get(id.index())
+            }
+        }
+    }
+
     /// The concrete dispatch bindings of one instance body.
     pub(crate) fn instance_bindings(
         &self,

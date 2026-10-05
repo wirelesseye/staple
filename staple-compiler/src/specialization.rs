@@ -777,6 +777,21 @@ pub(crate) struct DescriptorBoundEntryKey {
     pub instance: InstanceOrdinal,
 }
 
+/// The direction of a reabstraction conversion (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ReabstractionDirection {
+    ConcreteToDynamic,
+    DynamicToConcrete,
+}
+
+/// The identity of one reabstraction thunk (R5), keyed by the concrete
+/// function type and the conversion direction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ReabstractionThunkKey {
+    pub concrete: CanonicalFunctionType,
+    pub direction: ReabstractionDirection,
+}
+
 /// Generated-artifact request keys. The variant is the namespace: keys from
 /// different families can never compare or hash equal, even when their numeric
 /// IDs coincide. `RuntimeHelper` is deliberately absent: runtime symbols have
@@ -791,6 +806,7 @@ pub(crate) enum ArtifactRequestKey {
     DescriptorDrop(CanonicalType),
     CompoundDescriptorDrop(CompoundDescriptorDropKey),
     DescriptorBoundEntry(DescriptorBoundEntryKey),
+    ReabstractionThunk(ReabstractionThunkKey),
     GcFinalizer(GcFinalizerKey),
     CoroutineCodes(CoroutineCodesKey),
     ReactionRunner(ReactiveRunnerKey),
@@ -811,6 +827,7 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::DescriptorDrop(_) => "descriptor-drop",
             ArtifactRequestKey::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             ArtifactRequestKey::DescriptorBoundEntry(_) => "descriptor-bound-entry",
+            ArtifactRequestKey::ReabstractionThunk(_) => "reabstraction-thunk",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => "gc-finalizer-payload",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(_)) => "gc-finalizer-cell",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment { .. }) => {
@@ -1031,6 +1048,7 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
             "__staple_compound_descriptor_drop".to_owned()
         }
         ArtifactRequestKey::DescriptorBoundEntry(_) => "__staple_descriptor_bound_entry".to_owned(),
+        ArtifactRequestKey::ReabstractionThunk(_) => "__staple_reabstraction".to_owned(),
         ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => {
             "__staple_gc_finalizer_payload".to_owned()
         }

@@ -18,7 +18,7 @@ use crate::lower::{
     LoweredExpressionKind, LoweredItemKind, LoweredPatternKind, LoweredProductStep, LoweredProgram,
     PatternId, PlaceId,
 };
-use crate::{CheckedType, FunctionId, TypeParameterId, contains_type_parameter};
+use crate::{CheckedFunctionType, CheckedType, FunctionId, TypeParameterId, contains_type_parameter};
 
 /// Whether a function's template can be emitted as a dynamic implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,8 +283,20 @@ impl LoweredProgram {
         function: FunctionId,
         caller_runtime: &BTreeSet<TypeParameterId>,
         current: bool,
+        function_type: &CheckedFunctionType,
+        substitutions: &crate::CallSubstitutions,
     ) -> Option<BTreeSet<TypeParameterId>> {
         if !self.dictionary_pass_generic_calls || current || !caller_runtime.is_empty() {
+            return None;
+        }
+        // A call site whose types name a parameter product cannot lower through
+        // a dynamic implementation, so it stays monomorphized.
+        if contains_parameter_product(&CheckedType::Function(function_type.clone()))
+            || substitutions
+                .types
+                .iter()
+                .any(|entry| contains_parameter_product(&entry.value_type))
+        {
             return None;
         }
         if !self.dynamic_support(function).is_supported() {
@@ -431,10 +443,8 @@ impl LoweredProgram {
         if contains_parameter_product(&CheckedType::Function(template.signature.clone())) {
             walker.reject(RejectionReason::ParameterProducts);
         }
-        if contains_nested_polymorphic_function(&template.signature.parameter)
-            || contains_nested_polymorphic_function(&template.signature.result)
-        {
-            walker.reject(RejectionReason::FunctionTypedSignature);
+        if let Some(reason) = signature_function_restriction(&template.signature) {
+            walker.reject(reason);
         }
         let copy = self.semantic_ids.copy_trait;
         let sized = self.semantic_ids.sized_trait;
@@ -505,52 +515,6 @@ fn contains_polymorphic_function(ty: &CheckedType) -> bool {
     }
 }
 
-/// Like [`contains_polymorphic_function`] but a top-level function type is
-/// treated as the container to inspect rather than as a nested function value.
-/// Used for callable signatures, where a parameter or result that is itself a
-/// function value still needs reabstraction.
-fn contains_nested_polymorphic_function(ty: &CheckedType) -> bool {
-    match ty {
-        CheckedType::Function(function) => {
-            contains_polymorphic_function(&function.parameter)
-                || contains_polymorphic_function(&function.result)
-                || function
-                    .effects
-                    .resources
-                    .iter()
-                    .any(|resource| contains_polymorphic_function(&resource.value_type))
-        }
-        CheckedType::CPointer { pointee } => contains_nested_polymorphic_function(pointee),
-        CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
-            contains_nested_polymorphic_function(value)
-        }
-        CheckedType::Array { element, count } => {
-            contains_nested_polymorphic_function(element)
-                || contains_nested_polymorphic_function(count)
-        }
-        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
-            arguments.iter().any(contains_nested_polymorphic_function)
-        }
-        CheckedType::Product(product) => product
-            .elements
-            .iter()
-            .any(|field| contains_nested_polymorphic_function(&field.value_type)),
-        CheckedType::Sum(sum) => sum
-            .alternatives
-            .iter()
-            .any(contains_nested_polymorphic_function),
-        CheckedType::Wrapper {
-            arguments,
-            representation,
-            ..
-        } => {
-            arguments.iter().any(contains_nested_polymorphic_function)
-                || contains_nested_polymorphic_function(representation)
-        }
-        _ => false,
-    }
-}
-
 /// Whether a type contains a parameter product anywhere. Capable parameters
 /// cannot appear in a scheme used as a value, and the dynamic emitter does not
 /// model their arity.
@@ -591,6 +555,85 @@ fn contains_parameter_product(ty: &CheckedType) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether a type contains a function value behind a reference, slice,
+/// buffer, or shared cell. Converting such a value needs copying shared
+/// storage, so R5 reports it as the allowed restriction instead.
+fn contains_function_behind_reference(ty: &CheckedType) -> bool {
+    match ty {
+        CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
+            contains_polymorphic_function(value) || contains_function_behind_reference(value)
+        }
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|field| contains_function_behind_reference(&field.value_type)),
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_function_behind_reference),
+        CheckedType::Wrapper {
+            arguments,
+            representation,
+            ..
+        } => {
+            arguments.iter().any(contains_function_behind_reference)
+                || contains_function_behind_reference(representation)
+        }
+        CheckedType::Array { element, .. } => contains_function_behind_reference(element),
+        CheckedType::Opaque { arguments, .. }
+        | CheckedType::TypeConstructor { arguments, .. } => {
+            arguments.iter().any(contains_function_behind_reference)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a type contains a function value R5 cannot convert yet: a nested
+/// function type, or a function inside a by-value aggregate. A direct function
+/// type and a function behind a reference are handled elsewhere.
+pub(super) fn contains_unsupported_function(ty: &CheckedType) -> bool {
+    match ty {
+        CheckedType::Function(function) => {
+            contains_polymorphic_function(&function.parameter)
+                || contains_polymorphic_function(&function.result)
+        }
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|field| contains_polymorphic_function(&field.value_type)),
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_polymorphic_function),
+        CheckedType::Wrapper {
+            arguments,
+            representation,
+            ..
+        } => {
+            arguments.iter().any(contains_polymorphic_function)
+                || contains_polymorphic_function(representation)
+        }
+        CheckedType::Array { element, .. } => contains_polymorphic_function(element),
+        CheckedType::Opaque { arguments, .. }
+        | CheckedType::TypeConstructor { arguments, .. } => {
+            arguments.iter().any(contains_polymorphic_function)
+        }
+        _ => false,
+    }
+}
+
+/// Whether any flattened parameter type or the result needs an unsupported
+/// conversion, or sits behind a reference.
+fn signature_function_restriction(
+    function_type: &CheckedFunctionType,
+) -> Option<RejectionReason> {
+    let parameters = super::flattened_parameter_types(&function_type.parameter);
+    let mut reason = None;
+    for parameter in parameters.iter().chain(std::iter::once(&*function_type.result)) {
+        if contains_function_behind_reference(parameter) {
+            return Some(RejectionReason::FunctionBehindReference);
+        }
+        if contains_unsupported_function(parameter) {
+            reason = Some(RejectionReason::FunctionTypedSignature);
+        }
+    }
+    reason
 }
 
 struct SupportWalker<'program> {
@@ -686,14 +729,19 @@ impl SupportWalker<'_> {
             self.reject(RejectionReason::Malformed);
             return;
         };
-        if contains_polymorphic_function(&expression.value_type) {
+        if contains_function_behind_reference(&expression.value_type) {
+            self.reject(RejectionReason::FunctionBehindReference);
+        } else if contains_unsupported_function(&expression.value_type) {
             self.reject(RejectionReason::FunctionTypedValue);
         }
-        if let Some(coercion) = &expression.coercion
-            && (contains_polymorphic_function(&coercion.source)
-                || contains_polymorphic_function(&coercion.target))
-        {
-            self.reject(RejectionReason::FunctionTypedCoercion);
+        if let Some(coercion) = &expression.coercion {
+            for ty in [&coercion.source, &coercion.target] {
+                if contains_function_behind_reference(ty) {
+                    self.reject(RejectionReason::FunctionBehindReference);
+                } else if contains_unsupported_function(ty) {
+                    self.reject(RejectionReason::FunctionTypedCoercion);
+                }
+            }
         }
         match &expression.kind {
             LoweredExpressionKind::String(_) | LoweredExpressionKind::CString(_) => {}
@@ -870,15 +918,49 @@ impl SupportWalker<'_> {
         if call.reactive.is_some() {
             self.reject(RejectionReason::ReactiveCall);
         }
-        if contains_nested_polymorphic_function(&call.function_type.parameter)
-            || contains_nested_polymorphic_function(&call.function_type.result)
-            || call
-                .substitutions
-                .types
-                .iter()
-                .any(|entry| contains_polymorphic_function(&entry.value_type))
-        {
-            self.reject(RejectionReason::FunctionTypeAtCallBoundary);
+        if let Some(reason) = signature_function_restriction(&call.function_type) {
+            self.reject(reason);
+        }
+        for entry in &call.substitutions.types {
+            if contains_function_behind_reference(&entry.value_type) {
+                self.reject(RejectionReason::FunctionBehindReference);
+            } else if contains_unsupported_function(&entry.value_type) {
+                self.reject(RejectionReason::FunctionTypeAtCallBoundary);
+            }
+        }
+        // A concrete callee with a dynamic function-typed argument or result
+        // needs the dynamic-to-concrete direction, which the dynamic emitter
+        // does not apply yet. Reject rather than emit a wrong-ABI call.
+        let mentions_parameters = contains_type_parameter(&CheckedType::Function(
+            call.function_type.clone(),
+        )) || call
+            .substitutions
+            .types
+            .iter()
+            .any(|entry| contains_type_parameter(&entry.value_type));
+        if !mentions_parameters {
+            let dynamic_function = |ty: &CheckedType| {
+                matches!(ty, CheckedType::Function(_))
+                    && contains_type_parameter(ty)
+            };
+            for argument in &call.arguments {
+                let Some(expression) = argument.expression else {
+                    continue;
+                };
+                if let Some(record) = self.program.expressions.get(expression)
+                    && dynamic_function(
+                        record
+                            .coercion
+                            .as_ref()
+                            .map_or(&record.value_type, |coercion| &coercion.target),
+                    )
+                {
+                    self.reject(RejectionReason::FunctionTypeAtCallBoundary);
+                }
+            }
+            if dynamic_function(&call.result_type) {
+                self.reject(RejectionReason::FunctionTypeAtCallBoundary);
+            }
         }
         for step in &call.steps {
             match step {
@@ -981,7 +1063,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 2596;
+    const IN_SCOPE_BASELINE: usize = 1168;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.

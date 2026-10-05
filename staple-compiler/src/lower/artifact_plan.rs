@@ -37,6 +37,9 @@ pub(crate) enum LoweredArtifactPlan {
     /// A dynamic-shape closure's forwarding entry (R-C). The entry loads the
     /// instance's descriptors from its environment and forwards the call.
     DescriptorBoundEntry(DescriptorBoundEntryPlan),
+    /// A reabstraction thunk (R5): converts a closure between the concrete and
+    /// dynamic ABIs.
+    ReabstractionThunk(ReabstractionThunkPlan),
     /// A garbage-collector finalizer. Expansion records the referenced drop glue.
     GcFinalizer(GcFinalizerPlan),
     /// A coroutine `resume`/`cleanup` pair. Expansion records the frame layout
@@ -67,6 +70,15 @@ pub(crate) struct DescriptorBoundEntryPlan {
     pub runtime: Vec<crate::TypeParameterId>,
     /// The closure's function type: the dynamic shape without descriptors.
     pub function_type: CheckedFunctionType,
+}
+
+/// A reabstraction thunk (R5). The concrete side uses the concrete closure
+/// ABI; the dynamic side uses the dynamic shape without descriptor parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReabstractionThunkPlan {
+    pub concrete: CheckedFunctionType,
+    pub dynamic: CheckedFunctionType,
+    pub direction: crate::specialization::ReabstractionDirection,
 }
 
 /// One type a plan carries, as `LoweredArtifactPlan::visit_types` yields it.
@@ -138,6 +150,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::DescriptorDrop(_) => "descriptor-drop",
             LoweredArtifactPlan::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             LoweredArtifactPlan::DescriptorBoundEntry(_) => "descriptor-bound-entry",
+            LoweredArtifactPlan::ReabstractionThunk(_) => "reabstraction-thunk",
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload { .. }) => {
                 "gc-finalizer-payload"
             }
@@ -219,6 +232,12 @@ impl LoweredArtifactPlan {
                 LoweredArtifactPlan::DescriptorBoundEntry(plan),
                 ArtifactRequestKey::DescriptorBoundEntry(key),
             ) => plan.instance.index() == key.instance.index(),
+            (
+                LoweredArtifactPlan::ReabstractionThunk(plan),
+                ArtifactRequestKey::ReabstractionThunk(key),
+            ) => {
+                same_function(&plan.concrete, &key.concrete) && plan.direction == key.direction
+            }
             (LoweredArtifactPlan::DropGlue(plan), ArtifactRequestKey::DropGlue(key)) => {
                 same_type(&plan.value_type, key)
             }
@@ -330,6 +349,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::TypeDescriptor(plan) => plan.expanded,
             LoweredArtifactPlan::DescriptorDrop(plan) => plan.glue.is_some(),
             LoweredArtifactPlan::DescriptorBoundEntry(_) => true,
+            LoweredArtifactPlan::ReabstractionThunk(_) => true,
             LoweredArtifactPlan::CompoundDescriptorDrop(_) => true,
             LoweredArtifactPlan::DropGlue(plan) => !matches!(plan.body, DropGlueBody::Unexpanded),
             LoweredArtifactPlan::GcFinalizer(plan) => match plan {
@@ -675,6 +695,11 @@ impl LoweredArtifactPlan {
                 runtime: _,
                 function_type: _,
             }) => {}
+            LoweredArtifactPlan::ReabstractionThunk(ReabstractionThunkPlan {
+                concrete: _,
+                dynamic: _,
+                direction: _,
+            }) => {}
         }
     }
 
@@ -700,6 +725,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::CompoundDescriptorDrop(_)
             | LoweredArtifactPlan::DescriptorBoundEntry(_)
+            | LoweredArtifactPlan::ReabstractionThunk(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
@@ -729,6 +755,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::CompoundDescriptorDrop(_)
             | LoweredArtifactPlan::DescriptorBoundEntry(_)
+            | LoweredArtifactPlan::ReabstractionThunk(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)

@@ -256,6 +256,7 @@ pub(crate) enum LoweredArtifactDependencyKind {
     DescriptorDrop,
     CompoundDescriptorDrop,
     DescriptorBoundEntry,
+    ReabstractionThunk,
     /// A generated garbage-collector finalizer.
     GcFinalizer,
     /// A coroutine body's generated resume/cleanup pair.
@@ -281,6 +282,7 @@ impl LoweredArtifactDependencyKind {
             LoweredArtifactDependencyKind::DescriptorDrop => "descriptor-drop",
             LoweredArtifactDependencyKind::CompoundDescriptorDrop => "compound-descriptor-drop",
             LoweredArtifactDependencyKind::DescriptorBoundEntry => "descriptor-bound-entry",
+            LoweredArtifactDependencyKind::ReabstractionThunk => "reabstraction-thunk",
             LoweredArtifactDependencyKind::GcFinalizer => "gc-finalizer",
             LoweredArtifactDependencyKind::CoroutineCodes => "coroutine-codes",
             LoweredArtifactDependencyKind::ReactionRunner => "reaction-runner",
@@ -317,6 +319,9 @@ impl LoweredArtifactDependencyKind {
             ) | (
                 LoweredArtifactDependencyKind::DescriptorBoundEntry,
                 ArtifactRequestKey::DescriptorBoundEntry(_)
+            ) | (
+                LoweredArtifactDependencyKind::ReabstractionThunk,
+                ArtifactRequestKey::ReabstractionThunk(_)
             ) | (
                 LoweredArtifactDependencyKind::GcFinalizer,
                 ArtifactRequestKey::GcFinalizer(_)
@@ -958,6 +963,8 @@ impl<'a> WorklistBuilder<'a> {
             InstanceResolutionTarget::Nested(enclosing)
             | InstanceResolutionTarget::Current(enclosing) => enclosing.key.runtime().clone(),
         };
+        let call_function_type = function_type.clone();
+        let call_substitutions = substitutions.clone();
         let request = InstanceResolutionRequest {
             function,
             origin: origin.clone(),
@@ -967,9 +974,13 @@ impl<'a> WorklistBuilder<'a> {
             target,
         };
         let resolved = if differential {
-            match self
-                .program
-                .differential_call_runtime(function, &caller_runtime, current)
+            match self.program.differential_call_runtime(
+                function,
+                &caller_runtime,
+                current,
+                &call_function_type,
+                &call_substitutions,
+            )
             {
                 Some(runtime) => self
                     .program
@@ -3509,6 +3520,57 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_boundaries_reabstract_function_results() {
+        let (text, name) = dynamic_test_module_with_boundary(
+            concat!(
+                "type Range T = wrap (current: T, end: T)\n",
+                "def range: <T where Copy T> T -> T -> Range T = start => end => Range (current: start, end: end)\n",
+                "def concrete: I32 -> I32 = x => (range x 3).end\n",
+                "let result = concrete 42\n",
+            ),
+            "range",
+            Some("concrete"),
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-reabstraction-result",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Concrete = unsafe extern "C" fn(*const u8, i32) -> i32;
+        let concrete = unsafe { engine.get_function::<Concrete>(&name) }.unwrap();
+        assert_eq!(unsafe { concrete.call(std::ptr::null(), 42) }, 3);
+    }
+
+    #[test]
+    fn dynamic_boundaries_reabstract_function_arguments() {
+        let (text, name) = dynamic_test_module_with_boundary(
+            concat!(
+                "def apply: <T where Copy T> (T -> T, T) -> T = (f, x) => f x\n",
+                "def concrete: I32 -> I32 = x => apply.<I32> ((y => y), x)\n",
+                "let result = concrete 41\n",
+            ),
+            "apply",
+            Some("concrete"),
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-reabstraction",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Concrete = unsafe extern "C" fn(*const u8, i32) -> i32;
+        let concrete = unsafe { engine.get_function::<Concrete>(&name) }.unwrap();
+        assert_eq!(unsafe { concrete.call(std::ptr::null(), 41) }, 41);
+    }
+
+    #[test]
     fn dynamic_closures_capture_runtime_values() {
         let (text, name) = dynamic_test_module(
             concat!(
@@ -3825,6 +3887,7 @@ mod tests {
             }
             caller
         });
+        program.record_reabstractions();
         let diagnostics =
             program.close_artifact_catalog(&super::super::artifact_closure::ProductionHooks);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");

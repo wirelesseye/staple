@@ -22,7 +22,7 @@ use crate::specialization::{
 use crate::{
     CheckedCoercion, CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType,
     CheckedPropagation, CheckedResource, CheckedTraitBound, CheckedTraitDispatch, CheckedType,
-    FunctionId, SymbolId, TypeId, TypeParameterId, contains_type_parameter, substitute_effect_set,
+    FunctionId, InitializerId, SymbolId, TypeId, TypeParameterId, contains_type_parameter, substitute_effect_set,
     substitute_type,
 };
 
@@ -202,6 +202,9 @@ pub(crate) struct LoweredInstanceBody {
     /// The symbols emission tracks for scope-exit cleanup, in registration
     /// order (pattern traversal order).
     pub owned_bindings: Vec<LoweredOwnedBinding>,
+    /// Reabstraction plans at concrete-to-dynamic boundaries (R-E), keyed by
+    /// the call site and the argument index (`None` for the result).
+    pub conversions: BTreeMap<(LoweredCallId, Option<usize>), super::LoweredReabstraction>,
     // Instance-local arenas. IDs are meaningful only inside this body.
     pub(super) blocks: Arena<LoweredBlock, BlockId>,
     pub(super) items: Arena<LoweredItem, ItemId>,
@@ -257,6 +260,7 @@ impl LoweredInstanceBody {
             artifact_uses: Vec::new(),
             instance_uses: Vec::new(),
             owned_bindings: Vec::new(),
+            conversions: BTreeMap::new(),
             blocks: Arena::default(),
             items: Arena::default(),
             expressions: Arena::default(),
@@ -2679,6 +2683,8 @@ impl<'a> BodyCloner<'a> {
             } else {
                 (function_type, substitutions, evidence)
             };
+        let call_function_type = function_type.clone();
+        let call_substitutions = substitutions.clone();
         let request = InstanceResolutionRequest {
             function,
             origin: origin.clone(),
@@ -2702,7 +2708,13 @@ impl<'a> BodyCloner<'a> {
         } else {
             let runtime = if differential {
                 self.program
-                    .differential_call_runtime(function, self.enclosing.key.runtime(), false)
+                    .differential_call_runtime(
+                        function,
+                        self.enclosing.key.runtime(),
+                        false,
+                        &call_function_type,
+                        &call_substitutions,
+                    )
             } else {
                 None
             };
@@ -3254,6 +3266,276 @@ fn error_with(cloner: &mut BodyCloner<'_>) -> LoweredWithId {
         body,
         scope_exit: super::LoweredScopeExit::Ordinary,
     })
+}
+
+impl LoweredProgram {
+    /// Records the reabstraction plan at every concrete-to-dynamic call
+    /// boundary (R-E). Runs after every instance body is materialized, so each
+    /// callee's dynamic signature is available.
+    pub(super) fn record_reabstractions(&mut self) {
+        let instances = self.instances.iter().map(|(id, _)| id).collect::<Vec<_>>();
+        for id in instances {
+            let caller_runtime_empty = self
+                .specializations
+                .instance(self.instances.get(id).expect("instance").ordinal)
+                .is_some_and(|key| key.runtime().is_empty());
+            let Some(body) = self.instances.get(id).and_then(|record| record.body.as_ref())
+            else {
+                continue;
+            };
+            let calls = body
+                .bindings
+                .iter()
+                .filter_map(|(site, target)| {
+                    let super::LoweredBindingSite::Call(call) = site else {
+                        return None;
+                    };
+                    let super::LoweredBoundTarget::Instance(callee) = target else {
+                        return None;
+                    };
+                    Some((*call, *callee))
+                })
+                .collect::<Vec<_>>();
+            let mut conversions = BTreeMap::new();
+            for (call, callee) in calls {
+                let Some(record) = body.call(call) else {
+                    continue;
+                };
+                let argument_type = |index: usize| {
+                    let expression = record.arguments.get(index)?.expression?;
+                    let expression = body.expression(expression)?;
+                    let value_type = expression
+                        .coercion
+                        .as_ref()
+                        .map_or(&expression.value_type, |coercion| &coercion.target);
+                    match value_type {
+                        CheckedType::Function(function) => Some(function.clone()),
+                        _ => None,
+                    }
+                };
+                self.reabstraction_into(
+                    call,
+                    record,
+                    argument_type,
+                    callee,
+                    caller_runtime_empty,
+                    &mut conversions,
+                );
+            }
+            if let Some(record) = self.instances.get_mut(id)
+                && let Some(body) = record.body.as_mut()
+            {
+                body.conversions = conversions;
+            }
+        }
+        // Module initializers use the program arenas. Their binding tables are
+        // built later (inside the artifact closure), so each direct call is
+        // resolved here to find its callee instance.
+        let count = self.initializers.len();
+        self.initializer_conversions = vec![BTreeMap::new(); count];
+        for index in 0..count {
+            let initializer = InitializerId::from_index(index);
+            let calls = self.initializer_direct_calls(initializer);
+            let mut conversions = BTreeMap::new();
+            for call in calls {
+                let Some(record) = self.calls.get(call) else {
+                    continue;
+                };
+                let super::LoweredCallableTarget::DirectFunction { function, .. } = &record.target
+                else {
+                    continue;
+                };
+                let request = InstanceResolutionRequest {
+                    function: *function,
+                    origin: record.origin.clone(),
+                    function_type: record.function_type.clone(),
+                    substitutions: record.substitutions.clone(),
+                    evidence: record.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                };
+                // The initializer is a concrete owner, so the differential
+                // option selects the dynamic instance the binder will use.
+                let runtime = self.differential_call_runtime(
+                    *function,
+                    &std::collections::BTreeSet::new(),
+                    false,
+                    &record.function_type,
+                    &record.substitutions,
+                );
+                let resolved = match runtime {
+                    Some(runtime) => {
+                        self.resolve_instance_request_with_runtime(&request, &runtime)
+                    }
+                    None => self.resolve_instance_request(&request),
+                };
+                let Ok(resolved) = resolved else {
+                    continue;
+                };
+                let Some(ordinal) = self.specializations.instance_ordinal(&resolved.key) else {
+                    continue;
+                };
+                let callee = FunctionInstanceId::from_index(ordinal.index());
+                let argument_type = |argument_index: usize| {
+                    let expression = record.arguments.get(argument_index)?.expression?;
+                    let expression = self.expressions.get(expression)?;
+                    let value_type = expression
+                        .coercion
+                        .as_ref()
+                        .map_or(&expression.value_type, |coercion| &coercion.target);
+                    match value_type {
+                        CheckedType::Function(function) => Some(function.clone()),
+                        _ => None,
+                    }
+                };
+                self.reabstraction_into(
+                    call,
+                    record,
+                    argument_type,
+                    callee,
+                    true,
+                    &mut conversions,
+                );
+            }
+            self.initializer_conversions[index] = conversions;
+        }
+    }
+
+    /// Every direct call expression reachable from one module initializer.
+    fn initializer_direct_calls(&self, initializer: InitializerId) -> Vec<LoweredCallId> {
+        struct Collector {
+            calls: Vec<LoweredCallId>,
+        }
+        impl super::cleanup_artifacts::LoweredOwnerVisitor for Collector {
+            fn call_id_site(
+                &mut self,
+                id: LoweredCallId,
+                _call: &LoweredCall,
+            ) -> Result<(), Vec<Diagnostic>> {
+                self.calls.push(id);
+                Ok(())
+            }
+        }
+        let mut collector = Collector { calls: Vec::new() };
+        let _ = super::cleanup_artifacts::walk_owner(
+            self,
+            super::emission::OwnerArenas::Initializer(initializer),
+            &mut collector,
+        );
+        collector.calls
+    }
+
+    /// Records one boundary's conversions from a call's materialized types and
+    /// the callee's dynamic signature. `caller_runtime_empty` is the calling
+    /// instance's or initializer's run-time set being empty.
+    fn reabstraction_into(
+        &self,
+        call_id: LoweredCallId,
+        call: &LoweredCall,
+        argument_type: impl Fn(usize) -> Option<CheckedFunctionType>,
+        callee: FunctionInstanceId,
+        caller_runtime_empty: bool,
+        conversions: &mut BTreeMap<(LoweredCallId, Option<usize>), super::LoweredReabstraction>,
+    ) {
+        let Some(instance) = self.instances.get(callee) else {
+            return;
+        };
+        let Some(key) = self.specializations.instance(instance.ordinal) else {
+            return;
+        };
+        let callee_runtime_empty = key.runtime().is_empty();
+        if caller_runtime_empty == callee_runtime_empty {
+            return;
+        }
+        let Some(signature) = instance.body.as_ref().map(|body| body.signature.clone()) else {
+            return;
+        };
+        let concrete_to_dynamic = callee_runtime_empty == false;
+        let parameter_types = super::flattened_parameter_types(&signature.parameter);
+        for (index, argument) in call.arguments.iter().enumerate() {
+            let slot = argument.slot.unwrap_or(index);
+            let Some(parameter) = parameter_types.get(slot) else {
+                continue;
+            };
+            let (concrete, dynamic) = if concrete_to_dynamic {
+                let CheckedType::Function(dynamic) = parameter else {
+                    continue;
+                };
+                if !crate::contains_type_parameter(&CheckedType::Function(dynamic.clone()))
+                    || super::dynamic_support::contains_unsupported_function(
+                        &CheckedType::Function(dynamic.clone()),
+                    )
+                {
+                    continue;
+                }
+                let Some(concrete) = argument_type(index) else {
+                    continue;
+                };
+                (concrete, dynamic.clone())
+            } else {
+                let Some(dynamic) = argument_type(index) else {
+                    continue;
+                };
+                let CheckedType::Function(concrete) = parameter else {
+                    continue;
+                };
+                if !crate::contains_type_parameter(&CheckedType::Function(dynamic.clone()))
+                    || super::dynamic_support::contains_unsupported_function(
+                        &CheckedType::Function(dynamic.clone()),
+                    )
+                {
+                    continue;
+                }
+                (concrete.clone(), dynamic)
+            };
+            conversions.insert(
+                (call_id, Some(index)),
+                super::LoweredReabstraction {
+                    direction: if concrete_to_dynamic {
+                        super::LoweredReabstractionDirection::ConcreteToDynamic
+                    } else {
+                        super::LoweredReabstractionDirection::DynamicToConcrete
+                    },
+                    concrete,
+                    dynamic,
+                },
+            );
+        }
+        let (concrete, dynamic) = if concrete_to_dynamic {
+            let CheckedType::Function(dynamic) = signature.result.as_ref() else {
+                return;
+            };
+            if !crate::contains_type_parameter(&CheckedType::Function(dynamic.clone())) {
+                return;
+            }
+            let CheckedType::Function(concrete) = &call.result_type else {
+                return;
+            };
+            (concrete.clone(), dynamic.clone())
+        } else {
+            let CheckedType::Function(dynamic) = &call.result_type else {
+                return;
+            };
+            if !crate::contains_type_parameter(&CheckedType::Function(dynamic.clone())) {
+                return;
+            }
+            let CheckedType::Function(concrete) = signature.result.as_ref() else {
+                return;
+            };
+            (concrete.clone(), dynamic.clone())
+        };
+        conversions.insert(
+            (call_id, None),
+            super::LoweredReabstraction {
+                direction: if concrete_to_dynamic {
+                    super::LoweredReabstractionDirection::DynamicToConcrete
+                } else {
+                    super::LoweredReabstractionDirection::ConcreteToDynamic
+                },
+                concrete,
+                dynamic,
+            },
+        );
+    }
 }
 
 /// Walks one instance body and verifies its local invariants: every local ID
