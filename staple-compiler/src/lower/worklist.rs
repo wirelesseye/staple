@@ -254,6 +254,7 @@ pub(crate) enum LoweredArtifactDependencyKind {
     DropGlue,
     TypeDescriptor,
     DescriptorDrop,
+    CompoundDescriptorDrop,
     /// A generated garbage-collector finalizer.
     GcFinalizer,
     /// A coroutine body's generated resume/cleanup pair.
@@ -277,6 +278,7 @@ impl LoweredArtifactDependencyKind {
             LoweredArtifactDependencyKind::DropGlue => "drop-glue",
             LoweredArtifactDependencyKind::TypeDescriptor => "type-descriptor",
             LoweredArtifactDependencyKind::DescriptorDrop => "descriptor-drop",
+            LoweredArtifactDependencyKind::CompoundDescriptorDrop => "compound-descriptor-drop",
             LoweredArtifactDependencyKind::GcFinalizer => "gc-finalizer",
             LoweredArtifactDependencyKind::CoroutineCodes => "coroutine-codes",
             LoweredArtifactDependencyKind::ReactionRunner => "reaction-runner",
@@ -307,6 +309,9 @@ impl LoweredArtifactDependencyKind {
             ) | (
                 LoweredArtifactDependencyKind::DescriptorDrop,
                 ArtifactRequestKey::DescriptorDrop(_)
+            ) | (
+                LoweredArtifactDependencyKind::CompoundDescriptorDrop,
+                ArtifactRequestKey::CompoundDescriptorDrop(_)
             ) | (
                 LoweredArtifactDependencyKind::GcFinalizer,
                 ArtifactRequestKey::GcFinalizer(_)
@@ -3526,6 +3531,269 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_products_preserve_packed_layout_through_calls() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def pair: <A, B where Copy A, Copy B> (A, B) -> (A, B) = value => value\n",
+                "def forward: <T where Copy T> T -> (T, I32) = value => pair (value, 1)\n",
+                "let first = forward 42\n",
+            ),
+            "forward",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-products",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Forward = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *const u8);
+        let forward = unsafe { engine.get_function::<Forward>(&name) }.unwrap();
+        for size in [0_usize, 1, 3, 8, 17, 33] {
+            for align in [1, 4, 8, 16, 32] {
+                let descriptor = Descriptor {
+                    size,
+                    stride: size.div_ceil(align) * align,
+                    align,
+                    flags: 1,
+                    drop: 0,
+                    count: 0,
+                };
+                let input = (0..128).map(|byte| byte as u8).collect::<Vec<_>>();
+                let mut output = [0xff; 128];
+                unsafe {
+                    forward.call(
+                        std::ptr::null(),
+                        &descriptor,
+                        output.as_mut_ptr().add(1),
+                        input.as_ptr().add(1),
+                    );
+                }
+                assert_eq!(&output[1..1 + size], &input[1..1 + size]);
+                assert_eq!(&output[1 + size..5 + size], &1_i32.to_ne_bytes());
+                assert_eq!(output[0], 0xff);
+                assert!(output[5 + size..].iter().all(|byte| *byte == 0xff));
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_flattened_parameters_use_their_own_descriptors() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def swap: <A, B where Copy A, Copy B> (A, B) -> (B, A) = (a, b) => (b, a)\n",
+                "let result = swap (1, U8 :: 2)\n",
+            ),
+            "swap",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-flat-parameters",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Swap = unsafe extern "C" fn(
+            *const u8,
+            *const Descriptor,
+            *const Descriptor,
+            *mut u8,
+            *const u8,
+            *const u8,
+        );
+        let swap = unsafe { engine.get_function::<Swap>(&name) }.unwrap();
+        let a = Descriptor {
+            size: 3,
+            stride: 4,
+            align: 4,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let b = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let first = [21; 3];
+        let second = [42; 17];
+        let mut output = [0xff; 22];
+        unsafe {
+            swap.call(
+                std::ptr::null(),
+                &a,
+                &b,
+                output.as_mut_ptr().add(1),
+                first.as_ptr(),
+                second.as_ptr(),
+            );
+        }
+        assert_eq!(&output[1..18], &second);
+        assert_eq!(&output[18..21], &first);
+        assert_eq!(output[0], 0xff);
+        assert_eq!(output[21], 0xff);
+    }
+
+    #[test]
+    fn dynamic_sum_injection_preserves_payload_layout() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def inject: <T where Sized T> move T -> T | I32 = move value => value\n",
+                "let result = inject (U8 :: 42)\n",
+            ),
+            "inject",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-sum-injection",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Inject = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *mut u8);
+        let inject = unsafe { engine.get_function::<Inject>(&name) }.unwrap();
+        for (size, align) in [(1_usize, 1_usize), (3, 1), (8, 4), (17, 16), (24, 8)] {
+            let stride = size.div_ceil(align) * align;
+            let descriptor = Descriptor {
+                size,
+                stride,
+                align,
+                flags: 1,
+                drop: 0,
+                count: 0,
+            };
+            // Canonical alternative order is I32, T; the first wins alignment ties.
+            let (carrier_size, carrier_stride, carrier_align) = if align > 4 {
+                (size, stride, align)
+            } else {
+                (4, 4, 4)
+            };
+            let offset = 4_usize.div_ceil(carrier_align) * carrier_align;
+            let payload_size = size.max(4).div_ceil(carrier_size) * carrier_stride;
+            let total = (offset + payload_size).div_ceil(carrier_align) * carrier_align;
+            let mut input = [42; 64];
+            let mut output = [0xff; 128];
+            unsafe {
+                inject.call(
+                    std::ptr::null(),
+                    &descriptor,
+                    output.as_mut_ptr().add(1),
+                    input.as_mut_ptr(),
+                );
+            }
+            assert_eq!(&output[1..5], &1_i32.to_ne_bytes());
+            assert_eq!(&output[1 + offset..1 + offset + size], &input[..size]);
+            assert!(output[5..1 + offset].iter().all(|byte| *byte == 0));
+            assert!(
+                output[1 + offset + size..1 + total]
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+            assert_eq!(output[0], 0xff);
+            assert!(output[1 + total..].iter().all(|byte| *byte == 0xff));
+        }
+    }
+
+    #[test]
+    fn dynamic_sum_widening_remaps_only_the_active_payload() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def widen: <T where Sized T> move (T | I32) -> T | I32 | F64 = move value => value\n",
+                "let input: U8 | I32 = U8 :: 42\n",
+                "let result = widen input\n",
+            ),
+            "widen",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-sum-widening",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Widen = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *mut u8);
+        let widen = unsafe { engine.get_function::<Widen>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        for (source_tag, target_tag, payload_size) in [(0_i32, 1_i32, 4), (1, 2, 17)] {
+            let mut input = [0; 49];
+            input[1..5].copy_from_slice(&source_tag.to_ne_bytes());
+            input[17..17 + payload_size].fill(42);
+            let mut output = [0xff; 50];
+            unsafe {
+                widen.call(
+                    std::ptr::null(),
+                    &descriptor,
+                    output.as_mut_ptr().add(1),
+                    input.as_mut_ptr().add(1),
+                );
+            }
+            assert_eq!(&output[1..5], &target_tag.to_ne_bytes());
+            assert_eq!(
+                &output[17..17 + payload_size],
+                &input[17..17 + payload_size]
+            );
+            assert!(output[5..17].iter().all(|byte| *byte == 0));
+            assert!(output[17 + payload_size..49].iter().all(|byte| *byte == 0));
+            assert_eq!(output[0], 0xff);
+            assert_eq!(output[49], 0xff);
+        }
+    }
+
+    #[test]
     fn dynamic_moved_values_transfer_without_cleanup() {
         let (text, name) = dynamic_test_module(
             concat!(
@@ -3592,12 +3860,17 @@ mod tests {
             "{ return 7 }",
             "identity 7",
             "borrow { identity value }",
+            "borrow (identity value)",
+            "{ let held = (identity value, 1); 7 }",
+            "{ let held: T | I32 = identity value; 7 }",
+            "{ let held: T | I32 = 7; 7 }",
+            "{ let held: (T, I32) | Bool = (identity value, 1); 7 }",
         ]
         .into_iter()
         .enumerate()
         {
             let source = format!(
-                "def identity: <U> move U -> U = move value => value\ndef borrow: <U where Sized U> U -> I32 = value => 7\ndef consume: <T where Sized T> move T -> I32 = move value => {body}\nlet result = consume 42\n"
+                "def identity: <U> move U -> U = move value => value\ndef borrow: <U where Sized U> U -> I32 = value => 7\ndef consume: <T where Sized T> move T -> I32 = move value => {body}\nlet result = consume (U8 :: 42)\n"
             );
             let (text, name) = dynamic_test_module(&source, "consume");
             let context = inkwell::context::Context::create();

@@ -752,6 +752,20 @@ pub(crate) struct ExternAdapterKey {
     pub callable_type: CanonicalFunctionType,
 }
 
+/// Structural cleanup uses component descriptors, so its identity depends on
+/// the aggregate shape and arity rather than the caller's type parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CompoundDescriptorShape {
+    Product,
+    Sum,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CompoundDescriptorDropKey {
+    pub shape: CompoundDescriptorShape,
+    pub count: u32,
+}
+
 /// Generated-artifact request keys. The variant is the namespace: keys from
 /// different families can never compare or hash equal, even when their numeric
 /// IDs coincide. `RuntimeHelper` is deliberately absent: runtime symbols have
@@ -764,6 +778,7 @@ pub(crate) enum ArtifactRequestKey {
     DropGlue(DropGlueKey),
     TypeDescriptor(CanonicalType),
     DescriptorDrop(CanonicalType),
+    CompoundDescriptorDrop(CompoundDescriptorDropKey),
     GcFinalizer(GcFinalizerKey),
     CoroutineCodes(CoroutineCodesKey),
     ReactionRunner(ReactiveRunnerKey),
@@ -782,6 +797,7 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::DropGlue(_) => "drop-glue",
             ArtifactRequestKey::TypeDescriptor(_) => "type-descriptor",
             ArtifactRequestKey::DescriptorDrop(_) => "descriptor-drop",
+            ArtifactRequestKey::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => "gc-finalizer-payload",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(_)) => "gc-finalizer-cell",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment { .. }) => {
@@ -995,6 +1011,9 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
         ArtifactRequestKey::DropGlue(_) => "__staple_drop_glue".to_owned(),
         ArtifactRequestKey::TypeDescriptor(_) => "__staple_type_descriptor".to_owned(),
         ArtifactRequestKey::DescriptorDrop(_) => "__staple_descriptor_drop".to_owned(),
+        ArtifactRequestKey::CompoundDescriptorDrop(_) => {
+            "__staple_compound_descriptor_drop".to_owned()
+        }
         ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => {
             "__staple_gc_finalizer_payload".to_owned()
         }

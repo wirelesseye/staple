@@ -64,6 +64,39 @@ impl<'program, 'context> Backend<'program, 'context> {
             .map_err(compiler_diagnostic)
     }
 
+    pub(crate) fn dynamic_byte_offset(
+        &self,
+        value: PointerValue<'context>,
+        offset: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        unsafe {
+            self.builder
+                .build_gep(self.context.i8_type(), value, &[offset], "dynamic.offset")
+        }
+        .map_err(compiler_diagnostic)
+    }
+
+    pub(crate) fn descriptor_drop_pointer(
+        &self,
+        descriptor: PointerValue<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let entry = self
+            .builder
+            .build_struct_gep(
+                self.type_descriptor_type(0),
+                descriptor,
+                4,
+                "descriptor.drop.slot",
+            )
+            .map_err(compiler_diagnostic)?;
+        Ok(self
+            .builder
+            .build_load(pointer, entry, "descriptor.drop")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value())
+    }
+
     /// Copy exactly the descriptor's store size. Packed products permit only
     /// byte alignment, even when a component's standalone alignment is larger.
     pub(crate) fn copy_dynamic_value(
@@ -72,6 +105,9 @@ impl<'program, 'context> Backend<'program, 'context> {
         source: PointerValue<'context>,
         destination: PointerValue<'context>,
     ) -> CodeGenerationResult<()> {
+        if source == destination {
+            return Ok(());
+        }
         let layout = self.load_descriptor_layout(descriptor)?;
         self.builder
             .build_memcpy(destination, 1, source, 1, layout.store_size)
@@ -87,20 +123,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         value: PointerValue<'context>,
     ) -> CodeGenerationResult<()> {
         let pointer = self.context.ptr_type(AddressSpace::default());
-        let entry = self
-            .builder
-            .build_struct_gep(
-                self.type_descriptor_type(0),
-                descriptor,
-                4,
-                "descriptor.drop.slot",
-            )
-            .map_err(compiler_diagnostic)?;
-        let drop = self
-            .builder
-            .build_load(pointer, entry, "descriptor.drop")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
+        let drop = self.descriptor_drop_pointer(descriptor)?;
         let present = self
             .builder
             .build_is_not_null(drop, "descriptor.has.drop")

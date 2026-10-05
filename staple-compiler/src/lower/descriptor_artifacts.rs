@@ -65,13 +65,85 @@ pub(super) fn concrete_body_types(body: &super::LoweredInstanceBody) -> Vec<Chec
     collect(&body.signature.result, &mut types);
     for (_, expression) in body.expressions() {
         collect(&expression.value_type, &mut types);
+        if let Some(coercion) = &expression.coercion {
+            collect(&coercion.source, &mut types);
+            collect(&coercion.target, &mut types);
+        }
+    }
+    if let Some(coercion) = &body.body_coercion {
+        collect(&coercion.source, &mut types);
+        collect(&coercion.target, &mut types);
     }
     for (_, call) in body.calls.iter() {
+        collect(&call.function_type.parameter, &mut types);
         for entry in &call.substitutions.types {
             collect(&entry.value_type, &mut types);
         }
     }
     types
+}
+
+pub(super) fn compound_body_shapes(
+    body: &super::LoweredInstanceBody,
+) -> Vec<crate::specialization::CompoundDescriptorDropKey> {
+    use crate::specialization::{
+        CompoundDescriptorDropKey as Key, CompoundDescriptorShape as Shape,
+    };
+    fn collect(ty: &CheckedType, shapes: &mut Vec<Key>) {
+        if !crate::contains_type_parameter(ty) {
+            return;
+        }
+        let (shape, children): (Shape, Vec<&CheckedType>) = match ty {
+            CheckedType::Product(product) => (
+                Shape::Product,
+                product
+                    .elements
+                    .iter()
+                    .map(|field| &field.value_type)
+                    .collect(),
+            ),
+            CheckedType::Sum(sum) => (Shape::Sum, sum.alternatives.iter().collect()),
+            CheckedType::Wrapper { representation, .. } => {
+                collect(representation, shapes);
+                return;
+            }
+            _ => return,
+        };
+        let key = Key {
+            shape,
+            count: children
+                .len()
+                .try_into()
+                .expect("checked aggregate arity fits u32"),
+        };
+        if !shapes.contains(&key) {
+            shapes.push(key);
+        }
+        for child in children {
+            collect(child, shapes);
+        }
+    }
+    let mut shapes = Vec::new();
+    collect(&body.signature.parameter, &mut shapes);
+    collect(&body.signature.result, &mut shapes);
+    for (_, expression) in body.expressions() {
+        collect(&expression.value_type, &mut shapes);
+        if let Some(coercion) = &expression.coercion {
+            collect(&coercion.source, &mut shapes);
+            collect(&coercion.target, &mut shapes);
+        }
+    }
+    if let Some(coercion) = &body.body_coercion {
+        collect(&coercion.source, &mut shapes);
+        collect(&coercion.target, &mut shapes);
+    }
+    for (_, call) in body.calls.iter() {
+        collect(&call.function_type.parameter, &mut shapes);
+        for entry in &call.substitutions.types {
+            collect(&entry.value_type, &mut shapes);
+        }
+    }
+    shapes
 }
 
 pub(super) fn scan_instance(
@@ -91,7 +163,7 @@ pub(super) fn scan_instance(
     let Some(body) = &instance.body else {
         return Ok(Vec::new());
     };
-    concrete_body_types(body)
+    let mut requests = concrete_body_types(body)
         .iter()
         .enumerate()
         .map(|(index, ty)| {
@@ -104,7 +176,17 @@ pub(super) fn scan_instance(
                 Some(super::artifact_closure::ArtifactUseSite::InstanceTypeDescriptor(index));
             Ok(request)
         })
-        .collect()
+        .collect::<super::artifact_closure::ScanResult>()?;
+    for (index, key) in compound_body_shapes(body).into_iter().enumerate() {
+        requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::CompoundDescriptorDrop(key),
+            plan: Plan::CompoundDescriptorDrop(key),
+            kind: Kind::CompoundDescriptorDrop,
+            origin: body.origin.clone(),
+            use_site: Some(super::artifact_closure::ArtifactUseSite::InstanceCompoundDrop(index)),
+        });
+    }
+    Ok(requests)
 }
 
 fn planned(request: &ClosureRequest) -> PlannedArtifact {
@@ -172,6 +254,7 @@ pub(super) fn expand(
             plan.expanded = true;
             Plan::TypeDescriptor(plan)
         }
+        Plan::CompoundDescriptorDrop(plan) => Plan::CompoundDescriptorDrop(plan),
         Plan::DescriptorDrop(mut plan) => {
             let request = ClosureRequest::Artifact {
                 key: ArtifactRequestKey::DropGlue(

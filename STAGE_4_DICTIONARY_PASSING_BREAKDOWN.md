@@ -250,11 +250,17 @@ Implemented foundations:
   JIT tests exercise runtime caller/callee layouts, ownership transfer without
   premature cleanup, and exactly-once drops after borrowing temporaries and
   on normal and explicit returns.
-  Compound descriptor construction is not yet connected to body emission.
+- Entry-built runtime product/sum descriptors and planned structural drop
+  artifacts. Product fields use packed store-size offsets; sum drops inspect
+  the active tag and use the runtime carrier layout. Dynamic bodies support
+  flattened product parameters, whole-product packing at generic calls,
+  product construction/access, and sum injection/widening coercions. Execution tests
+  cover packed output, guarded sum payload storage, and exactly-once cleanup
+  for both active sum alternatives.
 
 Stage 4a is **not complete**. Still required: the differential lowering option
-and transitive restriction analysis; compound builder/drop artifact planning;
-compound/flattened value emission, control flow, resources and remaining
+and transitive restriction analysis; arrays/wrappers and remaining compound
+value emission, control flow, resources and remaining
 ABI/call routes; reabstraction; dynamic GC payloads and
 intrinsics; and the differential exit gate. Stage 3's polymorphic-value gate
 remains in place.
@@ -264,7 +270,11 @@ passes; all 104 corpus/example inputs report `same` against the `50565d8`
 release build without a differential lowering option. Backend primitives are
 committed as `ed91238`. Subsequent body emission changes pass workspace checks,
 focused dynamic execution tests, and the descriptor tests (including the
-corpus layout sweep).
+corpus layout sweep). The compound descriptor continuation passes the compiler
+library suite (370 passed, one ignored) and all nine dynamic execution tests
+including the later flattened-parameter and sum-widening additions. Rebuilt
+default-mode LLVM output matches `50565d8` for all 104 corpus/example inputs
+(four compilations per binary per input).
 
 ### Step 4a.1 — Keys, specialization, and validation
 

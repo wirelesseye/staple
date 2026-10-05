@@ -87,6 +87,8 @@ pub(super) enum ClosureRequest {
 pub(crate) enum ArtifactUseSite {
     /// Index into the dynamic body's deterministic concrete descriptor list.
     InstanceTypeDescriptor(usize),
+    /// Index into the dynamic body's structural cleanup shape list.
+    InstanceCompoundDrop(usize),
     /// A scripted test site identified by its position in the hook table.
     #[cfg(test)]
     Test(u32),
@@ -301,7 +303,9 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 };
                 super::structural_artifacts::expand_structural_method(program, artifact, plan)
             }
-            ArtifactRequestKey::TypeDescriptor(_) | ArtifactRequestKey::DescriptorDrop(_) => {
+            ArtifactRequestKey::TypeDescriptor(_)
+            | ArtifactRequestKey::DescriptorDrop(_)
+            | ArtifactRequestKey::CompoundDescriptorDrop(_) => {
                 super::descriptor_artifacts::expand(program, artifact, plan)
             }
             ArtifactRequestKey::DropGlue(_) => {
@@ -393,6 +397,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::DropGlue(_)
                 | ArtifactRequestKey::TypeDescriptor(_)
                 | ArtifactRequestKey::DescriptorDrop(_)
+                | ArtifactRequestKey::CompoundDescriptorDrop(_)
                 | ArtifactRequestKey::GcFinalizer(_)
                 | ArtifactRequestKey::CoroutineCodes(_)
                 | ArtifactRequestKey::ReactionRunner(_)
@@ -1615,6 +1620,17 @@ impl LoweredProgram {
             UseSiteOwner::Initializer => self.reactive_callbacks.get(id).is_some(),
         };
         match site {
+            ArtifactUseSite::InstanceCompoundDrop(index) => {
+                let valid = match site_owner {
+                    UseSiteOwner::Instance(body) => {
+                        index < super::descriptor_artifacts::compound_body_shapes(body).len()
+                    }
+                    UseSiteOwner::Initializer => false,
+                };
+                if !valid {
+                    report("compound cleanup", index);
+                }
+            }
             ArtifactUseSite::InstanceTypeDescriptor(index) => {
                 let valid = match site_owner {
                     UseSiteOwner::Instance(body) => {

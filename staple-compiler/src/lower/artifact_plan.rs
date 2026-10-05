@@ -33,6 +33,7 @@ pub(crate) enum LoweredArtifactPlan {
     DropGlue(DropGluePlan),
     TypeDescriptor(TypeDescriptorPlan),
     DescriptorDrop(DescriptorDropPlan),
+    CompoundDescriptorDrop(crate::specialization::CompoundDescriptorDropKey),
     /// A garbage-collector finalizer. Expansion records the referenced drop glue.
     GcFinalizer(GcFinalizerPlan),
     /// A coroutine `resume`/`cleanup` pair. Expansion records the frame layout
@@ -118,6 +119,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::DropGlue(_) => "drop-glue",
             LoweredArtifactPlan::TypeDescriptor(_) => "type-descriptor",
             LoweredArtifactPlan::DescriptorDrop(_) => "descriptor-drop",
+            LoweredArtifactPlan::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload { .. }) => {
                 "gc-finalizer-payload"
             }
@@ -188,6 +190,10 @@ impl LoweredArtifactPlan {
                 LoweredArtifactPlan::DescriptorDrop(plan),
                 ArtifactRequestKey::DescriptorDrop(key),
             ) => same_type(&plan.value_type, key),
+            (
+                LoweredArtifactPlan::CompoundDescriptorDrop(plan),
+                ArtifactRequestKey::CompoundDescriptorDrop(key),
+            ) => plan == key,
             (LoweredArtifactPlan::DropGlue(plan), ArtifactRequestKey::DropGlue(key)) => {
                 same_type(&plan.value_type, key)
             }
@@ -274,6 +280,7 @@ impl LoweredArtifactPlan {
                 | LoweredArtifactPlan::DropGlue(_)
                 | LoweredArtifactPlan::TypeDescriptor(_)
                 | LoweredArtifactPlan::DescriptorDrop(_)
+                | LoweredArtifactPlan::CompoundDescriptorDrop(_)
                 | LoweredArtifactPlan::GcFinalizer(_)
                 | LoweredArtifactPlan::CoroutineCodes(_)
         )
@@ -291,6 +298,7 @@ impl LoweredArtifactPlan {
             }
             LoweredArtifactPlan::TypeDescriptor(plan) => plan.expanded,
             LoweredArtifactPlan::DescriptorDrop(plan) => plan.glue.is_some(),
+            LoweredArtifactPlan::CompoundDescriptorDrop(_) => true,
             LoweredArtifactPlan::DropGlue(plan) => !matches!(plan.body, DropGlueBody::Unexpanded),
             LoweredArtifactPlan::GcFinalizer(plan) => match plan {
                 GcFinalizerPlan::Payload { glue, .. }
@@ -483,6 +491,7 @@ impl LoweredArtifactPlan {
             }
             LoweredArtifactPlan::TypeDescriptor(plan) => visit(Value(&plan.value_type)),
             LoweredArtifactPlan::DescriptorDrop(plan) => visit(Value(&plan.value_type)),
+            LoweredArtifactPlan::CompoundDescriptorDrop(_) => {}
             LoweredArtifactPlan::DropGlue(DropGluePlan { value_type, body }) => {
                 visit(Value(value_type));
                 match body {
@@ -644,7 +653,8 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::DropGlue(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees(visit),
-            LoweredArtifactPlan::ReactionRunner(_)
+            LoweredArtifactPlan::CompoundDescriptorDrop(_)
+            | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
             | LoweredArtifactPlan::ExternAdapter(_) => {}
@@ -671,7 +681,8 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::DropGlue(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees_mut(visit),
-            LoweredArtifactPlan::ReactionRunner(_)
+            LoweredArtifactPlan::CompoundDescriptorDrop(_)
+            | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
             | LoweredArtifactPlan::ExternAdapter(_) => {}

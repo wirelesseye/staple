@@ -459,7 +459,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     global.set_constant(true);
                     Vec::new()
                 }
-                LoweredArtifactPlan::DescriptorDrop(_) => {
+                LoweredArtifactPlan::DescriptorDrop(_) | LoweredArtifactPlan::CompoundDescriptorDrop(_) => {
                     let ty = self
                         .backend
                         .context
@@ -1786,6 +1786,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::TypeDescriptor(plan) => {
                 self.emit_type_descriptor(ordinal, plan, &artifact.origin.span)
             }
+            LoweredArtifactPlan::CompoundDescriptorDrop(plan) => self.emit_compound_descriptor_drop(ordinal, *plan, &artifact.origin.span),
             LoweredArtifactPlan::DescriptorDrop(plan) => {
                 let function = self
                     .artifacts

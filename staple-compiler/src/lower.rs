@@ -14208,6 +14208,7 @@ pub enum PlannedArtifactFamily {
     CoroutineCodes,
     TypeDescriptor,
     DescriptorDrop,
+    CompoundDescriptorDrop,
 }
 
 impl LoweredModule {
@@ -14268,7 +14269,8 @@ impl LoweredModule {
                 | (ExternAdapter, ArtifactRequestKey::ExternAdapter(_))
                 | (CoroutineCodes, ArtifactRequestKey::CoroutineCodes(_))
                 | (TypeDescriptor, ArtifactRequestKey::TypeDescriptor(_))
-                | (DescriptorDrop, ArtifactRequestKey::DescriptorDrop(_)) => true,
+                | (DescriptorDrop, ArtifactRequestKey::DescriptorDrop(_))
+                | (CompoundDescriptorDrop, ArtifactRequestKey::CompoundDescriptorDrop(_)) => true,
                 _ => false,
             };
             if !selected {
