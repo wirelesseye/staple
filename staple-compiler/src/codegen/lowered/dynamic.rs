@@ -3209,10 +3209,61 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 result
             }
-            _ => {
+            // Explicit arms per unsupported kind: a new lowered expression
+            // kind must decide its dynamic behavior here and in the support
+            // scanner instead of falling into a catch-all (R-F).
+            LoweredExpressionKind::Name(_) => {
                 return Err(Diagnostic::new(
                     expression.origin.span.clone(),
-                    "dynamic expression is not yet implemented",
+                    "dynamic reactive name reads are not yet implemented",
+                ));
+            }
+            LoweredExpressionKind::Deferred(_) => {
+                return Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "deferred dynamic expression is not yet implemented",
+                ));
+            }
+            LoweredExpressionKind::StringTemplate(_) => {
+                return Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "dynamic string templates are not yet implemented",
+                ));
+            }
+            LoweredExpressionKind::Index(_) => {
+                return Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "dynamic index expressions are not yet implemented",
+                ));
+            }
+            LoweredExpressionKind::CallableValue(_) => {
+                return Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "dynamic callable values are not yet implemented",
+                ));
+            }
+            LoweredExpressionKind::Resource(_) => {
+                return Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "dynamic resource reads are not yet implemented",
+                ));
+            }
+            LoweredExpressionKind::With(_) => {
+                return Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "dynamic with scopes are not yet implemented",
+                ));
+            }
+            LoweredExpressionKind::Coro(_) => {
+                return Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "dynamic coroutine creation is not yet implemented",
+                ));
+            }
+            LoweredExpressionKind::Await(_) => {
+                return Err(Diagnostic::new(
+                    expression.origin.span.clone(),
+                    "dynamic awaits are not yet implemented",
                 ));
             }
         };

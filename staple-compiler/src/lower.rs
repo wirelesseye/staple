@@ -2800,9 +2800,11 @@ pub(crate) struct LoweredProgram {
     dictionary_pass_generic_calls: bool,
     /// Per-template transitive dynamic support, computed once per lowering.
     dynamic_support: std::collections::HashMap<FunctionId, dynamic_support::DynamicSupport>,
-    /// Test-only: the first exclusion reason per template.
-    #[cfg(test)]
-    pub(crate) dynamic_support_reasons: std::collections::HashMap<FunctionId, &'static str>,
+    /// Every exclusion reason per template, including the transitive reason.
+    pub(crate) dynamic_support_reasons:
+        std::collections::HashMap<FunctionId, std::collections::BTreeSet<dynamic_support::RejectionReason>>,
+    /// Whether each excluded template's reasons include an in-scope one.
+    pub(crate) dynamic_support_in_scope: std::collections::HashMap<FunctionId, bool>,
     /// The ordered, deduplicated runtime surfaces the closed catalog needs.
     /// Recorded after the closure fixed point; emission installs each surface
     /// only when present.

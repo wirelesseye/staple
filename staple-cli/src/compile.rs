@@ -806,7 +806,7 @@ mod tests {
         format_diagnostics, link_executable, parse_options, run,
     };
     use std::ffi::{OsStr, OsString};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -4673,73 +4673,87 @@ mod tests {
     /// dynamic implementations.
     #[cfg(unix)]
     #[test]
+    fn codegen_corpus_differential_run_matches_default_subset() {
+        // The default suite runs a fixed, generic-heavy subset so the quick
+        // differential gate stays fast; the full run is
+        // `codegen_corpus_differential_run_matches_default` (R0.4).
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = workspace_root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")])
+            .expect("corpus link options should parse");
+        const SUBSET: [&str; 10] = [
+            "calls_generic",
+            "parameter_products",
+            "from_types",
+            "generic_drop_ownership",
+            "generic_drop_selection",
+            "loops_values",
+            "match_sums_products",
+            "destructuring",
+            "numeric_intrinsics",
+            "example_traits_and_generics",
+        ];
+        let mut dynamic_calls = 0usize;
+        let mut matched = 0usize;
+        for program in staple_compiler::codegen_corpus() {
+            if !SUBSET.contains(&program.name) {
+                continue;
+            }
+            let (source, root) = corpus_source(program, workspace_root);
+            dynamic_calls += differential_compare(
+                program.name,
+                &source,
+                &root,
+                &standard_library,
+                &options,
+            );
+            matched += 1;
+        }
+        assert_eq!(matched, SUBSET.len(), "every subset program exists");
+        eprintln!("quick differential run: {matched} programs, {dynamic_calls} dynamic call sites");
+        assert!(dynamic_calls > 0, "the quick subset must use dynamic calls");
+    }
+
+    /// The full Stage 4a differential exit gate: every runnable corpus program
+    /// and every runnable example, both modes, identical stdout and exit
+    /// status. Run explicitly with `--ignored` (R0.4).
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "full differential run: run explicitly for the Stage 4a exit gate"]
     fn codegen_corpus_differential_run_matches_default() {
-        use std::path::Path;
-
-        use staple_compiler::{
-            CorpusExpectation, CorpusSource, LoweredModule, Lowerer, NameResolver, ProgramLoader,
-            TypeChecker,
-        };
-
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let standard_library = workspace_root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")])
             .expect("corpus link options should parse");
 
-        let lower = |source: &str, root: &Path, differential: bool| -> LoweredModule {
-            let loaded = ProgramLoader::new()
-                .with_standard_library_root(&standard_library)
-                .load_source(source, root)
-                .expect("corpus source should load");
-            let resolved = NameResolver::new()
-                .resolve_program(loaded)
-                .expect("corpus source should resolve");
-            let checked = TypeChecker::new()
-                .check(resolved)
-                .expect("corpus source should type check");
-            Lowerer::new()
-                .with_dictionary_pass_generic_calls(differential)
-                .lower(&checked)
-                .expect("corpus source should lower")
-        };
-
         let mut runnable = 0usize;
         let mut programs_with_dynamic_calls = 0usize;
         let mut dynamic_calls = 0usize;
         for program in staple_compiler::codegen_corpus() {
-            let (source, root) = match program.source {
-                CorpusSource::Inline(source) => (source.to_owned(), workspace_root.to_path_buf()),
-                CorpusSource::File(path) => {
-                    let full = workspace_root.join(path);
-                    let source = std::fs::read_to_string(&full)
-                        .unwrap_or_else(|error| panic!("`{path}` should read: {error}"));
-                    let root = full
-                        .parent()
-                        .expect("a corpus file has a parent directory")
-                        .to_path_buf();
-                    (source, root)
-                }
-            };
-            if program.expectation == CorpusExpectation::CompileOnly {
+            if program.expectation == staple_compiler::CorpusExpectation::CompileOnly {
                 continue;
             }
-            let default = compile_link_run(&lower(&source, &root, false), &options)
-                .unwrap_or_else(|error| panic!("`{}` should run: {error}", program.name));
-            let lowered = lower(&source, &root, true);
-            let count = lowered.differential_dynamic_call_count();
+            let (source, root) = corpus_source(program, workspace_root);
+            let count =
+                differential_compare(program.name, &source, &root, &standard_library, &options);
             dynamic_calls += count;
             if count > 0 {
                 programs_with_dynamic_calls += 1;
             }
-            let differential = compile_link_run(&lowered, &options)
-                .unwrap_or_else(|error| panic!("`{}` should run: {error}", program.name));
-            assert_eq!(
-                default, differential,
-                "`{}` differs between default and differential modes",
-                program.name
-            );
             runnable += 1;
         }
+        // `macros.sta` is not a corpus entry (its expansion is covered by the
+        // standalone example gate), so the full differential run adds it here.
+        let macros = workspace_root.join("staple-compiler/examples/macros.sta");
+        let source = std::fs::read_to_string(&macros).expect("macros.sta should read");
+        dynamic_calls += differential_compare(
+            "example_macros",
+            &source,
+            macros.parent().unwrap(),
+            &standard_library,
+            &options,
+        );
+        runnable += 1;
         eprintln!(
             "differential run: {programs_with_dynamic_calls}/{runnable} programs used dynamic calls ({dynamic_calls} call sites)"
         );
@@ -4747,6 +4761,68 @@ mod tests {
             programs_with_dynamic_calls * 2 > runnable,
             "dynamic calls must be non-zero for most runnable programs"
         );
+    }
+
+    /// The source text and root directory of one corpus program.
+    #[cfg(unix)]
+    fn corpus_source(
+        program: &staple_compiler::CorpusProgram,
+        workspace_root: &Path,
+    ) -> (String, std::path::PathBuf) {
+        use staple_compiler::CorpusSource;
+        match program.source {
+            CorpusSource::Inline(source) => (source.to_owned(), workspace_root.to_path_buf()),
+            CorpusSource::File(path) => {
+                let full = workspace_root.join(path);
+                let source = std::fs::read_to_string(&full)
+                    .unwrap_or_else(|error| panic!("`{path}` should read: {error}"));
+                let root = full
+                    .parent()
+                    .expect("a corpus file has a parent directory")
+                    .to_path_buf();
+                (source, root)
+            }
+        }
+    }
+
+    /// Lower one program both ways, run both, and require identical output.
+    /// Returns the differential mode's redirected call count.
+    #[cfg(unix)]
+    fn differential_compare(
+        name: &str,
+        source: &str,
+        root: &Path,
+        standard_library: &Path,
+        options: &Options,
+    ) -> usize {
+        use staple_compiler::{LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker};
+        let lower = |differential: bool| -> LoweredModule {
+            let loaded = ProgramLoader::new()
+                .with_standard_library_root(standard_library)
+                .load_source(source, root)
+                .unwrap_or_else(|diagnostics| panic!("`{name}` should load: {diagnostics:?}"));
+            let resolved = NameResolver::new()
+                .resolve_program(loaded)
+                .unwrap_or_else(|diagnostics| panic!("`{name}` should resolve: {diagnostics:?}"));
+            let checked = TypeChecker::new()
+                .check(resolved)
+                .unwrap_or_else(|diagnostics| panic!("`{name}` should check: {diagnostics:?}"));
+            Lowerer::new()
+                .with_dictionary_pass_generic_calls(differential)
+                .lower(&checked)
+                .unwrap_or_else(|diagnostics| panic!("`{name}` should lower: {diagnostics:?}"))
+        };
+        let default = compile_link_run(&lower(false), options)
+            .unwrap_or_else(|error| panic!("`{name}` should run: {error}"));
+        let lowered = lower(true);
+        let count = lowered.differential_dynamic_call_count();
+        let differential = compile_link_run(&lowered, options)
+            .unwrap_or_else(|error| panic!("`{name}` should run: {error}"));
+        assert_eq!(
+            default, differential,
+            "`{name}` differs between default and differential modes"
+        );
+        count
     }
 
     /// Compile one lowered program, emit an object, link it, run

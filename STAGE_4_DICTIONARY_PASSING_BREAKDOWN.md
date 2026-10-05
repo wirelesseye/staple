@@ -228,136 +228,38 @@ of `6a44dfa` are planned in
 [STAGE_4A_REMAINDER_BREAKDOWN.md](STAGE_4A_REMAINDER_BREAKDOWN.md). Its R0.5
 step replaces the status log below.
 
-### Implementation status (partial)
+### Implementation status
 
-Implemented foundations:
-- Runtime instance keys, distinct name planning, nested runtime-parameter
-  classification, and instance-local validation. Specialization preserves
-  runtime parameters and marker bounds, while retaining independent concrete
-  substitutions.
-- Demand-driven static `type-descriptor` and `descriptor-drop` artifacts,
-  component descriptors, and concrete descriptor drop entry points.
-- Descriptor layout rules for packed products, sums, and wrappers, with a
-  corpus sweep against LLVM `TargetData`, including product and sum offsets.
-- Backend runtime descriptor primitives: header/component loads, fixed-size
-  entry slots, runtime product/sum layout calculations, descriptor-sized byte
-  copies, nullable descriptor drop calls, and the dynamic ABI function type.
-  Execution tests exercise padded strides, carrier ties, unaligned copies,
-  component order, and both cleanup branches.
-- Executable descriptor ABI entries for single-parameter dynamic bodies:
-  parameter/name reads, scalar literals, immutable local bindings, blocks,
-  explicit returns, owned scope cleanup, borrowed temporary cleanup, and
-  direct calls to dynamic and concrete instances. Call-result storage is aligned from runtime descriptors
-  and allocated once in the entry block. Runtime argument descriptor order
-  follows each callee's key, and results use caller-provided storage.
-- Dynamic bodies demand concrete leaf descriptors through closure scanner
-  use records. Closure validation checks their owner-local descriptor indices.
-  JIT tests exercise runtime caller/callee layouts, ownership transfer without
-  premature cleanup, and exactly-once drops after borrowing temporaries and
-  on normal and explicit returns.
-- Entry-built runtime product/sum descriptors and planned structural drop
-  artifacts. Product fields use packed store-size offsets; sum drops inspect
-  the active tag and use the runtime carrier layout. Dynamic bodies support
-  flattened product parameters, whole-product packing at generic calls,
-  product construction/access, and sum injection/widening coercions. Execution tests
-  cover packed output, guarded sum payload storage, and exactly-once cleanup
-  for both active sum alternatives.
-- Fixed repeated products (including zero and collapsed single repeats),
-  expression-statement cleanup for runtime values, and ordinary local product
-  destructuring. Structural product cleanup follows concrete reverse field
-  order; a native execution test records that order with differently sized
-  components.
+Stage 4a's foundations, the dynamic emitter, and the differential exit gate
+are in place. The remaining work is tracked in
+[STAGE_4A_REMAINDER_BREAKDOWN.md](STAGE_4A_REMAINDER_BREAKDOWN.md)
+(baseline `6a44dfa`), which also defines the tracked coverage report that
+measures completion: no corpus template may be rejected for an in-scope
+reason.
 
-- Concrete-to-dynamic direct call emission reuses concrete argument evaluation,
-  spills direct ABI values, packs flattened products when the generic parameter
-  is scalar-shaped, passes static descriptors in callee order, and loads the
-  caller-provided result slot. Concrete instance owners with dynamic call bindings demand
-  descriptors through the closure scanner. Native execution tests cover scalar,
-  packed product, moved, and mixed-size two-descriptor calls; graph and closure
-  validation run on each connected boundary. Resource arguments and function
-  reabstraction remain unimplemented on this path. The hidden selection option
-  is not yet connected.
+**Decision R-F. The dynamic emitter stays separate.** It is too large to fold
+into the concrete emitter at this point. Consistency comes from three rules:
 
-Added since the foundation (commits `dabb384`..`d93c53f` and the current
-continuation):
-- Dynamic wrappers and constructors: wrapper descriptors delegate to their
-  representation, `Wrap` coercions copy the representation, and structural
-  constructor calls build product/wrapper results from flattened argument
-  slots. Singleton names produce unit storage before their sum-injection
-  coercion.
-- Dynamic control flow: `&&`/`||` short-circuit over dynamic `Bool` storage;
-  `match` with sum tag tests, payload extraction, product/nominal/at/wildcard
-  pattern tests and bindings; `loop` with preallocated entry-block break slots;
-  `break`/`continue` cleanup; and branch-local environment snapshots for match
-  arms and loop bodies.
-- Dynamic mutable storage: entry-block binding cells, reads through the cell,
-  and assignment to symbol, temporary, dereferenced, product-element, and
-  representation places with `drop_previous` cleanup and liveness restore.
-- Pointer-like descriptors: `Ref`, `Slice`, `Buffer`, `CPointer`,
-  `COpaquePointer`, and function types keep their static layout and get
-  component-free run-time descriptors. Access supports representation, scalar,
-  and product paths plus `Ref` dereference chains.
-- Scalar intrinsics in dynamic bodies: numeric conversion, pointer cast and
-  address conversions, integer/float binary and compare operations, including
-  `Bool` results stored in their sum representation. Concrete extern calls in
-  dynamic bodies follow the concrete pass modes and store their result into the
-  call's reserved slot.
-- `String` and `CString` literals build through the concrete backend helpers and
-  store their static-layout values into reserved dynamic slots; a bound
-  `CString` drops through its static descriptor at scope exit.
-- Slice access (`values.0` through a `Ref (Slice T)`) loads the runtime data
-  pointer and length, bounds-checks, and strides by the element descriptor, so
-  the element address is correct for any run-time element layout.
-- Descriptor-sized intrinsics operate on storage pointers: `__slice_length`,
-  `__slice_get_ref` (bounds-checked with the element descriptor's stride),
-  `__ref_replace` (copies the old payload out and the replacement in), and the
-  `__buffer_length`/`__buffer_capacity` metadata reads. They are not yet
-  reachable from a dynamic body through the standard-library companion methods,
-  because those methods are used as callable values (indirect closures), which
-  remain unimplemented.
-- The hidden differential option (Decision 11) is connected: a transitive
-  greatest-fixed-point support analysis excludes unsupported templates and
-  their parameter-dependent callers; the worklist, instance-body builder, and
-  initializer binder all select dynamic instances for direct calls from
-  concrete owners; initializer scanners request the descriptors the
-  concrete-to-dynamic bridge needs. `LoweredModule::differential_dynamic_call_count`
-  reports redirected call sites.
-- Exit-gate coverage: a compiler test lowers and strictly emits every corpus
-  program with the option (all 89 use dynamic instances, 368 in total), and a
-  CLI test runs every runnable corpus program in both modes and requires
-  identical stdout and exit status (86/86 programs, 9660 redirected call
-  sites).
+- semantic decisions (cleanup order, drop flags, coercions, pattern tests)
+  come only from lowered records, which both emitters read;
+- both the dynamic emitter's and the support scanner's matches over lowered
+  kinds are exhaustive, so a new form must be classified in both;
+- the differential run compares the two emitters' behavior on the whole
+  corpus.
 
-Stage 4a is **not complete**. Still required: reabstraction between concrete
-and dynamic function values (function-typed parameters, results, and nested
-products currently fall back through the support analysis); resources and
-`with` scopes; dynamic GC payloads (trailing descriptor words, dynamic
-finalizers, dynamic closure environments); the remaining Decision 9 intrinsics
-(slice, buffer, and `Ref` operations); string, `CString`, template, index, and
-product-spread expression forms; and callable values and dynamic closures.
-Stage 3's polymorphic-value gate remains in place.
+Validation details live in commit messages; commit references must be
+reachable from the branch.
 
-Foundation validation (commit `8c86d8c`): `cargo test --workspace --quiet`
-passes; all 104 corpus/example inputs report `same` against the `50565d8`
-release build without a differential lowering option. Backend primitives are
-committed as `ed91238`. Subsequent body emission changes pass workspace checks,
-focused dynamic execution tests, and the descriptor tests (including the
-corpus layout sweep). The compound descriptor continuation passes the compiler
-library suite (370 passed, one ignored) and all nine dynamic execution tests
-including the later flattened-parameter and sum-widening additions. Rebuilt
-default-mode LLVM output matches `50565d8` for all 104 corpus/example inputs
-(four compilations per binary per input), verified for `db53462`.
-The subsequent repetition/statement/destructuring continuation passes workspace
-checks and all eleven dynamic execution tests. Adding the concrete boundary
-passes workspace checks and all twelve dynamic execution tests.
+**Remainder progress** (plan steps in
+[STAGE_4A_REMAINDER_BREAKDOWN.md](STAGE_4A_REMAINDER_BREAKDOWN.md)):
 
-Current continuation validation: `cargo test --workspace --quiet` passes
-(compiler library 382 passed, two ignored; CLI 232 passed). The differential
-run matches default behavior on all 86 runnable corpus programs with 9660
-dynamic call sites. Rebuilt default-mode LLVM output matches the `50565d8`
-release build for all 104 corpus/example inputs (four compilations per binary
-per input), verified for `325d637`; every new path is gated on the hidden
-option or on dynamic instances, which only exist when it is on.
+- **R0 complete.** The support analysis records every rejection reason per
+  template, classifies each as in scope or allowed (R0.1), and a tracked
+  coverage test asserts the in-scope count never rises above the checked-in
+  baseline of **3047**. The dynamic emitter's expression match is exhaustive
+  (R-F), the default suite runs a ten-program quick differential subset while
+  the full run (all runnable corpus programs plus `macros.sta`) is an ignored
+  test, and this status section is now a short summary.
 
 ### Step 4a.1 — Keys, specialization, and validation
 
