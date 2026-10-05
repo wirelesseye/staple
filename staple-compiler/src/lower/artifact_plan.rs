@@ -164,6 +164,9 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::DynamicClosureEnvironment {
                 ..
             }) => "gc-finalizer-dynamic-closure-environment",
+            LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::DynamicBuffer) => {
+                "gc-finalizer-dynamic-buffer"
+            }
             LoweredArtifactPlan::CoroutineCodes(_) => "coroutine-codes",
             LoweredArtifactPlan::ReactionRunner(_) => "reaction-runner",
             LoweredArtifactPlan::UntilRunner(_) => "until-runner",
@@ -277,6 +280,10 @@ impl LoweredArtifactPlan {
                             closure: expected_closure,
                         },
                     ) => closure.index() == expected_closure.index(),
+                    (
+                        GcFinalizerPlan::DynamicBuffer,
+                        GcFinalizerKey::DynamicBuffer,
+                    ) => true,
                     _ => false,
                 }
             }
@@ -358,6 +365,7 @@ impl LoweredArtifactPlan {
                 | GcFinalizerPlan::Buffer { glue, .. } => glue.is_some(),
                 GcFinalizerPlan::ClosureEnvironment { drops, .. } => drops.is_some(),
                 GcFinalizerPlan::DynamicClosureEnvironment { .. } => true,
+                GcFinalizerPlan::DynamicBuffer => true,
             },
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.frame.is_some(),
             LoweredArtifactPlan::ReactionRunner(plan)
@@ -594,6 +602,7 @@ impl LoweredArtifactPlan {
                     runtime: _,
                     captures: _,
                 } => {}
+                GcFinalizerPlan::DynamicBuffer => {}
                 GcFinalizerPlan::ClosureEnvironment {
                     closure: _,
                     captures,
@@ -1248,6 +1257,9 @@ pub(crate) enum GcFinalizerPlan {
         /// The element's drop glue, absent only in the request-time marker.
         glue: Option<PlannedArtifact>,
     },
+    /// A dynamic buffer (R6): drops the elements through the element
+    /// descriptor in the allocation's trailing word.
+    DynamicBuffer,
     /// A dynamic closure environment (R-D): drops each owned capture through
     /// the descriptors the environment holds.
     DynamicClosureEnvironment {
@@ -1294,7 +1306,8 @@ impl GcFinalizerPlan {
                     visit(PlannedCalleeRef::Artifact(&drop.glue));
                 }
             }
-            GcFinalizerPlan::DynamicClosureEnvironment { .. } => {}
+            GcFinalizerPlan::DynamicClosureEnvironment { .. }
+            | GcFinalizerPlan::DynamicBuffer => {}
         }
     }
 
@@ -1312,7 +1325,8 @@ impl GcFinalizerPlan {
                     visit(PlannedCalleeRefMut::Artifact(&mut drop.glue));
                 }
             }
-            GcFinalizerPlan::DynamicClosureEnvironment { .. } => {}
+            GcFinalizerPlan::DynamicClosureEnvironment { .. }
+            | GcFinalizerPlan::DynamicBuffer => {}
         }
     }
 }

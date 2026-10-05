@@ -479,6 +479,10 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
             | IntrinsicFunction::RefReplace
             | IntrinsicFunction::BufferLength
             | IntrinsicFunction::BufferCapacity
+            | IntrinsicFunction::BufferWithCapacity
+            | IntrinsicFunction::BufferPush
+            | IntrinsicFunction::BufferGet
+            | IntrinsicFunction::BufferFreeze
     )
 }
 
@@ -775,6 +779,22 @@ impl SupportWalker<'_> {
                     LoweredCallableTarget::DirectFunction { .. }
                         | LoweredCallableTarget::TraitImplementation { .. }
                 );
+                // A callable value whose target template cannot be lowered
+                // dynamically is a transitive dependency.
+                if let LoweredCallableTarget::DirectFunction { function, .. }
+                | LoweredCallableTarget::TraitImplementation {
+                    function: Some(function),
+                    ..
+                } = &callable.target
+                    && self
+                        .program
+                        .relevant_parameters(*function)
+                        .type_parameters()
+                        .next()
+                        .is_some()
+                {
+                    self.dependencies.insert(*function);
+                }
                 if !captures_eligible
                     || (!captures.is_empty() && !dynamic_shape)
                     || (dynamic_shape && !dynamic_target)
@@ -1063,7 +1083,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 1194;
+    const IN_SCOPE_BASELINE: usize = 648;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.

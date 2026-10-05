@@ -334,6 +334,29 @@ pub(super) fn scan_instance(
             });
         }
     }
+    // A dynamic buffer allocation installs the shared dynamic buffer
+    // finalizer (R6).
+    if let Some((call_id, _)) = body.calls.iter().find(|(_, call)| {
+        matches!(
+            &call.target,
+            super::LoweredCallableTarget::Intrinsic {
+                intrinsic: crate::IntrinsicFunction::BufferWithCapacity,
+                ..
+            }
+        )
+    }) {
+        requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::GcFinalizer(
+                crate::specialization::GcFinalizerKey::DynamicBuffer,
+            ),
+            plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicBuffer),
+            kind: Kind::GcFinalizer,
+            origin: body.origin.clone(),
+            use_site: Some(super::artifact_closure::ArtifactUseSite::BufferAllocation(
+                call_id,
+            )),
+        });
+    }
     requests.extend(reabstraction_requests(&body.conversions, &body.origin)?);
     Ok(requests)
 }

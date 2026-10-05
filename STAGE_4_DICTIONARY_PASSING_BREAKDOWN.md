@@ -306,6 +306,13 @@ reachable from the branch.
   `returns_function`, and the baseline is **1194** over the larger corpus
   (1168 before the two programs, whose standard-library dependencies add 26
   in-scope templates).
+- **R6 in progress.** Dynamic buffers get a runtime header offset, element
+  stride, and store size from the element descriptor; `__buffer_with_capacity`
+  allocates the header, elements, and a trailing element-descriptor word and
+  installs one shared `gc-finalizer-dynamic-buffer` finalizer that drops every
+  live element. `__buffer_push`, `__buffer_get`, and `__buffer_freeze` operate
+  through the runtime layout. The in-scope baseline drops from 1194 to **648**
+  (`__buffer_pop` and `__buffer_transfer` remain).
 
 ### Step 4a.1 — Keys, specialization, and validation
 

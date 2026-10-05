@@ -37,6 +37,13 @@ struct DynamicLoopContext<'context> {
     breaks: bool,
 }
 
+/// Runtime buffer layout from an element descriptor.
+struct DynamicBufferLayout<'context> {
+    store_size: inkwell::values::IntValue<'context>,
+    stride: inkwell::values::IntValue<'context>,
+    header_offset: inkwell::values::IntValue<'context>,
+}
+
 /// The branch-local part of the dynamic environment. Match arms and loop
 /// bodies restore it so bindings introduced on one path never leak to another.
 #[derive(Clone)]
@@ -897,6 +904,265 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)?)
     }
 
+    /// The element descriptor of a buffer intrinsic, from its `T` argument.
+    fn intrinsic_element_descriptor(
+        &self,
+        call: &crate::LoweredCall,
+        environment: &DynamicEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let element_type = call
+            .substitutions
+            .types
+            .first()
+            .map(|entry| entry.value_type.clone())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "buffer intrinsic has no element type"))?;
+        self.dynamic_descriptor(&element_type, environment, span)
+    }
+
+    /// Load a buffer pointer from a dynamic value slot.
+    fn load_buffer_pointer(
+        &self,
+        slot: PointerValue<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        Ok(self
+            .backend
+            .builder
+            .build_load(
+                self.backend.context.ptr_type(AddressSpace::default()),
+                slot,
+                "buffer.pointer",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value())
+    }
+
+    /// Load a buffer header metadata word (0 length, 1 capacity).
+    fn load_buffer_metadata(
+        &self,
+        buffer: PointerValue<'context>,
+        field: u64,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let slot = self.backend.dynamic_byte_offset(
+            buffer,
+            self.backend
+                .size_type
+                .const_int(field * pointer_bytes, false),
+        )?;
+        Ok(self
+            .backend
+            .builder
+            .build_load(self.backend.size_type, slot, "buffer.metadata")
+            .map_err(compiler_diagnostic)?
+            .into_int_value())
+    }
+
+    /// Trap when a buffer's frozen flag is set.
+    fn trap_if_buffer_frozen(
+        &self,
+        buffer: PointerValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let slot = self.backend.dynamic_byte_offset(
+            buffer,
+            self.backend
+                .size_type
+                .const_int(2 * pointer_bytes, false),
+        )?;
+        let frozen = self
+            .backend
+            .builder
+            .build_load(self.backend.context.i8_type(), slot, "buffer.frozen")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let frozen = self
+            .backend
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                frozen,
+                self.backend.context.i8_type().const_zero(),
+                "buffer.is_frozen",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend.build_trap_if(frozen, span.clone())
+    }
+
+    /// The runtime layout of a dynamic buffer: its header offset, element
+    /// store size, and element stride, all from the element descriptor.
+    fn dynamic_buffer_layout(
+        &self,
+        element: PointerValue<'context>,
+    ) -> CodeGenerationResult<DynamicBufferLayout<'context>> {
+        let layout = self.backend.load_descriptor_layout(element)?;
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let base = self
+            .backend
+            .size_type
+            .const_int(2 * pointer_bytes + 1, false);
+        let header_offset = self.runtime_align_up(base, layout.align)?;
+        Ok(DynamicBufferLayout {
+            store_size: layout.store_size,
+            stride: layout.stride,
+            header_offset,
+        })
+    }
+
+    /// The one shared dynamic buffer finalizer (R6): read the element
+    /// descriptor from the allocation's trailing word and drop every live
+    /// element.
+    pub(super) fn emit_dynamic_buffer_finalizer(
+        &mut self,
+        buffer: PointerValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let end_function = self
+            .backend
+            .llvm_module
+            .get_function("__staple_gc_payload_end")
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing GC payload-end helper"))?;
+        let end = self
+            .backend
+            .builder
+            .build_call(end_function, &[buffer.into()], "buffer.payload.end")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "payload end has no value"))?
+            .into_int_value();
+        let word = self
+            .backend
+            .builder
+            .build_int_sub(
+                end,
+                self.backend.size_type.const_int(pointer_bytes, false),
+                "buffer.descriptor.address",
+            )
+            .map_err(compiler_diagnostic)?;
+        let word = self
+            .backend
+            .builder
+            .build_int_to_ptr(word, pointer, "buffer.descriptor.slot")
+            .map_err(compiler_diagnostic)?;
+        let element = self
+            .backend
+            .builder
+            .build_load(pointer, word, "buffer.element.descriptor")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let layout = self.dynamic_buffer_layout(element)?;
+        let length = self
+            .backend
+            .builder
+            .build_load(self.backend.size_type, buffer, "buffer.length")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let data = self.backend.dynamic_byte_offset(buffer, layout.header_offset)?;
+        let function = self
+            .backend
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "buffer finalizer outside a function"))?;
+        let index_slot = self
+            .backend
+            .entry_builder()
+            .build_alloca(self.backend.size_type, "buffer.finalize.index")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(index_slot, self.backend.size_type.const_zero())
+            .map_err(compiler_diagnostic)?;
+        let check = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.finalize.check");
+        let element_block = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.finalize.element");
+        let done = self
+            .backend
+            .context
+            .append_basic_block(function, "buffer.finalize.done");
+        self.backend
+            .builder
+            .build_unconditional_branch(check)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(check);
+        let index = self
+            .backend
+            .builder
+            .build_load(self.backend.size_type, index_slot, "buffer.finalize.index")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let finished = self
+            .backend
+            .builder
+            .build_int_compare(inkwell::IntPredicate::UGE, index, length, "buffer.finalize.done")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_conditional_branch(finished, done, element_block)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(element_block);
+        let offset = self
+            .backend
+            .builder
+            .build_int_mul(index, layout.stride, "buffer.finalize.offset")
+            .map_err(compiler_diagnostic)?;
+        let field = self.backend.dynamic_byte_offset(data, offset)?;
+        self.backend.drop_dynamic_value(element, field)?;
+        let next = self
+            .backend
+            .builder
+            .build_int_add(
+                index,
+                self.backend.size_type.const_int(1, false),
+                "buffer.finalize.next",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(index_slot, next)
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_unconditional_branch(check)
+            .map_err(compiler_diagnostic)?;
+        self.backend.builder.position_at_end(done);
+        let _ = layout.store_size;
+        Ok(())
+    }
+
+    /// The declared shared dynamic buffer finalizer.
+    fn dynamic_buffer_finalizer_code(
+        &self,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        let ordinal = self
+            .view
+            .artifacts()
+            .find_map(|(_, artifact)| match &artifact.plan {
+                Some(crate::LoweredArtifactPlan::GcFinalizer(
+                    crate::GcFinalizerPlan::DynamicBuffer,
+                )) => Some(artifact.ordinal),
+                _ => None,
+            })
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic buffer finalizer plan"))?;
+        self.artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing dynamic buffer finalizer declaration")
+            })
+    }
+
     /// The dynamic closure environment's finalizer (R-D): drop every owned
     /// capture through the descriptor stored in the environment.
     pub(super) fn emit_dynamic_closure_finalizer(
@@ -1486,6 +1752,172 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend
                     .builder
                     .build_store(storage, value)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::BufferWithCapacity => {
+                let capacity = slot_pointer(0)?;
+                let capacity = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, capacity, "buffer.capacity")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let element = self.intrinsic_element_descriptor(call, environment, span)?;
+                let layout = self.dynamic_buffer_layout(element)?;
+                let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+                let bytes = self
+                    .backend
+                    .builder
+                    .build_int_mul(capacity, layout.stride, "buffer.bytes")
+                    .map_err(compiler_diagnostic)?;
+                let concrete = self
+                    .backend
+                    .builder
+                    .build_int_add(layout.header_offset, bytes, "buffer.concrete.size")
+                    .map_err(compiler_diagnostic)?;
+                let total = self
+                    .backend
+                    .builder
+                    .build_int_add(
+                        concrete,
+                        self.backend
+                            .size_type
+                            .const_int(pointer_bytes, false),
+                        "buffer.total.size",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let buffer = self
+                    .backend
+                    .build_gc_allocation(total, "buffer", span.clone())?;
+                self.backend
+                    .builder
+                    .build_store(buffer, self.backend.size_type.const_zero())
+                    .map_err(compiler_diagnostic)?;
+                let capacity_slot = self.backend.dynamic_byte_offset(
+                    buffer,
+                    self.backend
+                        .size_type
+                        .const_int(pointer_bytes, false),
+                )?;
+                self.backend
+                    .builder
+                    .build_store(capacity_slot, capacity)
+                    .map_err(compiler_diagnostic)?;
+                let frozen_slot = self.backend.dynamic_byte_offset(
+                    buffer,
+                    self.backend
+                        .size_type
+                        .const_int(2 * pointer_bytes, false),
+                )?;
+                self.backend
+                    .builder
+                    .build_store(frozen_slot, self.backend.context.i8_type().const_zero())
+                    .map_err(compiler_diagnostic)?;
+                let descriptor_slot = self.backend.dynamic_byte_offset(buffer, concrete)?;
+                self.backend
+                    .builder
+                    .build_store(descriptor_slot, element)
+                    .map_err(compiler_diagnostic)?;
+                let finalizer = self.dynamic_buffer_finalizer_code(span)?;
+                self.backend.set_gc_finalizer(buffer, finalizer)?;
+                self.backend
+                    .builder
+                    .build_store(storage, buffer)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::BufferPush => {
+                let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
+                let value = slot_pointer(1)?;
+                let element = self.intrinsic_element_descriptor(call, environment, span)?;
+                let layout = self.dynamic_buffer_layout(element)?;
+                self.trap_if_buffer_frozen(buffer, span)?;
+                let length = self.load_buffer_metadata(buffer, 0)?;
+                let capacity = self.load_buffer_metadata(buffer, 1)?;
+                let full = self
+                    .backend
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::UGE, length, capacity, "buffer.full")
+                    .map_err(compiler_diagnostic)?;
+                self.backend.build_trap_if(full, span.clone())?;
+                let data = self.backend.dynamic_byte_offset(buffer, layout.header_offset)?;
+                let offset = self
+                    .backend
+                    .builder
+                    .build_int_mul(length, layout.stride, "buffer.push.offset")
+                    .map_err(compiler_diagnostic)?;
+                let field = self.backend.dynamic_byte_offset(data, offset)?;
+                self.backend.copy_dynamic_value(element, value, field)?;
+                let next = self
+                    .backend
+                    .builder
+                    .build_int_add(
+                        length,
+                        self.backend.size_type.const_int(1, false),
+                        "buffer.push.length",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(buffer, next)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::BufferGet => {
+                let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
+                let index = slot_pointer(1)?;
+                let index = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, index, "buffer.index")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let element = self.intrinsic_element_descriptor(call, environment, span)?;
+                let layout = self.dynamic_buffer_layout(element)?;
+                let data = self.backend.dynamic_byte_offset(buffer, layout.header_offset)?;
+                let offset = self
+                    .backend
+                    .builder
+                    .build_int_mul(index, layout.stride, "buffer.get.offset")
+                    .map_err(compiler_diagnostic)?;
+                let field = self.backend.dynamic_byte_offset(data, offset)?;
+                self.backend
+                    .builder
+                    .build_store(storage, field)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::BufferFreeze => {
+                let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
+                let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+                let frozen_slot = self.backend.dynamic_byte_offset(
+                    buffer,
+                    self.backend
+                        .size_type
+                        .const_int(2 * pointer_bytes, false),
+                )?;
+                self.backend
+                    .builder
+                    .build_store(frozen_slot, self.backend.context.i8_type().const_int(1, false))
+                    .map_err(compiler_diagnostic)?;
+                let length = self.load_buffer_metadata(buffer, 0)?;
+                let element = self.intrinsic_element_descriptor(call, environment, span)?;
+                let layout = self.dynamic_buffer_layout(element)?;
+                let data = self.backend.dynamic_byte_offset(buffer, layout.header_offset)?;
+                self.backend
+                    .builder
+                    .build_store(storage, data)
+                    .map_err(compiler_diagnostic)?;
+                let length_slot = self.backend.dynamic_byte_offset(
+                    storage,
+                    self.backend
+                        .size_type
+                        .const_int(pointer_bytes, false),
+                )?;
+                self.backend
+                    .builder
+                    .build_store(length_slot, length)
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
@@ -2199,7 +2631,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         if !environment.returned {
-            let value = value.ok_or_else(|| unsupported("empty result"))?;
+            // An empty block result is the unit value; its descriptor has zero
+            // store size, so a null source makes the copy a no-op.
+            let value = value.unwrap_or_else(|| {
+                self.backend
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .const_null()
+            });
             if let (Some(coercion), Some(plan)) = (&body.body_coercion, &body.body_coercion_plan) {
                 self.coerce_dynamic_value(
                     value,
