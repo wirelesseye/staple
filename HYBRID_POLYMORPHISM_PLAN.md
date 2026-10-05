@@ -378,9 +378,15 @@ scope in the binding's value. This matches today's behavior for a generic
   - reachability tests show no dictionary-passed code for concretely called
     generics and no artifacts for unused polymorphic values.
 
-**Breakdown plan: required.** This is the largest and riskiest stage. Expect
-two substages: 4a, descriptors, abstract ABI, and dynamic layout; 4b,
-polymorphic closures, calls, and adapters.
+- `Copy` and `Sized` bounds, which need no dictionary (moved from Stage 6).
+
+**Breakdown plan: required.** See
+[STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md](STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md).
+This is the largest and riskiest stage. It has two substages: 4a,
+descriptors, the abstract ABI, dynamic layout, and reabstraction between
+concrete and dynamic function values, tested through a hidden mode that
+dictionary-passes ordinary generic calls; 4b, polymorphic closures, calls
+through `Forall` values, and instantiation and scheme adapters.
 
 ### Stage 5 — Effect polymorphism at run time
 
@@ -404,7 +410,7 @@ pattern.
 - Structural trait methods, prerequisite traits, and associated types:
   descriptors in dictionaries, and `Trait.Name T` projections on run-time
   parameters.
-- `Copy` and `Drop` mapped onto descriptors.
+- `Drop` mapped onto descriptor drop glue. (`Copy` moved to Stage 4.)
 - **`Staple.md`:** rewrite "Traits and bounded generic functions" to
   describe the hybrid strategy, replacing "Traits use static dispatch …
   runtime dictionaries … are not currently supported", and allow bounded
@@ -460,7 +466,7 @@ small plan, and they can be scheduled separately or dropped.
 | 1 — `Forall` in the syntax tree | **Required** — [written](STAGE_1_FORALL_SYNTAX_BREAKDOWN.md) |
 | 2 — Explicit checked schemes | **Required** — [written](STAGE_2_CHECKED_SCHEMES_BREAKDOWN.md) |
 | 3 — First-class polymorphism in the checker | **Required** — [written](STAGE_3_FIRST_CLASS_POLYMORPHISM_BREAKDOWN.md) |
-| 4 — Core dictionary passing | **Required** (split 4a/4b) |
+| 4 — Core dictionary passing | **Required** (split 4a/4b) — [written](STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md) |
 | 5 — Effect polymorphism at run time | Not required |
 | 6 — Trait bounds via dictionaries | **Required** |
 | 7 — Independently generic trait methods | **Required** |
