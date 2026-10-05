@@ -620,7 +620,11 @@ impl SupportWalker<'_> {
                 self.reject("structural trait dispatch")
             }
             LoweredCallableTarget::IndirectClosure { .. } => self.reject("indirect closure call"),
-            LoweredCallableTarget::ExternalFunction { .. } => self.reject("extern call"),
+            LoweredCallableTarget::ExternalFunction { .. } => {
+                if mentions_parameters {
+                    self.reject("parameter-dependent extern call");
+                }
+            }
             LoweredCallableTarget::Intrinsic { intrinsic, .. } => {
                 if !dynamic_scalar_intrinsic(*intrinsic) {
                     self.reject("intrinsic call");

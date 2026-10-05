@@ -382,6 +382,105 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(storage)
     }
 
+    /// A concrete extern call inside a dynamic body. Arguments are concrete
+    /// scalars or pointers; each flattened slot follows the concrete pass
+    /// mode, and the result is stored back into the call's reserved slot.
+    fn emit_dynamic_extern_call(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        call: &crate::LoweredCall,
+        symbol: crate::SymbolId,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let span = &call.origin.span;
+        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "missing dynamic extern storage")
+        })?;
+        let types = super::flattened_parameter_types(&call.function_type.parameter);
+        let indirect = self.backend.indirect_parameter_mask(&call.function_type);
+        let mut slots = vec![None; types.len()];
+        let mut unplaced = Vec::new();
+        for step in &call.steps {
+            match step {
+                LoweredCallStep::Argument { argument } => {
+                    let record = &call.arguments[*argument];
+                    let value = record.expression.ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "dynamic extern thunk argument")
+                    })?;
+                    let value = self.emit_dynamic_expression(owner, value, environment)?;
+                    match record.slot {
+                        Some(slot) => slots[slot] = Some(value),
+                        None => unplaced.push(value),
+                    }
+                }
+                LoweredCallStep::ProductElement {
+                    expression, slot, ..
+                }
+                | LoweredCallStep::Default {
+                    expression, slot, ..
+                } => {
+                    let value = self.emit_dynamic_expression(owner, *expression, environment)?;
+                    slots[*slot] = Some(value);
+                }
+                LoweredCallStep::Invoke => break,
+                _ => {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "dynamic extern argument step is not yet implemented",
+                    ));
+                }
+            }
+        }
+        if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
+            let descriptor =
+                self.dynamic_descriptor(&call.function_type.parameter, environment, span)?;
+            for (index, slot) in slots.iter_mut().enumerate() {
+                *slot = Some(
+                    self.dynamic_product_field(descriptor, unplaced[0], index as u32)?
+                        .0,
+                );
+            }
+        }
+        let mut arguments = Vec::with_capacity(slots.len());
+        for (index, slot) in slots.iter().enumerate() {
+            let pointer = slot.ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing dynamic extern argument")
+            })?;
+            if indirect[index] {
+                arguments.push(pointer.into());
+            } else {
+                let ty = self.backend.compile_type(types[index])?;
+                arguments.push(
+                    self.backend
+                        .builder
+                        .build_load(ty, pointer, "extern.argument")
+                        .map_err(compiler_diagnostic)?
+                        .into(),
+                );
+            }
+        }
+        let function = self
+            .externs
+            .get(&symbol)
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing extern declaration"))?;
+        let value = self
+            .backend
+            .builder
+            .build_direct_call(function, &arguments, "extern.call")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic();
+        if let Some(value) = value {
+            self.backend
+                .builder
+                .build_store(storage, value)
+                .map_err(compiler_diagnostic)?;
+        }
+        Ok(storage)
+    }
+
     /// Scalar intrinsics evaluate their concrete arguments from storage and
     /// store the SSA result back into the call's reserved slot. The set
     /// mirrors Decision 9's supported scalar operations; anything needing the
@@ -2584,6 +2683,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 if let LoweredCallableTarget::Intrinsic { intrinsic, .. } = &call.target {
                     return self.emit_dynamic_intrinsic(owner, id, call, *intrinsic, environment);
+                }
+                if let LoweredCallableTarget::ExternalFunction { symbol } = &call.target {
+                    return self.emit_dynamic_extern_call(owner, id, call, *symbol, environment);
                 }
                 let route = match &call.target {
                     LoweredCallableTarget::DirectFunction { environment, .. } => *environment,

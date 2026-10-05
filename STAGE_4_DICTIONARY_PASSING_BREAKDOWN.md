@@ -294,7 +294,9 @@ continuation):
   and product paths plus `Ref` dereference chains.
 - Scalar intrinsics in dynamic bodies: numeric conversion, pointer cast and
   address conversions, integer/float binary and compare operations, including
-  `Bool` results stored in their sum representation.
+  `Bool` results stored in their sum representation. Concrete extern calls in
+  dynamic bodies follow the concrete pass modes and store their result into the
+  call's reserved slot.
 - The hidden differential option (Decision 11) is connected: a transitive
   greatest-fixed-point support analysis excludes unsupported templates and
   their parameter-dependent callers; the worklist, instance-body builder, and
