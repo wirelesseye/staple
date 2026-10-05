@@ -302,8 +302,10 @@ reachable from the branch.
   product stays monomorphized. The function-typed rows fall to one each;
   nested function types, by-value aggregates containing functions, and the
   dynamic emitter's dynamic-to-concrete direction remain and fall back with
-  an in-scope reason. The in-scope baseline drops to **1168**, and the corpus
-  gains `higher_order_map` and `returns_function`.
+  an in-scope reason. The corpus gains `higher_order_map` and
+  `returns_function`, and the baseline is **1194** over the larger corpus
+  (1168 before the two programs, whose standard-library dependencies add 26
+  in-scope templates).
 
 ### Step 4a.1 — Keys, specialization, and validation
 

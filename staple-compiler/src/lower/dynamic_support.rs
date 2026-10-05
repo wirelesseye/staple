@@ -1063,7 +1063,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 1168;
+    const IN_SCOPE_BASELINE: usize = 1194;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.
