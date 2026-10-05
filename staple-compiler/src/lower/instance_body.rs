@@ -2409,6 +2409,7 @@ impl<'a> BodyCloner<'a> {
                 CallSubstitutions::default(),
                 None,
                 false,
+                false,
             ) {
                 self.body.bindings.insert(
                     LoweredBindingSite::DerivedEvaluator(new),
@@ -2523,6 +2524,7 @@ impl<'a> BodyCloner<'a> {
                 function_type,
                 CallSubstitutions::default(),
                 None,
+                false,
                 false,
             ) {
                 self.body.bindings.insert(
@@ -2658,6 +2660,7 @@ impl<'a> BodyCloner<'a> {
         substitutions: CallSubstitutions,
         evidence: Option<TraitEvidence>,
         current: bool,
+        differential: bool,
     ) -> Option<FunctionInstanceId> {
         let (function_type, substitutions, evidence) =
             if self.program.relevant_parameters(function).is_empty() {
@@ -2693,7 +2696,19 @@ impl<'a> BodyCloner<'a> {
                 }
             }
         } else {
-            match self.program.resolve_instance_request(&request) {
+            let runtime = if differential {
+                self.program
+                    .differential_call_runtime(function, self.enclosing.key.runtime(), false)
+            } else {
+                None
+            };
+            let resolved = match runtime {
+                Some(runtime) => self
+                    .program
+                    .resolve_instance_request_with_runtime(&request, &runtime),
+                None => self.program.resolve_instance_request(&request),
+            };
+            match resolved {
                 Ok(resolved) => resolved,
                 Err(diagnostic) => {
                     self.diagnostics.push(diagnostic);
@@ -2744,6 +2759,7 @@ impl<'a> BodyCloner<'a> {
             function_type,
             CallSubstitutions::default(),
             None,
+            false,
             false,
         ) {
             self.body
@@ -2798,6 +2814,7 @@ impl<'a> BodyCloner<'a> {
                 CallSubstitutions::default(),
                 None,
                 false,
+                false,
             ) {
                 self.body
                     .bindings
@@ -2821,6 +2838,7 @@ impl<'a> BodyCloner<'a> {
                     original.substitutions.clone(),
                     original.evidence.clone(),
                     current,
+                    true,
                 ) {
                     self.body
                         .bindings
@@ -2883,6 +2901,7 @@ impl<'a> BodyCloner<'a> {
                     original.substitutions.clone(),
                     original.evidence.clone(),
                     current,
+                    false,
                 ) {
                     self.body
                         .bindings
@@ -3003,6 +3022,7 @@ impl<'a> BodyCloner<'a> {
                     function_type,
                     substitutions,
                     evidence,
+                    false,
                     false,
                 ) {
                     self.store_resolved_evidence(site, &resolved);

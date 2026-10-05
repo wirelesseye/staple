@@ -6,7 +6,7 @@
 //! check binding shape, live sites, evidence, and dependency/use agreement.
 //! Codegen reads these tables without resolving dispatch again.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use staple_syntax::{Diagnostic, Span};
 
@@ -176,6 +176,7 @@ impl<'a> InitializerBinder<'a> {
         function_type: CheckedFunctionType,
         substitutions: CallSubstitutions,
         evidence: Option<TraitEvidence>,
+        differential: bool,
     ) -> Option<FunctionInstanceId> {
         // A function with no relevant template parameters has exactly one
         // instance; the site's callable type may be a coerced view of the
@@ -201,7 +202,19 @@ impl<'a> InitializerBinder<'a> {
             evidence,
             target: InstanceResolutionTarget::Root,
         };
-        let resolved = match self.program.resolve_instance_request(&request) {
+        let runtime = if differential {
+            self.program
+                .differential_call_runtime(function, &BTreeSet::new(), false)
+        } else {
+            None
+        };
+        let resolved = match runtime {
+            Some(runtime) => self
+                .program
+                .resolve_instance_request_with_runtime(&request, &runtime),
+            None => self.program.resolve_instance_request(&request),
+        };
+        let resolved = match resolved {
             Ok(resolved) => resolved,
             Err(diagnostic) => {
                 self.diagnostics.push(diagnostic);
@@ -248,6 +261,7 @@ impl<'a> InitializerBinder<'a> {
             function_type,
             CallSubstitutions::default(),
             None,
+            false,
         );
     }
 
@@ -262,6 +276,7 @@ impl<'a> InitializerBinder<'a> {
                     call.function_type.clone(),
                     call.substitutions.clone(),
                     call.evidence.clone(),
+                    true,
                 );
             }
             LoweredCallableTarget::TraitImplementation {
@@ -317,6 +332,7 @@ impl<'a> InitializerBinder<'a> {
                     value.function_type.clone(),
                     value.substitutions.clone(),
                     value.evidence.clone(),
+                    false,
                 );
             }
             LoweredCallableTarget::TraitImplementation {
@@ -431,6 +447,7 @@ impl<'a> InitializerBinder<'a> {
                         function_type,
                         substitutions,
                         evidence,
+                        false,
                     )
                     .is_some()
                 {
@@ -602,6 +619,7 @@ impl<'a> InitializerBinder<'a> {
                 function_type,
                 CallSubstitutions::default(),
                 None,
+                false,
             );
         }
         for (part_index, part) in template.parts.iter().enumerate() {
@@ -675,6 +693,7 @@ impl<'a> InitializerBinder<'a> {
                     function_type.clone(),
                     CallSubstitutions::default(),
                     None,
+                    false,
                 );
                 None
             }
@@ -732,6 +751,7 @@ impl<'a> InitializerBinder<'a> {
             function_type,
             CallSubstitutions::default(),
             None,
+            false,
         );
     }
 

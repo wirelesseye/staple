@@ -2587,6 +2587,77 @@ mod tests {
             .unwrap_or_else(|diagnostics| panic!("source should lower: {diagnostics:?}\n{source}"))
     }
 
+    /// The hidden differential option must lower and strictly emit every
+    /// corpus program. Unsupported dynamic constructs fall back to
+    /// monomorphization through the transitive support analysis, so an
+    /// emission failure means the analysis and the dynamic emitter disagree.
+    #[test]
+    fn differential_lowering_emits_the_corpus() {
+        let mut failures = Vec::new();
+        let mut programs_with_dynamic = 0;
+        let mut dynamic_instances = 0;
+        let mut total = 0;
+        for program in codegen_corpus() {
+            total += 1;
+            let (source, root) = program_source(program);
+            let loaded = ProgramLoader::new()
+                .with_standard_library_root(workspace_root().join("stdlib"))
+                .load_source(&source, &root)
+                .unwrap_or_else(|diagnostics| {
+                    panic!("`{}` should load: {diagnostics:?}", program.name)
+                });
+            let resolved = NameResolver::new()
+                .resolve_program(loaded)
+                .unwrap_or_else(|diagnostics| {
+                    panic!("`{}` should resolve: {diagnostics:?}", program.name)
+                });
+            let checked = TypeChecker::new()
+                .check(resolved)
+                .unwrap_or_else(|diagnostics| {
+                    panic!("`{}` should type check: {diagnostics:?}", program.name)
+                });
+            let lowered = match Lowerer::new()
+                .with_dictionary_pass_generic_calls(true)
+                .lower(&checked)
+            {
+                Ok(lowered) => lowered,
+                Err(diagnostics) => {
+                    failures.push(format!("`{}` did not lower: {diagnostics:?}", program.name));
+                    continue;
+                }
+            };
+            let count = lowered
+                .program()
+                .instances()
+                .filter(|(id, _)| {
+                    lowered
+                        .program()
+                        .instance_runtime_parameters(*id)
+                        .is_some_and(|runtime| !runtime.is_empty())
+                })
+                .count();
+            if count > 0 {
+                programs_with_dynamic += 1;
+            }
+            dynamic_instances += count;
+            let context = Context::create();
+            if let Err(diagnostics) = crate::codegen::lowered_emissions(&context, &lowered) {
+                failures.push(format!(
+                    "`{}` did not emit: {diagnostics:?}",
+                    program.name
+                ));
+            }
+        }
+        eprintln!(
+            "differential lowering: {programs_with_dynamic}/{total} programs use dynamic instances, {dynamic_instances} dynamic instances"
+        );
+        assert!(
+            failures.is_empty(),
+            "differential lowering failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
     /// Strictly emit the full corpus and check catalog definitions, focus instances,
     /// structural coverage, and distinct generic artifacts.
     #[test]

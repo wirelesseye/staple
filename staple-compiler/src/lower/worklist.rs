@@ -15,7 +15,7 @@
 //! first-discovery order, typed dependency edges, and generated-artifact
 //! requests only.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use staple_syntax::{Diagnostic, Span};
 
@@ -931,6 +931,7 @@ impl<'a> WorklistBuilder<'a> {
         target: InstanceResolutionTarget<'_>,
         owner: TraversalOwner,
         kind: LoweredInstanceDependencyKind,
+        differential: bool,
     ) -> Option<FunctionInstanceId> {
         // A function with no relevant template parameters has exactly one
         // instance. The requesting site's callable type may be a coerced view
@@ -946,6 +947,12 @@ impl<'a> WorklistBuilder<'a> {
             } else {
                 (function_type, substitutions, evidence)
             };
+        let current = matches!(target, InstanceResolutionTarget::Current(_));
+        let caller_runtime = match &target {
+            InstanceResolutionTarget::Root => BTreeSet::new(),
+            InstanceResolutionTarget::Nested(enclosing)
+            | InstanceResolutionTarget::Current(enclosing) => enclosing.key.runtime().clone(),
+        };
         let request = InstanceResolutionRequest {
             function,
             origin: origin.clone(),
@@ -954,7 +961,20 @@ impl<'a> WorklistBuilder<'a> {
             evidence,
             target,
         };
-        match self.program.resolve_instance_request(&request) {
+        let resolved = if differential {
+            match self
+                .program
+                .differential_call_runtime(function, &caller_runtime, current)
+            {
+                Some(runtime) => self
+                    .program
+                    .resolve_instance_request_with_runtime(&request, &runtime),
+                None => self.program.resolve_instance_request(&request),
+            }
+        } else {
+            self.program.resolve_instance_request(&request)
+        };
+        match resolved {
             Ok(resolved) => {
                 let request_root = owner.instance_request(kind, origin);
                 let (id, _) = self
@@ -1351,6 +1371,7 @@ impl<'a> WorklistBuilder<'a> {
             nested_target(enclosing),
             owner,
             LoweredInstanceDependencyKind::CoroutineBody,
+                false,
         );
     }
 
@@ -1435,6 +1456,7 @@ impl<'a> WorklistBuilder<'a> {
             nested_target(enclosing),
             owner,
             kind,
+            false,
         );
     }
 
@@ -1471,6 +1493,7 @@ impl<'a> WorklistBuilder<'a> {
                 nested_target(enclosing),
                 owner,
                 LoweredInstanceDependencyKind::ImplicitThunkArgument,
+                false,
             );
         }
     }
@@ -1499,6 +1522,7 @@ impl<'a> WorklistBuilder<'a> {
                     target,
                     owner,
                     LoweredInstanceDependencyKind::DirectCall,
+                    true,
                 );
             }
             LoweredCallableTarget::TraitImplementation {
@@ -1568,6 +1592,7 @@ impl<'a> WorklistBuilder<'a> {
                     target,
                     owner,
                     LoweredInstanceDependencyKind::CallableValue,
+                false,
                 );
             }
             LoweredCallableTarget::TraitImplementation {
@@ -1725,6 +1750,7 @@ impl<'a> WorklistBuilder<'a> {
                     nested_target(enclosing),
                     owner,
                     LoweredInstanceDependencyKind::TraitMethod,
+                false,
                 );
             }
             TraitEvidence::Structural {
@@ -1885,6 +1911,7 @@ impl<'a> WorklistBuilder<'a> {
                     nested_target(enclosing),
                     owner,
                     LoweredInstanceDependencyKind::DerivedEvaluator,
+                false,
                 );
             }
             LoweredReactiveOperationKind::Reaction { callback, .. }
@@ -1927,6 +1954,7 @@ impl<'a> WorklistBuilder<'a> {
                 nested_target(enclosing),
                 owner,
                 LoweredInstanceDependencyKind::ReactiveCallback,
+                false,
             );
         }
         if let Some(callable) = callback.callable {

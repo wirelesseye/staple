@@ -1,7 +1,7 @@
 //! Demand-driven type descriptors and their concrete drop entry points.
 use super::artifact_closure::{ClosureRequest, ExpansionResult};
 use super::{
-    DescriptorDropPlan, DropGlueBody, DropGluePlan, LoweredArtifactDependencyKind as Kind,
+    ArenaId, DescriptorDropPlan, DropGlueBody, DropGluePlan, LoweredArtifactDependencyKind as Kind,
     LoweredArtifactPlan as Plan, LoweredArtifactRequestId, LoweredProgram, PlannedArtifact,
     TypeDescriptorPlan,
 };
@@ -27,38 +27,45 @@ pub(super) fn descriptor_request(
     })
 }
 
+/// One concrete leaf type of a dynamic context. Compound types containing a
+/// run-time parameter are not collected: their descriptors are built at run
+/// time from their components.
+pub(super) fn collect_concrete_types(ty: &CheckedType, types: &mut Vec<CheckedType>) {
+    if matches!(
+        ty,
+        CheckedType::Forall(_)
+            | CheckedType::ParameterProduct(_)
+            | CheckedType::TypeConstructor { .. }
+    ) {
+        return;
+    }
+    if !crate::contains_type_parameter(ty) {
+        if !types.contains(ty) {
+            types.push(ty.clone());
+        }
+        return;
+    }
+    match ty {
+        CheckedType::Product(product) => {
+            for field in &product.elements {
+                collect_concrete_types(&field.value_type, types);
+            }
+        }
+        CheckedType::Sum(sum) => {
+            for alternative in &sum.alternatives {
+                collect_concrete_types(alternative, types);
+            }
+        }
+        CheckedType::Wrapper { representation, .. } => collect_concrete_types(representation, types),
+        _ => {}
+    }
+}
+
 /// Concrete leaves used by a dynamic body. The deterministic order also names
 /// scanner use sites, so closure validation can prove each descriptor is owned.
 pub(super) fn concrete_body_types(body: &super::LoweredInstanceBody) -> Vec<CheckedType> {
     fn collect(ty: &CheckedType, types: &mut Vec<CheckedType>) {
-        if matches!(
-            ty,
-            CheckedType::Forall(_)
-                | CheckedType::ParameterProduct(_)
-                | CheckedType::TypeConstructor { .. }
-        ) {
-            return;
-        }
-        if !crate::contains_type_parameter(ty) {
-            if !types.contains(ty) {
-                types.push(ty.clone());
-            }
-            return;
-        }
-        match ty {
-            CheckedType::Product(product) => {
-                for field in &product.elements {
-                    collect(&field.value_type, types);
-                }
-            }
-            CheckedType::Sum(sum) => {
-                for alternative in &sum.alternatives {
-                    collect(alternative, types);
-                }
-            }
-            CheckedType::Wrapper { representation, .. } => collect(representation, types),
-            _ => {}
-        }
+        collect_concrete_types(ty, types)
     }
     let mut types = Vec::new();
     collect(&body.signature.parameter, &mut types);
@@ -198,6 +205,95 @@ pub(super) fn scan_instance(
         });
     }
     Ok(requests)
+}
+
+/// Descriptors a module initializer's concrete bridge into a dynamic
+/// implementation needs: the concrete types named by the calls it redirects.
+/// Concrete types a module initializer's differential bridge needs, in the
+/// deterministic scanner order. Used by both the scanner and use-site
+/// validation.
+pub(super) fn concrete_initializer_types(
+    program: &LoweredProgram,
+    id: super::InitializerId,
+) -> Vec<CheckedType> {
+    if !program.dictionary_pass_generic_calls {
+        return Vec::new();
+    }
+    let mut visitor = InitializerDescriptorVisitor {
+        program,
+        types: Vec::new(),
+    };
+    if super::cleanup_artifacts::walk_owner(
+        program,
+        super::emission::OwnerArenas::Initializer(id),
+        &mut visitor,
+    )
+    .is_err()
+    {
+        return Vec::new();
+    }
+    visitor.types
+}
+
+pub(super) fn scan_initializer(
+    program: &LoweredProgram,
+    id: super::InitializerId,
+) -> super::artifact_closure::ScanResult {
+    let types = concrete_initializer_types(program, id);
+    if types.is_empty() {
+        return Ok(Vec::new());
+    }
+    let origin = program
+        .initializers
+        .get(id)
+        .map_or_else(crate::Origin::compiler, |initializer| {
+            initializer.origin.clone()
+        });
+    let mut requests = Vec::new();
+    for (index, ty) in types.iter().enumerate() {
+        let mut request = descriptor_request(ty, &origin).map_err(|diagnostic| vec![diagnostic])?;
+        let ClosureRequest::Artifact { use_site, .. } = &mut request else {
+            unreachable!()
+        };
+        *use_site =
+            Some(super::artifact_closure::ArtifactUseSite::InstanceTypeDescriptor(index));
+        requests.push(request);
+    }
+    Ok(requests)
+}
+
+struct InitializerDescriptorVisitor<'a> {
+    program: &'a LoweredProgram,
+    types: Vec<CheckedType>,
+}
+
+impl super::cleanup_artifacts::LoweredOwnerVisitor for InitializerDescriptorVisitor<'_> {
+    fn call_site(
+        &mut self,
+        call: &super::LoweredCall,
+    ) -> Result<(), Vec<staple_syntax::Diagnostic>> {
+        // Only the calls the differential option actually redirects need
+        // concrete descriptors for their run-time type arguments.
+        let Some(function) = (match &call.target {
+            super::LoweredCallableTarget::DirectFunction { function, .. } => Some(*function),
+            _ => None,
+        }) else {
+            return Ok(());
+        };
+        if self
+            .program
+            .differential_call_runtime(function, &std::collections::BTreeSet::new(), false)
+            .is_none()
+        {
+            return Ok(());
+        }
+        collect_concrete_types(&call.function_type.parameter, &mut self.types);
+        collect_concrete_types(&call.function_type.result, &mut self.types);
+        for entry in &call.substitutions.types {
+            collect_concrete_types(&entry.value_type, &mut self.types);
+        }
+        Ok(())
+    }
 }
 
 fn planned(request: &ClosureRequest) -> PlannedArtifact {

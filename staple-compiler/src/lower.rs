@@ -45,6 +45,7 @@ pub(crate) mod census;
 mod cleanup_artifacts;
 mod coroutine_artifacts;
 mod descriptor_artifacts;
+mod dynamic_support;
 mod emission;
 mod extern_artifacts;
 pub(crate) mod graph_validation;
@@ -2794,6 +2795,11 @@ pub(crate) struct LoweredProgram {
     specializations: SpecializationCatalog,
     semantic_ids: LoweredSemanticIds,
     string_formatting: LoweredStringFormatting,
+    /// The hidden differential lowering option (Decision 11): route direct
+    /// generic calls from concrete owners through dynamic implementations.
+    dictionary_pass_generic_calls: bool,
+    /// Per-template transitive dynamic support, computed once per lowering.
+    dynamic_support: std::collections::HashMap<FunctionId, dynamic_support::DynamicSupport>,
     /// The ordered, deduplicated runtime surfaces the closed catalog needs.
     /// Recorded after the closure fixed point; emission installs each surface
     /// only when present.
@@ -14343,11 +14349,26 @@ impl LoweredProgram {
 
 /// Converts checked compiler state into the code-generation input.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct Lowerer;
+pub struct Lowerer {
+    /// The hidden differential option (Decision 11): route direct generic
+    /// calls from concrete owners through dynamic implementations. Never
+    /// exposed through the CLI.
+    dictionary_pass_generic_calls: bool,
+}
 
 impl Lowerer {
     pub fn new() -> Self {
-        Self
+        Self {
+            dictionary_pass_generic_calls: false,
+        }
+    }
+
+    /// Enables the hidden differential lowering option used by the Stage 4a
+    /// exit gate.
+    #[doc(hidden)]
+    pub fn with_dictionary_pass_generic_calls(mut self, enabled: bool) -> Self {
+        self.dictionary_pass_generic_calls = enabled;
+        self
     }
 
     pub fn lower(&self, module: &TypedModule) -> Result<LoweredModule, Vec<Diagnostic>> {
@@ -14356,9 +14377,13 @@ impl Lowerer {
             return Err(polymorphic);
         }
         let mut program = LoweredProgram::default();
+        program.dictionary_pass_generic_calls = self.dictionary_pass_generic_calls;
         let mut diagnostics = validate_checked_module(module);
         if diagnostics.is_empty() {
             diagnostics.extend(program.snapshot(module));
+        }
+        if diagnostics.is_empty() && self.dictionary_pass_generic_calls {
+            program.compute_dynamic_support();
         }
         diagnostics.extend(program.validate());
         if diagnostics.is_empty() {
