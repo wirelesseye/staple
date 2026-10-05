@@ -8,7 +8,7 @@ use inkwell::{
 };
 
 use super::{CodeGenerationResult, Diagnostic, LoweredEmitter, compiler_diagnostic};
-use crate::lower::EmissionOwner;
+use crate::lower::{ArenaId, EmissionOwner};
 use crate::{
     BlockId, CheckedType, ExpressionId, FunctionInstanceId, LoweredBindingSite, LoweredBoundTarget,
     LoweredCallEnvironment, LoweredCallStep, LoweredCallableTarget, LoweredCoercionPlan,
@@ -378,6 +378,234 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 })?;
                 self.backend.copy_dynamic_value(descriptor, value, storage)?;
             }
+        }
+        Ok(storage)
+    }
+
+    /// Build a closure value in a dynamic body (R-B). A concrete function
+    /// type uses the concrete ABI; a value that reads a function-typed binding
+    /// returns the binding's storage. Captures and dynamic-shape entries are
+    /// later steps (R3, R4).
+    fn emit_dynamic_callable_value(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        value_id: crate::LoweredCallableValueId,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let callable = self
+            .view
+            .callable_value(owner, value_id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(staple_syntax::Span::Compiler, "missing callable value")
+            })?;
+        let span = callable.origin.span.clone();
+        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "missing dynamic callable storage")
+        })?;
+        if callable
+            .closure
+            .as_ref()
+            .is_some_and(|closure| !closure.captures.is_empty())
+        {
+            return Err(Diagnostic::new(
+                span,
+                "dynamic closure captures are not yet implemented",
+            ));
+        }
+        if let Some(symbol) = self.callable_symbol(&callable)
+            && let Some(binding) = environment.bindings.get(&symbol).filter(|binding| binding.live)
+        {
+            return Ok(binding.pointer);
+        }
+        if let LoweredCallableTarget::IndirectClosure { callee } = &callable.target {
+            return self.emit_dynamic_expression(owner, *callee, environment);
+        }
+        let binding = self
+            .view
+            .binding(owner, LoweredBindingSite::CallableValue(value_id));
+        let code = match &callable.target {
+            LoweredCallableTarget::DirectFunction { .. }
+            | LoweredCallableTarget::TraitImplementation { .. } => {
+                let Some(LoweredBoundTarget::Instance(instance)) = binding else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "missing dynamic callable instance binding",
+                    ));
+                };
+                self.instances.get(instance).copied().ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "missing callable declaration")
+                })?
+            }
+            LoweredCallableTarget::ExternalFunction { .. } => self
+                .extern_adapter_code(owner, value_id)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing extern adapter"))?,
+            LoweredCallableTarget::Constructor { .. }
+            | LoweredCallableTarget::StructuralTraitMethod { .. } => {
+                self.callable_artifact_code(binding, &span, "callable artifact binding")?
+            }
+            LoweredCallableTarget::IndirectClosure { .. } => unreachable!(),
+            LoweredCallableTarget::Intrinsic { .. } => {
+                return Err(Diagnostic::new(
+                    span,
+                    "intrinsic callable values are not supported",
+                ));
+            }
+        };
+        let closure_environment = self
+            .backend
+            .context
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        let closure = self.backend.build_closure_value(code, closure_environment)?;
+        self.backend
+            .builder
+            .build_store(storage, closure)
+            .map_err(compiler_diagnostic)?;
+        Ok(storage)
+    }
+
+    /// An indirect call through a concrete closure value (R2). The callee's
+    /// function type is concrete, so the concrete closure ABI applies; the
+    /// arguments and result move between dynamic storage and the concrete ABI.
+    fn emit_dynamic_indirect_concrete_call(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        call: &crate::LoweredCall,
+        callee: ExpressionId,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let span = &call.origin.span;
+        if crate::contains_type_parameter(&CheckedType::Function(call.function_type.clone())) {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "dynamic-shape closure calls are not yet implemented",
+            ));
+        }
+        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "missing dynamic closure call storage")
+        })?;
+        let closure = self.emit_dynamic_expression(owner, callee, environment)?;
+        let closure_type = self.backend.closure_type();
+        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+        let code = self
+            .backend
+            .builder
+            .build_struct_gep(closure_type, closure, 0, "closure.code.slot")
+            .map_err(compiler_diagnostic)?;
+        let code = self
+            .backend
+            .builder
+            .build_load(pointer_type, code, "closure.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let closure_environment = self
+            .backend
+            .builder
+            .build_struct_gep(closure_type, closure, 1, "closure.environment.slot")
+            .map_err(compiler_diagnostic)?;
+        let closure_environment = self
+            .backend
+            .builder
+            .build_load(pointer_type, closure_environment, "closure.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let types = super::flattened_parameter_types(&call.function_type.parameter);
+        let indirect = self.backend.indirect_parameter_mask(&call.function_type);
+        let moved = super::super::abi::mutation_parameter_mask(types.len(), &call.function_type.moves);
+        let mut slots = vec![None; types.len()];
+        let mut unplaced = Vec::new();
+        let mut cleanups = Vec::new();
+        for step in &call.steps {
+            match step {
+                LoweredCallStep::Callee { .. } => {}
+                LoweredCallStep::Argument { argument } => {
+                    let record = &call.arguments[*argument];
+                    let value = record.expression.ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "dynamic closure thunk argument")
+                    })?;
+                    let value = self.emit_dynamic_expression(owner, value, environment)?;
+                    let cleanup = record.drops_after_call
+                        || (record.temporary
+                            && record
+                                .slot
+                                .is_some_and(|slot| !moved[slot])
+                            && crate::contains_type_parameter(&record.expected));
+                    if cleanup {
+                        cleanups.push((
+                            self.dynamic_descriptor(&record.expected, environment, span)?,
+                            value,
+                        ));
+                    }
+                    match record.slot {
+                        Some(slot) => slots[slot] = Some(value),
+                        None => unplaced.push(value),
+                    }
+                }
+                LoweredCallStep::ProductElement {
+                    expression, slot, ..
+                }
+                | LoweredCallStep::Default {
+                    expression, slot, ..
+                } => {
+                    let value = self.emit_dynamic_expression(owner, *expression, environment)?;
+                    slots[*slot] = Some(value);
+                }
+                LoweredCallStep::Invoke => break,
+                _ => {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "dynamic closure argument step is not yet implemented",
+                    ));
+                }
+            }
+        }
+        if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
+            let descriptor =
+                self.dynamic_descriptor(&call.function_type.parameter, environment, span)?;
+            for (index, slot) in slots.iter_mut().enumerate() {
+                *slot = Some(
+                    self.dynamic_product_field(descriptor, unplaced[0], index as u32)?
+                        .0,
+                );
+            }
+        }
+        let mut arguments = vec![closure_environment.into()];
+        for (index, slot) in slots.iter().enumerate() {
+            let pointer = slot.ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing dynamic closure argument")
+            })?;
+            if indirect[index] {
+                arguments.push(pointer.into());
+            } else {
+                let ty = self.backend.compile_type(types[index])?;
+                arguments.push(
+                    self.backend
+                        .builder
+                        .build_load(ty, pointer, "closure.argument")
+                        .map_err(compiler_diagnostic)?
+                        .into(),
+                );
+            }
+        }
+        let signature = self.backend.compile_closure_function_type(&call.function_type)?;
+        let value = self
+            .backend
+            .builder
+            .build_indirect_call(signature, code, &arguments, "closure.call")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic();
+        if let Some(value) = value {
+            self.backend
+                .builder
+                .build_store(storage, value)
+                .map_err(compiler_diagnostic)?;
+        }
+        for (descriptor, pointer) in cleanups.into_iter().rev() {
+            self.backend.drop_dynamic_value(descriptor, pointer)?;
         }
         Ok(storage)
     }
@@ -863,10 +1091,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.prepare_dynamic_descriptor(&coercion.target, &mut environment, &body.origin.span)?;
         }
         for (expression_id, record) in body.expressions() {
-            if matches!(
-                record.kind,
-                LoweredExpressionKind::CallableValue(_) | LoweredExpressionKind::Deferred(_)
-            ) {
+            if matches!(record.kind, LoweredExpressionKind::Deferred(_)) {
                 continue;
             }
             self.prepare_dynamic_descriptor(
@@ -957,7 +1182,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 | LoweredExpressionKind::Integer(_)
                 | LoweredExpressionKind::Float(_)
                 | LoweredExpressionKind::String(_)
-                | LoweredExpressionKind::CString(_) => {
+                | LoweredExpressionKind::CString(_)
+                | LoweredExpressionKind::CallableValue(_) => {
                     let descriptor = self.dynamic_descriptor(
                         record
                             .coercion
@@ -2638,7 +2864,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .view
             .expression(owner, id)
             .ok_or_else(|| {
-                Diagnostic::new(staple_syntax::Span::Compiler, "missing dynamic expression")
+                Diagnostic::new(
+                    staple_syntax::Span::Compiler,
+                    format!("missing dynamic expression {}", id.index()),
+                )
             })?
             .clone();
         let raw_type = expression
@@ -2923,6 +3152,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 if let LoweredCallableTarget::ExternalFunction { symbol } = &call.target {
                     return self.emit_dynamic_extern_call(owner, id, call, *symbol, environment);
+                }
+                if let LoweredCallableTarget::IndirectClosure { callee } = &call.target {
+                    // `clone_call` remaps `call.callee`; the target's copy may
+                    // still name the template arena.
+                    let callee = call.callee.unwrap_or(*callee);
+                    return self.emit_dynamic_indirect_concrete_call(
+                        owner,
+                        id,
+                        call,
+                        callee,
+                        environment,
+                    );
                 }
                 let route = match &call.target {
                     LoweredCallableTarget::DirectFunction { environment, .. } => *environment,
@@ -3236,11 +3477,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     "dynamic index expressions are not yet implemented",
                 ));
             }
-            LoweredExpressionKind::CallableValue(_) => {
-                return Err(Diagnostic::new(
-                    expression.origin.span.clone(),
-                    "dynamic callable values are not yet implemented",
-                ));
+            LoweredExpressionKind::CallableValue(value_id) => {
+                self.emit_dynamic_callable_value(owner, id, value_id, environment)?
             }
             LoweredExpressionKind::Resource(_) => {
                 return Err(Diagnostic::new(

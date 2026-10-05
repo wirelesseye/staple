@@ -268,6 +268,10 @@ reachable from the branch.
   instance's) first. Every descriptor-passing site (dynamic entry, dynamic
   body calls, concrete-to-dynamic bridge) uses that order, so 4b's polymorphic
   entries need no reordering adapter.
+- **R2 complete.** Dynamic bodies build concrete closures from direct
+  functions, constructors, externs, and structural adapters (R-B), read a
+  function-typed binding's storage, and call concrete closures indirectly with
+  the concrete ABI. The in-scope baseline drops to **2780**.
 
 ### Step 4a.1 — Keys, specialization, and validation
 

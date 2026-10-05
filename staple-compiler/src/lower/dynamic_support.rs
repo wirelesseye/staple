@@ -687,8 +687,27 @@ impl SupportWalker<'_> {
                 self.reject(RejectionReason::StringTemplate)
             }
             LoweredExpressionKind::Index(_) => self.reject(RejectionReason::IndexExpression),
-            LoweredExpressionKind::CallableValue(_) => {
-                self.reject(RejectionReason::CallableValue)
+            LoweredExpressionKind::CallableValue(value) => {
+                // R2: a concrete function type builds a concrete closure. A
+                // dynamic-shape value or a captured one is R3/R4.
+                let dynamic_shape = self
+                    .program
+                    .callable_values
+                    .get(*value)
+                    .is_some_and(|callable| {
+                        contains_type_parameter(&CheckedType::Function(
+                            callable.function_type.clone(),
+                        ))
+                    });
+                let captured = self
+                    .program
+                    .callable_values
+                    .get(*value)
+                    .and_then(|callable| callable.closure.as_ref())
+                    .is_some_and(|closure| !closure.captures.is_empty());
+                if dynamic_shape || captured {
+                    self.reject(RejectionReason::CallableValue);
+                }
             }
             LoweredExpressionKind::Resource(_) => {
                 self.reject(RejectionReason::ResourceExpression)
@@ -893,7 +912,13 @@ impl SupportWalker<'_> {
             LoweredCallableTarget::StructuralTraitMethod { .. } => {
                 self.reject(RejectionReason::StructuralTraitDispatch)
             }
-            LoweredCallableTarget::IndirectClosure { .. } => self.reject(RejectionReason::IndirectClosureCall),
+            LoweredCallableTarget::IndirectClosure { .. } => {
+                // R2: a concrete function type uses the concrete ABI. A
+                // dynamic-shape closure is R3.
+                if mentions_parameters {
+                    self.reject(RejectionReason::IndirectClosureCall);
+                }
+            }
             LoweredCallableTarget::ExternalFunction { .. } => {
                 if mentions_parameters {
                     self.reject(RejectionReason::ExternWithParameters);
@@ -934,7 +959,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 3047;
+    const IN_SCOPE_BASELINE: usize = 2780;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.

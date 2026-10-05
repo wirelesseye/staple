@@ -3504,6 +3504,77 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_bodies_build_and_call_concrete_closures() {
+        let (text, name) = dynamic_test_module(
+            concat!(
+                "def inc: I32 -> I32 = value => value + 1\n",
+                "def apply: <T where Copy T> T -> I32 = value => { let f: I32 -> I32 = inc; f 7 }\n",
+                "let result = apply 42\n",
+            ),
+            "apply",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-concrete-closure",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Apply = unsafe extern "C" fn(*const u8, *const Descriptor, *mut i32, *const u8);
+        let apply = unsafe { engine.get_function::<Apply>(&name) }.unwrap();
+        let descriptor = Descriptor {
+            size: 17,
+            stride: 32,
+            align: 16,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let value = [42u8; 17];
+        let mut result = 0;
+        unsafe {
+            apply.call(std::ptr::null(), &descriptor, &mut result, value.as_ptr());
+        }
+        assert_eq!(result, 8);
+    }
+
+    #[test]
+    fn dynamic_boundaries_call_concrete_closures() {
+        let (text, name) = dynamic_test_module_with_boundary(
+            concat!(
+                "def apply: <T where Copy T> (I32 -> I32, T) -> I32 = (f, x) => f 7\n",
+                "def concrete: I32 -> I32 = x => apply ((y => y + x), x)\n",
+                "let result = concrete 41\n",
+            ),
+            "apply",
+            Some("concrete"),
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dynamic-concrete-boundary",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Concrete = unsafe extern "C" fn(*const u8, i32) -> i32;
+        let concrete = unsafe { engine.get_function::<Concrete>(&name) }.unwrap();
+        assert_eq!(unsafe { concrete.call(std::ptr::null(), 41) }, 48);
+    }
+
+    #[test]
     fn dynamic_descriptor_order_follows_the_declared_scheme() {
         use std::collections::BTreeSet;
         let (_, mut program) = lower(concat!(

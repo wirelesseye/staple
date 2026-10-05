@@ -2192,6 +2192,10 @@ impl<'a> BodyCloner<'a> {
             return error_callable_value(self);
         };
         let mut value = original.clone();
+        if let LoweredCallableTarget::IndirectClosure { callee } = &value.target {
+            let callee = self.clone_expression(*callee);
+            value.target = LoweredCallableTarget::IndirectClosure { callee };
+        }
         value.function_type = self.function_type(&value.function_type);
         let concrete_function_type = value.function_type.clone();
         value.closure = value
