@@ -315,9 +315,8 @@ products currently fall back through the support analysis); resources and
 `with` scopes; dynamic GC payloads (trailing descriptor words, dynamic
 finalizers, dynamic closure environments); the remaining Decision 9 intrinsics
 (slice, buffer, and `Ref` operations); string, `CString`, template, index, and
-product-spread expression forms; callable values and dynamic closures; and the
-default-mode IR comparison against `50565d8`. Stage 3's polymorphic-value gate
-remains in place.
+product-spread expression forms; and callable values and dynamic closures.
+Stage 3's polymorphic-value gate remains in place.
 
 Foundation validation (commit `8c86d8c`): `cargo test --workspace --quiet`
 passes; all 104 corpus/example inputs report `same` against the `50565d8`
@@ -334,9 +333,12 @@ checks and all eleven dynamic execution tests. Adding the concrete boundary
 passes workspace checks and all twelve dynamic execution tests.
 
 Current continuation validation: `cargo test --workspace --quiet` passes
-(compiler library 380 passed, two ignored; CLI 232 passed). Default-mode IR is
-unaffected because every new path is gated on the hidden option or on dynamic
-instances, which only exist when it is on.
+(compiler library 380 passed, two ignored; CLI 232 passed). The differential
+run matches default behavior on all 86 runnable corpus programs with 9044
+dynamic call sites. Rebuilt default-mode LLVM output matches the `50565d8`
+release build for all 104 corpus/example inputs (four compilations per binary
+per input), verified for `325d637`; every new path is gated on the hidden
+option or on dynamic instances, which only exist when it is on.
 
 ### Step 4a.1 — Keys, specialization, and validation
 
