@@ -3503,6 +3503,63 @@ mod tests {
         assert_eq!(pair.body.as_ref().unwrap().bounds.len(), 2);
     }
 
+    #[test]
+    fn dynamic_descriptor_order_follows_the_declared_scheme() {
+        use std::collections::BTreeSet;
+        let (_, mut program) = lower(concat!(
+            "def swap: <A, B where Copy A, Copy B> (B, A) -> (A, B) = (second, first) => (first, second)\n",
+            "def forward: <A, B where Copy A, Copy B> (B, A) -> (A, B) = (second, first) => swap (second, first)\n",
+            "let result = forward (1, U8 :: 2)\n",
+        ));
+        let function = function_id(&program, "forward");
+        let scheme = program
+            .functions
+            .get(function)
+            .unwrap()
+            .scheme_type_parameters
+            .clone();
+        assert_eq!(scheme.len(), 2);
+        let call = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| match call.target {
+                LoweredCallableTarget::DirectFunction {
+                    function: target, ..
+                } if target == function => Some(call),
+                _ => None,
+            })
+            .unwrap();
+        let runtime = program
+            .relevant_parameters(function)
+            .type_parameters()
+            .collect::<BTreeSet<_>>();
+        let resolved = program
+            .resolve_instance_request_with_runtime(
+                &InstanceResolutionRequest {
+                    function,
+                    origin: call.origin.clone(),
+                    function_type: call.function_type.clone(),
+                    substitutions: call.substitutions.clone(),
+                    evidence: call.evidence.clone(),
+                    target: InstanceResolutionTarget::Root,
+                },
+                &runtime,
+            )
+            .unwrap();
+        let mut recorder = GraphRecorder::from_parts(program.take_graph());
+        let (dynamic, _) =
+            recorder.intern_resolved(&program, resolved, LoweredInstanceRequest::EagerTemplate);
+        let parts =
+            WorklistBuilder::resume(&program, recorder.into_parts(), vec![dynamic]).unwrap();
+        program.install_graph(parts);
+        // Descriptor order is the declared scheme order, not the order the
+        // signature happens to mention the parameters in (`B` first here).
+        assert_eq!(
+            program.emission_view().instance_runtime_order(dynamic).unwrap(),
+            scheme
+        );
+    }
+
     fn dynamic_test_module(source: &str, function_name: &str) -> (String, String) {
         dynamic_test_module_with_boundary(source, function_name, None)
     }

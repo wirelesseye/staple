@@ -186,7 +186,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let span = &call.origin.span;
         let runtime = self
             .view
-            .instance_runtime_parameters(instance)
+            .instance_runtime_order(instance)
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic callee key"))?;
         let signature = self
             .view
@@ -199,7 +199,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             ));
         }
         let mut arguments = vec![closure.into()];
-        for parameter in runtime {
+        for parameter in &runtime {
             let ty = call
                 .substitutions
                 .types
@@ -818,7 +818,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         let runtime = self
             .view
-            .instance_runtime_parameters(id)
+            .instance_runtime_order(id)
             .ok_or_else(|| unsupported("missing key"))?;
         let parameters = function.get_params();
         let descriptors = runtime
@@ -2947,7 +2947,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 };
                 let runtime = self
                     .view
-                    .instance_runtime_parameters(*callee)
+                    .instance_runtime_order(*callee)
                     .ok_or_else(|| {
                         Diagnostic::new(call.origin.span.clone(), "missing callee key")
                     })?;
@@ -2966,7 +2966,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     LoweredCallEnvironment::Current => environment.closure,
                 };
                 let mut arguments = vec![closure.into()];
-                for parameter in runtime {
+                for parameter in &runtime {
                     let ty = call
                         .substitutions
                         .types

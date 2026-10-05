@@ -260,6 +260,14 @@ reachable from the branch.
   (R-F), the default suite runs a ten-program quick differential subset while
   the full run (all runnable corpus programs plus `macros.sta`) is an ignored
   test, and this status section is now a short summary.
+- **R1 complete.** Descriptor ABI order (R-A) is the template's declared
+  scheme order: lowering snapshots each function's scheme type parameters
+  (companion parameters first, hidden projection parameters last), and
+  `EmissionView::instance_runtime_order` filters them by the instance's
+  run-time set, with parameters a template does not declare (an enclosing
+  instance's) first. Every descriptor-passing site (dynamic entry, dynamic
+  body calls, concrete-to-dynamic bridge) uses that order, so 4b's polymorphic
+  entries need no reordering adapter.
 
 ### Step 4a.1 — Keys, specialization, and validation
 

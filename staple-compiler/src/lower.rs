@@ -2511,6 +2511,10 @@ pub(crate) struct LoweredFunction {
     pub parameter_pattern: PatternId,
     pub parameters: Vec<SymbolId>,
     pub captures: Vec<LoweredCapture>,
+    /// The template's declared type parameters in scheme order (companion
+    /// parameters first, hidden projection parameters last). Descriptor ABI
+    /// order follows this order (R-A).
+    pub scheme_type_parameters: Vec<TypeParameterId>,
     pub body_origin: Origin,
     pub body_syntax: SyntaxId,
     pub body: Option<BlockId>,
@@ -3421,6 +3425,21 @@ impl LoweredProgram {
                 requires_cell: capture_requires_cell(module, *symbol),
             })
             .collect();
+        let scheme_type_parameters = module
+            .scheme_of_function(function.id)
+            .or_else(|| binding_symbol.and_then(|symbol| module.scheme_of_symbol(symbol)))
+            .map(|scheme| {
+                scheme
+                    .parameters
+                    .iter()
+                    .filter_map(|parameter| match parameter {
+                        crate::typecheck::CheckedSchemeParameter::Type { id, .. } => Some(*id),
+                        crate::typecheck::CheckedSchemeParameter::Effect { .. }
+                        | crate::typecheck::CheckedSchemeParameter::Product(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let value = LoweredFunction {
             origin: origin.clone(),
             semantic_id: function.id,
@@ -3428,6 +3447,7 @@ impl LoweredProgram {
             module: module_id,
             binding_symbol,
             signature,
+            scheme_type_parameters,
             bounds: module.bounds_of_function(function.id).to_vec(),
             parameter_style: function.parameter_style,
             parameter_pattern,
