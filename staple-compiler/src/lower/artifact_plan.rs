@@ -167,6 +167,9 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::DynamicBuffer) => {
                 "gc-finalizer-dynamic-buffer"
             }
+            LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::DynamicCell) => {
+                "gc-finalizer-dynamic-cell"
+            }
             LoweredArtifactPlan::CoroutineCodes(_) => "coroutine-codes",
             LoweredArtifactPlan::ReactionRunner(_) => "reaction-runner",
             LoweredArtifactPlan::UntilRunner(_) => "until-runner",
@@ -284,6 +287,7 @@ impl LoweredArtifactPlan {
                         GcFinalizerPlan::DynamicBuffer,
                         GcFinalizerKey::DynamicBuffer,
                     ) => true,
+                    (GcFinalizerPlan::DynamicCell, GcFinalizerKey::DynamicCell) => true,
                     _ => false,
                 }
             }
@@ -366,6 +370,7 @@ impl LoweredArtifactPlan {
                 GcFinalizerPlan::ClosureEnvironment { drops, .. } => drops.is_some(),
                 GcFinalizerPlan::DynamicClosureEnvironment { .. } => true,
                 GcFinalizerPlan::DynamicBuffer => true,
+                GcFinalizerPlan::DynamicCell => true,
             },
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.frame.is_some(),
             LoweredArtifactPlan::ReactionRunner(plan)
@@ -603,6 +608,7 @@ impl LoweredArtifactPlan {
                     captures: _,
                 } => {}
                 GcFinalizerPlan::DynamicBuffer => {}
+                GcFinalizerPlan::DynamicCell => {}
                 GcFinalizerPlan::ClosureEnvironment {
                     closure: _,
                     captures,
@@ -1260,6 +1266,9 @@ pub(crate) enum GcFinalizerPlan {
     /// A dynamic buffer (R6): drops the elements through the element
     /// descriptor in the allocation's trailing word.
     DynamicBuffer,
+    /// A dynamic shared cell (R-D): drops the value through the descriptor in
+    /// the allocation's trailing word.
+    DynamicCell,
     /// A dynamic closure environment (R-D): drops each owned capture through
     /// the descriptors the environment holds.
     DynamicClosureEnvironment {
@@ -1307,7 +1316,8 @@ impl GcFinalizerPlan {
                 }
             }
             GcFinalizerPlan::DynamicClosureEnvironment { .. }
-            | GcFinalizerPlan::DynamicBuffer => {}
+            | GcFinalizerPlan::DynamicBuffer
+            | GcFinalizerPlan::DynamicCell => {}
         }
     }
 
@@ -1326,7 +1336,8 @@ impl GcFinalizerPlan {
                 }
             }
             GcFinalizerPlan::DynamicClosureEnvironment { .. }
-            | GcFinalizerPlan::DynamicBuffer => {}
+            | GcFinalizerPlan::DynamicBuffer
+            | GcFinalizerPlan::DynamicCell => {}
         }
     }
 }

@@ -111,6 +111,9 @@ pub(crate) enum ArtifactUseSite {
     OwnedBinding(SymbolId),
     /// A captured binding cell's finalizer.
     CellFinalizer(SymbolId),
+    /// A captured binding cell's dynamic finalizer (R-D): one shared finalizer
+    /// reads the value descriptor from the cell's trailing word.
+    DynamicCellFinalizer(SymbolId),
     /// A closure environment's finalizer.
     ClosureEnvironment(LoweredCallableValueId),
     /// A dynamic-shape closure's descriptor-bound entry (R-C).
@@ -1716,7 +1719,9 @@ impl LoweredProgram {
                     report("pattern", id.index());
                 }
             }
-            ArtifactUseSite::OwnedBinding(symbol) | ArtifactUseSite::CellFinalizer(symbol) => {
+            ArtifactUseSite::OwnedBinding(symbol)
+            | ArtifactUseSite::CellFinalizer(symbol)
+            | ArtifactUseSite::DynamicCellFinalizer(symbol) => {
                 // A module-scoped symbol without real module storage (a `let`
                 // inside a top-level `with`/block) is owned like a local; only
                 // an actual global, function binding, or extern is never

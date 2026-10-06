@@ -923,10 +923,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic)?;
                 }
                 crate::LoweredCaptureAccess::SharedCell => {
-                    return Err(Diagnostic::new(
-                        span.clone(),
-                        "dynamic shared-cell captures are not yet implemented",
-                    ));
+                    // The environment stores the shared cell pointer; the cell
+                    // is GC-allocated by the enclosing body and owned by its
+                    // own finalizer, so the environment does not drop it.
+                    self.backend
+                        .builder
+                        .build_store(field, binding.pointer)
+                        .map_err(compiler_diagnostic)?;
                 }
             }
         }
@@ -1324,6 +1327,113 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing dynamic buffer finalizer declaration")
             })
+    }
+
+    /// A dynamic shared cell's finalizer (R-D): drop the value through the
+    /// descriptor stored in the allocation's trailing word.
+    pub(super) fn emit_dynamic_cell_finalizer(
+        &mut self,
+        cell: PointerValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let end_function = self
+            .backend
+            .llvm_module
+            .get_function("__staple_gc_payload_end")
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing GC payload-end helper"))?;
+        let end = self
+            .backend
+            .builder
+            .build_call(end_function, &[cell.into()], "cell.payload.end")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "payload end has no value"))?
+            .into_int_value();
+        let word = self
+            .backend
+            .builder
+            .build_int_sub(
+                end,
+                self.backend.size_type.const_int(pointer_bytes, false),
+                "cell.descriptor.address",
+            )
+            .map_err(compiler_diagnostic)?;
+        let word = self
+            .backend
+            .builder
+            .build_int_to_ptr(word, pointer, "cell.descriptor.slot")
+            .map_err(compiler_diagnostic)?;
+        let descriptor = self
+            .backend
+            .builder
+            .build_load(pointer, word, "cell.value.descriptor")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        self.backend.drop_dynamic_value(descriptor, cell)?;
+        Ok(())
+    }
+
+    /// The declared shared dynamic cell finalizer.
+    fn dynamic_cell_finalizer_code(
+        &self,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        let ordinal = self
+            .view
+            .artifacts()
+            .find_map(|(_, artifact)| match &artifact.plan {
+                Some(crate::LoweredArtifactPlan::GcFinalizer(
+                    crate::GcFinalizerPlan::DynamicCell,
+                )) => Some(artifact.ordinal),
+                _ => None,
+            })
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic cell finalizer plan"))?;
+        self.artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing dynamic cell finalizer declaration")
+            })
+    }
+
+    /// A mutable local's cell. A captured cell is a dynamic GC payload with a
+    /// trailing descriptor word and the shared dynamic cell finalizer (R-D);
+    /// an uncaptured cell is entry-block stack storage.
+    fn allocate_dynamic_cell(
+        &self,
+        descriptor: PointerValue<'context>,
+        captured: bool,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        if !captured {
+            return self.backend.allocate_dynamic_value(descriptor);
+        }
+        let layout = self.backend.load_descriptor_layout(descriptor)?;
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let total = self
+            .backend
+            .builder
+            .build_int_add(
+                layout.store_size,
+                self.backend.size_type.const_int(pointer_bytes, false),
+                "cell.total.size",
+            )
+            .map_err(compiler_diagnostic)?;
+        let cell = self
+            .backend
+            .build_gc_allocation(total, "binding.cell", span.clone())?;
+        let word = self.backend.dynamic_byte_offset(cell, layout.store_size)?;
+        self.backend
+            .builder
+            .build_store(word, descriptor)
+            .map_err(compiler_diagnostic)?;
+        let finalizer = self.dynamic_cell_finalizer_code(span)?;
+        self.backend.set_gc_finalizer(cell, finalizer)?;
+        Ok(cell)
     }
 
     /// The dynamic closure environment's finalizer (R-D): drop every owned
@@ -2670,9 +2780,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         )
                         .map_err(compiler_diagnostic)?
                         .into_pointer_value(),
-                    crate::LoweredCaptureAccess::SharedCell => {
-                        return Err(unsupported("shared-cell captures"));
-                    }
+                    crate::LoweredCaptureAccess::SharedCell => self
+                        .backend
+                        .builder
+                        .build_load(
+                            self.backend.context.ptr_type(AddressSpace::default()),
+                            field,
+                            "capture.cell",
+                        )
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value(),
                 };
                 let descriptor = capture_descriptors[index].ok_or_else(|| {
                     Diagnostic::new(body.origin.span.clone(), "missing capture descriptor")
@@ -2794,7 +2911,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .clone();
             self.prepare_dynamic_descriptor(&ty, &mut environment, &item.origin.span)?;
             let descriptor = self.dynamic_descriptor(&ty, &environment, &item.origin.span)?;
-            let cell = self.backend.allocate_dynamic_value(descriptor)?;
+            let captured = self.view.symbol(symbol).is_some_and(|record| {
+                record.captured && (record.mutable_storage || record.derived)
+            });
+            let cell = self.allocate_dynamic_cell(descriptor, captured, &item.origin.span)?;
             environment.cells.insert(symbol, cell);
         }
         // Reserve call results before any body control flow. Descriptor-derived

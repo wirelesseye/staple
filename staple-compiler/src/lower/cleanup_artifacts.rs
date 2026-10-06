@@ -118,7 +118,8 @@ pub(super) fn expand_gc_finalizer(
         // Dynamic closure environments and buffers drop their contents
         // through descriptors; no drop-glue artifacts are requested.
         GcFinalizerPlan::DynamicClosureEnvironment { .. }
-        | GcFinalizerPlan::DynamicBuffer => plan,
+        | GcFinalizerPlan::DynamicBuffer
+        | GcFinalizerPlan::DynamicCell => plan,
     };
     Ok((LoweredArtifactPlan::GcFinalizer(plan), requests))
 }

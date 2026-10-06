@@ -333,6 +333,18 @@ reachable from the branch.
   **11** because those templates also carry resource, callable-value, capture,
   or function-typed reasons. Resource effects, resource calls, `with` scopes,
   and implicit thunk arguments remain.
+- **R4 shared-cell emission support (not yet routed).** A captured mutable
+  local's cell is now a dynamic GC payload with a trailing value-descriptor
+  word and the shared `gc-finalizer-dynamic-cell` finalizer; a shared-cell
+  capture stores the cell pointer in the environment and the closure body
+  loads it. `captures_eligible` no longer excludes shared cells. Routing is
+  still blocked: a callable value with a shared-cell capture points at a
+  closure template that the support scanner rejects, and the closure targets
+  reachable once shared cells are allowed also capture compound run-time
+  types, which the environment layout cannot describe from the parameter
+  descriptors alone. The emitter therefore stays unreached and the in-scope
+  count stays **11**; the next R4 slice must store or rebuild compound
+  capture descriptors and relax the scanner accordingly.
 
 ### Step 4a.1 — Keys, specialization, and validation
 

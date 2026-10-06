@@ -357,6 +357,41 @@ pub(super) fn scan_instance(
             )),
         });
     }
+    // A captured mutable local allocates a dynamic shared cell and installs
+    // the shared dynamic cell finalizer (R-D).
+    for (_, item) in body.items() {
+        let super::LoweredItemKind::Binding(binding) = &item.kind else {
+            continue;
+        };
+        if !binding.cell
+            || binding.signal
+            || binding.derived
+            || binding.generic
+            || binding.compile_time_only
+        {
+            continue;
+        }
+        let Some(symbol) = binding.symbol else {
+            continue;
+        };
+        let captured = program.symbols.get(symbol).is_some_and(|record| {
+            record.captured && (record.mutable_storage || record.derived)
+        });
+        if !captured {
+            continue;
+        }
+        requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::GcFinalizer(
+                crate::specialization::GcFinalizerKey::DynamicCell,
+            ),
+            plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicCell),
+            kind: Kind::GcFinalizer,
+            origin: body.origin.clone(),
+            use_site: Some(super::artifact_closure::ArtifactUseSite::DynamicCellFinalizer(
+                symbol,
+            )),
+        });
+    }
     requests.extend(reabstraction_requests(&body.conversions, &body.origin)?);
     Ok(requests)
 }

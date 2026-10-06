@@ -777,8 +777,7 @@ impl SupportWalker<'_> {
                     closure.captures.as_slice()
                 });
                 let captures_eligible = captures.iter().all(|capture| {
-                    capture.access != crate::LoweredCaptureAccess::SharedCell
-                        && !contains_polymorphic_function(&capture.value_type)
+                    !contains_polymorphic_function(&capture.value_type)
                         && (matches!(&capture.value_type, CheckedType::Parameter { .. })
                             || !contains_type_parameter(&capture.value_type))
                 });

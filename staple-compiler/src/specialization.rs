@@ -721,6 +721,9 @@ pub(crate) enum GcFinalizerKey {
     /// A dynamic buffer. One shared finalizer reads the element descriptor
     /// from the allocation's trailing word (R6).
     DynamicBuffer,
+    /// A dynamic shared cell. One shared finalizer reads the value descriptor
+    /// from the allocation's trailing word (R-D).
+    DynamicCell,
 }
 
 /// The identity of one coroutine body's `resume`/`cleanup` pair, keyed by the
@@ -842,6 +845,9 @@ impl ArtifactRequestKey {
             }) => "gc-finalizer-dynamic-closure-environment",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicBuffer) => {
                 "gc-finalizer-dynamic-buffer"
+            }
+            ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicCell) => {
+                "gc-finalizer-dynamic-cell"
             }
             ArtifactRequestKey::CoroutineCodes(_) => "coroutine-codes",
             ArtifactRequestKey::ReactionRunner(_) => "reaction-runner",
@@ -1072,6 +1078,9 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
         }
         ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicBuffer) => {
             "__staple_gc_finalizer_dynamic_buffer".to_owned()
+        }
+        ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicCell) => {
+            "__staple_gc_finalizer_dynamic_cell".to_owned()
         }
         ArtifactRequestKey::CoroutineCodes(_) => "__staple_coroutine_codes".to_owned(),
         ArtifactRequestKey::ReactionRunner(_) => "__staple_reaction_runner".to_owned(),

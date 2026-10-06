@@ -2027,6 +2027,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             GcFinalizerPlan::DynamicBuffer => {
                 self.emit_dynamic_buffer_finalizer(body.payload, span)?;
             }
+            GcFinalizerPlan::DynamicCell => {
+                self.emit_dynamic_cell_finalizer(body.payload, span)?;
+            }
             GcFinalizerPlan::Buffer { element, glue } => {
                 let drop_plan = self.finalizer_glue(glue, span)?;
                 let llvm_element = self.backend.compile_type(element)?;
