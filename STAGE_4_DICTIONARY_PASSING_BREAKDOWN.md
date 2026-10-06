@@ -239,7 +239,9 @@ shared-cell function restriction is classified explicitly. Concrete indexing,
 spreads, defaults, string literal patterns, and propagation/assertion bindings
 have dynamic emission. Nested generic bindings record initialization state
 without evaluating their initializer. Both emitters share String/CString
-kernels; the rejection-kind
+kernels. Concrete-signature closures with runtime captures use planned
+ABI adapters, and compound/function capture descriptors are supported;
+the rejection-kind
 audit and final exit checks are open. Detailed coverage and
 validation status live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).

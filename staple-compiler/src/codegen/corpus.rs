@@ -1264,7 +1264,11 @@ static CORPUS: [CorpusProgram; 100] = [
                 "use std.io.println\n",
                 "def nested_generic: <T where Copy T> T -> (T, I32) = value => { def identity: <U where Copy U> U -> U = item => item; (value, identity 17) }\n",
                 "let (nested_value, nested_result) = nested_generic 6; println \"${nested_value} ${nested_result}\"\n",
-                "def indexed: <T where Copy T> T -> I32 = value => { let values = (8, 9); values[1] }\n",
+                "def concrete_capture: <T where Copy T> T -> I32 = value => { let callable = () => { let ignored = value; 3 }; callable () }\n",
+            "def compound_capture: <T where Copy T> T -> T = value => { let pair = (value, value); let callable: T -> T = item => { let (first, second) = pair; first }; callable value }\n",
+            "def function_capture: <T where Copy T> (T, T -> T) -> T = (value, callback) => { let callable: T -> T = item => callback item; callable value }\n",
+            "let concrete_captured = concrete_capture 6; let compound_captured = compound_capture 7; let function_captured = function_capture.<I32> (8, item => item); println \"${concrete_captured} ${compound_captured} ${function_captured}\"\n",
+            "def indexed: <T where Copy T> T -> I32 = value => { let values = (8, 9); values[1] }\n",
                 "def named: <T where Copy T> T ->{state} (T, I32, I32) = value => { let mut count = 0; let make = () => { count = count + 1; (a: value, b: count) }; let expanded: (a: T, b: I32) = (...=make (), b: 7); (expanded.a, expanded.b, count) }\n",
                 "type Defaulted = from (a: I32, b: I32 = 5)\n",
                 "def defaults: <T where Copy T> T -> I32 = value => { let inputs: Defaulted = (a: 3); let (a, b) = inputs; a + b }\n",
@@ -1300,7 +1304,7 @@ static CORPUS: [CorpusProgram; 100] = [
             ),
             "expressions",
         )),
-        "6 17\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n",
+        "6 17\n3 7 8\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n",
     ),
     expect_stdout(
         must_run(inline(

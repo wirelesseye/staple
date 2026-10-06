@@ -13,7 +13,7 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After shared string intrinsic emission. This section is rewritten in
+After capture ABI and layout audit. This section is rewritten in
 place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks, managed references,
@@ -26,18 +26,21 @@ have dynamic implementations. P1, P2, P3, P5, P6, and P7 are resolved.
 | R1 — Descriptor order | Done |
 | R2 — Concrete function values | Done |
 | R3 — Dynamic function values | Constructor adapters own their descriptors and expose the dynamic closure ABI. Runtime-shaped function captures through shared cells report the explicit Decision 7 restriction. |
-| R4 — Dynamic environments and captures | Done. Descriptor graphs are recursively copied, including compound children. |
+| R4 — Dynamic environments and captures | Compound and function capture descriptors are supported. Concrete-signature closures with runtime captures use a lowering-owned ABI adapter; capture-only descriptors come from the enclosing environment. Shared function cells retain Decision 7. |
 | R5 — Reabstraction | Done. Lowering-owned conversions handle nested functions and functions in by-value products, sums, wrappers, and fixed arrays (normalized to products). Functions behind references retain the explicit restriction. |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
 | R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. String/CString kernels share concrete emission helpers. The rejection-kind audit is open. |
 | R8 — Exit gate | Pending the remaining implementation and final complete checks. |
 
-**Coverage:** The last completed 100-program refresh measured 6,418 generic templates,
-4,762 eligible (74%), and 1,656 rejected for allowed reasons. The baseline
+**Coverage:** The last completed 100-program refresh measured 6,420 generic templates,
+4,764 eligible (74%), and 1,656 rejected for allowed reasons. The baseline
 remains zero, with no in-scope rejections.
 
 **Verified in this continuation:**
 - The zero-baseline full corpus coverage refresh passes for all 100 programs.
+- Bound-free capture cases require dynamic selection for compound captures,
+  function captures, and concrete-signature closures with runtime captures.
+  The concrete-signature adapter owns its nested conversion artifacts.
 - String/CString kernels use the same emission helper in both ABI paths,
   including the recorded CString conversion drop. All intrinsic variants
   are classified explicitly as supported or an allowed later-stage restriction.

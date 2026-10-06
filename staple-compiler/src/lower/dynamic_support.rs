@@ -683,12 +683,6 @@ impl SupportWalker<'_> {
                     // ABI without breaking aliasing (Decision 7).
                     self.reject(RejectionReason::FunctionBehindReference);
                 }
-                let captures_eligible = captures.iter().all(|capture| {
-                    shared_function(capture)
-                        || (!contains_polymorphic_function(&capture.value_type)
-                            && (matches!(&capture.value_type, CheckedType::Parameter { .. })
-                                || !contains_type_parameter(&capture.value_type)))
-                });
                 let dynamic_shape =
                     contains_type_parameter(&CheckedType::Function(callable.function_type.clone()));
                 let dynamic_target = matches!(
@@ -716,10 +710,7 @@ impl SupportWalker<'_> {
                 {
                     self.dependencies.insert(*function);
                 }
-                if !captures_eligible
-                    || (!captures.is_empty() && !dynamic_shape)
-                    || (dynamic_shape && !dynamic_target)
-                {
+                if dynamic_shape && !dynamic_target {
                     self.reject(RejectionReason::CallableValue);
                 }
             }
@@ -1207,6 +1198,9 @@ mod tests {
             "propagate",
             "asserted",
             "nested_generic",
+            "concrete_capture",
+            "compound_capture",
+            "function_capture",
         ] {
             let function = lowered
                 .program

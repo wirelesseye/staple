@@ -118,6 +118,8 @@ pub(crate) enum ArtifactUseSite {
     ClosureEnvironment(LoweredCallableValueId),
     /// A dynamic-shape closure's descriptor-bound entry (R-C).
     DescriptorBoundEntry(LoweredCallableValueId),
+    /// Adapt a descriptor-bound closure with a concrete signature.
+    ConcreteCapturedClosure(LoweredCallableValueId),
     /// Descriptor-bound entry for an implicit thunk argument.
     DescriptorBoundThunk {
         call: LoweredCallId,
@@ -1749,7 +1751,8 @@ impl LoweredProgram {
                     report("callable value", id.index());
                 }
             }
-            ArtifactUseSite::DescriptorBoundEntry(id) => {
+            ArtifactUseSite::DescriptorBoundEntry(id)
+            | ArtifactUseSite::ConcreteCapturedClosure(id) => {
                 if !callable_value(id) {
                     report("callable value", id.index());
                 }

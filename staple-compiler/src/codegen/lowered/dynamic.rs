@@ -1376,6 +1376,49 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let closure = self
                         .backend
                         .build_closure_value(code, closure_environment)?;
+                    let closure = if !crate::contains_type_parameter(&CheckedType::Function(
+                        callable.function_type.clone(),
+                    )) {
+                        let ordinal = self
+                            .view
+                            .artifact_uses(owner)
+                            .and_then(|uses| {
+                                uses.iter().find(|use_| {
+                                    use_.site
+                                        == crate::ArtifactUseSite::ConcreteCapturedClosure(value_id)
+                                })
+                            })
+                            .map(|use_| use_.artifact)
+                            .ok_or_else(|| {
+                                Diagnostic::new(span.clone(), "missing concrete capture adapter")
+                            })?;
+                        let code = self
+                            .artifacts
+                            .get(&ordinal)
+                            .and_then(|functions| functions.first())
+                            .copied()
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    span.clone(),
+                                    "missing concrete capture adapter code",
+                                )
+                            })?;
+                        let saved = self.backend.build_gc_allocation(
+                            self.backend.size_type.const_int(
+                                2 * self.backend.target_data.get_pointer_byte_size(None) as u64,
+                                false,
+                            ),
+                            "captured.closure.adapter",
+                            span.clone(),
+                        )?;
+                        self.backend
+                            .builder
+                            .build_store(saved, closure)
+                            .map_err(compiler_diagnostic)?;
+                        self.backend.build_closure_value(code, saved)?
+                    } else {
+                        closure
+                    };
                     self.backend
                         .builder
                         .build_store(storage, closure)
@@ -1435,13 +1478,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             // The callee's run-time parameter is supplied at this site by the
             // substitution's value, which may itself mention the enclosing
             // instance's run-time parameters.
-            let value_type = substitutions
+            let descriptor = if let Some(entry) = substitutions
                 .types
                 .iter()
                 .find(|entry| entry.parameter == *parameter)
-                .map(|entry| entry.value_type.clone())
-                .ok_or_else(|| Diagnostic::new(span.clone(), "missing closure substitution"))?;
-            descriptors.push(self.dynamic_descriptor(&value_type, environment, span)?);
+            {
+                self.dynamic_descriptor(&entry.value_type, environment, span)?
+            } else {
+                *environment
+                    .descriptors
+                    .get(parameter)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "missing closure substitution"))?
+            };
+            descriptors.push(descriptor);
         }
         let capture_descriptors = captures
             .iter()

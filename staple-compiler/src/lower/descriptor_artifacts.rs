@@ -331,6 +331,38 @@ pub(super) fn scan_instance(
                 super::artifact_closure::ArtifactUseSite::DescriptorBoundEntry(*value_id),
             ),
         });
+        if !crate::contains_type_parameter(&CheckedType::Function(callable.function_type.clone())) {
+            let concrete = crate::specialization::CanonicalFunctionType::concrete(
+                &callable.function_type,
+                &record.origin,
+            )
+            .map_err(|error| vec![error])?;
+            let dynamic = crate::specialization::CanonicalFunctionType::dynamic(
+                &callable.function_type,
+                &record.origin,
+            )
+            .map_err(|error| vec![error])?;
+            requests.push(ClosureRequest::Artifact {
+                key: ArtifactRequestKey::ReabstractionThunk(
+                    crate::specialization::ReabstractionThunkKey {
+                        concrete,
+                        dynamic,
+                        direction: ReabstractionDirection::DynamicToConcrete,
+                    },
+                ),
+                plan: Plan::ReabstractionThunk(crate::ReabstractionThunkPlan {
+                    concrete: callable.function_type.clone(),
+                    dynamic: callable.function_type.clone(),
+                    direction: ReabstractionDirection::DynamicToConcrete,
+                    children: Vec::new(),
+                }),
+                kind: Kind::ReabstractionThunk,
+                origin: record.origin.clone(),
+                use_site: Some(
+                    super::artifact_closure::ArtifactUseSite::ConcreteCapturedClosure(*value_id),
+                ),
+            });
+        }
         // Captured dynamic closures install a descriptor-based finalizer (R-D).
         if let Some(closure) = &callable.closure
             && !closure.captures.is_empty()
