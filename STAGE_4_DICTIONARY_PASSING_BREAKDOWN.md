@@ -242,7 +242,8 @@ without evaluating their initializer. Both emitters share String/CString
 kernels. Concrete-signature closures with runtime captures use planned
 ABI adapters. Concrete child closures receive native capture environments,
 and shared cells retain native initialization state plus owned descriptors.
-Dynamic storage loads permit packed product field alignment;
+Dynamic storage loads permit packed product field alignment, verified by
+bound-free execution and LLVM alignment assertions;
 the rejection-kind
 audit is documented, and final exit checks remain. The default corpus trap
 assertion now accepts preserved signal statuses and nonzero panic exits. Detailed coverage and

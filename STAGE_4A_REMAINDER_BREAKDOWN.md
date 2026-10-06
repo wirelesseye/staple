@@ -13,7 +13,7 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After the trap-status harness correction. This section is rewritten in
+After packed dynamic storage hardening and the trap-status harness correction. This section is rewritten in
 place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks, managed references,
@@ -38,6 +38,9 @@ remains zero, with no in-scope rejections.
 
 **Verified in this continuation:**
 - The zero-baseline full corpus coverage refresh passes for all 100 programs.
+- The focused native differential and LLVM alignment assertions pass.
+- The assertion-failure corpus case pins empty stdout and permits a nonzero
+  panic exit, alongside existing signal-based traps.
 - Dynamic storage loads explicitly use alignment one, since ABI pointers may
   refer to packed product fields. A bound-free packed-buffer case checks the
   returned capacity and requires alignment-one loads in its dynamic LLVM IR.

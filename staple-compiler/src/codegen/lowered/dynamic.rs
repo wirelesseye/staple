@@ -97,6 +97,22 @@ impl<'context> DynamicEnvironment<'context> {
 }
 
 impl<'program, 'context> LoweredEmitter<'program, 'context> {
+    /// Dynamic ABI pointers can refer to fields in alignment-one products.
+    fn load_dynamic_storage<T: inkwell::types::BasicType<'context>>(
+        &self,
+        ty: T,
+        pointer: PointerValue<'context>,
+        name: &str,
+    ) -> Result<inkwell::values::BasicValueEnum<'context>, inkwell::builder::BuilderError> {
+        let value = self.backend.builder.build_load(ty, pointer, name)?;
+        value
+            .as_instruction_value()
+            .expect("load is an instruction")
+            .set_alignment(1)
+            .expect("one is a valid load alignment");
+        Ok(value)
+    }
+
     pub(super) fn emit_compound_descriptor_drop(
         &self,
         ordinal: crate::specialization::ArtifactOrdinal,
@@ -147,9 +163,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let (_, offset) = self.backend.runtime_sum_layout(&layouts)?;
                 let payload = self.backend.dynamic_byte_offset(value, offset)?;
                 let tag = self
-                    .backend
-                    .builder
-                    .build_load(self.backend.context.i32_type(), value, "sum.drop.tag")
+                    .load_dynamic_storage(self.backend.context.i32_type(), value, "sum.drop.tag")
                     .map_err(compiler_diagnostic)?;
                 tag.as_instruction_value()
                     .expect("tag load")
@@ -301,14 +315,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let value = BasicValueEnum::try_from(*value)
                         .map_err(|_| Diagnostic::new(span.clone(), "invalid concrete argument"))?;
                     if indirect[index] {
-                        self.backend
-                            .builder
-                            .build_load(
-                                self.backend.compile_type(parameter_types[index])?,
-                                value.into_pointer_value(),
-                                "dynamic.argument.value",
-                            )
-                            .map_err(compiler_diagnostic)
+                        self.load_dynamic_storage(
+                            self.backend.compile_type(parameter_types[index])?,
+                            value.into_pointer_value(),
+                            "dynamic.argument.value",
+                        )
+                        .map_err(compiler_diagnostic)
                     } else {
                         Ok(value)
                     }
@@ -406,9 +418,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .map_err(compiler_diagnostic)?;
         }
         let value = self
-            .backend
-            .builder
-            .build_load(result_type, result, "dynamic.call.value")
+            .load_dynamic_storage(result_type, result, "dynamic.call.value")
             .map_err(compiler_diagnostic)?;
         if let Some(conversion) = result_conversion {
             if conversion.direction != crate::LoweredReabstractionDirection::DynamicToConcrete {
@@ -519,9 +529,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         let ty = self.backend.compile_type(&bound.value_type)?;
         Ok(self
-            .backend
-            .builder
-            .build_load(ty, bound.pointer, "resource.copy")
+            .load_dynamic_storage(ty, bound.pointer, "resource.copy")
             .map_err(compiler_diagnostic)?
             .into())
     }
@@ -566,9 +574,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         })?;
         let ty = self.backend.compile_type(&bound.value_type)?;
         let value = self
-            .backend
-            .builder
-            .build_load(ty, bound.pointer, "resource.value")
+            .load_dynamic_storage(ty, bound.pointer, "resource.value")
             .map_err(compiler_diagnostic)?;
         self.backend
             .builder
@@ -708,9 +714,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     }
                     let ty = self.backend.compile_type(&interpolation.value_type)?;
                     let value = self
-                        .backend
-                        .builder
-                        .build_load(ty, value, "template.value")
+                        .load_dynamic_storage(ty, value, "template.value")
                         .map_err(compiler_diagnostic)?;
                     let function = self.dynamic_bound_function(
                         owner,
@@ -734,9 +738,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let finish =
             self.dynamic_bound_function(owner, LoweredBindingSite::FormattingFinish(id), &span)?;
         let formatter = self
-            .backend
-            .builder
-            .build_load(
+            .load_dynamic_storage(
                 formatter.get_type(),
                 formatter_storage,
                 "template.finished.formatter",
@@ -825,14 +827,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 {
                     binding.pointer.into()
                 } else {
-                    self.backend
-                        .builder
-                        .build_load(
-                            self.backend.compile_type(&capture.value_type)?,
-                            binding.pointer,
-                            "thunk.capture",
-                        )
-                        .map_err(compiler_diagnostic)?
+                    self.load_dynamic_storage(
+                        self.backend.compile_type(&capture.value_type)?,
+                        binding.pointer,
+                        "thunk.capture",
+                    )
+                    .map_err(compiler_diagnostic)?
                 };
                 value = self
                     .backend
@@ -1033,9 +1033,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .const_int(index as u64 * pointer_bytes, false),
             )?;
             let descriptor = self
-                .backend
-                .builder
-                .build_load(pointer, slot, "constructor.descriptor")
+                .load_dynamic_storage(pointer, slot, "constructor.descriptor")
                 .map_err(compiler_diagnostic)?
                 .into_pointer_value();
             descriptors.insert(parameter, descriptor);
@@ -1163,9 +1161,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             } else {
                 let value = self
-                    .backend
-                    .builder
-                    .build_load(self.backend.compile_type(ty)?, source, "index.argument")
+                    .load_dynamic_storage(self.backend.compile_type(ty)?, source, "index.argument")
                     .map_err(compiler_diagnostic)?;
                 value
                     .as_instruction_value()
@@ -1489,9 +1485,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     })?;
                 let stored = if capture.access == crate::LoweredCaptureAccess::ByValue {
                     let stored = self
-                        .backend
-                        .builder
-                        .build_load(
+                        .load_dynamic_storage(
                             self.backend.compile_type(&capture.value_type)?,
                             pointer,
                             "closure.capture",
@@ -1825,9 +1819,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         slot: PointerValue<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         Ok(self
-            .backend
-            .builder
-            .build_load(
+            .load_dynamic_storage(
                 self.backend.context.ptr_type(AddressSpace::default()),
                 slot,
                 "buffer.pointer",
@@ -1850,9 +1842,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .const_int(field * pointer_bytes, false),
         )?;
         Ok(self
-            .backend
-            .builder
-            .build_load(self.backend.size_type, slot, "buffer.metadata")
+            .load_dynamic_storage(self.backend.size_type, slot, "buffer.metadata")
             .map_err(compiler_diagnostic)?
             .into_int_value())
     }
@@ -1869,9 +1859,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.backend.size_type.const_int(2 * pointer_bytes, false),
         )?;
         let frozen = self
-            .backend
-            .builder
-            .build_load(self.backend.context.i8_type(), slot, "buffer.frozen")
+            .load_dynamic_storage(self.backend.context.i8_type(), slot, "buffer.frozen")
             .map_err(compiler_diagnostic)?
             .into_int_value();
         let frozen = self
@@ -1946,16 +1934,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_int_to_ptr(word, pointer, "buffer.descriptor.slot")
             .map_err(compiler_diagnostic)?;
         let element = self
-            .backend
-            .builder
-            .build_load(pointer, word, "buffer.element.descriptor")
+            .load_dynamic_storage(pointer, word, "buffer.element.descriptor")
             .map_err(compiler_diagnostic)?
             .into_pointer_value();
         let layout = self.dynamic_buffer_layout(element)?;
         let length = self
-            .backend
-            .builder
-            .build_load(self.backend.size_type, buffer, "buffer.length")
+            .load_dynamic_storage(self.backend.size_type, buffer, "buffer.length")
             .map_err(compiler_diagnostic)?
             .into_int_value();
         let data = self
@@ -1994,9 +1978,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map_err(compiler_diagnostic)?;
         self.backend.builder.position_at_end(check);
         let index = self
-            .backend
-            .builder
-            .build_load(self.backend.size_type, index_slot, "buffer.finalize.index")
+            .load_dynamic_storage(self.backend.size_type, index_slot, "buffer.finalize.index")
             .map_err(compiler_diagnostic)?
             .into_int_value();
         let finished = self
@@ -2107,9 +2089,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_int_to_ptr(word, pointer, "cell.descriptor.slot")
             .map_err(compiler_diagnostic)?;
         let descriptor = self
-            .backend
-            .builder
-            .build_load(pointer, word, "cell.value.descriptor")
+            .load_dynamic_storage(pointer, word, "cell.value.descriptor")
             .map_err(compiler_diagnostic)?;
         if let Some(instruction) = descriptor.as_instruction_value() {
             instruction
@@ -2227,9 +2207,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .const_int((runtime.len() + index) as u64 * pointer_bytes, false);
                 let slot = self.backend.dynamic_byte_offset(environment, offset)?;
                 Ok(Some(
-                    self.backend
-                        .builder
-                        .build_load(pointer, slot, "finalizer.capture.descriptor")
+                    self.load_dynamic_storage(pointer, slot, "finalizer.capture.descriptor")
                         .map_err(compiler_diagnostic)?
                         .into_pointer_value(),
                 ))
@@ -2323,9 +2301,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_struct_gep(closure_type, closure, 0, "closure.code.slot")
             .map_err(compiler_diagnostic)?;
         let code = self
-            .backend
-            .builder
-            .build_load(pointer_type, code, "closure.code")
+            .load_dynamic_storage(pointer_type, code, "closure.code")
             .map_err(compiler_diagnostic)?
             .into_pointer_value();
         let closure_environment = self
@@ -2334,9 +2310,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_struct_gep(closure_type, closure, 1, "closure.environment.slot")
             .map_err(compiler_diagnostic)?;
         let closure_environment = self
-            .backend
-            .builder
-            .build_load(pointer_type, closure_environment, "closure.environment")
+            .load_dynamic_storage(pointer_type, closure_environment, "closure.environment")
             .map_err(compiler_diagnostic)?
             .into_pointer_value();
         let types = super::flattened_parameter_types(&call.function_type.parameter);
@@ -2421,9 +2395,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             } else {
                 let ty = self.backend.compile_type(types[index])?;
                 arguments.push(
-                    self.backend
-                        .builder
-                        .build_load(ty, pointer, "closure.argument")
+                    self.load_dynamic_storage(ty, pointer, "closure.argument")
                         .map_err(compiler_diagnostic)?
                         .into(),
                 );
@@ -2523,9 +2495,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             } else {
                 let ty = self.backend.compile_type(types[index])?;
                 arguments.push(
-                    self.backend
-                        .builder
-                        .build_load(ty, pointer, "extern.argument")
+                    self.load_dynamic_storage(ty, pointer, "extern.argument")
                         .map_err(compiler_diagnostic)?
                         .into(),
                 );
@@ -2629,9 +2599,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_struct_gep(self.backend.slice_type(), slice, 1, "slice.length.slot")
                     .map_err(compiler_diagnostic)?;
                 let length = self
-                    .backend
-                    .builder
-                    .build_load(self.backend.size_type, length, "slice.length")
+                    .load_dynamic_storage(self.backend.size_type, length, "slice.length")
                     .map_err(compiler_diagnostic)?;
                 self.backend
                     .builder
@@ -2649,9 +2617,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_struct_gep(slice_type, slice, 0, "slice.data")
                     .map_err(compiler_diagnostic)?;
                 let data = self
-                    .backend
-                    .builder
-                    .build_load(
+                    .load_dynamic_storage(
                         self.backend.context.ptr_type(AddressSpace::default()),
                         data,
                         "slice.pointer",
@@ -2664,15 +2630,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_struct_gep(slice_type, slice, 1, "slice.length.slot")
                     .map_err(compiler_diagnostic)?;
                 let length = self
-                    .backend
-                    .builder
-                    .build_load(self.backend.size_type, length, "slice.length")
+                    .load_dynamic_storage(self.backend.size_type, length, "slice.length")
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let position = self
-                    .backend
-                    .builder
-                    .build_load(self.backend.size_type, position, "slice.position")
+                    .load_dynamic_storage(self.backend.size_type, position, "slice.position")
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let out_of_bounds = self
@@ -2707,9 +2669,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let reference = slot_pointer(0)?;
                 let replacement = slot_pointer(1)?;
                 let payload = self
-                    .backend
-                    .builder
-                    .build_load(
+                    .load_dynamic_storage(
                         self.backend.context.ptr_type(AddressSpace::default()),
                         reference,
                         "ref.replace.reference",
@@ -2726,9 +2686,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             crate::IntrinsicFunction::BufferLength | crate::IntrinsicFunction::BufferCapacity => {
                 let buffer = slot_pointer(0)?;
                 let buffer = self
-                    .backend
-                    .builder
-                    .build_load(
+                    .load_dynamic_storage(
                         self.backend.context.ptr_type(AddressSpace::default()),
                         buffer,
                         "buffer.pointer",
@@ -2752,9 +2710,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                     .map_err(compiler_diagnostic)?;
                 let value = self
-                    .backend
-                    .builder
-                    .build_load(self.backend.size_type, slot, "buffer.metadata")
+                    .load_dynamic_storage(self.backend.size_type, slot, "buffer.metadata")
                     .map_err(compiler_diagnostic)?;
                 self.backend
                     .builder
@@ -2765,9 +2721,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             crate::IntrinsicFunction::BufferWithCapacity => {
                 let capacity = slot_pointer(0)?;
                 let capacity = self
-                    .backend
-                    .builder
-                    .build_load(self.backend.size_type, capacity, "buffer.capacity")
+                    .load_dynamic_storage(self.backend.size_type, capacity, "buffer.capacity")
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
@@ -2871,9 +2825,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let buffer = self.load_buffer_pointer(slot_pointer(0)?)?;
                 let index = slot_pointer(1)?;
                 let index = self
-                    .backend
-                    .builder
-                    .build_load(self.backend.size_type, index, "buffer.index")
+                    .load_dynamic_storage(self.backend.size_type, index, "buffer.index")
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
@@ -3096,9 +3048,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let pointer = slot_pointer(index)?;
             let ty = self.backend.compile_type(types[index])?;
             values.push(
-                self.backend
-                    .builder
-                    .build_load(ty, pointer, "intrinsic.argument")
+                self.load_dynamic_storage(ty, pointer, "intrinsic.argument")
                     .map_err(compiler_diagnostic)?,
             );
         }
@@ -3252,9 +3202,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .const_int(index as u64 * pointer_bytes, false);
             let slot = self.backend.dynamic_byte_offset(environment, offset)?;
             let descriptor = self
-                .backend
-                .builder
-                .build_load(pointer, slot, "entry.descriptor")
+                .load_dynamic_storage(pointer, slot, "entry.descriptor")
                 .map_err(compiler_diagnostic)?;
             arguments.push(descriptor.into());
         }
@@ -3378,9 +3326,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .backend
                         .dynamic_byte_offset(environment.closure, offset)?;
                     Ok(Some(
-                        self.backend
-                            .builder
-                            .build_load(pointer_type, slot, "capture.descriptor")
+                        self.load_dynamic_storage(pointer_type, slot, "capture.descriptor")
                             .map_err(compiler_diagnostic)?
                             .into_pointer_value(),
                     ))
@@ -3398,9 +3344,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let pointer = match accesses[index] {
                     crate::LoweredCaptureAccess::ByValue => field,
                     crate::LoweredCaptureAccess::Borrowed => self
-                        .backend
-                        .builder
-                        .build_load(
+                        .load_dynamic_storage(
                             self.backend.context.ptr_type(AddressSpace::default()),
                             field,
                             "capture.pointer",
@@ -3408,9 +3352,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map_err(compiler_diagnostic)?
                         .into_pointer_value(),
                     crate::LoweredCaptureAccess::SharedCell => self
-                        .backend
-                        .builder
-                        .build_load(
+                        .load_dynamic_storage(
                             self.backend.context.ptr_type(AddressSpace::default()),
                             field,
                             "capture.cell",
@@ -4071,9 +4013,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                     .map_err(compiler_diagnostic)?;
                 let tag = self
-                    .backend
-                    .builder
-                    .build_load(self.backend.context.i32_type(), value, "sum.coerce.tag")
+                    .load_dynamic_storage(self.backend.context.i32_type(), value, "sum.coerce.tag")
                     .map_err(compiler_diagnostic)?;
                 tag.as_instruction_value()
                     .expect("sum tag load")
@@ -4175,9 +4115,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(left);
         }
         let tag = self
-            .backend
-            .builder
-            .build_load(self.backend.context.i32_type(), left, "logical.tag")
+            .load_dynamic_storage(self.backend.context.i32_type(), left, "logical.tag")
             .map_err(compiler_diagnostic)?;
         tag.as_instruction_value()
             .expect("logical tag load")
@@ -4570,9 +4508,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
                 CheckedType::Ref(_) => {
                     let payload = self
-                        .backend
-                        .builder
-                        .build_load(
+                        .load_dynamic_storage(
                             self.backend.context.ptr_type(AddressSpace::default()),
                             pointer,
                             "match.payload",
@@ -4703,9 +4639,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     pointer
                 };
                 let string = self
-                    .backend
-                    .builder
-                    .build_load(
+                    .load_dynamic_storage(
                         self.backend.compile_type(&CheckedType::String)?,
                         pointer,
                         "match.string",
@@ -4737,9 +4671,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<PointerValue<'context>> {
         for _ in dereference {
             pointer = self
-                .backend
-                .builder
-                .build_load(
+                .load_dynamic_storage(
                     self.backend.context.ptr_type(AddressSpace::default()),
                     pointer,
                     "access.payload",
@@ -4758,9 +4690,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
         use inkwell::values::BasicValue;
         let tag = self
-            .backend
-            .builder
-            .build_load(self.backend.context.i32_type(), pointer, "match.tag")
+            .load_dynamic_storage(self.backend.context.i32_type(), pointer, "match.tag")
             .map_err(compiler_diagnostic)?;
         tag.as_instruction_value()
             .expect("sum tag load")
@@ -4900,9 +4830,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map(|expression| &expression.value_type)
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing index expression"))?;
         let position = self
-            .backend
-            .builder
-            .build_load(
+            .load_dynamic_storage(
                 self.backend.compile_type(position_type)?,
                 position,
                 "mutation.index",
@@ -4913,9 +4841,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return Ok(());
         }
         let replacement = self
-            .backend
-            .builder
-            .build_load(
+            .load_dynamic_storage(
                 self.backend.compile_type(&place.value_type)?,
                 replacement,
                 "mutation.value",
@@ -5003,9 +4929,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let mut pointer = self.emit_dynamic_expression(owner, *reference, environment)?;
                 for _ in dereference {
                     pointer = self
-                        .backend
-                        .builder
-                        .build_load(
+                        .load_dynamic_storage(
                             self.backend.context.ptr_type(AddressSpace::default()),
                             pointer,
                             "place.payload",
@@ -5050,9 +4974,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_struct_gep(slice_type, slice, 0, "mutation.slice.data")
                     .map_err(compiler_diagnostic)?;
                 let data = self
-                    .backend
-                    .builder
-                    .build_load(pointer_type, data, "mutation.slice.pointer")
+                    .load_dynamic_storage(pointer_type, data, "mutation.slice.pointer")
                     .map_err(compiler_diagnostic)?
                     .into_pointer_value();
                 let length = self
@@ -5061,9 +4983,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_struct_gep(slice_type, slice, 1, "mutation.slice.length")
                     .map_err(compiler_diagnostic)?;
                 let length = self
-                    .backend
-                    .builder
-                    .build_load(self.backend.size_type, length, "mutation.slice.count")
+                    .load_dynamic_storage(self.backend.size_type, length, "mutation.slice.count")
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let position = self.backend.size_type.const_int(*index as u64, false);
@@ -5162,9 +5082,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredPatternKind::Nominal { argument, .. } => {
                 if pattern.test.identity == crate::LoweredPatternIdentity::Ref {
                     let payload = self
-                        .backend
-                        .builder
-                        .build_load(
+                        .load_dynamic_storage(
                             self.backend.context.ptr_type(AddressSpace::default()),
                             pointer,
                             "pattern.payload",
@@ -5951,9 +5869,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .build_struct_gep(slice, base, 0, "slice.data")
                             .map_err(compiler_diagnostic)?;
                         let data = self
-                            .backend
-                            .builder
-                            .build_load(
+                            .load_dynamic_storage(
                                 self.backend.context.ptr_type(AddressSpace::default()),
                                 data,
                                 "slice.pointer",
@@ -5966,9 +5882,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .build_struct_gep(slice, base, 1, "slice.length.slot")
                             .map_err(compiler_diagnostic)?;
                         let length = self
-                            .backend
-                            .builder
-                            .build_load(self.backend.size_type, length, "slice.length")
+                            .load_dynamic_storage(self.backend.size_type, length, "slice.length")
                             .map_err(compiler_diagnostic)?
                             .into_int_value();
                         let position = self.backend.size_type.const_int(*index as u64, false);
@@ -6485,9 +6399,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     } else {
                         let ty = self.backend.compile_type(parameter_types[index])?;
                         let value = self
-                            .backend
-                            .builder
-                            .build_load(ty, pointer, "concrete.argument")
+                            .load_dynamic_storage(ty, pointer, "concrete.argument")
                             .map_err(compiler_diagnostic)?;
                         arguments.push(value.into());
                     }

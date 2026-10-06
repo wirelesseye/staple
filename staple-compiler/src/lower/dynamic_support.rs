@@ -1225,6 +1225,7 @@ mod tests {
             "function_capture",
             "native_capture",
             "native_cell",
+            "packed_buffer",
             "phantom_argument",
         ] {
             let function = lowered
@@ -1252,6 +1253,25 @@ mod tests {
                 "{name} must run dynamically"
             );
         }
+        let context = inkwell::context::Context::create();
+        let ir = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        let mut dynamic = false;
+        let mut loads = 0;
+        for line in ir.lines() {
+            if line.starts_with("define ") {
+                dynamic = line.contains("_dynamic(");
+            }
+            if dynamic && line.contains("buffer.pointer") && line.contains(" = load ") {
+                assert!(
+                    line.ends_with("align 1"),
+                    "packed dynamic pointer load: {line}"
+                );
+                loads += 1;
+            }
+        }
+        assert!(loads > 0, "dynamic storage loads must be exercised");
     }
 
     #[test]

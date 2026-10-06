@@ -55,8 +55,8 @@ pub struct CorpusProgram {
     /// The exact stdout a `MustRun` program prints. The CLI harness asserts it
     /// under the default emitter.
     pub expected_stdout: Option<&'static str>,
-    /// A `MustRun` program that must end in an `llvm.trap` (killed by a
-    /// signal, so no exit code) under the default emitter.
+    /// A `MustRun` program that must fail with a nonzero exit or signal
+    /// under the default emitter.
     pub traps: bool,
     /// A `MustRun` program's generic artifact family: the in-process harness
     /// requires two distinct artifacts of it.
@@ -111,7 +111,7 @@ const fn must_run(mut program: CorpusProgram) -> CorpusProgram {
     program
 }
 
-/// Requires a `MustRun` entry to end in a trap under the default emitter.
+/// Requires a `MustRun` entry to fail under the default emitter.
 const fn expect_trap(mut program: CorpusProgram) -> CorpusProgram {
     program.traps = true;
     program
@@ -1247,16 +1247,19 @@ static CORPUS: [CorpusProgram; 100] = [
         )),
         "",
     ),
-    expect_trap(must_run(inline(
-        "dynamic_asserting_trap",
-        concat!(
-            "type Found T = wrap T\n",
-            "type Absent = wrap String\n",
-            "def asserted_failure: <T where Copy T> T -> T = value => { let maybe: Found T | Absent = Absent \"missing\"; let! Found(next) = maybe; next }\n",
-            "let result = asserted_failure 13\n",
-        ),
-        "expressions",
-    ))),
+    expect_stdout(
+        expect_trap(must_run(inline(
+            "dynamic_asserting_trap",
+            concat!(
+                "type Found T = wrap T\n",
+                "type Absent = wrap String\n",
+                "def asserted_failure: <T where Copy T> T -> T = value => { let maybe: Found T | Absent = Absent \"missing\"; let! Found(next) = maybe; next }\n",
+                "let result = asserted_failure 13\n",
+            ),
+            "expressions",
+        ))),
+        "",
+    ),
     expect_stdout(
         must_run(inline(
             "dynamic_audit_forms",
@@ -1265,13 +1268,16 @@ static CORPUS: [CorpusProgram; 100] = [
                 "def nested_generic: <T where Copy T> T -> (T, I32) = value => { def identity: <U where Copy U> U -> U = item => item; (value, identity 17) }\n",
                 "let (nested_value, nested_result) = nested_generic 6; println \"${nested_value} ${nested_result}\"\n",
                 "def concrete_capture: <T where Copy T> T -> I32 = value => { let callable = () => { let ignored = value; 3 }; callable () }\n",
-            "def compound_capture: <T where Copy T> T -> T = value => { let pair = (value, value); let callable: T -> T = item => { let (first, second) = pair; first }; callable value }\n",
-            "def function_capture: <T where Copy T> (T, T -> T) -> T = (value, callback) => { let callable: T -> T = item => callback item; callable value }\n",
-            "let concrete_captured = concrete_capture 6; let compound_captured = compound_capture 7; let function_captured = function_capture.<I32> (8, item => item); println \"${concrete_captured} ${compound_captured} ${function_captured}\"\n",
-            "def native_capture: <T where Copy T> T -> I32 = value => { let seed = 8; let callable = () => seed; callable () }\n",
-            "def native_cell: <T where Copy T> T ->{state} I32 = value => { let mut count = 0; let increment = () => { count = count + 1; count }; let first = increment (); let second = increment (); first + second }\n",
-            "let native_captured = native_capture 0; let native_mutated = native_cell 0; println \"${native_captured} ${native_mutated}\"\n",
-            "def indexed: <T where Copy T> T -> I32 = value => { let values = (8, 9); values[1] }\n",
+                "def compound_capture: <T where Copy T> T -> T = value => { let pair = (value, value); let callable: T -> T = item => { let (first, second) = pair; first }; callable value }\n",
+                "def function_capture: <T where Copy T> (T, T -> T) -> T = (value, callback) => { let callable: T -> T = item => callback item; callable value }\n",
+                "let concrete_captured = concrete_capture 6; let compound_captured = compound_capture 7; let function_captured = function_capture.<I32> (8, item => item); println \"${concrete_captured} ${compound_captured} ${function_captured}\"\n",
+                "def native_capture: <T where Copy T> T -> I32 = value => { let seed = 8; let callable = () => seed; callable () }\n",
+                "def native_cell: <T where Copy T> T ->{state} I32 = value => { let mut count = 0; let increment = () => { count = count + 1; count }; let first = increment (); let second = increment (); first + second }\n",
+                "let native_captured = native_capture 0; let native_mutated = native_cell 0; println \"${native_captured} ${native_mutated}\"\n",
+                "use std.buffer.Buffer\n",
+                "def packed_buffer: <T where Copy T> T -> USize = value => { let fields: (tag: I8, values: Buffer T) = (tag: I8 :: 1, values: Buffer.with_capacity.<T> 1); Buffer.capacity fields.values }\n",
+                "let packed_length = packed_buffer 7; println \"${packed_length}\"\n",
+                "def indexed: <T where Copy T> T -> I32 = value => { let values = (8, 9); values[1] }\n",
                 "def named: <T where Copy T> T ->{state} (T, I32, I32) = value => { let mut count = 0; let make = () => { count = count + 1; (a: value, b: count) }; let expanded: (a: T, b: I32) = (...=make (), b: 7); (expanded.a, expanded.b, count) }\n",
                 "type Defaulted = from (a: I32, b: I32 = 5)\n",
                 "def defaults: <T where Copy T> T -> I32 = value => { let inputs: Defaulted = (a: 3); let (a, b) = inputs; a + b }\n",
@@ -1307,7 +1313,7 @@ static CORPUS: [CorpusProgram; 100] = [
             ),
             "expressions",
         )),
-        "6 17\n3 7 8\n8 3\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n",
+        "6 17\n3 7 8\n8 3\n1\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n",
     ),
     expect_stdout(
         must_run(inline(
