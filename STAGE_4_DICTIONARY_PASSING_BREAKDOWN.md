@@ -224,32 +224,24 @@ Breakdown-level decisions, in addition to the main plan's. Decisions 10 and
 
 ## Stage 4a — Dynamic implementations
 
-The remaining 4a work, its exit gate, and the problems found in reviews are
-planned in [STAGE_4A_REMAINDER_BREAKDOWN.md](STAGE_4A_REMAINDER_BREAKDOWN.md).
-That plan holds the detailed status. This section only summarizes it.
+Stage 4a's exit gate and resolved review problems are recorded in
+[STAGE_4A_REMAINDER_BREAKDOWN.md](STAGE_4A_REMAINDER_BREAKDOWN.md).
 
 ### Implementation status
 
-**Stage 4a is not complete.** Dynamic implementations now support ordinary
-implicit thunks, managed references, and concrete structural dispatch and
-mutation, and generic constructor values, with recursively owned descriptor
-graphs. General reabstraction now converts nested functions and functions
-in by-value aggregates through lowering-owned artifacts. The remaining
-shared-cell function restriction is classified explicitly. Concrete indexing,
-spreads, defaults, string literal patterns, and propagation/assertion bindings
-have dynamic emission. Nested generic bindings record initialization state
-without evaluating their initializer. Both emitters share String/CString
-kernels. Concrete-signature closures with runtime captures use planned
-ABI adapters. Concrete child closures receive native capture environments,
-and shared cells retain native initialization state plus owned descriptors.
-Dynamic storage loads permit packed product field alignment, verified by
-bound-free execution and LLVM alignment assertions;
-the rejection-kind
-audit is documented. Coverage, full differential execution, and all default
-IR comparisons pass; the complete workspace rerun remains. The managed-reference
-JIT test accounts for the shared-cell initialization byte before its descriptor. The default corpus trap
-assertion now accepts preserved signal statuses and nonzero panic exits. Detailed coverage and
-validation status live in the remainder plan's
+**Stage 4a is complete.** Dynamic implementations support ordinary implicit
+thunks, managed references, concrete structural dispatch and mutation, generic
+constructor values, recursive function reabstraction in by-value aggregates,
+and runtime captures with owned descriptor graphs. Concrete child closures
+receive native environments; shared cells retain initialization state.
+Concrete indexing, spreads, defaults, string patterns, propagating/asserting
+bindings, and nested generic declarations have dynamic emission. Both emitters
+share String/CString kernels, and dynamic storage loads accept packed alignment.
+The explicit later-stage restrictions and remaining rejection guards are audited.
+
+The complete workspace suite, zero-baseline coverage, full differential
+execution, and all 111 default IR comparisons pass. Detailed final results
+live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
 
 **Decision R-F. The dynamic emitter stays separate.** It is too large to fold

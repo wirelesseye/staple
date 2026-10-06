@@ -13,75 +13,42 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After correcting the managed-reference test for the shared-cell initialization byte. This section is rewritten in
-place at each update, not appended to.
-
-**Stage 4a is not complete.** Ordinary implicit thunks, managed references,
-concrete dispatch, generic constructor values, and general boundary conversions
-have dynamic implementations. P1, P2, P3, P5, P6, and P7 are resolved.
+**Stage 4a is complete.** R0–R8 and review problems P1–P7 are resolved.
+This section is rewritten in place; validation details also live in the
+conventional commits on this branch.
 
 | Step | State |
 |---|---|
-| R0 — Measurement and hygiene | Lowering errors fail coverage; the baseline rule is documented. Concrete structural calls and mutation no longer fall back. |
-| R1 — Descriptor order | Done |
-| R2 — Concrete function values | Done |
-| R3 — Dynamic function values | Constructor adapters own their descriptors and expose the dynamic closure ABI. Runtime-shaped function captures through shared cells report the explicit Decision 7 restriction. |
-| R4 — Dynamic environments and captures | Compound and function capture descriptors are supported. Concrete-signature closures with runtime captures use a lowering-owned ABI adapter; capture-only descriptors come from the enclosing environment. Concrete child closures receive native capture environments. Shared cells retain a native state byte and an owned trailing descriptor. Shared function cells retain Decision 7. |
-| R5 — Reabstraction | Done. Lowering-owned conversions handle nested functions and functions in by-value products, sums, wrappers, and fixed arrays (normalized to products). Functions behind references retain the explicit restriction. |
-| R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
-| R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. String/CString kernels share concrete emission helpers. The rejection-kind audit is recorded below; the execution, coverage, and IR gates pass; the complete workspace rerun remains. |
-| R8 — Exit gate | Coverage, full differential execution, and default IR comparisons pass. The workspace rerun exposed an outdated managed-reference test offset after the initialization-byte addition; the assertion now reads the owned descriptor after that byte. The complete workspace rerun remains. |
+| R0 — Measurement and hygiene | Done. Lowering failures fail coverage, the baseline is zero, and status is maintained in place. |
+| R1 — Descriptor order | Done. Descriptors follow declared scheme order. |
+| R2 — Concrete function values | Done. Concrete closure calls and boundary adapters are supported. |
+| R3 — Dynamic function values | Done. Constructor adapters own their descriptors and expose the dynamic closure ABI. Shared function cells retain the explicit Decision 7 restriction. |
+| R4 — Dynamic environments and captures | Done. Compound/function captures, concrete-signature adapters, native child environments, initialization bytes, and owned descriptors are supported. |
+| R5 — Reabstraction | Done. Lowering-owned recursive conversions cover nested functions and by-value products, sums, wrappers, and fixed arrays normalized to products, including mutable writeback. Functions behind references retain Decision 7. |
+| R6 — Buffer intrinsics and dynamic GC payloads | Done. Dynamic buffers and managed references own their descriptors and finalizers; dynamic storage loads accept packed alignment. |
+| R7 — Remaining forms | Done. Concrete indexing, spreads, defaults, string patterns, propagating/asserting bindings, nested generic declarations, and shared String/CString kernels are supported. Every remaining in-scope rejection kind is audited below. |
+| R8 — Exit gate | Done. Coverage, complete workspace tests, full differential execution, and default IR comparisons pass. |
 
-**Coverage:** The last completed 100-program refresh measured 6,429 generic templates,
-4,773 eligible (74.24%), and 1,656 rejected for allowed reasons. The baseline
-remains zero, with no in-scope rejections.
+**Final validation:**
 
-**Verified in this continuation:**
-- The zero-baseline full corpus coverage refresh passes for all 100 programs.
-- The focused native differential and LLVM alignment assertions pass.
-- The assertion-failure corpus case pins empty stdout and permits a nonzero
-  panic exit, alongside existing signal-based traps.
-- Dynamic storage loads explicitly use alignment one, since ABI pointers may
-  refer to packed product fields. A bound-free packed-buffer case checks the
-  returned capacity and requires alignment-one loads in its dynamic LLVM IR.
-- Concrete-only captures and mutable concrete shared cells execute in a dynamic
-  parent. Native environments read by-value fields with packed alignment; cells
-  retain native initialization state, and captured state-only cells live on the
-  GC heap. Captured value descriptors are deep-copied for finalizer lifetime.
-- Bound-free capture cases require dynamic selection for compound captures,
-  function captures, and concrete-signature closures with runtime captures.
-  The concrete-signature adapter owns its nested conversion artifacts.
-- String/CString kernels use the same emission helper in both ABI paths,
-  including the recorded CString conversion drop. All intrinsic variants
-  are classified explicitly as supported or an allowed later-stage restriction.
-- A nested generic identity declaration is selected dynamically. Initialization
-  checks run before call arguments and callable construction. Direct reads
-  before declaration are rejected by name resolution.
-- New bound-free cases cover concrete indexing, both spread forms, evaluation
-  order, defaults, plain and sum string literals, propagation success/failure,
-  and assertion success/failure. Dynamic expression coercions now apply to
-  every emission path. Shared capture slots use pointer size and alignment.
-- A terminating bound-free recursive generic regression requires exactly the
-  `FunctionBehindReference` reason for its shared self-closure cell.
-- The focused CLI differential execution, dynamic-selection and ABI-shape
-  assertions, and complete corpus coverage refresh pass.
-- The `dynamic_reabstraction_shapes` regression executes conversions in both
-  directions for nested function types and functions inside each by-value
-  aggregate shape, including a sum alternative without a callback.
-- Lowering assertions require dynamic selection for each regression template
-  and both thunk directions for a concrete tuple behind an opaque runtime
-  parameter. Mutable callback round trips, replacement of a mutable callback,
-  and whole-wrapper mutation exercise thunk and direct-boundary writeback.
-- Conversion and thunk plans own their recursive artifact dependencies.
-  Closure adapters keep the original code/environment in GC storage; packed
-  payload accesses use alignment one. Wrapper field mutation uses the
-  representation's product offsets instead of overwriting the whole payload.
-- Keys include the symbolic dynamic shape and direction as well as the concrete
-  type. An opaque parameter and a written product can materialize to the same
-  concrete type while requiring different pointer counts.
-- Full differential execution passes for all 98 runnable inputs, with identical stdout and exit status; 97 use dynamic calls (11,311 call sites).
-- All 111 default IR inputs match the `50565d8` release build.
-- The managed-reference JIT test now accounts for the shared-cell initialization byte before its owned descriptor; the complete workspace rerun remains at R8.
+- Coverage across 100 programs: 6,429 generic templates, 4,773 eligible
+  (74.24%), and 1,656 rejected for allowed reasons. In-scope rejections and
+  their baseline are both zero.
+- `cargo test --workspace --quiet`: 1,476 tests passed, zero failed, two
+  intentionally ignored. This includes all 233 CLI tests, 397 compiler unit
+  tests, and 574 compiler integration tests.
+- The separately invoked full ignored differential run passes all 98 runnable
+  inputs with identical stdout and exit status. Dynamic calls are used by
+  97 inputs, covering 11,311 call sites.
+- All 111 default IR inputs (100 corpus programs and 11 standalone example
+  files) match the `50565d8` release build. Each input has one stable variant:
+  19 were compared with four samples and 92 with two samples per compiler.
+- Bound-free native regressions require dynamic selection for the repaired
+  forms, exercise recursive conversions and mutable writeback, and assert
+  alignment-one loads for packed buffer fields. The managed-reference JIT
+  ownership/finalizer test checks the initialization byte and trailing
+  descriptor at the current cell offsets. Trap cases compare exact statuses
+  and pin expected stdout, including empty assertion-failure output.
 
 ### Intrinsic audit
 
