@@ -13,7 +13,7 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After dynamic nested generic binding support. This section is rewritten in
+After shared string intrinsic emission. This section is rewritten in
 place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks, managed references,
@@ -29,7 +29,7 @@ have dynamic implementations. P1, P2, P3, P5, P6, and P7 are resolved.
 | R4 — Dynamic environments and captures | Done. Descriptor graphs are recursively copied, including compound children. |
 | R5 — Reabstraction | Done. Lowering-owned conversions handle nested functions and functions in by-value products, sums, wrappers, and fixed arrays (normalized to products). Functions behind references retain the explicit restriction. |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
-| R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. The rejection-kind audit is open. |
+| R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. String/CString kernels share concrete emission helpers. The rejection-kind audit is open. |
 | R8 — Exit gate | Pending the remaining implementation and final complete checks. |
 
 **Coverage:** The last completed 100-program refresh measured 6,418 generic templates,
@@ -38,6 +38,9 @@ remains zero, with no in-scope rejections.
 
 **Verified in this continuation:**
 - The zero-baseline full corpus coverage refresh passes for all 100 programs.
+- String/CString kernels use the same emission helper in both ABI paths,
+  including the recorded CString conversion drop. All intrinsic variants
+  are classified explicitly as supported or an allowed later-stage restriction.
 - A nested generic identity declaration is selected dynamically. Initialization
   checks run before call arguments and callable construction. Direct reads
   before declaration are rejected by name resolution.
@@ -64,6 +67,21 @@ remains zero, with no in-scope rejections.
   type. An opaque parameter and a written product can materialize to the same
   concrete type while requiring different pointer counts.
 - Final complete workspace, differential, and default IR checks remain at R8.
+
+### Intrinsic audit
+
+The former `StringIntrinsic` reason is removed: parsing, UTF-8 validation,
+CString bytes/NUL checks, numeric formatting, CString conversions, and string
+addition have shared kernel emission. The private declarations in
+`stdlib/std/string.sta`, `stdlib/std/cinterop.sta`, and
+`stdlib/std/core/number.sta` are identified by owning module in
+`resolve.rs`; their current callers are concrete standard-library wrappers.
+A public bound-free generic caller cannot directly name those private kernels.
+Their concrete behavior is exercised by the CLI string tests and full corpus.
+The former catch-all `Intrinsic` and `BufferIntrinsic` reasons are removed;
+the rejection classifier exhaustively lists all supported variants and only
+returns allowed reasons for async/reactive operations, buffer clone, and
+slice-from-reference.
 
 ## Open problems
 

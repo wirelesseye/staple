@@ -6913,6 +6913,118 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.build_bool_value(condition, sum_type, span)
     }
 
+    /// Concrete string kernels shared by both ABI emitters.
+    fn emit_string_intrinsic(
+        &mut self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        call_id: LoweredCallId,
+        intrinsic: IntrinsicFunction,
+        arguments: &[BasicMetadataValueEnum<'context>],
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = call.origin.span.clone();
+        let unsupported = |family| Diagnostic::new(span.clone(), format!("malformed {family}"));
+        match intrinsic {
+            IntrinsicFunction::ParseNumber { to } => {
+                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                    return Err(unsupported("numeric parsing operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_parse_number(to, *string, span)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::ValidateUtf8 => {
+                let [BasicMetadataValueEnum::StructValue(bytes)] = arguments else {
+                    return Err(unsupported("UTF-8 operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_validate_utf8(*bytes)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::StringHasNul => {
+                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                    return Err(unsupported("interior-NUL operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_string_has_nul(*string)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::CStringBytes => {
+                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
+                    return Err(unsupported("CString bytes operand"));
+                };
+                Ok(self
+                    .backend
+                    .build_c_string_bytes(*pointer, span)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::ToString { value: numeric } => {
+                let [argument] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "numeric conversion needs one argument",
+                    ));
+                };
+                // Use the common String conversion helper.
+                let argument = BasicValueEnum::try_from(*argument).map_err(|_| {
+                    Diagnostic::new(span.clone(), "numeric conversion requires a numeric value")
+                })?;
+                self.backend
+                    .build_numeric_to_string(numeric, argument, span)
+            }
+            IntrinsicFunction::StringFromCString => {
+                let [BasicMetadataValueEnum::PointerValue(source)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "CString conversion requires a pointer",
+                    ));
+                };
+                // The shared conversion core; the CString release expands the
+                // recorded `CStringConversion` glue.
+                let result = self
+                    .backend
+                    .build_string_from_c_string(*source, span.clone())?;
+                self.emit_drop_site(
+                    owner,
+                    crate::ArtifactUseSite::CStringConversion(call_id),
+                    DropSource::Value((*source).into()),
+                    &span,
+                )?;
+                Ok(result.as_any_value_enum())
+            }
+            IntrinsicFunction::StringToCString => {
+                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "String conversion requires a String value",
+                    ));
+                };
+                // Use the common runtime helper.
+                Ok(self
+                    .backend
+                    .build_string_to_c_string(*string, span)?
+                    .as_any_value_enum())
+            }
+            IntrinsicFunction::StringAdd => {
+                let [
+                    BasicMetadataValueEnum::StructValue(left),
+                    BasicMetadataValueEnum::StructValue(right),
+                ] = arguments
+                else {
+                    return Err(Diagnostic::new(
+                        span,
+                        "string concatenation requires two String values",
+                    ));
+                };
+                self.backend.build_string_add(*left, *right, span)
+            }
+            _ => Err(unsupported("string intrinsic")),
+        }
+    }
+
     fn emit_intrinsic(
         &mut self,
         owner: EmissionOwner,
@@ -6933,6 +7045,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
         };
         match intrinsic {
+            IntrinsicFunction::ParseNumber { .. }
+            | IntrinsicFunction::ValidateUtf8
+            | IntrinsicFunction::StringHasNul
+            | IntrinsicFunction::CStringBytes
+            | IntrinsicFunction::ToString { .. }
+            | IntrinsicFunction::StringFromCString
+            | IntrinsicFunction::StringToCString
+            | IntrinsicFunction::StringAdd => {
+                self.emit_string_intrinsic(owner, call, call_id, intrinsic, arguments)
+            }
             IntrinsicFunction::NumericConvert { from, to } => {
                 let [argument] = arguments else {
                     return Err(unsupported("numeric conversion"));
@@ -6944,15 +7066,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_numeric_conversion(from, to, value)?
                     .as_any_value_enum())
             }
-            IntrinsicFunction::ParseNumber { to } => {
-                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
-                    return Err(unsupported("numeric parsing operand"));
-                };
-                Ok(self
-                    .backend
-                    .build_parse_number(to, *string, span)?
-                    .as_any_value_enum())
-            }
+
             IntrinsicFunction::PointerCast => {
                 let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
                     return Err(unsupported("pointer cast operand"));
@@ -6985,33 +7099,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?
                     .as_any_value_enum())
             }
-            IntrinsicFunction::ValidateUtf8 => {
-                let [BasicMetadataValueEnum::StructValue(bytes)] = arguments else {
-                    return Err(unsupported("UTF-8 operand"));
-                };
-                Ok(self
-                    .backend
-                    .build_validate_utf8(*bytes)?
-                    .as_any_value_enum())
-            }
-            IntrinsicFunction::StringHasNul => {
-                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
-                    return Err(unsupported("interior-NUL operand"));
-                };
-                Ok(self
-                    .backend
-                    .build_string_has_nul(*string)?
-                    .as_any_value_enum())
-            }
-            IntrinsicFunction::CStringBytes => {
-                let [BasicMetadataValueEnum::PointerValue(pointer)] = arguments else {
-                    return Err(unsupported("CString bytes operand"));
-                };
-                Ok(self
-                    .backend
-                    .build_c_string_bytes(*pointer, span)?
-                    .as_any_value_enum())
-            }
+
             IntrinsicFunction::IntegerBinary { integer, operation } => {
                 let [
                     BasicMetadataValueEnum::IntValue(left),
@@ -7029,20 +7117,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_integer_binary(integer, operation, *left, *right)?;
                 Ok(value.as_any_value_enum())
             }
-            IntrinsicFunction::ToString { value: numeric } => {
-                let [argument] = arguments else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "numeric conversion needs one argument",
-                    ));
-                };
-                // Use the common String conversion helper.
-                let argument = BasicValueEnum::try_from(*argument).map_err(|_| {
-                    Diagnostic::new(span.clone(), "numeric conversion requires a numeric value")
-                })?;
-                self.backend
-                    .build_numeric_to_string(numeric, argument, span)
-            }
+
             IntrinsicFunction::IntegerCompare { integer, operation } => {
                 let [
                     BasicMetadataValueEnum::IntValue(left),
@@ -7091,52 +7166,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_float_compare(float, operation, *left, *right)?;
                 self.build_intrinsic_bool(condition, result_type, span)
             }
-            IntrinsicFunction::StringFromCString => {
-                let [BasicMetadataValueEnum::PointerValue(source)] = arguments else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "CString conversion requires a pointer",
-                    ));
-                };
-                // The shared conversion core; the CString release expands the
-                // recorded `CStringConversion` glue.
-                let result = self
-                    .backend
-                    .build_string_from_c_string(*source, span.clone())?;
-                self.emit_drop_site(
-                    owner,
-                    crate::ArtifactUseSite::CStringConversion(call_id),
-                    DropSource::Value((*source).into()),
-                    &span,
-                )?;
-                Ok(result.as_any_value_enum())
-            }
-            IntrinsicFunction::StringToCString => {
-                let [BasicMetadataValueEnum::StructValue(string)] = arguments else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "String conversion requires a String value",
-                    ));
-                };
-                // Use the common runtime helper.
-                Ok(self
-                    .backend
-                    .build_string_to_c_string(*string, span)?
-                    .as_any_value_enum())
-            }
-            IntrinsicFunction::StringAdd => {
-                let [
-                    BasicMetadataValueEnum::StructValue(left),
-                    BasicMetadataValueEnum::StructValue(right),
-                ] = arguments
-                else {
-                    return Err(Diagnostic::new(
-                        span,
-                        "string concatenation requires two String values",
-                    ));
-                };
-                self.backend.build_string_add(*left, *right, span)
-            }
+
             IntrinsicFunction::SliceLength => {
                 let [BasicMetadataValueEnum::StructValue(slice)] = arguments else {
                     return Err(Diagnostic::new(span, "length requires a slice"));

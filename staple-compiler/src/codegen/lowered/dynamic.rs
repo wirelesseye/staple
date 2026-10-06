@@ -2969,6 +2969,27 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             );
         }
         let result = match intrinsic {
+            crate::IntrinsicFunction::ParseNumber { .. }
+            | crate::IntrinsicFunction::ValidateUtf8
+            | crate::IntrinsicFunction::StringHasNul
+            | crate::IntrinsicFunction::CStringBytes
+            | crate::IntrinsicFunction::ToString { .. }
+            | crate::IntrinsicFunction::StringFromCString
+            | crate::IntrinsicFunction::StringToCString
+            | crate::IntrinsicFunction::StringAdd => {
+                let Some(LoweredExpressionKind::Call(call_id)) =
+                    self.view.expression(owner, id).map(|record| &record.kind)
+                else {
+                    return Err(Diagnostic::new(span.clone(), "intrinsic is not a call"));
+                };
+                let arguments = values.iter().copied().map(Into::into).collect::<Vec<_>>();
+                inkwell::values::BasicValueEnum::try_from(
+                    self.emit_string_intrinsic(owner, call, *call_id, intrinsic, &arguments)?,
+                )
+                .map_err(|_| {
+                    Diagnostic::new(span.clone(), "string intrinsic result is not a value")
+                })?
+            }
             crate::IntrinsicFunction::NumericConvert { from, to } => self
                 .backend
                 .build_numeric_conversion(from, to, values[0])?

@@ -43,12 +43,6 @@ pub(crate) enum RejectionReason {
     CallableValue,
     /// A parameter product appears in a dynamic signature.
     ParameterProducts,
-    /// An intrinsic outside the supported and allowed sets.
-    Intrinsic,
-    /// Buffer operations other than `__buffer_clone` (R6).
-    BufferIntrinsic,
-    /// String and CString operations (R7).
-    StringIntrinsic,
     /// Recursive (`Ref`/`Slice`/`Syntax`) construction.
     RecursiveConstruction,
     /// A deferred callable expression reached the scanner.
@@ -127,9 +121,6 @@ impl RejectionReason {
         match self {
             RejectionReason::CallableValue => "callable value expression",
             RejectionReason::ParameterProducts => "parameter products",
-            RejectionReason::Intrinsic => "unsupported intrinsic",
-            RejectionReason::BufferIntrinsic => "buffer intrinsic",
-            RejectionReason::StringIntrinsic => "string intrinsic",
             RejectionReason::RecursiveConstruction => "recursive construction",
             RejectionReason::Deferred => "deferred expression",
             RejectionReason::ParameterDependentNonGeneric => "parameter-dependent non-generic call",
@@ -161,18 +152,6 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
     match intrinsic {
         IntrinsicFunction::BufferClone => RejectionReason::BufferClone,
         IntrinsicFunction::SliceFromRef => RejectionReason::SliceFromRef,
-        IntrinsicFunction::BufferWithCapacity
-        | IntrinsicFunction::BufferPush
-        | IntrinsicFunction::BufferGet
-        | IntrinsicFunction::BufferFreeze => RejectionReason::BufferIntrinsic,
-        IntrinsicFunction::ParseNumber { .. }
-        | IntrinsicFunction::ValidateUtf8
-        | IntrinsicFunction::CStringBytes
-        | IntrinsicFunction::StringHasNul
-        | IntrinsicFunction::ToString { .. }
-        | IntrinsicFunction::StringFromCString
-        | IntrinsicFunction::StringToCString
-        | IntrinsicFunction::StringAdd => RejectionReason::StringIntrinsic,
         IntrinsicFunction::ReactiveScope
         | IntrinsicFunction::Reaction
         | IntrinsicFunction::Batch
@@ -193,7 +172,35 @@ fn intrinsic_rejection(intrinsic: crate::IntrinsicFunction) -> RejectionReason {
         | IntrinsicFunction::CompletionTokenCancel
         | IntrinsicFunction::ResolverComplete
         | IntrinsicFunction::ResolverCancel => RejectionReason::AsyncIntrinsic,
-        _ => RejectionReason::Intrinsic,
+        IntrinsicFunction::NumericConvert { .. }
+        | IntrinsicFunction::ParseNumber { .. }
+        | IntrinsicFunction::PointerCast
+        | IntrinsicFunction::PointerAddress
+        | IntrinsicFunction::AddressPointer
+        | IntrinsicFunction::ValidateUtf8
+        | IntrinsicFunction::CStringBytes
+        | IntrinsicFunction::StringHasNul
+        | IntrinsicFunction::ToString { .. }
+        | IntrinsicFunction::IntegerBinary { .. }
+        | IntrinsicFunction::IntegerCompare { .. }
+        | IntrinsicFunction::FloatBinary { .. }
+        | IntrinsicFunction::FloatCompare { .. }
+        | IntrinsicFunction::StringFromCString
+        | IntrinsicFunction::StringToCString
+        | IntrinsicFunction::StringAdd
+        | IntrinsicFunction::SliceLength
+        | IntrinsicFunction::SliceGetRef
+        | IntrinsicFunction::BufferWithCapacity
+        | IntrinsicFunction::BufferLength
+        | IntrinsicFunction::BufferCapacity
+        | IntrinsicFunction::BufferPush
+        | IntrinsicFunction::BufferPop
+        | IntrinsicFunction::BufferGet
+        | IntrinsicFunction::BufferFreeze
+        | IntrinsicFunction::BufferTransfer
+        | IntrinsicFunction::RefReplace => {
+            unreachable!("supported intrinsic passed to rejection classifier")
+        }
     }
 }
 
@@ -378,7 +385,15 @@ fn dynamic_scalar_intrinsic(intrinsic: crate::IntrinsicFunction) -> bool {
     use crate::IntrinsicFunction;
     matches!(
         intrinsic,
-        IntrinsicFunction::NumericConvert { .. }
+        IntrinsicFunction::ParseNumber { .. }
+            | IntrinsicFunction::ValidateUtf8
+            | IntrinsicFunction::StringHasNul
+            | IntrinsicFunction::CStringBytes
+            | IntrinsicFunction::ToString { .. }
+            | IntrinsicFunction::StringFromCString
+            | IntrinsicFunction::StringToCString
+            | IntrinsicFunction::StringAdd
+            | IntrinsicFunction::NumericConvert { .. }
             | IntrinsicFunction::PointerCast
             | IntrinsicFunction::PointerAddress
             | IntrinsicFunction::AddressPointer
