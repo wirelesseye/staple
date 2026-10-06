@@ -40,6 +40,7 @@ pub(crate) enum LoweredArtifactPlan {
     /// A reabstraction thunk (R5): converts a closure between the concrete and
     /// dynamic ABIs.
     ReabstractionThunk(ReabstractionThunkPlan),
+    ValueConversion(ValueConversionPlan),
     /// A garbage-collector finalizer. Expansion records the referenced drop glue.
     GcFinalizer(GcFinalizerPlan),
     /// A coroutine `resume`/`cleanup` pair. Expansion records the frame layout
@@ -79,6 +80,19 @@ pub(crate) struct ReabstractionThunkPlan {
     pub concrete: CheckedFunctionType,
     pub dynamic: CheckedFunctionType,
     pub direction: crate::specialization::ReabstractionDirection,
+    /// Parameter conversion, result conversion, and mutable parameter writeback,
+    /// in that order.
+    pub children: Vec<PlannedArtifact>,
+}
+
+/// A by-value conversion. Children are field converters or the leaf closure
+/// thunk; every dependency is closed and bound before emission.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ValueConversionPlan {
+    pub concrete: CheckedType,
+    pub dynamic: CheckedType,
+    pub direction: crate::specialization::ReabstractionDirection,
+    pub children: Vec<PlannedArtifact>,
 }
 
 /// One type a plan carries, as `LoweredArtifactPlan::visit_types` yields it.
@@ -151,6 +165,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             LoweredArtifactPlan::DescriptorBoundEntry(_) => "descriptor-bound-entry",
             LoweredArtifactPlan::ReabstractionThunk(_) => "reabstraction-thunk",
+            LoweredArtifactPlan::ValueConversion(_) => "value-conversion",
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload { .. }) => {
                 "gc-finalizer-payload"
             }
@@ -242,7 +257,21 @@ impl LoweredArtifactPlan {
             (
                 LoweredArtifactPlan::ReabstractionThunk(plan),
                 ArtifactRequestKey::ReabstractionThunk(key),
-            ) => same_function(&plan.concrete, &key.concrete) && plan.direction == key.direction,
+            ) => {
+                same_function(&plan.concrete, &key.concrete)
+                    && CanonicalFunctionType::dynamic(&plan.dynamic, origin)
+                        .is_ok_and(|shape| shape == key.dynamic)
+                    && plan.direction == key.direction
+            }
+            (
+                LoweredArtifactPlan::ValueConversion(plan),
+                ArtifactRequestKey::ValueConversion(key),
+            ) => {
+                same_type(&plan.concrete, &key.concrete)
+                    && CanonicalType::dynamic(&plan.dynamic, origin)
+                        .is_ok_and(|shape| shape == key.dynamic)
+                    && plan.direction == key.direction
+            }
             (LoweredArtifactPlan::DropGlue(plan), ArtifactRequestKey::DropGlue(key)) => {
                 same_type(&plan.value_type, key)
             }
@@ -340,6 +369,8 @@ impl LoweredArtifactPlan {
                 | LoweredArtifactPlan::CompoundDescriptorDrop(_)
                 | LoweredArtifactPlan::GcFinalizer(_)
                 | LoweredArtifactPlan::CoroutineCodes(_)
+                | LoweredArtifactPlan::ValueConversion(_)
+                | LoweredArtifactPlan::ReabstractionThunk(_)
         )
     }
 
@@ -357,6 +388,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::DescriptorDrop(plan) => plan.glue.is_some(),
             LoweredArtifactPlan::DescriptorBoundEntry(_) => true,
             LoweredArtifactPlan::ReabstractionThunk(_) => true,
+            LoweredArtifactPlan::ValueConversion(_) => true,
             LoweredArtifactPlan::CompoundDescriptorDrop(_) => true,
             LoweredArtifactPlan::DropGlue(plan) => !matches!(plan.body, DropGlueBody::Unexpanded),
             LoweredArtifactPlan::GcFinalizer(plan) => match plan {
@@ -711,13 +743,25 @@ impl LoweredArtifactPlan {
                 concrete: _,
                 dynamic: _,
                 direction: _,
+                children: _,
             }) => {}
+            LoweredArtifactPlan::ValueConversion(_) => {}
         }
     }
 
     fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
         match self {
             LoweredArtifactPlan::ConstructorAdapter(plan) => plan.visit_callees(visit),
+            LoweredArtifactPlan::ValueConversion(plan) => {
+                for child in &plan.children {
+                    visit(PlannedCalleeRef::Artifact(child));
+                }
+            }
+            LoweredArtifactPlan::ReabstractionThunk(plan) => {
+                for child in &plan.children {
+                    visit(PlannedCalleeRef::Artifact(child));
+                }
+            }
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::TypeDescriptor(plan) => {
                 for component in &plan.components {
@@ -737,7 +781,6 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::CompoundDescriptorDrop(_)
             | LoweredArtifactPlan::DescriptorBoundEntry(_)
-            | LoweredArtifactPlan::ReabstractionThunk(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
@@ -748,6 +791,16 @@ impl LoweredArtifactPlan {
     fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
         match self {
             LoweredArtifactPlan::ConstructorAdapter(plan) => plan.visit_callees_mut(visit),
+            LoweredArtifactPlan::ValueConversion(plan) => {
+                for child in &mut plan.children {
+                    visit(PlannedCalleeRefMut::Artifact(child));
+                }
+            }
+            LoweredArtifactPlan::ReabstractionThunk(plan) => {
+                for child in &mut plan.children {
+                    visit(PlannedCalleeRefMut::Artifact(child));
+                }
+            }
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::TypeDescriptor(plan) => {
                 for component in &mut plan.components {
@@ -767,7 +820,6 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::CompoundDescriptorDrop(_)
             | LoweredArtifactPlan::DescriptorBoundEntry(_)
-            | LoweredArtifactPlan::ReabstractionThunk(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)

@@ -3310,10 +3310,7 @@ impl LoweredProgram {
                         .coercion
                         .as_ref()
                         .map_or(&expression.value_type, |coercion| &coercion.target);
-                    match value_type {
-                        CheckedType::Function(function) => Some(function.clone()),
-                        _ => None,
-                    }
+                    Some(value_type.clone())
                 };
                 self.reabstraction_into(
                     call,
@@ -3382,10 +3379,7 @@ impl LoweredProgram {
                         .coercion
                         .as_ref()
                         .map_or(&expression.value_type, |coercion| &coercion.target);
-                    match value_type {
-                        CheckedType::Function(function) => Some(function.clone()),
-                        _ => None,
-                    }
+                    Some(value_type.clone())
                 };
                 self.reabstraction_into(
                     call,
@@ -3431,7 +3425,7 @@ impl LoweredProgram {
         &self,
         call_id: LoweredCallId,
         call: &LoweredCall,
-        argument_type: impl Fn(usize) -> Option<CheckedFunctionType>,
+        argument_type: impl Fn(usize) -> Option<CheckedType>,
         callee: FunctionInstanceId,
         caller_runtime_empty: bool,
         conversions: &mut BTreeMap<(LoweredCallId, Option<usize>), super::LoweredReabstraction>,
@@ -3449,92 +3443,76 @@ impl LoweredProgram {
         let Some(signature) = instance.body.as_ref().map(|body| body.signature.clone()) else {
             return;
         };
-        let concrete_to_dynamic = callee_runtime_empty == false;
-        let parameter_types = super::flattened_parameter_types(&signature.parameter);
-        for (index, argument) in call.arguments.iter().enumerate() {
-            let slot = argument.slot.unwrap_or(index);
-            let Some(parameter) = parameter_types.get(slot) else {
+        let concrete_to_dynamic = !callee_runtime_empty;
+        let whole = signature.mutations.contains(&crate::CheckedMutation::Whole);
+        let parameter_types = if whole {
+            vec![signature.parameter.as_ref().clone()]
+        } else {
+            super::flattened_parameter_types(&signature.parameter)
+        };
+        let actual_types = if whole {
+            vec![call.function_type.parameter.as_ref().clone()]
+        } else {
+            super::flattened_parameter_types(&call.function_type.parameter)
+        };
+        for (slot, parameter) in parameter_types.iter().enumerate() {
+            let actual = if caller_runtime_empty {
+                actual_types.get(slot).cloned()
+            } else {
+                call.arguments
+                    .iter()
+                    .enumerate()
+                    .find(|(index, argument)| argument.slot.unwrap_or(*index) == slot)
+                    .and_then(|(index, _)| argument_type(index))
+                    .or_else(|| actual_types.get(slot).cloned())
+            };
+            let Some(actual) = actual else {
                 continue;
             };
             let (concrete, dynamic) = if concrete_to_dynamic {
-                let CheckedType::Function(dynamic) = parameter else {
-                    continue;
-                };
-                if !crate::contains_type_parameter(&CheckedType::Function(dynamic.clone()))
-                    || super::dynamic_support::contains_unsupported_function(
-                        &CheckedType::Function(dynamic.clone()),
-                    )
-                {
-                    continue;
-                }
-                let Some(concrete) = argument_type(index) else {
-                    continue;
-                };
-                (concrete, dynamic.clone())
+                (actual, parameter.clone())
             } else {
-                let Some(dynamic) = argument_type(index) else {
-                    continue;
-                };
-                let CheckedType::Function(concrete) = parameter else {
-                    continue;
-                };
-                if !crate::contains_type_parameter(&CheckedType::Function(dynamic.clone()))
-                    || super::dynamic_support::contains_unsupported_function(
-                        &CheckedType::Function(dynamic.clone()),
-                    )
-                {
-                    continue;
-                }
-                (concrete.clone(), dynamic)
+                (parameter.clone(), actual)
             };
+            if super::value_conversions::needs_conversion(&concrete, &dynamic) {
+                conversions.insert(
+                    (call_id, Some(slot)),
+                    super::LoweredReabstraction {
+                        writeback: whole
+                            || signature
+                                .mutations
+                                .contains(&crate::CheckedMutation::Element(slot)),
+                        direction: if concrete_to_dynamic {
+                            super::LoweredReabstractionDirection::ConcreteToDynamic
+                        } else {
+                            super::LoweredReabstractionDirection::DynamicToConcrete
+                        },
+                        concrete,
+                        dynamic,
+                    },
+                );
+            }
+        }
+        let (concrete, dynamic) = if concrete_to_dynamic {
+            (call.result_type.clone(), signature.result.as_ref().clone())
+        } else {
+            (signature.result.as_ref().clone(), call.result_type.clone())
+        };
+        if super::value_conversions::needs_conversion(&concrete, &dynamic) {
             conversions.insert(
-                (call_id, Some(index)),
+                (call_id, None),
                 super::LoweredReabstraction {
+                    writeback: false,
                     direction: if concrete_to_dynamic {
-                        super::LoweredReabstractionDirection::ConcreteToDynamic
-                    } else {
                         super::LoweredReabstractionDirection::DynamicToConcrete
+                    } else {
+                        super::LoweredReabstractionDirection::ConcreteToDynamic
                     },
                     concrete,
                     dynamic,
                 },
             );
         }
-        let (concrete, dynamic) = if concrete_to_dynamic {
-            let CheckedType::Function(dynamic) = signature.result.as_ref() else {
-                return;
-            };
-            if !crate::contains_type_parameter(&CheckedType::Function(dynamic.clone())) {
-                return;
-            }
-            let CheckedType::Function(concrete) = &call.result_type else {
-                return;
-            };
-            (concrete.clone(), dynamic.clone())
-        } else {
-            let CheckedType::Function(dynamic) = &call.result_type else {
-                return;
-            };
-            if !crate::contains_type_parameter(&CheckedType::Function(dynamic.clone())) {
-                return;
-            }
-            let CheckedType::Function(concrete) = signature.result.as_ref() else {
-                return;
-            };
-            (concrete.clone(), dynamic.clone())
-        };
-        conversions.insert(
-            (call_id, None),
-            super::LoweredReabstraction {
-                direction: if concrete_to_dynamic {
-                    super::LoweredReabstractionDirection::DynamicToConcrete
-                } else {
-                    super::LoweredReabstractionDirection::ConcreteToDynamic
-                },
-                concrete,
-                dynamic,
-            },
-        );
     }
 }
 

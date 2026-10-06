@@ -846,6 +846,14 @@ pub(crate) enum ReabstractionDirection {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ReabstractionThunkKey {
     pub concrete: CanonicalFunctionType,
+    pub dynamic: CanonicalFunctionType,
+    pub direction: ReabstractionDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ValueConversionKey {
+    pub concrete: CanonicalType,
+    pub dynamic: CanonicalType,
     pub direction: ReabstractionDirection,
 }
 
@@ -864,6 +872,7 @@ pub(crate) enum ArtifactRequestKey {
     CompoundDescriptorDrop(CompoundDescriptorDropKey),
     DescriptorBoundEntry(DescriptorBoundEntryKey),
     ReabstractionThunk(ReabstractionThunkKey),
+    ValueConversion(ValueConversionKey),
     GcFinalizer(GcFinalizerKey),
     CoroutineCodes(CoroutineCodesKey),
     ReactionRunner(ReactiveRunnerKey),
@@ -885,6 +894,7 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             ArtifactRequestKey::DescriptorBoundEntry(_) => "descriptor-bound-entry",
             ArtifactRequestKey::ReabstractionThunk(_) => "reabstraction-thunk",
+            ArtifactRequestKey::ValueConversion(_) => "value-conversion",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => "gc-finalizer-payload",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Cell(_)) => "gc-finalizer-cell",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::ClosureEnvironment { .. }) => {
@@ -1112,6 +1122,7 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
         }
         ArtifactRequestKey::DescriptorBoundEntry(_) => "__staple_descriptor_bound_entry".to_owned(),
         ArtifactRequestKey::ReabstractionThunk(_) => "__staple_reabstraction".to_owned(),
+        ArtifactRequestKey::ValueConversion(_) => "__staple_value_conversion".to_owned(),
         ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => {
             "__staple_gc_finalizer_payload".to_owned()
         }

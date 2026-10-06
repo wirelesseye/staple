@@ -128,6 +128,11 @@ pub(crate) enum ArtifactUseSite {
         call: LoweredCallId,
         argument: Option<usize>,
     },
+    /// Inverse conversion of a mutable argument after a boundary call.
+    ReabstractionWriteback {
+        call: LoweredCallId,
+        argument: usize,
+    },
     /// An `Index` call's operand temporary dropped after the call: `operand` is
     /// the flattened parameter index, or `None` for the whole-argument
     /// temporary.
@@ -328,14 +333,8 @@ impl ArtifactFamilyHooks for ProductionHooks {
             | ArtifactRequestKey::DescriptorBoundEntry(_) => {
                 super::descriptor_artifacts::expand(program, artifact, plan)
             }
-            ArtifactRequestKey::ReabstractionThunk(_) => {
-                let LoweredArtifactPlan::ReabstractionThunk(plan) = plan else {
-                    return Err(vec![Diagnostic::new(
-                        record.origin.span.clone(),
-                        "reabstraction-thunk artifact carries a mismatched plan".to_string(),
-                    )]);
-                };
-                Ok((LoweredArtifactPlan::ReabstractionThunk(plan), Vec::new()))
+            ArtifactRequestKey::ReabstractionThunk(_) | ArtifactRequestKey::ValueConversion(_) => {
+                super::value_conversions::expand(plan, &record.origin)
             }
             ArtifactRequestKey::DropGlue(_) => {
                 let LoweredArtifactPlan::DropGlue(plan) = plan else {
@@ -429,6 +428,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::CompoundDescriptorDrop(_)
                 | ArtifactRequestKey::DescriptorBoundEntry(_)
                 | ArtifactRequestKey::ReabstractionThunk(_)
+                | ArtifactRequestKey::ValueConversion(_)
                 | ArtifactRequestKey::GcFinalizer(_)
                 | ArtifactRequestKey::CoroutineCodes(_)
                 | ArtifactRequestKey::ReactionRunner(_)
@@ -1765,7 +1765,8 @@ impl LoweredProgram {
                     report("thunk argument of call", id.index());
                 }
             }
-            ArtifactUseSite::ReabstractionThunk { call: id, .. } => {
+            ArtifactUseSite::ReabstractionThunk { call: id, .. }
+            | ArtifactUseSite::ReabstractionWriteback { call: id, .. } => {
                 if !call(id) {
                     report("call", id.index());
                 }

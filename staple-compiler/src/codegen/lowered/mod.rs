@@ -1,5 +1,6 @@
 //! LLVM emitter over the read-only lowered program view.
 
+mod conversions;
 mod coroutines;
 mod dynamic;
 mod reactive;
@@ -482,6 +483,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let ty = self
                         .backend
                         .compile_dynamic_function_type(&plan.function_type, 0)?;
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
+                LoweredArtifactPlan::ValueConversion(_) => {
+                    let pointer = self.backend.context.ptr_type(AddressSpace::default());
+                    let ty = self
+                        .backend
+                        .context
+                        .void_type()
+                        .fn_type(&[pointer.into(), pointer.into()], false);
                     vec![
                         self.backend
                             .llvm_module
@@ -1827,6 +1841,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
                 self.emit_descriptor_bound_entry(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::ValueConversion(plan) => {
+                self.emit_value_conversion(ordinal, plan, &artifact.origin.span)
             }
             LoweredArtifactPlan::ReabstractionThunk(plan) => {
                 self.emit_reabstraction_thunk(ordinal, plan, &artifact.origin.span)

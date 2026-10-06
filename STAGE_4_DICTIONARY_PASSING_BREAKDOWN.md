@@ -169,20 +169,21 @@ Breakdown-level decisions, in addition to the main plan's. Decisions 10 and
      environment.
 
    Passing every value by pointer, even concrete ones, makes the abstract
-   shape depend only on the function's written structure. Adapters are
-   then keyed by the concrete type alone. Ownership follows the existing
-   modes: a `move` parameter transfers the pointed-to value (the caller
+   shape depend only on the function's written structure. Adapter keys
+   include that symbolic shape as well as the concrete type. Ownership follows
+   the existing modes: a `move` parameter transfers the pointed-to value (the caller
    does not drop it), a borrowed one stays the caller's, and a `mut` one is
    updated in place.
 7. **Reabstraction at concrete/dynamic boundaries.** When a concrete
    instance calls a dynamic implementation, every argument and result whose
    dynamic type contains a function type is converted:
    - a function value converts through a generated reabstraction thunk,
-     keyed by `(concrete function type, direction)`, that captures the
-     original closure. Nested function types convert recursively;
+     keyed by the concrete function type, symbolic dynamic function type,
+     and direction, that captures the original closure. Nested function
+     types convert recursively;
    - a by-value product, sum, array, or wrapper converts element by element
-     into new storage through a generated conversion function, keyed the
-     same way;
+     into new storage through a generated conversion function, keyed by
+     `(concrete type, symbolic dynamic type, direction)`;
    - a function value reached through `Ref`, `Slice`, `Buffer`, or a shared
      capture cell can't be converted without copying shared storage. That
      is rejected with a diagnostic (see [Restrictions](#restrictions)).
@@ -232,8 +233,10 @@ That plan holds the detailed status. This section only summarizes it.
 **Stage 4a is not complete.** Dynamic implementations now support ordinary
 implicit thunks, managed references, and concrete structural dispatch and
 mutation, and generic constructor values, with recursively owned descriptor
-graphs. General reabstraction at aggregate and nested function boundaries
-remains. Detailed coverage and validation status live in the remainder plan's
+graphs. General reabstraction now converts nested functions and functions
+in by-value aggregates through lowering-owned artifacts. The remaining
+recursive callable and final exit checks are open. Detailed coverage and
+validation status live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
 
 **Decision R-F. The dynamic emitter stays separate.** It is too large to fold
@@ -310,7 +313,7 @@ commit references must be reachable from the branch.
 ### Step 4a.5 — Reabstraction
 
 - New artifact families `reabstraction-thunk` and `value-conversion`,
-  keyed by `(concrete type, direction)` (Decision 7).
+  keyed by `(concrete type, symbolic dynamic type, direction)` (Decision 7).
 - Insert conversions at concrete-to-dynamic call boundaries for arguments
   and results, including nested function types and by-value aggregates.
 - Report the restriction for function values behind references.

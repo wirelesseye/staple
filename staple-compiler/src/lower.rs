@@ -33,8 +33,7 @@ use crate::{
     IntegerType, IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction,
     ResolvedModule, SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId,
     TypeParameterId, TypedModule, contains_type_parameter, implicit_wrapper_representation,
-    infer_type_parameters, select_sum_alternative_with,
-    sum_through_implicit_wrapper,
+    infer_type_parameters, select_sum_alternative_with, sum_through_implicit_wrapper,
 };
 
 mod artifact_closure;
@@ -55,6 +54,7 @@ mod instance_resolution;
 mod runtime_call_facts;
 mod runtime_requirements;
 mod structural_artifacts;
+mod value_conversions;
 mod worklist;
 
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
@@ -107,13 +107,13 @@ pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredIn
 // Family-specific plan types are also used within the lowering subtree.
 pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
-    DescriptorBoundEntryPlan, DynamicCapture, ReabstractionThunkPlan,
-    CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorDropPlan,
-    DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture, DroppedElement, ExternAdapterPlan,
-    ExternDeclaration, GcFinalizerPlan, IndexedElement, LoweredArtifactPlan, PlanType,
-    PlannedArtifact, PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance,
+    CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorBoundEntryPlan,
+    DescriptorDropPlan, DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture,
+    DroppedElement, DynamicCapture, ExternAdapterPlan, ExternDeclaration, GcFinalizerPlan,
+    IndexedElement, LoweredArtifactPlan, PlanType, PlannedArtifact, PlannedCallee,
+    PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReabstractionThunkPlan,
     ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody,
-    StructuralMethodPlan, SumAlternative, TraitDelegate, TypeDescriptorPlan,
+    StructuralMethodPlan, SumAlternative, TraitDelegate, TypeDescriptorPlan, ValueConversionPlan,
 };
 
 // Runtime requirements. Fixed-named runtime surfaces are not an
@@ -710,11 +710,13 @@ impl LoweredCoercionPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LoweredReabstraction {
     pub direction: LoweredReabstractionDirection,
-    /// The concrete function type on the concrete side.
-    pub concrete: CheckedFunctionType,
-    /// The dynamic function type on the dynamic side, which mentions the
+    /// Convert a mutable argument back into the caller's storage after the call.
+    pub writeback: bool,
+    /// The materialized value type on the concrete side.
+    pub concrete: CheckedType,
+    /// The dynamic value type on the dynamic side, which mentions the
     /// run-time parameters the closure's type does.
-    pub dynamic: CheckedFunctionType,
+    pub dynamic: CheckedType,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2829,8 +2831,10 @@ pub(crate) struct LoweredProgram {
     /// Per-template transitive dynamic support, computed once per lowering.
     dynamic_support: std::collections::HashMap<FunctionId, dynamic_support::DynamicSupport>,
     /// Every exclusion reason per template, including the transitive reason.
-    pub(crate) dynamic_support_reasons:
-        std::collections::HashMap<FunctionId, std::collections::BTreeSet<dynamic_support::RejectionReason>>,
+    pub(crate) dynamic_support_reasons: std::collections::HashMap<
+        FunctionId,
+        std::collections::BTreeSet<dynamic_support::RejectionReason>,
+    >,
     /// Whether each excluded template's reasons include an in-scope one.
     pub(crate) dynamic_support_in_scope: std::collections::HashMap<FunctionId, bool>,
     /// The ordered, deduplicated runtime surfaces the closed catalog needs.
@@ -18130,8 +18134,10 @@ mod tests {
             ));
         }
         assert!(
-            indirect_chains.iter().any(|lowered| lowered.arguments[0].pass_mode
-                == LoweredArgumentPassMode::MutablePlace),
+            indirect_chains
+                .iter()
+                .any(|lowered| lowered.arguments[0].pass_mode
+                    == LoweredArgumentPassMode::MutablePlace),
             "`Ref.replace` mutates its reference in place"
         );
     }

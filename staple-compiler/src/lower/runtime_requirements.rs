@@ -12,11 +12,11 @@ use super::ArenaId;
 use super::cleanup_artifacts::{LoweredOwnerVisitor, walk_owner};
 use super::emission::OwnerArenas;
 use super::{
-    ConstructorConstruction, DropGlueBody, IntrinsicFunction, LoweredArtifactPlan, LoweredBindingSite, LoweredBoundTarget,
-    LoweredAwaitKind, LoweredBindingItem, LoweredCall, LoweredCallableTarget, LoweredCallableValue,
-    LoweredCallableValueId, LoweredClosureEnvironment, LoweredPattern, LoweredPatternKind,
-    LoweredProgram, LoweredStringTemplate, LoweredStringTemplatePart, Origin, RuntimeRelease,
-    StructuralBody, SymbolId, SymbolStorage,
+    ConstructorConstruction, DropGlueBody, IntrinsicFunction, LoweredArtifactPlan,
+    LoweredAwaitKind, LoweredBindingItem, LoweredBindingSite, LoweredBoundTarget, LoweredCall,
+    LoweredCallableTarget, LoweredCallableValue, LoweredCallableValueId, LoweredClosureEnvironment,
+    LoweredPattern, LoweredPatternKind, LoweredProgram, LoweredStringTemplate,
+    LoweredStringTemplatePart, Origin, RuntimeRelease, StructuralBody, SymbolId, SymbolStorage,
 };
 
 /// One runtime surface a lowered program needs. The declaration order is the
@@ -361,8 +361,10 @@ fn record_plan_requirements(
         | LoweredArtifactPlan::TypeDescriptor(_)
         | LoweredArtifactPlan::DescriptorDrop(_)
         | LoweredArtifactPlan::CompoundDescriptorDrop(_)
-        | LoweredArtifactPlan::DescriptorBoundEntry(_)
-        | LoweredArtifactPlan::ReabstractionThunk(_) => {}
+        | LoweredArtifactPlan::DescriptorBoundEntry(_) => {}
+        LoweredArtifactPlan::ReabstractionThunk(_) | LoweredArtifactPlan::ValueConversion(_) => {
+            requirements.record(RuntimeRequirement::GarbageCollector)
+        }
     }
 }
 
@@ -500,7 +502,9 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
         // A dynamic-shape closure allocates its descriptor environment in the
         // collector (R-D).
         let binding = match self.owner {
-            OwnerArenas::Instance(body) => body.bindings.get(&LoweredBindingSite::CallableValue(id)),
+            OwnerArenas::Instance(body) => {
+                body.bindings.get(&LoweredBindingSite::CallableValue(id))
+            }
             OwnerArenas::Initializer(initializer) => self
                 .program
                 .initializer_bindings

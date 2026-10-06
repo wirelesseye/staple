@@ -5,10 +5,7 @@ use super::{
     LoweredArtifactPlan as Plan, LoweredArtifactRequestId, LoweredProgram, PlannedArtifact,
     TypeDescriptorPlan,
 };
-use crate::specialization::{
-    ArtifactRequestKey, CanonicalFunctionType, CanonicalType, ReabstractionDirection,
-    ReabstractionThunkKey,
-};
+use crate::specialization::{ArtifactRequestKey, CanonicalType, ReabstractionDirection};
 use crate::{CheckedType, Origin};
 use staple_syntax::Diagnostic;
 
@@ -188,27 +185,51 @@ fn reabstraction_requests(
                 ReabstractionDirection::DynamicToConcrete
             }
         };
-        let concrete = CanonicalFunctionType::concrete(&conversion.concrete, origin)
-            .map_err(|diagnostic| vec![diagnostic])?;
-        requests.push(ClosureRequest::Artifact {
-            key: ArtifactRequestKey::ReabstractionThunk(ReabstractionThunkKey {
-                concrete,
-                direction,
-            }),
-            plan: Plan::ReabstractionThunk(crate::ReabstractionThunkPlan {
-                concrete: conversion.concrete.clone(),
-                dynamic: conversion.dynamic.clone(),
-                direction,
-            }),
-            kind: Kind::ReabstractionThunk,
-            origin: origin.clone(),
-            use_site: Some(
-                super::artifact_closure::ArtifactUseSite::ReabstractionThunk {
+        let mut request = super::value_conversions::request(
+            &conversion.concrete,
+            &conversion.dynamic,
+            direction,
+            origin,
+        )
+        .map_err(|error| vec![error])?;
+        let ClosureRequest::Artifact { use_site, .. } = &mut request else {
+            unreachable!()
+        };
+        *use_site = Some(
+            super::artifact_closure::ArtifactUseSite::ReabstractionThunk {
+                call: *call,
+                argument: *argument,
+            },
+        );
+        requests.push(request);
+        if conversion.writeback {
+            let argument = argument.expect("writeback belongs to an argument");
+            let inverse = match direction {
+                ReabstractionDirection::ConcreteToDynamic => {
+                    ReabstractionDirection::DynamicToConcrete
+                }
+                ReabstractionDirection::DynamicToConcrete => {
+                    ReabstractionDirection::ConcreteToDynamic
+                }
+            };
+            let mut request = super::value_conversions::request(
+                &conversion.concrete,
+                &conversion.dynamic,
+                inverse,
+                origin,
+            )
+            .map_err(|error| vec![error])?;
+            let ClosureRequest::Artifact { use_site, .. } = &mut request else {
+                unreachable!()
+            };
+            *use_site = Some(
+                super::artifact_closure::ArtifactUseSite::ReabstractionWriteback {
                     call: *call,
-                    argument: *argument,
+                    argument,
                 },
-            ),
-        });
+            );
+            requests.push(request);
+        }
     }
     Ok(requests)
 }
@@ -670,6 +691,7 @@ pub(super) fn expand(
         Plan::CompoundDescriptorDrop(plan) => Plan::CompoundDescriptorDrop(plan),
         Plan::DescriptorBoundEntry(plan) => Plan::DescriptorBoundEntry(plan),
         Plan::ReabstractionThunk(plan) => Plan::ReabstractionThunk(plan),
+        Plan::ValueConversion(plan) => Plan::ValueConversion(plan),
         Plan::DescriptorDrop(mut plan) => {
             let request = ClosureRequest::Artifact {
                 key: ArtifactRequestKey::DropGlue(

@@ -13,44 +13,48 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After the generic constructor-value continuation. This section is
-rewritten in place at each update, not appended to.
+After the general reabstraction continuation. This section is rewritten in
+place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks, managed references,
-concrete dispatch, and generic constructor values have dynamic implementations.
-P1, P2, P5, P6, and P7 are resolved. R5's general boundary conversions remain
-open.
+concrete dispatch, generic constructor values, and general boundary conversions
+have dynamic implementations. P1, P2, P3, P5, P6, and P7 are resolved.
 
 | Step | State |
 |---|---|
 | R0 — Measurement and hygiene | Lowering errors fail coverage; the baseline rule is documented. Concrete structural calls and mutation no longer fall back. |
 | R1 — Descriptor order | Done |
 | R2 — Concrete function values | Done |
-| R3 — Dynamic function values | Done. Ordinary and managed-reference constructors capture owned descriptors and expose the dynamic closure ABI; unsupported boundary shapes still fall back. |
+| R3 — Dynamic function values | Constructor adapters own their descriptors and expose the dynamic closure ABI. The nested recursive generic callable remains open. |
 | R4 — Dynamic environments and captures | Done. Descriptor graphs are recursively copied, including compound children. |
-| R5 — Reabstraction | Direct function boundaries only. Nested functions and functions in by-value aggregates still need general conversion (P3). |
+| R5 — Reabstraction | Done. Lowering-owned conversions handle nested functions and functions in by-value products, sums, wrappers, and fixed arrays (normalized to products). Functions behind references retain the explicit restriction. |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
-| R7 — Remaining forms | Ordinary implicit thunks now work for direct and indirect calls, including captures of run-time values and concrete thunks in dynamic bodies. |
+| R7 — Remaining forms | Ordinary implicit thunks work for direct and indirect calls. The remaining recursive callable and rejection-kind audit are open. |
 | R8 — Exit gate | Pending the remaining implementation and final complete checks. |
 
-**Coverage:** The 97-program refresh measured 6,212 generic templates,
-4,600 eligible (74%), and 1,612 rejected, with two in-scope rejections: one
-callable value and `keep`'s function-typed signature. The coverage ratchet is
-now 2. The returned product-constructor case was added after that snapshot;
-its execution and explicit dynamic selection pass. A diagnostic refresh
-will identify the remaining callable form before R8.
+**Coverage:** The 98-program refresh measured 6,284 generic templates,
+4,658 eligible (74%), and 1,626 rejected. The only in-scope rejection is
+`recur` in `local_recursive_generic` (`CallableValue`); it is not a constructor.
+R5 removes `keep`'s function-typed signature rejection. The coverage ratchet
+is now 1, down from 2.
 
 **Verified in this continuation:**
-- All `dynamic_` corpus programs pass the focused CLI differential execution.
-  The new constructor program exercises an ordinary wrapper constructor, a
-  returned product constructor, and returned `Ref` constructors for `I32`
-  and `U8`.
-- Lowering asserts dynamic selection for `wrapped`, `maker`, and `pair_maker`.
-- Constructor plans own their descriptor and compound-drop dependencies.
-  Their environments recursively copy runtime descriptor graphs; managed
-  payloads use the shared descriptor finalizer.
-- Concrete specialization keys still reject unresolved parameters. Symbolic
-  constructor keys explicitly preserve runtime parameter identity.
+- The focused CLI differential execution, dynamic-selection and ABI-shape
+  assertions, and complete corpus coverage refresh pass.
+- The `dynamic_reabstraction_shapes` regression executes conversions in both
+  directions for nested function types and functions inside each by-value
+  aggregate shape, including a sum alternative without a callback.
+- Lowering assertions require dynamic selection for each regression template
+  and both thunk directions for a concrete tuple behind an opaque runtime
+  parameter. Mutable callback round trips, replacement of a mutable callback,
+  and whole-wrapper mutation exercise thunk and direct-boundary writeback.
+- Conversion and thunk plans own their recursive artifact dependencies.
+  Closure adapters keep the original code/environment in GC storage; packed
+  payload accesses use alignment one. Wrapper field mutation uses the
+  representation's product offsets instead of overwriting the whole payload.
+- Keys include the symbolic dynamic shape and direction as well as the concrete
+  type. An opaque parameter and a written product can materialize to the same
+  concrete type while requiring different pointer counts.
 - Final complete workspace, differential, and default IR checks remain at R8.
 
 ## Open problems
@@ -72,15 +76,11 @@ resolved before R8.
   all three concrete forms and asserts dynamic selection for each template.
   Sum patterns obtain their payload descriptor from the payload type, so
   alternative wrappers do not pass their wrapper descriptor to a product.
-- **P3. The coverage gate can reach zero without general reabstraction.**
-  Converting nested function types and functions inside by-value aggregates
-  (Decision 7's `value-conversion` family) is unimplemented. The scanner
-  rejects these cases correctly, but only one corpus template (`keep`)
-  exercises them, and R5's required "function inside a sum" program was
-  never added. Handling `keep` alone would bring the count to zero.
-  → **R5:** implement the general conversion, and add bound-free execution
-  tests for each shape in both directions: a nested function type and a
-  function inside a product, a sum, a wrapper, and an array.
+- **P3. General reabstraction coverage — resolved.** The `value-conversion`
+  family recursively owns its child converters and closure thunks. Bound-free
+  execution and explicit dynamic-selection tests cover nested functions and
+  functions in products, sums, wrappers, and fixed arrays in both directions.
+  Additional execution covers opaque tuple arguments and mutable callbacks.
 - **P4. The status turned back into a log.** The Stage 4 breakdown's status
   section grew again after R0.5, out of order (R4 entries after R7) and
   self-contradictory (the in-scope count both "3" and "stays 11").
@@ -322,18 +322,17 @@ concrete (R-B), inside dynamic bodies.
   type contains a function type, including nested function types and
   by-value products, sums, arrays, and wrappers.
 - Artifact families `reabstraction-thunk` and `value-conversion`, keyed by
-  `(concrete type, direction)`.
+  `(concrete type, symbolic dynamic type, direction)`.
+  The symbolic shape distinguishes an opaque runtime parameter from a written
+  product that materializes to the same concrete type but has a different ABI.
 - The restriction for function values behind references, with its
   diagnostic, reported by the support analysis as an allowed reason.
 - **Measure:** no function-typed rejection remains outside the allowed
   restriction. Add corpus programs for `map`-style higher-order generics, a
   generic that returns a function, and a function inside a sum, each run in
   both modes.
-- **Still open (P3):** the `value-conversion` family and nested function
-  types. They need bound-free execution tests for each shape in both
-  directions (a nested function type, and a function inside a product, a
-  sum, a wrapper, and an array), because the corpus alone barely exercises
-  them.
+- **P3 resolved:** bound-free execution and selection tests cover every shape
+  in both directions, opaque tuple arguments, and mutable callback writeback.
 
 ### R6 — Buffer intrinsics and dynamic GC payloads
 

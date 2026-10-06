@@ -257,6 +257,7 @@ pub(crate) enum LoweredArtifactDependencyKind {
     CompoundDescriptorDrop,
     DescriptorBoundEntry,
     ReabstractionThunk,
+    ValueConversion,
     /// A generated garbage-collector finalizer.
     GcFinalizer,
     /// A coroutine body's generated resume/cleanup pair.
@@ -283,6 +284,7 @@ impl LoweredArtifactDependencyKind {
             LoweredArtifactDependencyKind::CompoundDescriptorDrop => "compound-descriptor-drop",
             LoweredArtifactDependencyKind::DescriptorBoundEntry => "descriptor-bound-entry",
             LoweredArtifactDependencyKind::ReabstractionThunk => "reabstraction-thunk",
+            LoweredArtifactDependencyKind::ValueConversion => "value-conversion",
             LoweredArtifactDependencyKind::GcFinalizer => "gc-finalizer",
             LoweredArtifactDependencyKind::CoroutineCodes => "coroutine-codes",
             LoweredArtifactDependencyKind::ReactionRunner => "reaction-runner",
@@ -322,6 +324,9 @@ impl LoweredArtifactDependencyKind {
             ) | (
                 LoweredArtifactDependencyKind::ReabstractionThunk,
                 ArtifactRequestKey::ReabstractionThunk(_)
+            ) | (
+                LoweredArtifactDependencyKind::ValueConversion,
+                ArtifactRequestKey::ValueConversion(_)
             ) | (
                 LoweredArtifactDependencyKind::GcFinalizer,
                 ArtifactRequestKey::GcFinalizer(_)

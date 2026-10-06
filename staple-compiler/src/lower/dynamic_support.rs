@@ -41,20 +41,6 @@ impl DynamicSupport {
 pub(crate) enum RejectionReason {
     /// A callable value expression (`CallableValue`).
     CallableValue,
-    /// A value whose type mentions a function type with run-time parameters.
-    #[allow(dead_code)]
-    FunctionTypedValue,
-    /// A coercion whose source or target mentions such a function type.
-    #[allow(dead_code)]
-    FunctionTypedCoercion,
-    /// A signature parameter or result is such a function type.
-    FunctionTypedSignature,
-    /// A call boundary passes or returns such a function type.
-    FunctionTypeAtCallBoundary,
-    /// A call through a closure value. All indirect calls are supported since
-    /// R2/R3; kept for future restrictions.
-    #[allow(dead_code)]
-    IndirectClosureCall,
     /// A parameter product appears in a dynamic signature.
     ParameterProducts,
     /// An intrinsic outside the supported and allowed sets.
@@ -67,11 +53,6 @@ pub(crate) enum RejectionReason {
     /// A resource mutation target.
     /// An index expression (trait-dispatched).
     IndexExpression,
-    /// An implicit thunk argument. The corpus uses these as reactive callback
-    /// and coroutine bodies (Stage 8); the dynamic emitter builds their
-    /// closures through the same machinery as R4.
-    #[allow(dead_code)]
-    ImplicitThunkArgument,
     /// A propagating or asserting pattern binding.
     PropagatingBinding,
     /// A nested generic `def` binding.
@@ -159,17 +140,11 @@ impl RejectionReason {
     pub(crate) fn description(self) -> &'static str {
         match self {
             RejectionReason::CallableValue => "callable value expression",
-            RejectionReason::FunctionTypedValue => "value of a function type",
-            RejectionReason::FunctionTypedCoercion => "function-typed coercion",
-            RejectionReason::FunctionTypedSignature => "function-typed signature",
-            RejectionReason::FunctionTypeAtCallBoundary => "function type at a call boundary",
-            RejectionReason::IndirectClosureCall => "indirect closure call",
             RejectionReason::ParameterProducts => "parameter products",
             RejectionReason::Intrinsic => "unsupported intrinsic",
             RejectionReason::BufferIntrinsic => "buffer intrinsic",
             RejectionReason::StringIntrinsic => "string intrinsic",
             RejectionReason::IndexExpression => "index expression",
-            RejectionReason::ImplicitThunkArgument => "implicit thunk argument",
             RejectionReason::PropagatingBinding => "propagating binding",
             RejectionReason::GenericBinding => "generic binding",
             RejectionReason::StringPattern => "string pattern",
@@ -552,53 +527,13 @@ fn contains_function_behind_reference(ty: &CheckedType) -> bool {
     }
 }
 
-/// Whether a type contains a function value R5 cannot convert yet: a nested
-/// function type, or a function inside a by-value aggregate. A direct function
-/// type and a function behind a reference are handled elsewhere.
-pub(super) fn contains_unsupported_function(ty: &CheckedType) -> bool {
-    match ty {
-        CheckedType::Function(function) => {
-            contains_polymorphic_function(&function.parameter)
-                || contains_polymorphic_function(&function.result)
-        }
-        CheckedType::Product(product) => product
-            .elements
-            .iter()
-            .any(|field| contains_polymorphic_function(&field.value_type)),
-        CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_polymorphic_function),
-        CheckedType::Wrapper {
-            arguments,
-            representation,
-            ..
-        } => {
-            arguments.iter().any(contains_polymorphic_function)
-                || contains_polymorphic_function(representation)
-        }
-        CheckedType::Array { element, .. } => contains_polymorphic_function(element),
-        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
-            arguments.iter().any(contains_polymorphic_function)
-        }
-        _ => false,
-    }
-}
-
-/// Whether any flattened parameter type or the result needs an unsupported
-/// conversion, or sits behind a reference.
+/// Shared storage cannot be rewritten while adapting an owned function value.
 fn signature_function_restriction(function_type: &CheckedFunctionType) -> Option<RejectionReason> {
-    let parameters = super::flattened_parameter_types(&function_type.parameter);
-    let mut reason = None;
-    for parameter in parameters
+    super::flattened_parameter_types(&function_type.parameter)
         .iter()
-        .chain(std::iter::once(&*function_type.result))
-    {
-        if contains_function_behind_reference(parameter) {
-            return Some(RejectionReason::FunctionBehindReference);
-        }
-        if contains_unsupported_function(parameter) {
-            reason = Some(RejectionReason::FunctionTypedSignature);
-        }
-    }
-    reason
+        .chain(std::iter::once(function_type.result.as_ref()))
+        .any(contains_function_behind_reference)
+        .then_some(RejectionReason::FunctionBehindReference)
 }
 
 struct SupportWalker<'program> {
@@ -936,41 +871,6 @@ impl SupportWalker<'_> {
         for entry in &call.substitutions.types {
             if contains_function_behind_reference(&entry.value_type) {
                 self.reject(RejectionReason::FunctionBehindReference);
-            } else if contains_unsupported_function(&entry.value_type) {
-                self.reject(RejectionReason::FunctionTypeAtCallBoundary);
-            }
-        }
-        // A concrete callee with a dynamic function-typed argument or result
-        // needs the dynamic-to-concrete direction, which the dynamic emitter
-        // does not apply yet. Reject rather than emit a wrong-ABI call.
-        let mentions_parameters =
-            contains_type_parameter(&CheckedType::Function(call.function_type.clone()))
-                || call
-                    .substitutions
-                    .types
-                    .iter()
-                    .any(|entry| contains_type_parameter(&entry.value_type));
-        if !mentions_parameters {
-            let dynamic_function = |ty: &CheckedType| {
-                matches!(ty, CheckedType::Function(_)) && contains_type_parameter(ty)
-            };
-            for argument in &call.arguments {
-                let Some(expression) = argument.expression else {
-                    continue;
-                };
-                if let Some(record) = self.program.expressions.get(expression)
-                    && dynamic_function(
-                        record
-                            .coercion
-                            .as_ref()
-                            .map_or(&record.value_type, |coercion| &coercion.target),
-                    )
-                {
-                    self.reject(RejectionReason::FunctionTypeAtCallBoundary);
-                }
-            }
-            if dynamic_function(&call.result_type) {
-                self.reject(RejectionReason::FunctionTypeAtCallBoundary);
             }
         }
         for step in &call.steps {
@@ -1083,7 +983,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 2;
+    const IN_SCOPE_BASELINE: usize = 1;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.
@@ -1240,6 +1140,75 @@ mod tests {
                             .is_some_and(|key| !key.runtime().is_empty())),
                 "{name} must run dynamically"
             );
+        }
+    }
+
+    #[test]
+    fn aggregate_reabstraction_is_selected_inside_dynamic_bodies() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let program = codegen_corpus()
+            .iter()
+            .find(|program| program.name == "dynamic_reabstraction_shapes")
+            .unwrap();
+        let CorpusSource::Inline(source) = program.source else {
+            panic!("conversion regression is inline");
+        };
+        let loaded = ProgramLoader::new()
+            .with_standard_library_root(workspace.join("stdlib"))
+            .load_source(source, workspace)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(loaded).unwrap();
+        let checked = TypeChecker::new().check(resolved).unwrap();
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&checked)
+            .unwrap();
+        for name in [
+            "nested",
+            "product",
+            "wrapper",
+            "summed",
+            "array",
+            "opaque",
+            "mutator",
+            "reset",
+            "reset_box",
+        ] {
+            let function = lowered
+                .program
+                .functions
+                .iter()
+                .find_map(|(_, id, function)| (function.name == name).then_some(id))
+                .unwrap();
+            assert_eq!(
+                lowered.program.dynamic_support(function),
+                DynamicSupport::Supported,
+                "{name}"
+            );
+            assert!(
+                lowered
+                    .program
+                    .instances
+                    .iter()
+                    .any(|(_, instance)| instance.template == function
+                        && lowered
+                            .program
+                            .specializations
+                            .instance(instance.ordinal)
+                            .is_some_and(|key| !key.runtime().is_empty())),
+                "{name} must run dynamically"
+            );
+        }
+        for direction in [
+            crate::specialization::ReabstractionDirection::ConcreteToDynamic,
+            crate::specialization::ReabstractionDirection::DynamicToConcrete,
+        ] {
+            assert!(lowered.program.artifacts.iter().any(|(_, artifact)| {
+                matches!(&artifact.plan, Some(crate::LoweredArtifactPlan::ValueConversion(plan)) if plan.direction == direction)
+            }), "both conversion directions must be planned");
+            assert!(lowered.program.artifacts.iter().any(|(_, artifact)| {
+                matches!(&artifact.plan, Some(crate::LoweredArtifactPlan::ReabstractionThunk(plan)) if plan.direction == direction && matches!(plan.concrete.parameter.as_ref(), CheckedType::Product(_)) && matches!(plan.dynamic.parameter.as_ref(), CheckedType::Parameter { .. }))
+            }), "tuple parameters must adapt between flattened and opaque ABIs");
         }
     }
 
