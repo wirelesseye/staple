@@ -100,11 +100,12 @@ bounds](#subtype-bounds)). A literal identifier parameter may use
 a typed wildcard when its syntax is not needed, or a binding when it is:
 
 ```staple
-macro conditional =
-    condition: Expr *
-    then_branch: Expr *
-    _: Ident "else" *
-    else_branch: Expr =>
+macro conditional = [
+    condition: Expr,
+    then_branch: Expr,
+    _: Ident "else",
+    else_branch: Expr,
+] =>
     parse_quote {
         match $condition {
             True => $then_branch,
@@ -123,10 +124,11 @@ two]`. A function-style macro may also use one `Sequence T` as a top-level
 parameter:
 
 ```staple
-macro collect =
-    values: Sequence (Ident String) *
-    _: Equals *
-    body: Braced Syntax => ...
+macro collect = [
+    values: Sequence (Ident String),
+    _: Equals,
+    body: Braced Syntax,
+] => ...
 ```
 
 The sequence consumes zero or more consecutive top-level arguments. Matching
@@ -392,13 +394,10 @@ pub type MacroCallMetadata = wrap (
 ```
 
 ```staple
-macro define_alias =
-    metadata: MacroCallMetadata *
-    ty: Type =>
-    {
-        let visibility = metadata.visibility
-        parse_quote { $visibility type Generated = alias $ty }
-    }
+macro define_alias = [metadata: MacroCallMetadata, ty: Type] => {
+    let visibility = metadata.visibility
+    parse_quote { $visibility type Generated = alias $ty }
+}
 
 pub define_alias I32
 ```
@@ -416,10 +415,11 @@ position each visibility form consumes one source atom; if none is present,
 `Private` is injected without consuming the following argument:
 
 ```staple
-macro configure =
-    value: Expr *
-    vis: Visibility *
-    ty: Type => ...
+macro configure = [
+    value: Expr,
+    vis: Visibility,
+    ty: Type
+] => ...
 
 configure value I32
 configure value pub I32
