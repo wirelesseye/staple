@@ -140,7 +140,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 98] = [
+static CORPUS: [CorpusProgram; 100] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -1247,6 +1247,56 @@ static CORPUS: [CorpusProgram; 98] = [
         )),
         "",
     ),
+    expect_trap(must_run(inline(
+        "dynamic_asserting_trap",
+        concat!(
+            "type Found T = wrap T\n",
+            "type Absent = wrap String\n",
+            "def asserted_failure: <T where Copy T> T -> T = value => { let maybe: Found T | Absent = Absent \"missing\"; let! Found(next) = maybe; next }\n",
+            "let result = asserted_failure 13\n",
+        ), "expressions",
+    ))),
+    expect_stdout(must_run(inline(
+        "dynamic_audit_forms",
+        concat!(
+            "use std.io.println\n",
+            "use std.slice.Slice\n",
+            "def indexed: <T where Copy T> T -> I32 = value => { let values = (8, 9); values[1] }\n",
+            "def named: <T where Copy T> T ->{state} (T, I32, I32) = value => { let mut count = 0; let make = () => { count = count + 1; (a: value, b: count) }; let expanded: (a: T, b: I32) = (...=make (), b: 7); (expanded.a, expanded.b, count) }\n",
+            "type Defaulted = from (a: I32, b: I32 = 5)\n",
+            "def defaults: <T where Copy T> T -> I32 = value => { let inputs: Defaulted = (a: 3); let (a, b) = inputs; a + b }\n",
+            "def spreads: <T where Copy T> T -> (T, T, I32) = value => { let pair = (value, value); (...pair, 9) }\n",
+            "def literals: <T where Copy T> (T, String) -> I32 = (value, text) => match text { \"yes\" => 1, _ => 2 }\n",
+            "type Held T = wrap T\n",
+            "type TextOrHeld T = alias String | Held T\n",
+            "def summed_literal: <T where Copy T> (T, TextOrHeld T) -> I32 = (value, text) => match text { \"yes\" => 3, Held item => 4, _ => 5 }\n",
+            "type Found T = wrap T\n",
+            "type Absent = wrap String\n",
+            "def propagate: <T where Copy T> (T, Bool) -> Found T | Absent = (value, flag) => { let maybe: Found T | Absent = if flag { Found value } else { Absent \"missing\" }; let? Found(next) = maybe; Found next }\n",
+            "def asserted: <T where Copy T> T -> T = value => { let maybe: Found T | Absent = Found value; let! Found(next) = maybe; next }\n",
+            "let (named_value, named_tag, evaluations) = named 6\n",
+            "let default_value = defaults 0\n",
+            "println \"${named_value} ${named_tag} ${evaluations} ${default_value}\"\n",
+            "let indexed_result = indexed 0\n",
+            "println \"${indexed_result}\"\n",
+            "let (first, second, tag) = spreads 6\n",
+            "println \"${first} ${second} ${tag}\"\n",
+            "let yes = literals (0, \"yes\")\n",
+            "let no = literals (0, \"no\")\n",
+            "println \"${yes} ${no}\"\n",
+            "let sum_yes = summed_literal.<I32> (0, \"yes\")\n",
+            "let sum_no = summed_literal.<I32> (0, \"no\")\n",
+            "let sum_held = summed_literal.<I32> (0, Held 7)\n",
+            "println \"${sum_yes} ${sum_no} ${sum_held}\"\n",
+            "let found = propagate (11, True)\n",
+            "let missing = propagate (11, False)\n",
+            "let found_value = match found { Found value => value, Absent text => 0 }\n",
+            "let missing_value = match missing { Found value => value, Absent text => 12 }\n",
+            "let asserted_value = asserted 13\n",
+            "println \"${found_value} ${missing_value} ${asserted_value}\"\n",
+
+        ), "expressions",
+    )), "6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n"),
     expect_stdout(
         must_run(inline(
             "dynamic_reabstraction_shapes",

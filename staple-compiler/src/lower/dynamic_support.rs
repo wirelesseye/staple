@@ -51,18 +51,8 @@ pub(crate) enum RejectionReason {
     StringIntrinsic,
     /// A resource expression in the body.
     /// A resource mutation target.
-    /// An index expression (trait-dispatched).
-    IndexExpression,
-    /// A propagating or asserting pattern binding.
-    PropagatingBinding,
     /// A nested generic `def` binding.
     GenericBinding,
-    /// A string literal pattern.
-    StringPattern,
-    /// A non-string literal pattern.
-    LiteralPattern,
-    /// A product spread step.
-    ProductSpread,
     /// Recursive (`Ref`/`Slice`/`Syntax`) construction.
     RecursiveConstruction,
     /// A deferred callable expression reached the scanner.
@@ -144,12 +134,7 @@ impl RejectionReason {
             RejectionReason::Intrinsic => "unsupported intrinsic",
             RejectionReason::BufferIntrinsic => "buffer intrinsic",
             RejectionReason::StringIntrinsic => "string intrinsic",
-            RejectionReason::IndexExpression => "index expression",
-            RejectionReason::PropagatingBinding => "propagating binding",
             RejectionReason::GenericBinding => "generic binding",
-            RejectionReason::StringPattern => "string pattern",
-            RejectionReason::LiteralPattern => "literal pattern",
-            RejectionReason::ProductSpread => "product spread",
             RejectionReason::RecursiveConstruction => "recursive construction",
             RejectionReason::Deferred => "deferred expression",
             RejectionReason::ParameterDependentNonGeneric => "parameter-dependent non-generic call",
@@ -595,9 +580,6 @@ impl SupportWalker<'_> {
                 }
             }
             LoweredItemKind::PatternBinding(binding) => {
-                if binding.propagating || binding.asserting {
-                    self.reject(RejectionReason::PropagatingBinding);
-                }
                 self.expression(binding.value);
             }
             LoweredItemKind::Assignment(assignment) => {
@@ -663,7 +645,13 @@ impl SupportWalker<'_> {
                     self.reject(RejectionReason::TraitCallRuntime);
                 }
             }
-            LoweredExpressionKind::Index(_) => self.reject(RejectionReason::IndexExpression),
+            LoweredExpressionKind::Index(index) => {
+                if index.arguments.iter().any(contains_type_parameter) {
+                    self.reject(RejectionReason::TraitCallRuntime);
+                }
+                self.expression(index.base);
+                self.expression(index.index);
+            }
             LoweredExpressionKind::CallableValue(value) => {
                 // R2 builds concrete closures; R3 builds dynamic-shape
                 // closures to a descriptor-bound entry for a generic `def` or
@@ -756,9 +744,9 @@ impl SupportWalker<'_> {
                         | LoweredProductStep::Default { expression, .. } => {
                             self.expression(*expression);
                         }
-                        LoweredProductStep::PositionalSpread { .. }
-                        | LoweredProductStep::NamedSpread { .. } => {
-                            self.reject(RejectionReason::ProductSpread)
+                        LoweredProductStep::PositionalSpread { expression, .. }
+                        | LoweredProductStep::NamedSpread { expression, .. } => {
+                            self.expression(*expression)
                         }
                     }
                 }
@@ -798,7 +786,7 @@ impl SupportWalker<'_> {
             return;
         };
         match &pattern.kind {
-            LoweredPatternKind::Literal { .. } => self.reject(RejectionReason::LiteralPattern),
+            LoweredPatternKind::Literal { .. } => {}
             LoweredPatternKind::Wildcard | LoweredPatternKind::Binding { .. } => {}
             LoweredPatternKind::Product { elements, .. } => {
                 for element in elements {
@@ -806,12 +794,6 @@ impl SupportWalker<'_> {
                 }
             }
             LoweredPatternKind::Nominal { argument, .. } => {
-                if matches!(
-                    &pattern.test.subject,
-                    CheckedType::String | CheckedType::StringLiteralSet(_)
-                ) {
-                    self.reject(RejectionReason::StringPattern);
-                }
                 self.pattern(*argument);
             }
             LoweredPatternKind::At {
@@ -1182,6 +1164,66 @@ mod tests {
             lowered.program.dynamic_support_reasons[&function],
             BTreeSet::from([RejectionReason::FunctionBehindReference])
         );
+    }
+
+    #[test]
+    fn audited_forms_are_selected_dynamically() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let program = codegen_corpus()
+            .iter()
+            .find(|program| program.name == "dynamic_audit_forms")
+            .unwrap();
+        let CorpusSource::Inline(source) = program.source else {
+            panic!("audit regression is inline");
+        };
+        let loaded = ProgramLoader::new()
+            .with_standard_library_root(workspace.join("stdlib"))
+            .load_source(source, workspace)
+            .unwrap();
+        let checked = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(loaded).unwrap())
+            .unwrap();
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&checked)
+            .unwrap();
+        for name in [
+            "indexed",
+            "named",
+            "defaults",
+            "spreads",
+            "literals",
+            "summed_literal",
+            "propagate",
+            "asserted",
+            "propagate",
+            "asserted",
+        ] {
+            let function = lowered
+                .program
+                .functions
+                .iter()
+                .find_map(|(_, id, function)| (function.name == name).then_some(id))
+                .unwrap();
+            assert_eq!(
+                lowered.program.dynamic_support(function),
+                DynamicSupport::Supported,
+                "{name}"
+            );
+            assert!(
+                lowered
+                    .program
+                    .instances
+                    .iter()
+                    .any(|(_, instance)| instance.template == function
+                        && lowered
+                            .program
+                            .specializations
+                            .instance(instance.ordinal)
+                            .is_some_and(|key| !key.runtime().is_empty())),
+                "{name} must run dynamically"
+            );
+        }
     }
 
     #[test]

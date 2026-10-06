@@ -235,7 +235,9 @@ implicit thunks, managed references, and concrete structural dispatch and
 mutation, and generic constructor values, with recursively owned descriptor
 graphs. General reabstraction now converts nested functions and functions
 in by-value aggregates through lowering-owned artifacts. The remaining
-shared-cell function restriction is classified explicitly; the rejection-kind
+shared-cell function restriction is classified explicitly. Concrete indexing,
+spreads, defaults, string literal patterns, and propagation/assertion bindings
+have dynamic emission; the rejection-kind
 audit and final exit checks are open. Detailed coverage and
 validation status live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
