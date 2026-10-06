@@ -241,9 +241,11 @@ have dynamic emission. Nested generic bindings record initialization state
 without evaluating their initializer. Both emitters share String/CString
 kernels. Concrete-signature closures with runtime captures use planned
 ABI adapters. Concrete child closures receive native capture environments,
-and shared cells retain native initialization state plus owned descriptors;
+and shared cells retain native initialization state plus owned descriptors.
+Dynamic storage loads permit packed product field alignment;
 the rejection-kind
-audit is documented, and final exit checks remain. Detailed coverage and
+audit is documented, and final exit checks remain. The default corpus trap
+assertion now accepts preserved signal statuses and nonzero panic exits. Detailed coverage and
 validation status live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
 

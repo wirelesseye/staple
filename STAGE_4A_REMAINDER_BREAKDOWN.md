@@ -13,7 +13,7 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After concrete capture interoperability. This section is rewritten in
+After the trap-status harness correction. This section is rewritten in
 place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks, managed references,
@@ -30,7 +30,7 @@ have dynamic implementations. P1, P2, P3, P5, P6, and P7 are resolved.
 | R5 — Reabstraction | Done. Lowering-owned conversions handle nested functions and functions in by-value products, sums, wrappers, and fixed arrays (normalized to products). Functions behind references retain the explicit restriction. |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
 | R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. String/CString kernels share concrete emission helpers. The rejection-kind audit is recorded below; final execution, workspace, coverage, and IR gates remain. |
-| R8 — Exit gate | Pending the remaining implementation and final complete checks. |
+| R8 — Exit gate | Final checks are running. The initial workspace run exposed a trap-status assertion that still expected `None` after signal preservation; the harness now accepts nonzero exits/signals while differential checks retain exact status equality. |
 
 **Coverage:** The last completed 100-program refresh measured 6,420 generic templates,
 4,764 eligible (74%), and 1,656 rejected for allowed reasons. The baseline
@@ -38,6 +38,9 @@ remains zero, with no in-scope rejections.
 
 **Verified in this continuation:**
 - The zero-baseline full corpus coverage refresh passes for all 100 programs.
+- Dynamic storage loads explicitly use alignment one, since ABI pointers may
+  refer to packed product fields. A bound-free packed-buffer case checks the
+  returned capacity and requires alignment-one loads in its dynamic LLVM IR.
 - Concrete-only captures and mutable concrete shared cells execute in a dynamic
   parent. Native environments read by-value fields with packed alignment; cells
   retain native initialization state, and captured state-only cells live on the

@@ -4644,11 +4644,15 @@ mod tests {
             }
             let behavior = compile_link_run(&lowered, &options)
                 .unwrap_or_else(|error| panic!("`{}` should link and run: {error}", program.name));
-            assert_eq!(
+            assert!(
+                if program.traps {
+                    behavior.0 != Some(0)
+                } else {
+                    behavior.0 == Some(0)
+                },
+                "`{}` has unexpected exit status {:?}",
+                program.name,
                 behavior.0,
-                if program.traps { None } else { Some(0) },
-                "`{}` has unexpected exit status",
-                program.name
             );
             let expected = program
                 .expected_stdout
