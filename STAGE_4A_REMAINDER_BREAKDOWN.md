@@ -13,43 +13,45 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After the concrete dispatch continuation. This section is
+After the generic constructor-value continuation. This section is
 rewritten in place at each update, not appended to.
 
-**Stage 4a is not complete.** Ordinary implicit thunks now use dynamic closure
-entries, and dynamic `Ref` construction uses a descriptor-bearing GC payload.
-P1, P2, P5, P6, and P7 are resolved. R3's
-generic constructor values, and R5's general boundary conversions remain open.
+**Stage 4a is not complete.** Ordinary implicit thunks, managed references,
+concrete dispatch, and generic constructor values have dynamic implementations.
+P1, P2, P5, P6, and P7 are resolved. R5's general boundary conversions remain
+open.
 
 | Step | State |
 |---|---|
 | R0 — Measurement and hygiene | Lowering errors fail coverage; the baseline rule is documented. Concrete structural calls and mutation no longer fall back. |
 | R1 — Descriptor order | Done |
 | R2 — Concrete function values | Done |
-| R3 — Dynamic function values | Generic constructor values remain (2 templates). Nested function values within dynamic bodies are supported; unsupported boundary shapes still fall back. |
+| R3 — Dynamic function values | Done. Ordinary and managed-reference constructors capture owned descriptors and expose the dynamic closure ABI; unsupported boundary shapes still fall back. |
 | R4 — Dynamic environments and captures | Done. Descriptor graphs are recursively copied, including compound children. |
 | R5 — Reabstraction | Direct function boundaries only. Nested functions and functions in by-value aggregates still need general conversion (P3). |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
 | R7 — Remaining forms | Ordinary implicit thunks now work for direct and indirect calls, including captures of run-time values and concrete thunks in dynamic bodies. |
 | R8 — Exit gate | Pending the remaining implementation and final complete checks. |
 
-**Coverage:** 4,550 of 6,148 generic templates (74%) across 96 corpus
-programs are eligible for dynamic implementations. There are 1,598 rejected
-templates; three have in-scope reasons: two generic constructor values and
-`keep`, which needs aggregate reabstraction. The coverage test passes at the
-ratchet of 3. The concrete-dispatch regression asserts dynamic selection for
-all three implementations.
+**Coverage:** The 97-program refresh measured 6,212 generic templates,
+4,600 eligible (74%), and 1,612 rejected, with two in-scope rejections: one
+callable value and `keep`'s function-typed signature. The coverage ratchet is
+now 2. The returned product-constructor case was added after that snapshot;
+its execution and explicit dynamic selection pass. A diagnostic refresh
+will identify the remaining callable form before R8.
 
 **Verified in this continuation:**
-- The concrete-dispatch corpus program prints `7`, `8`, and `9` identically
-  in default and differential modes; every regression named `dynamic_` passes
-  the focused CLI differential run.
-- The lowering regression asserts dynamic instances for all three concrete
-  dispatch implementations.
-- The differential harness now compares Unix terminating signals as part
-  of process status; different crashes cannot compare equal as `None`.
-- The previous full workspace run passed. Final full differential execution,
-  default-mode IR comparison, and workspace checks remain required at R8.
+- All `dynamic_` corpus programs pass the focused CLI differential execution.
+  The new constructor program exercises an ordinary wrapper constructor, a
+  returned product constructor, and returned `Ref` constructors for `I32`
+  and `U8`.
+- Lowering asserts dynamic selection for `wrapped`, `maker`, and `pair_maker`.
+- Constructor plans own their descriptor and compound-drop dependencies.
+  Their environments recursively copy runtime descriptor graphs; managed
+  payloads use the shared descriptor finalizer.
+- Concrete specialization keys still reject unresolved parameters. Symbolic
+  constructor keys explicitly preserve runtime parameter identity.
+- Final complete workspace, differential, and default IR checks remain at R8.
 
 ## Open problems
 

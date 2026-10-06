@@ -205,7 +205,8 @@ impl LoweredArtifactPlan {
                 plan.symbol == key.symbol
                     && plan.type_id == key.type_id
                     && CanonicalAdapterKind::from(plan.adapter) == key.adapter
-                    && same_function(&plan.callable_type, &key.callable_type)
+                    && CanonicalFunctionType::dynamic(&plan.callable_type, origin)
+                        .is_ok_and(|shape| shape == key.callable_type)
             }
             (
                 LoweredArtifactPlan::StructuralMethod(plan),
@@ -241,9 +242,7 @@ impl LoweredArtifactPlan {
             (
                 LoweredArtifactPlan::ReabstractionThunk(plan),
                 ArtifactRequestKey::ReabstractionThunk(key),
-            ) => {
-                same_function(&plan.concrete, &key.concrete) && plan.direction == key.direction
-            }
+            ) => same_function(&plan.concrete, &key.concrete) && plan.direction == key.direction,
             (LoweredArtifactPlan::DropGlue(plan), ArtifactRequestKey::DropGlue(key)) => {
                 same_type(&plan.value_type, key)
             }
@@ -283,10 +282,7 @@ impl LoweredArtifactPlan {
                             closure: expected_closure,
                         },
                     ) => closure.index() == expected_closure.index(),
-                    (
-                        GcFinalizerPlan::DynamicBuffer,
-                        GcFinalizerKey::DynamicBuffer,
-                    ) => true,
+                    (GcFinalizerPlan::DynamicBuffer, GcFinalizerKey::DynamicBuffer) => true,
                     (GcFinalizerPlan::DynamicCell, GcFinalizerKey::DynamicCell) => true,
                     _ => false,
                 }
@@ -444,6 +440,7 @@ impl LoweredArtifactPlan {
                 adapter: _,
                 callable_type,
                 construction,
+                layout: _,
             }) => {
                 visit(Function(callable_type));
                 match construction {
@@ -794,6 +791,8 @@ pub(crate) struct ConstructorAdapterPlan {
     pub callable_type: CheckedFunctionType,
     /// The construction the adapter performs. `Unexpanded` at request time.
     pub construction: ConstructorConstruction,
+    /// Descriptor and compound-drop dependencies of a dynamic representation.
+    pub layout: Vec<PlannedArtifact>,
 }
 
 /// How a constructor adapter turns its flattened parameters into its result.
@@ -824,7 +823,47 @@ pub(crate) enum ConstructorConstruction {
 }
 
 impl ConstructorAdapterPlan {
+    /// Private environment order for descriptors captured by a dynamic constructor.
+    pub(crate) fn runtime_parameters(&self) -> Vec<crate::TypeParameterId> {
+        fn collect(ty: &CheckedType, ids: &mut std::collections::BTreeSet<crate::TypeParameterId>) {
+            match ty {
+                CheckedType::Parameter { id, .. } => {
+                    ids.insert(*id);
+                }
+                CheckedType::Product(product) => {
+                    for field in &product.elements {
+                        collect(&field.value_type, ids);
+                    }
+                }
+                CheckedType::Sum(sum) => {
+                    for alternative in &sum.alternatives {
+                        collect(alternative, ids);
+                    }
+                }
+                CheckedType::Wrapper { representation, .. } => collect(representation, ids),
+                CheckedType::Ref(ty) | CheckedType::Slice(ty) | CheckedType::Buffer(ty) => {
+                    collect(ty, ids)
+                }
+                CheckedType::Array { element, count } => {
+                    collect(element, ids);
+                    collect(count, ids);
+                }
+                CheckedType::Function(function) => {
+                    collect(&function.parameter, ids);
+                    collect(&function.result, ids);
+                }
+                _ => {}
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        collect(&self.callable_type.parameter, &mut ids);
+        collect(&self.callable_type.result, &mut ids);
+        ids.into_iter().collect()
+    }
     fn visit_callees<'a>(&'a self, visit: &mut impl FnMut(PlannedCalleeRef<'a>)) {
+        for layout in &self.layout {
+            visit(PlannedCalleeRef::Artifact(layout));
+        }
         if let ConstructorConstruction::ManagedRef {
             finalizer: Some(finalizer),
             ..
@@ -835,6 +874,9 @@ impl ConstructorAdapterPlan {
     }
 
     fn visit_callees_mut<'a>(&'a mut self, visit: &mut impl FnMut(PlannedCalleeRefMut<'a>)) {
+        for layout in &mut self.layout {
+            visit(PlannedCalleeRefMut::Artifact(layout));
+        }
         if let ConstructorConstruction::ManagedRef {
             finalizer: Some(finalizer),
             ..

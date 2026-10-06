@@ -22,8 +22,8 @@ use crate::specialization::{
 use crate::{
     CheckedCoercion, CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType,
     CheckedPropagation, CheckedResource, CheckedTraitBound, CheckedTraitDispatch, CheckedType,
-    FunctionId, InitializerId, SymbolId, TypeId, TypeParameterId, contains_type_parameter, substitute_effect_set,
-    substitute_type,
+    FunctionId, InitializerId, SymbolId, TypeId, TypeParameterId, contains_type_parameter,
+    substitute_effect_set, substitute_type,
 };
 
 use super::instance_resolution::{
@@ -2707,14 +2707,13 @@ impl<'a> BodyCloner<'a> {
             }
         } else {
             let runtime = if differential {
-                self.program
-                    .differential_call_runtime(
-                        function,
-                        self.enclosing.key.runtime(),
-                        false,
-                        &call_function_type,
-                        &call_substitutions,
-                    )
+                self.program.differential_call_runtime(
+                    function,
+                    self.enclosing.key.runtime(),
+                    false,
+                    &call_function_type,
+                    &call_substitutions,
+                )
             } else {
                 None
             };
@@ -3181,7 +3180,7 @@ impl<'a> BodyCloner<'a> {
                 return;
             }
         };
-        match ConstructorAdapterKey::new(symbol, type_id, adapter, &concrete, origin) {
+        match ConstructorAdapterKey::shape(symbol, type_id, adapter, &concrete, origin) {
             Ok(key) => {
                 let key = ArtifactRequestKey::ConstructorAdapter(key);
                 match self.artifacts_by_key.get(&key) {
@@ -3279,7 +3278,10 @@ impl LoweredProgram {
                 .specializations
                 .instance(self.instances.get(id).expect("instance").ordinal)
                 .is_some_and(|key| key.runtime().is_empty());
-            let Some(body) = self.instances.get(id).and_then(|record| record.body.as_ref())
+            let Some(body) = self
+                .instances
+                .get(id)
+                .and_then(|record| record.body.as_ref())
             else {
                 continue;
             };
@@ -3363,9 +3365,7 @@ impl LoweredProgram {
                     &record.substitutions,
                 );
                 let resolved = match runtime {
-                    Some(runtime) => {
-                        self.resolve_instance_request_with_runtime(&request, &runtime)
-                    }
+                    Some(runtime) => self.resolve_instance_request_with_runtime(&request, &runtime),
                     None => self.resolve_instance_request(&request),
                 };
                 let Ok(resolved) = resolved else {

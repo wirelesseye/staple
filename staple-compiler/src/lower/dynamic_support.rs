@@ -752,6 +752,10 @@ impl SupportWalker<'_> {
                     callable.target,
                     LoweredCallableTarget::DirectFunction { .. }
                         | LoweredCallableTarget::TraitImplementation { .. }
+                        | LoweredCallableTarget::Constructor {
+                            recursive: None | Some(crate::RecursiveConstruction::ManagedReference),
+                            ..
+                        }
                 );
                 // A callable value whose target template cannot be lowered
                 // dynamically is a transitive dependency.
@@ -1079,7 +1083,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 3;
+    const IN_SCOPE_BASELINE: usize = 2;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.
@@ -1191,6 +1195,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn constructor_values_are_selected_inside_dynamic_bodies() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let program = codegen_corpus()
+            .iter()
+            .find(|program| program.name == "dynamic_constructor_values")
+            .unwrap();
+        let CorpusSource::Inline(source) = program.source else {
+            panic!("constructor regression is inline");
+        };
+        let loaded = ProgramLoader::new()
+            .with_standard_library_root(workspace.join("stdlib"))
+            .load_source(source, workspace)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(loaded).unwrap();
+        let checked = TypeChecker::new().check(resolved).unwrap();
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&checked)
+            .unwrap();
+        for name in ["wrapped", "maker", "pair_maker"] {
+            let function = lowered
+                .program
+                .functions
+                .iter()
+                .find_map(|(_, id, function)| (function.name == name).then_some(id))
+                .unwrap();
+            assert_eq!(
+                lowered.program.dynamic_support(function),
+                DynamicSupport::Supported,
+                "{name}"
+            );
+            assert!(
+                lowered
+                    .program
+                    .instances
+                    .iter()
+                    .any(|(_, instance)| instance.template == function
+                        && lowered
+                            .program
+                            .specializations
+                            .instance(instance.ordinal)
+                            .is_some_and(|key| !key.runtime().is_empty())),
+                "{name} must run dynamically"
+            );
+        }
+    }
+
     /// The tracked coverage report (R0.2). Every generic template in the
     /// corpus is counted once per program; a template is in scope when any of
     /// its reasons is. Baseline increases require new corpus programs or
@@ -1248,6 +1300,7 @@ mod tests {
                     .unwrap_or(false)
                 {
                     in_scope += 1;
+                    eprintln!("in-scope template `{}`: {:?}", function.name, reasons);
                 }
             }
         }

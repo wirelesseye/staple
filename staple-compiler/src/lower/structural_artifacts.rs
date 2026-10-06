@@ -54,6 +54,42 @@ pub(super) fn expand_constructor_adapter(
         .get(plan.type_id)
         .and_then(|metadata| metadata.recursive_construction);
     let mut requests = Vec::new();
+    let mut layout = Vec::new();
+    if !plan.runtime_parameters().is_empty() {
+        let mut types = Vec::new();
+        super::descriptor_artifacts::collect_concrete_types(&product, &mut types);
+        for ty in types {
+            let request = super::descriptor_artifacts::descriptor_request(&ty, &origin)
+                .map_err(|error| vec![error])?;
+            let ClosureRequest::Artifact { key, kind, .. } = &request else {
+                unreachable!()
+            };
+            layout.push(PlannedArtifact {
+                key: key.clone(),
+                artifact: None,
+                kind: *kind,
+            });
+            requests.push(request);
+        }
+        let mut shapes = Vec::new();
+        super::descriptor_artifacts::collect_compound_shapes(&product, &mut shapes);
+        for shape in shapes {
+            let key = ArtifactRequestKey::CompoundDescriptorDrop(shape);
+            let kind = LoweredArtifactDependencyKind::CompoundDescriptorDrop;
+            layout.push(PlannedArtifact {
+                key: key.clone(),
+                artifact: None,
+                kind,
+            });
+            requests.push(ClosureRequest::Artifact {
+                key,
+                plan: LoweredArtifactPlan::CompoundDescriptorDrop(shape),
+                kind,
+                origin: origin.clone(),
+                use_site: None,
+            });
+        }
+    }
     let construction = match &*plan.callable_type.result {
         CheckedType::Ref(payload) => {
             if declared != Some(RecursiveConstruction::ManagedReference) {
@@ -66,7 +102,21 @@ pub(super) fn expand_constructor_adapter(
                 )]);
             }
             let payload = payload.as_ref().clone();
-            let finalizer = if program.concrete_needs_drop(&payload) {
+            let finalizer = if !plan.runtime_parameters().is_empty() {
+                let key = ArtifactRequestKey::GcFinalizer(GcFinalizerKey::DynamicCell);
+                requests.push(ClosureRequest::Artifact {
+                    key: key.clone(),
+                    plan: LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::DynamicCell),
+                    kind: LoweredArtifactDependencyKind::GcFinalizer,
+                    origin: origin.clone(),
+                    use_site: None,
+                });
+                Some(PlannedArtifact {
+                    key,
+                    artifact: None,
+                    kind: LoweredArtifactDependencyKind::GcFinalizer,
+                })
+            } else if program.concrete_needs_drop(&payload) {
                 let canonical = match CanonicalType::concrete(&payload, &origin) {
                     Ok(canonical) => canonical,
                     Err(diagnostic) => return Err(vec![diagnostic]),
@@ -116,6 +166,7 @@ pub(super) fn expand_constructor_adapter(
     Ok((
         LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
             construction,
+            layout,
             ..plan
         }),
         requests,

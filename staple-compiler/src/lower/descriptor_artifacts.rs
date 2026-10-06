@@ -101,64 +101,69 @@ pub(super) fn concrete_body_types(body: &super::LoweredInstanceBody) -> Vec<Chec
     types
 }
 
-pub(super) fn compound_body_shapes(
-    body: &super::LoweredInstanceBody,
-) -> Vec<crate::specialization::CompoundDescriptorDropKey> {
+pub(super) fn collect_compound_shapes(
+    ty: &CheckedType,
+    shapes: &mut Vec<crate::specialization::CompoundDescriptorDropKey>,
+) {
     use crate::specialization::{
         CompoundDescriptorDropKey as Key, CompoundDescriptorShape as Shape,
     };
-    fn collect(ty: &CheckedType, shapes: &mut Vec<Key>) {
-        if !crate::contains_type_parameter(ty) {
+
+    if !crate::contains_type_parameter(ty) {
+        return;
+    }
+    let (shape, children): (Shape, Vec<&CheckedType>) = match ty {
+        CheckedType::Product(product) => (
+            Shape::Product,
+            product
+                .elements
+                .iter()
+                .map(|field| &field.value_type)
+                .collect(),
+        ),
+        CheckedType::Sum(sum) => (Shape::Sum, sum.alternatives.iter().collect()),
+        CheckedType::Wrapper { representation, .. } => {
+            collect_compound_shapes(representation, shapes);
             return;
         }
-        let (shape, children): (Shape, Vec<&CheckedType>) = match ty {
-            CheckedType::Product(product) => (
-                Shape::Product,
-                product
-                    .elements
-                    .iter()
-                    .map(|field| &field.value_type)
-                    .collect(),
-            ),
-            CheckedType::Sum(sum) => (Shape::Sum, sum.alternatives.iter().collect()),
-            CheckedType::Wrapper { representation, .. } => {
-                collect(representation, shapes);
-                return;
-            }
-            _ => return,
-        };
-        let key = Key {
-            shape,
-            count: children
-                .len()
-                .try_into()
-                .expect("checked aggregate arity fits u32"),
-        };
-        if !shapes.contains(&key) {
-            shapes.push(key);
-        }
-        for child in children {
-            collect(child, shapes);
-        }
+        _ => return,
+    };
+    let key = Key {
+        shape,
+        count: children
+            .len()
+            .try_into()
+            .expect("checked aggregate arity fits u32"),
+    };
+    if !shapes.contains(&key) {
+        shapes.push(key);
     }
+    for child in children {
+        collect_compound_shapes(child, shapes);
+    }
+}
+
+pub(super) fn compound_body_shapes(
+    body: &super::LoweredInstanceBody,
+) -> Vec<crate::specialization::CompoundDescriptorDropKey> {
     let mut shapes = Vec::new();
-    collect(&body.signature.parameter, &mut shapes);
-    collect(&body.signature.result, &mut shapes);
+    collect_compound_shapes(&body.signature.parameter, &mut shapes);
+    collect_compound_shapes(&body.signature.result, &mut shapes);
     for (_, expression) in body.expressions() {
-        collect(&expression.value_type, &mut shapes);
+        collect_compound_shapes(&expression.value_type, &mut shapes);
         if let Some(coercion) = &expression.coercion {
-            collect(&coercion.source, &mut shapes);
-            collect(&coercion.target, &mut shapes);
+            collect_compound_shapes(&coercion.source, &mut shapes);
+            collect_compound_shapes(&coercion.target, &mut shapes);
         }
     }
     if let Some(coercion) = &body.body_coercion {
-        collect(&coercion.source, &mut shapes);
-        collect(&coercion.target, &mut shapes);
+        collect_compound_shapes(&coercion.source, &mut shapes);
+        collect_compound_shapes(&coercion.target, &mut shapes);
     }
     for (_, call) in body.calls.iter() {
-        collect(&call.function_type.parameter, &mut shapes);
+        collect_compound_shapes(&call.function_type.parameter, &mut shapes);
         for entry in &call.substitutions.types {
-            collect(&entry.value_type, &mut shapes);
+            collect_compound_shapes(&entry.value_type, &mut shapes);
         }
     }
     shapes

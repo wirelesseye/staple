@@ -297,7 +297,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let function_type = if runtime.is_empty() {
                 self.backend.compile_closure_function_type(signature)?
             } else {
-                self.backend.compile_dynamic_function_type(signature, runtime.len())?
+                self.backend
+                    .compile_dynamic_function_type(signature, runtime.len())?
             };
             let linkage = instance
                 .requires_internal_linkage
@@ -435,9 +436,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 })?;
             let functions = match plan {
                 LoweredArtifactPlan::ConstructorAdapter(plan) => {
-                    let ty = self
-                        .backend
-                        .compile_closure_function_type(&plan.callable_type)?;
+                    let ty = if plan.runtime_parameters().is_empty() {
+                        self.backend
+                            .compile_closure_function_type(&plan.callable_type)?
+                    } else {
+                        self.backend
+                            .compile_dynamic_function_type(&plan.callable_type, 0)?
+                    };
                     vec![
                         self.backend
                             .llvm_module
@@ -459,7 +464,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     global.set_constant(true);
                     Vec::new()
                 }
-                LoweredArtifactPlan::DescriptorDrop(_) | LoweredArtifactPlan::CompoundDescriptorDrop(_) => {
+                LoweredArtifactPlan::DescriptorDrop(_)
+                | LoweredArtifactPlan::CompoundDescriptorDrop(_) => {
                     let ty = self
                         .backend
                         .context
@@ -487,9 +493,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         crate::specialization::ReabstractionDirection::ConcreteToDynamic => self
                             .backend
                             .compile_dynamic_function_type(&plan.dynamic, 0)?,
-                        crate::specialization::ReabstractionDirection::DynamicToConcrete => self
-                            .backend
-                            .compile_closure_function_type(&plan.concrete)?,
+                        crate::specialization::ReabstractionDirection::DynamicToConcrete => {
+                            self.backend.compile_closure_function_type(&plan.concrete)?
+                        }
                     };
                     vec![
                         self.backend
@@ -921,7 +927,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let Some(root) = body.root else {
             return Ok(());
         };
-        if self.view.instance_runtime_parameters(id).is_some_and(|runtime| !runtime.is_empty()) {
+        if self
+            .view
+            .instance_runtime_parameters(id)
+            .is_some_and(|runtime| !runtime.is_empty())
+        {
             return self.emit_dynamic_instance_body(id, function, body, root);
         }
         let entry = self.backend.context.append_basic_block(function, "entry");
@@ -1812,7 +1822,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::TypeDescriptor(plan) => {
                 self.emit_type_descriptor(ordinal, plan, &artifact.origin.span)
             }
-            LoweredArtifactPlan::CompoundDescriptorDrop(plan) => self.emit_compound_descriptor_drop(ordinal, *plan, &artifact.origin.span),
+            LoweredArtifactPlan::CompoundDescriptorDrop(plan) => {
+                self.emit_compound_descriptor_drop(ordinal, *plan, &artifact.origin.span)
+            }
             LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
                 self.emit_descriptor_bound_entry(ordinal, plan, &artifact.origin.span)
             }
@@ -2166,6 +2178,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing constructor adapter declaration")
             })?;
+        if !plan.runtime_parameters().is_empty() {
+            return self.emit_dynamic_constructor_adapter(function, plan, span);
+        }
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         let parameters = function.get_params();
@@ -5332,7 +5347,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .instance_runtime_parameters(*instance)
                     .is_some_and(|runtime| !runtime.is_empty())
                 {
-                    let value = self.emit_concrete_dynamic_call(owner, id, *instance, &call, pointer, &values)?;
+                    let value = self.emit_concrete_dynamic_call(
+                        owner, id, *instance, &call, pointer, &values,
+                    )?;
                     self.emit_call_cleanup(owner, id, cleanups, &call.origin.span)?;
                     return Ok(value);
                 }

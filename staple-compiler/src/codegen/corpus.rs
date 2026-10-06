@@ -140,7 +140,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 96] = [
+static CORPUS: [CorpusProgram; 97] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -1246,6 +1246,35 @@ static CORPUS: [CorpusProgram; 96] = [
             &["replace"],
         )),
         "",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "dynamic_constructor_values",
+            concat!(
+                "use std.io.println\n",
+                "type Pair T = wrap (T, I32)\n",
+                "def wrapped: <T where Copy T> T -> T = value => {\n",
+                "    let make: (T, I32) -> Pair T = Pair\n",
+                "    let Pair (first, second) = make (value, 5)\n",
+                "    first\n",
+                "}\n",
+                "def maker: <T where Copy T> () -> (T -> Ref T) = () => Ref\n",
+                "def pair_maker: <T where Copy T> () -> ((T, I32) -> Pair T) = () => Pair\n",
+                "let make_pair: (I32, I32) -> Pair I32 = pair_maker ()\n",
+                "let Pair (pair_first, pair_second) = make_pair (11, 12)\n",
+                "println \"${pair_first} ${pair_second}\"\n",
+                "let first = wrapped 42\n",
+                "println \"${first}\"\n",
+                "let make_i32: I32 -> Ref I32 = maker ()\n",
+                "let Ref second = make_i32 17\n",
+                "println \"${second}\"\n",
+                "let make_u8: U8 -> Ref U8 = maker ()\n",
+                "let Ref third = make_u8 (U8 :: 9)\n",
+                "println \"${third}\"\n",
+            ),
+            "calls",
+        )),
+        "11 12\n42\n17\n9\n",
     ),
     expect_stdout(
         must_run(inline(

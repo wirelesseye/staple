@@ -231,9 +231,9 @@ That plan holds the detailed status. This section only summarizes it.
 
 **Stage 4a is not complete.** Dynamic implementations now support ordinary
 implicit thunks, managed references, and concrete structural dispatch and
-mutation, with recursively owned descriptor graphs. Generic constructor
-values and general reabstraction at aggregate and nested function boundaries
-remain. Detailed coverage and validation status live in the remainder plan's
+mutation, and generic constructor values, with recursively owned descriptor
+graphs. General reabstraction at aggregate and nested function boundaries
+remains. Detailed coverage and validation status live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
 
 **Decision R-F. The dynamic emitter stays separate.** It is too large to fold

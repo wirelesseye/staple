@@ -40,22 +40,30 @@ impl LoweredProgram {
                 continue; // `validate_specializations` reports a missing plan.
             };
             let origin = &artifact.origin;
+            let symbolic_constructor =
+                matches!(plan, crate::LoweredArtifactPlan::ConstructorAdapter(_));
             let mut problems = Vec::new();
             plan.visit_types(&mut |value| {
                 let result = match value {
-                    PlanType::Value(value_type) => CanonicalType::concrete(value_type, origin)
-                        .map(|_| ())
-                        .map_err(|diagnostic| (value_type.to_string(), diagnostic)),
-                    PlanType::Function(function_type) => {
+                    PlanType::Value(value_type) => (if symbolic_constructor {
+                        CanonicalType::dynamic(value_type, origin)
+                    } else {
+                        CanonicalType::concrete(value_type, origin)
+                    })
+                    .map(|_| ())
+                    .map_err(|diagnostic| (value_type.to_string(), diagnostic)),
+                    PlanType::Function(function_type) => (if symbolic_constructor {
+                        CanonicalFunctionType::dynamic(function_type, origin)
+                    } else {
                         CanonicalFunctionType::concrete(function_type, origin)
-                            .map(|_| ())
-                            .map_err(|diagnostic| {
-                                (
-                                    crate::CheckedType::Function(function_type.clone()).to_string(),
-                                    diagnostic,
-                                )
-                            })
-                    }
+                    })
+                    .map(|_| ())
+                    .map_err(|diagnostic| {
+                        (
+                            crate::CheckedType::Function(function_type.clone()).to_string(),
+                            diagnostic,
+                        )
+                    }),
                     PlanType::Resource(resource) => {
                         CanonicalType::concrete(&resource.value_type, origin)
                             .map(|_| ())

@@ -1091,6 +1091,95 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(storage)
     }
 
+    pub(super) fn emit_dynamic_constructor_adapter(
+        &mut self,
+        function: FunctionValue<'context>,
+        plan: &crate::ConstructorAdapterPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let entry = self.backend.context.append_basic_block(function, "entry");
+        self.backend.builder.position_at_end(entry);
+        let parameters = function.get_params();
+        let closure = parameters[0].into_pointer_value();
+        let result = parameters[1].into_pointer_value();
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let mut descriptors = HashMap::new();
+        for (index, parameter) in plan.runtime_parameters().into_iter().enumerate() {
+            let slot = self.backend.dynamic_byte_offset(
+                closure,
+                self.backend
+                    .size_type
+                    .const_int(index as u64 * pointer_bytes, false),
+            )?;
+            let descriptor = self
+                .backend
+                .builder
+                .build_load(pointer, slot, "constructor.descriptor")
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+            descriptors.insert(parameter, descriptor);
+        }
+        let mut environment = DynamicEnvironment {
+            descriptors,
+            compound_descriptors: Vec::new(),
+            bindings: HashMap::new(),
+            binding_order: Vec::new(),
+            temporaries: HashMap::new(),
+            packed_arguments: HashMap::new(),
+            coercions: HashMap::new(),
+            loop_results: HashMap::new(),
+            cells: HashMap::new(),
+            resources: HashMap::new(),
+            loops: Vec::new(),
+            closure,
+            result,
+            result_descriptor: pointer.const_null(),
+            returned: false,
+        };
+        let (product, managed) = match &plan.construction {
+            crate::ConstructorConstruction::Value { product, .. } => (product, false),
+            crate::ConstructorConstruction::ManagedRef { product, .. } => (product, true),
+            _ => {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "unexpanded dynamic constructor",
+                ));
+            }
+        };
+        let descriptor = self.prepare_dynamic_descriptor(product, &mut environment, span)?;
+        let result = if managed {
+            let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
+            let allocation = self.allocate_dynamic_cell(descriptor, true, span)?;
+            self.backend
+                .builder
+                .build_store(result, allocation)
+                .map_err(compiler_diagnostic)?;
+            allocation
+        } else {
+            result
+        };
+        if let CheckedType::Product(product) = product {
+            for index in 0..product.elements.len() {
+                let (field, descriptor) =
+                    self.dynamic_product_field(descriptor, result, index as u32)?;
+                self.backend.copy_dynamic_value(
+                    descriptor,
+                    parameters[2 + index].into_pointer_value(),
+                    field,
+                )?;
+            }
+        } else if let Some(value) = parameters.get(2) {
+            self.backend
+                .copy_dynamic_value(descriptor, value.into_pointer_value(), result)?;
+        }
+        self.backend
+            .builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
     /// Build a closure value in a dynamic body (R-B). A concrete function
     /// type uses the concrete ABI; a value that reads a function-typed binding
     /// returns the binding's storage. Captures and dynamic-shape entries are
@@ -1128,6 +1217,68 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let binding = self
             .view
             .binding(owner, LoweredBindingSite::CallableValue(value_id));
+        if matches!(callable.target, LoweredCallableTarget::Constructor { .. })
+            && crate::contains_type_parameter(&CheckedType::Function(
+                callable.function_type.clone(),
+            ))
+        {
+            let Some(LoweredBoundTarget::Artifact(ordinal)) = binding else {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "missing dynamic constructor artifact",
+                ));
+            };
+            let Some(crate::LoweredArtifactPlan::ConstructorAdapter(plan)) = self
+                .view
+                .artifact(*ordinal)
+                .and_then(|artifact| artifact.plan.as_ref())
+            else {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "missing dynamic constructor plan",
+                ));
+            };
+            let runtime = plan.runtime_parameters();
+            let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+            let closure_environment = self.backend.build_gc_allocation(
+                self.backend
+                    .size_type
+                    .const_int(runtime.len() as u64 * pointer_bytes, false),
+                "constructor.environment",
+                span.clone(),
+            )?;
+            for (index, parameter) in runtime.iter().enumerate() {
+                let descriptor =
+                    environment
+                        .descriptors
+                        .get(parameter)
+                        .copied()
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "missing constructor runtime descriptor")
+                        })?;
+                let copy = self.copy_descriptor_to_gc(descriptor, &span)?;
+                let slot = self.backend.dynamic_byte_offset(
+                    closure_environment,
+                    self.backend
+                        .size_type
+                        .const_int(index as u64 * pointer_bytes, false),
+                )?;
+                self.backend
+                    .builder
+                    .build_store(slot, copy)
+                    .map_err(compiler_diagnostic)?;
+            }
+            let code =
+                self.callable_artifact_code(binding, &span, "dynamic constructor binding")?;
+            let closure = self
+                .backend
+                .build_closure_value(code, closure_environment)?;
+            self.backend
+                .builder
+                .build_store(storage, closure)
+                .map_err(compiler_diagnostic)?;
+            return Ok(storage);
+        }
         let code = match &callable.target {
             LoweredCallableTarget::DirectFunction { .. }
             | LoweredCallableTarget::TraitImplementation { .. } => {

@@ -23,6 +23,7 @@ use crate::{
 /// nothing is re-sorted or normalized here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum CanonicalType {
+    RuntimeParameter(TypeParameterId),
     Never,
     I8,
     I16,
@@ -142,10 +143,14 @@ impl CanonicalType {
     /// parameters and checker placeholders with a diagnostic at the
     /// requesting record's origin.
     pub(crate) fn concrete(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
-        Self::convert(value_type, origin)
+        Self::convert(value_type, origin, false)
     }
 
-    fn convert(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
+    fn convert(
+        value_type: &CheckedType,
+        origin: &Origin,
+        runtime: bool,
+    ) -> Result<Self, Diagnostic> {
         let key = match value_type {
             CheckedType::Forall(_) => {
                 return Err(origin_diagnostic(
@@ -184,21 +189,22 @@ impl CanonicalType {
                 CanonicalType::StringLiteralSet(values.clone())
             }
             CheckedType::Ref(payload) => {
-                CanonicalType::Ref(Box::new(Self::convert(payload, origin)?))
+                CanonicalType::Ref(Box::new(Self::convert(payload, origin, runtime)?))
             }
             CheckedType::Slice(payload) => {
-                CanonicalType::Slice(Box::new(Self::convert(payload, origin)?))
+                CanonicalType::Slice(Box::new(Self::convert(payload, origin, runtime)?))
             }
             CheckedType::Buffer(payload) => {
-                CanonicalType::Buffer(Box::new(Self::convert(payload, origin)?))
+                CanonicalType::Buffer(Box::new(Self::convert(payload, origin, runtime)?))
             }
             CheckedType::Array { element, count } => CanonicalType::Array {
-                element: Box::new(Self::convert(element, origin)?),
-                count: Box::new(Self::convert(count, origin)?),
+                element: Box::new(Self::convert(element, origin, runtime)?),
+                count: Box::new(Self::convert(count, origin, runtime)?),
             },
             CheckedType::CString => CanonicalType::CString,
             CheckedType::CChar => CanonicalType::CChar,
             CheckedType::COpaquePointer => CanonicalType::COpaquePointer,
+            CheckedType::Parameter { id, .. } if runtime => CanonicalType::RuntimeParameter(*id),
             CheckedType::Parameter { name, .. } => {
                 return Err(origin_diagnostic(
                     origin,
@@ -208,15 +214,15 @@ impl CanonicalType {
             CheckedType::TypeConstructor { id, arguments, .. } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::TypeConstructor,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin)?,
+                arguments: Self::convert_arguments(arguments, origin, runtime)?,
             },
             CheckedType::Opaque { id, arguments, .. } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::Opaque,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin)?,
+                arguments: Self::convert_arguments(arguments, origin, runtime)?,
             },
             CheckedType::CPointer { pointee } => CanonicalType::CPointer {
-                pointee: Box::new(Self::convert(pointee, origin)?),
+                pointee: Box::new(Self::convert(pointee, origin, runtime)?),
             },
             CheckedType::ParameterProduct(product) => CanonicalType::ParameterProduct {
                 elements: product
@@ -225,7 +231,7 @@ impl CanonicalType {
                     .map(|element| {
                         Ok(CanonicalProductElement {
                             name: element.name.clone(),
-                            value_type: Self::convert(&element.value_type, origin)?,
+                            value_type: Self::convert(&element.value_type, origin, runtime)?,
                         })
                     })
                     .collect::<Result<Vec<_>, Diagnostic>>()?,
@@ -239,14 +245,14 @@ impl CanonicalType {
                     .map(|element| {
                         Ok(CanonicalProductElement {
                             name: element.name.clone(),
-                            value_type: Self::convert(&element.value_type, origin)?,
+                            value_type: Self::convert(&element.value_type, origin, runtime)?,
                         })
                     })
                     .collect::<Result<Vec<_>, Diagnostic>>()?,
                 variadic: product.variadic,
             },
             CheckedType::Sum(sum) => CanonicalType::Sum {
-                alternatives: Self::convert_arguments(&sum.alternatives, origin)?,
+                alternatives: Self::convert_arguments(&sum.alternatives, origin, runtime)?,
             },
             CheckedType::Function(function) => {
                 // A concrete effect row is encoded as a function type with
@@ -265,11 +271,11 @@ impl CanonicalType {
                         ..function.clone()
                     };
                     CanonicalType::Function(Box::new(CanonicalFunctionType::convert(
-                        &marker, origin,
+                        &marker, origin, runtime,
                     )?))
                 } else {
                     CanonicalType::Function(Box::new(CanonicalFunctionType::convert(
-                        function, origin,
+                        function, origin, runtime,
                     )?))
                 }
             }
@@ -281,7 +287,7 @@ impl CanonicalType {
             } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::Wrapper,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin)?,
+                arguments: Self::convert_arguments(arguments, origin, runtime)?,
             },
         };
         Ok(key)
@@ -290,27 +296,47 @@ impl CanonicalType {
     fn convert_arguments(
         arguments: &[CheckedType],
         origin: &Origin,
+        runtime: bool,
     ) -> Result<Vec<CanonicalType>, Diagnostic> {
         arguments
             .iter()
-            .map(|argument| Self::convert(argument, origin))
+            .map(|argument| Self::convert(argument, origin, runtime))
             .collect()
     }
 }
 
-impl CanonicalType {}
+impl CanonicalType {
+    pub(crate) fn dynamic(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
+        Self::convert(value_type, origin, true)
+    }
+}
 
 impl CanonicalFunctionType {
+    pub(crate) fn dynamic(
+        function: &CheckedFunctionType,
+        origin: &Origin,
+    ) -> Result<Self, Diagnostic> {
+        Self::convert(function, origin, true)
+    }
+
     pub(crate) fn concrete(
         function: &CheckedFunctionType,
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
-        Self::convert(function, origin)
+        Self::convert(function, origin, false)
     }
 
-    fn convert(function: &CheckedFunctionType, origin: &Origin) -> Result<Self, Diagnostic> {
+    fn convert(
+        function: &CheckedFunctionType,
+        origin: &Origin,
+        runtime: bool,
+    ) -> Result<Self, Diagnostic> {
         Ok(CanonicalFunctionType {
-            parameter: Box::new(CanonicalType::convert(&function.parameter, origin)?),
+            parameter: Box::new(CanonicalType::convert(
+                &function.parameter,
+                origin,
+                runtime,
+            )?),
             parameter_style: match function.parameter_style {
                 staple_syntax::FunctionParameterStyle::Single => CanonicalParameterStyle::Single,
                 staple_syntax::FunctionParameterStyle::Juxtaposed => {
@@ -319,8 +345,8 @@ impl CanonicalFunctionType {
             },
             mutations: function.mutations.iter().cloned().map(Into::into).collect(),
             moves: function.moves.iter().cloned().map(Into::into).collect(),
-            effects: CanonicalEffectSet::convert(&function.effects, origin)?,
-            result: Box::new(CanonicalType::convert(&function.result, origin)?),
+            effects: CanonicalEffectSet::convert(&function.effects, origin, runtime)?,
+            result: Box::new(CanonicalType::convert(&function.result, origin, runtime)?),
         })
     }
 }
@@ -330,10 +356,14 @@ impl CanonicalEffectSet {
         effects: &CheckedEffectSet,
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
-        Self::convert(effects, origin)
+        Self::convert(effects, origin, false)
     }
 
-    fn convert(effects: &CheckedEffectSet, origin: &Origin) -> Result<Self, Diagnostic> {
+    fn convert(
+        effects: &CheckedEffectSet,
+        origin: &Origin,
+        runtime: bool,
+    ) -> Result<Self, Diagnostic> {
         if let Some(variable) = &effects.variable {
             return Err(origin_diagnostic(
                 origin,
@@ -347,7 +377,7 @@ impl CanonicalEffectSet {
             resources: effects
                 .resources
                 .iter()
-                .map(|resource| CanonicalResource::convert(resource, origin))
+                .map(|resource| CanonicalResource::convert(resource, origin, runtime))
                 .collect::<Result<Vec<_>, Diagnostic>>()?,
             state: effects.state.map(Into::into),
         })
@@ -355,9 +385,13 @@ impl CanonicalEffectSet {
 }
 
 impl CanonicalResource {
-    fn convert(resource: &CheckedResource, origin: &Origin) -> Result<Self, Diagnostic> {
+    fn convert(
+        resource: &CheckedResource,
+        origin: &Origin,
+        runtime: bool,
+    ) -> Result<Self, Diagnostic> {
         Ok(CanonicalResource {
-            value_type: CanonicalType::convert(&resource.value_type, origin)?,
+            value_type: CanonicalType::convert(&resource.value_type, origin, runtime)?,
             mutable: resource.mutable,
         })
     }
@@ -631,6 +665,23 @@ pub(crate) struct ConstructorAdapterKey {
 }
 
 impl ConstructorAdapterKey {
+    pub(crate) fn shape(
+        symbol: SymbolId,
+        type_id: TypeId,
+        adapter: LoweredCallableAdapter,
+        callable_type: &CheckedFunctionType,
+        origin: &Origin,
+    ) -> Result<Self, Diagnostic> {
+        if !crate::contains_type_parameter(&CheckedType::Function(callable_type.clone())) {
+            return Self::new(symbol, type_id, adapter, callable_type, origin);
+        }
+        Ok(Self {
+            symbol,
+            type_id,
+            adapter: adapter.into(),
+            callable_type: CanonicalFunctionType::dynamic(callable_type, origin)?,
+        })
+    }
     pub(crate) fn new(
         symbol: SymbolId,
         type_id: TypeId,
@@ -1610,6 +1661,25 @@ mod tests {
             .expect_err("an unresolved parameter never forms a concrete key");
         assert_eq!(diagnostic.span, requesting_origin().span);
         assert!(diagnostic.message.contains("`First`"));
+        let symbolic = CanonicalType::dynamic(&first, &requesting_origin()).unwrap();
+        assert_eq!(
+            symbolic,
+            CanonicalType::RuntimeParameter(TypeParameterId(5))
+        );
+        assert_ne!(
+            symbolic,
+            CanonicalType::dynamic(
+                &CheckedType::Parameter {
+                    id: TypeParameterId(6),
+                    name: "First".to_owned(),
+                    sized: false,
+                    parameter_product_capable: false,
+                },
+                &requesting_origin()
+            )
+            .unwrap()
+        );
+
         assert!(
             CanonicalType::concrete(
                 &CheckedType::Ref(Box::new(CheckedType::Parameter {
@@ -2426,6 +2496,7 @@ mod tests {
                 adapter: LoweredCallableAdapter::Constructor,
                 callable_type: simple_callable(),
                 construction: ConstructorConstruction::Unexpanded,
+                layout: Vec::new(),
             }),
             LoweredArtifactPlan::StructuralMethod(StructuralMethodPlan {
                 structural: StructuralTraitMethod::Index,
