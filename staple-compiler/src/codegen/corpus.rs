@@ -1268,6 +1268,9 @@ static CORPUS: [CorpusProgram; 100] = [
             "def compound_capture: <T where Copy T> T -> T = value => { let pair = (value, value); let callable: T -> T = item => { let (first, second) = pair; first }; callable value }\n",
             "def function_capture: <T where Copy T> (T, T -> T) -> T = (value, callback) => { let callable: T -> T = item => callback item; callable value }\n",
             "let concrete_captured = concrete_capture 6; let compound_captured = compound_capture 7; let function_captured = function_capture.<I32> (8, item => item); println \"${concrete_captured} ${compound_captured} ${function_captured}\"\n",
+            "def native_capture: <T where Copy T> T -> I32 = value => { let seed = 8; let callable = () => seed; callable () }\n",
+            "def native_cell: <T where Copy T> T ->{state} I32 = value => { let mut count = 0; let increment = () => { count = count + 1; count }; let first = increment (); let second = increment (); first + second }\n",
+            "let native_captured = native_capture 0; let native_mutated = native_cell 0; println \"${native_captured} ${native_mutated}\"\n",
             "def indexed: <T where Copy T> T -> I32 = value => { let values = (8, 9); values[1] }\n",
                 "def named: <T where Copy T> T ->{state} (T, I32, I32) = value => { let mut count = 0; let make = () => { count = count + 1; (a: value, b: count) }; let expanded: (a: T, b: I32) = (...=make (), b: 7); (expanded.a, expanded.b, count) }\n",
                 "type Defaulted = from (a: I32, b: I32 = 5)\n",
@@ -1304,7 +1307,7 @@ static CORPUS: [CorpusProgram; 100] = [
             ),
             "expressions",
         )),
-        "6 17\n3 7 8\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n",
+        "6 17\n3 7 8\n8 3\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n",
     ),
     expect_stdout(
         must_run(inline(

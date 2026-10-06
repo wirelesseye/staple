@@ -13,7 +13,7 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After the rejection-kind audit. This section is rewritten in
+After concrete capture interoperability. This section is rewritten in
 place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks, managed references,
@@ -26,7 +26,7 @@ have dynamic implementations. P1, P2, P3, P5, P6, and P7 are resolved.
 | R1 — Descriptor order | Done |
 | R2 — Concrete function values | Done |
 | R3 — Dynamic function values | Constructor adapters own their descriptors and expose the dynamic closure ABI. Runtime-shaped function captures through shared cells report the explicit Decision 7 restriction. |
-| R4 — Dynamic environments and captures | Compound and function capture descriptors are supported. Concrete-signature closures with runtime captures use a lowering-owned ABI adapter; capture-only descriptors come from the enclosing environment. Shared function cells retain Decision 7. |
+| R4 — Dynamic environments and captures | Compound and function capture descriptors are supported. Concrete-signature closures with runtime captures use a lowering-owned ABI adapter; capture-only descriptors come from the enclosing environment. Concrete child closures receive native capture environments. Shared cells retain a native state byte and an owned trailing descriptor. Shared function cells retain Decision 7. |
 | R5 — Reabstraction | Done. Lowering-owned conversions handle nested functions and functions in by-value products, sums, wrappers, and fixed arrays (normalized to products). Functions behind references retain the explicit restriction. |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
 | R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. String/CString kernels share concrete emission helpers. The rejection-kind audit is recorded below; final execution, workspace, coverage, and IR gates remain. |
@@ -38,6 +38,10 @@ remains zero, with no in-scope rejections.
 
 **Verified in this continuation:**
 - The zero-baseline full corpus coverage refresh passes for all 100 programs.
+- Concrete-only captures and mutable concrete shared cells execute in a dynamic
+  parent. Native environments read by-value fields with packed alignment; cells
+  retain native initialization state, and captured state-only cells live on the
+  GC heap. Captured value descriptors are deep-copied for finalizer lifetime.
 - Bound-free capture cases require dynamic selection for compound captures,
   function captures, and concrete-signature closures with runtime captures.
   The concrete-signature adapter owns its nested conversion artifacts.
@@ -425,8 +429,8 @@ concrete (R-B), inside dynamic bodies.
 
 ## Risks
 
-- **Reabstraction is the least explored part.** Nothing exercises thunks
-  yet, and a missed conversion calls a closure with the wrong ABI, which
+- **Reabstraction requires explicit conversion plans.** Bound-free cases exercise
+  nested thunks and aggregate conversions; a missed conversion calls a closure with the wrong ABI, which
   crashes instead of failing to compile. R-E keeps every conversion visible
   in lowered records, and graph validation should check that every
   concrete-to-dynamic boundary with a function-typed dynamic type has a

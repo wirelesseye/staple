@@ -1223,6 +1223,8 @@ mod tests {
             "concrete_capture",
             "compound_capture",
             "function_capture",
+            "native_capture",
+            "native_cell",
             "phantom_argument",
         ] {
             let function = lowered

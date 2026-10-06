@@ -240,7 +240,8 @@ spreads, defaults, string literal patterns, and propagation/assertion bindings
 have dynamic emission. Nested generic bindings record initialization state
 without evaluating their initializer. Both emitters share String/CString
 kernels. Concrete-signature closures with runtime captures use planned
-ABI adapters, and compound/function capture descriptors are supported;
+ABI adapters. Concrete child closures receive native capture environments,
+and shared cells retain native initialization state plus owned descriptors;
 the rejection-kind
 audit is documented, and final exit checks remain. Detailed coverage and
 validation status live in the remainder plan's

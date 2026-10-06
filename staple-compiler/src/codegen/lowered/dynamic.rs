@@ -1445,11 +1445,81 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ));
             }
         };
-        let closure_environment = self
-            .backend
-            .context
-            .ptr_type(AddressSpace::default())
-            .const_null();
+        let captures = callable
+            .closure
+            .as_ref()
+            .map_or(&[][..], |closure| closure.captures.as_slice());
+        let closure_environment = if captures.is_empty() {
+            self.backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+        } else {
+            let fields = captures
+                .iter()
+                .map(|capture| {
+                    if capture.access == crate::LoweredCaptureAccess::ByValue {
+                        self.backend.compile_type(&capture.value_type)
+                    } else {
+                        Ok(self
+                            .backend
+                            .context
+                            .ptr_type(AddressSpace::default())
+                            .into())
+                    }
+                })
+                .collect::<CodeGenerationResult<Vec<_>>>()?;
+            let ty = self.backend.capture_environment_type(&fields);
+            let mut value = ty.const_zero();
+            for (index, capture) in captures.iter().enumerate() {
+                let pointer = environment
+                    .bindings
+                    .get(&capture.capture.symbol)
+                    .filter(|binding| binding.live)
+                    .map(|binding| binding.pointer)
+                    .or_else(|| {
+                        environment
+                            .initialization_states
+                            .get(&capture.capture.symbol)
+                            .copied()
+                    })
+                    .or_else(|| environment.cells.get(&capture.capture.symbol).copied())
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "missing concrete closure capture")
+                    })?;
+                let stored = if capture.access == crate::LoweredCaptureAccess::ByValue {
+                    let stored = self
+                        .backend
+                        .builder
+                        .build_load(
+                            self.backend.compile_type(&capture.value_type)?,
+                            pointer,
+                            "closure.capture",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    stored
+                        .as_instruction_value()
+                        .unwrap()
+                        .set_alignment(1)
+                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                    stored
+                } else {
+                    pointer.into()
+                };
+                value = self
+                    .backend
+                    .insert_capture(value, stored, index as u32, span.clone())?;
+            }
+            let allocated = self
+                .backend
+                .allocate_capture_environment(ty, value, span.clone())?;
+            if let Some(finalizer) =
+                self.site_finalizer(owner, crate::ArtifactUseSite::ClosureEnvironment(value_id))
+            {
+                self.backend.set_gc_finalizer(allocated, finalizer)?;
+            }
+            allocated
+        };
         let closure = self
             .backend
             .build_closure_value(code, closure_environment)?;
@@ -2087,6 +2157,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if !captured {
             return self.backend.allocate_dynamic_value(descriptor);
         }
+        let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
         let layout = self.backend.load_descriptor_layout(descriptor)?;
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
         let total = self
@@ -2094,14 +2165,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_int_add(
                 layout.store_size,
-                self.backend.size_type.const_int(pointer_bytes, false),
+                self.backend.size_type.const_int(pointer_bytes + 1, false),
                 "cell.total.size",
             )
             .map_err(compiler_diagnostic)?;
         let cell = self
             .backend
             .build_gc_allocation(total, "binding.cell", span.clone())?;
-        let word = self.backend.dynamic_byte_offset(cell, layout.store_size)?;
+        let state = self.backend.dynamic_byte_offset(cell, layout.store_size)?;
+        self.backend
+            .builder
+            .build_store(state, self.backend.context.i8_type().const_zero())
+            .map_err(compiler_diagnostic)?;
+        let descriptor_offset = self
+            .backend
+            .builder
+            .build_int_add(
+                layout.store_size,
+                self.backend.size_type.const_int(1, false),
+                "cell.descriptor.offset",
+            )
+            .map_err(compiler_diagnostic)?;
+        let word = self.backend.dynamic_byte_offset(cell, descriptor_offset)?;
         self.backend
             .builder
             .build_store(word, descriptor)
@@ -3455,7 +3540,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.prepare_dynamic_descriptor(&ty, &mut environment, &item.origin.span)?;
             let descriptor = self.dynamic_descriptor(&ty, &environment, &item.origin.span)?;
             let captured = self.view.symbol(symbol).is_some_and(|record| {
-                record.captured && (record.mutable_storage || record.derived)
+                record.captured
+                    && (record.mutable_storage
+                        || record.derived
+                        || record.requires_initialization_check)
             });
             let cell = self.allocate_dynamic_cell(descriptor, captured, &item.origin.span)?;
             environment.cells.insert(symbol, cell);
@@ -5334,11 +5422,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 continue;
             };
             if !environment.initialization_states.contains_key(&symbol) {
-                let state = self
-                    .backend
-                    .entry_builder()
-                    .build_alloca(self.backend.context.i8_type(), "dynamic.binding.state")
-                    .map_err(compiler_diagnostic)?;
+                let state = if self
+                    .view
+                    .symbol(symbol)
+                    .is_some_and(|record| record.captured)
+                {
+                    self.backend.build_gc_allocation(
+                        self.backend.size_type.const_int(1, false),
+                        "dynamic.binding.state",
+                        item.origin.span.clone(),
+                    )?
+                } else {
+                    self.backend
+                        .entry_builder()
+                        .build_alloca(self.backend.context.i8_type(), "dynamic.binding.state")
+                        .map_err(compiler_diagnostic)?
+                };
                 environment.initialization_states.insert(symbol, state);
             }
             self.backend
@@ -5387,6 +5486,31 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             "uninitialized dynamic binding is not yet implemented",
                         ));
                     };
+                    if let Some(symbol) = binding.symbol {
+                        if binding.cell
+                            && self.view.symbol(symbol).is_some_and(|record| {
+                                record.captured
+                                    && (record.mutable_storage
+                                        || record.derived
+                                        || record.requires_initialization_check)
+                            })
+                        {
+                            let cell = environment.cells[&symbol];
+                            let ty = self.view.owner_symbol_type(owner, symbol).unwrap();
+                            let descriptor =
+                                self.dynamic_descriptor(ty, environment, &item.origin.span)?;
+                            let layout = self.backend.load_descriptor_layout(descriptor)?;
+                            let state =
+                                self.backend.dynamic_byte_offset(cell, layout.store_size)?;
+                            self.backend
+                                .builder
+                                .build_store(
+                                    state,
+                                    self.backend.context.i8_type().const_int(1, false),
+                                )
+                                .map_err(compiler_diagnostic)?;
+                        }
+                    }
                     let pointer = self.emit_dynamic_expression(owner, value, environment)?;
                     if let Some(symbol) = binding.symbol {
                         let ty = self.view.owner_symbol_type(owner, symbol).ok_or_else(|| {
@@ -5406,6 +5530,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                     )
                                 })?;
                             self.backend.copy_dynamic_value(descriptor, pointer, cell)?;
+                            if self.view.symbol(symbol).is_some_and(|record| {
+                                record.captured
+                                    && (record.mutable_storage
+                                        || record.derived
+                                        || record.requires_initialization_check)
+                            }) {
+                                let layout = self.backend.load_descriptor_layout(descriptor)?;
+                                let state =
+                                    self.backend.dynamic_byte_offset(cell, layout.store_size)?;
+                                self.backend
+                                    .builder
+                                    .build_store(
+                                        state,
+                                        self.backend.context.i8_type().const_int(2, false),
+                                    )
+                                    .map_err(compiler_diagnostic)?;
+                            }
                             cell
                         } else {
                             pointer
