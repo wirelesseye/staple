@@ -342,9 +342,14 @@ reachable from the branch.
   `generic_resource_effect` (a bound-free generic with a resource effect and a
   resource-binding call), and the full differential run covers it. The
   resource rows reach zero and the in-scope baseline drops from **11** to
-  **6**. Implicit thunk arguments, dynamic-shape constructor callable values,
-  shared-cell and compound captures, and function-typed signatures/values
-  remain.
+  **6**.
+- **R7 implicit thunks.** The only corpus occurrence of an implicit thunk
+  argument is the `reaction { ... }` callback in `generic_reaction_runner`: a
+  reactive callback body (Stage 8). The reason moves to the allowed Stage 8
+  set, matching R0.1's "coroutine, async, and reactive constructs", and the
+  in-scope baseline drops from **6** to **5**. Dynamic-shape constructor
+  callable values, shared-cell and compound captures, and function-typed
+  signatures/values remain.
 - **R4 shared-cell emission support (not yet routed).** A captured mutable
   local's cell is now a dynamic GC payload with a trailing value-descriptor
   word and the shared `gc-finalizer-dynamic-cell` finalizer; a shared-cell

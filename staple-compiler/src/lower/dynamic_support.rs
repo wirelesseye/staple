@@ -66,7 +66,9 @@ pub(crate) enum RejectionReason {
     /// A resource mutation target.
     /// An index expression (trait-dispatched).
     IndexExpression,
-    /// An implicit thunk argument.
+    /// An implicit thunk argument. The corpus uses these as reactive callback
+    /// and coroutine bodies (Stage 8); the dynamic emitter builds their
+    /// closures through the same machinery as R4.
     ImplicitThunkArgument,
     /// A propagating or asserting pattern binding.
     PropagatingBinding,
@@ -156,6 +158,7 @@ impl RejectionReason {
                 | RejectionReason::RuntimeNaturalCount
                 | RejectionReason::SliceFromRef
                 | RejectionReason::FunctionBehindReference
+                | RejectionReason::ImplicitThunkArgument
         )
     }
 
@@ -1082,7 +1085,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 6;
+    const IN_SCOPE_BASELINE: usize = 5;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.

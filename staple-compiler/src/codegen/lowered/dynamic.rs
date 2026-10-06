@@ -2874,8 +2874,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 format!("dynamic implementation does not yet support {detail}"),
             )
         };
-        if !body.signature.effects.resources.is_empty() {
-        }
         let runtime = self
             .view
             .instance_runtime_order(id)
