@@ -13,7 +13,7 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After packed dynamic storage hardening and the trap-status harness correction. This section is rewritten in
+After correcting the managed-reference test for the shared-cell initialization byte. This section is rewritten in
 place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks, managed references,
@@ -29,11 +29,11 @@ have dynamic implementations. P1, P2, P3, P5, P6, and P7 are resolved.
 | R4 — Dynamic environments and captures | Compound and function capture descriptors are supported. Concrete-signature closures with runtime captures use a lowering-owned ABI adapter; capture-only descriptors come from the enclosing environment. Concrete child closures receive native capture environments. Shared cells retain a native state byte and an owned trailing descriptor. Shared function cells retain Decision 7. |
 | R5 — Reabstraction | Done. Lowering-owned conversions handle nested functions and functions in by-value products, sums, wrappers, and fixed arrays (normalized to products). Functions behind references retain the explicit restriction. |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
-| R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. String/CString kernels share concrete emission helpers. The rejection-kind audit is recorded below; final execution, workspace, coverage, and IR gates remain. |
-| R8 — Exit gate | Final checks are running. The initial workspace run exposed a trap-status assertion that still expected `None` after signal preservation; the harness now accepts nonzero exits/signals while differential checks retain exact status equality. |
+| R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. String/CString kernels share concrete emission helpers. The rejection-kind audit is recorded below; the execution, coverage, and IR gates pass; the complete workspace rerun remains. |
+| R8 — Exit gate | Coverage, full differential execution, and default IR comparisons pass. The workspace rerun exposed an outdated managed-reference test offset after the initialization-byte addition; the assertion now reads the owned descriptor after that byte. The complete workspace rerun remains. |
 
-**Coverage:** The last completed 100-program refresh measured 6,420 generic templates,
-4,764 eligible (74%), and 1,656 rejected for allowed reasons. The baseline
+**Coverage:** The last completed 100-program refresh measured 6,429 generic templates,
+4,773 eligible (74.24%), and 1,656 rejected for allowed reasons. The baseline
 remains zero, with no in-scope rejections.
 
 **Verified in this continuation:**
@@ -79,7 +79,9 @@ remains zero, with no in-scope rejections.
 - Keys include the symbolic dynamic shape and direction as well as the concrete
   type. An opaque parameter and a written product can materialize to the same
   concrete type while requiring different pointer counts.
-- Final complete workspace, differential, and default IR checks remain at R8.
+- Full differential execution passes for all 98 runnable inputs, with identical stdout and exit status; 97 use dynamic calls (11,311 call sites).
+- All 111 default IR inputs match the `50565d8` release build.
+- The managed-reference JIT test now accounts for the shared-cell initialization byte before its owned descriptor; the complete workspace rerun remains at R8.
 
 ### Intrinsic audit
 

@@ -4019,7 +4019,9 @@ mod tests {
         unsafe {
             make.call(std::ptr::null(), &root.header, &mut payload, input.as_ptr());
         }
-        let saved = unsafe { payload.add(3).cast::<*const Compound>().read_unaligned() };
+        // The owned descriptor follows the three-byte payload and initialization byte.
+        assert_eq!(unsafe { payload.add(3).read() }, 0);
+        let saved = unsafe { payload.add(4).cast::<*const Compound>().read_unaligned() };
         assert_ne!(saved, &root as *const Compound);
         let saved_child = unsafe { (*saved).component };
         assert_ne!(saved_child, &child.header as *const Descriptor);

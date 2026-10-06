@@ -245,7 +245,9 @@ and shared cells retain native initialization state plus owned descriptors.
 Dynamic storage loads permit packed product field alignment, verified by
 bound-free execution and LLVM alignment assertions;
 the rejection-kind
-audit is documented, and final exit checks remain. The default corpus trap
+audit is documented. Coverage, full differential execution, and all default
+IR comparisons pass; the complete workspace rerun remains. The managed-reference
+JIT test accounts for the shared-cell initialization byte before its descriptor. The default corpus trap
 assertion now accepts preserved signal statuses and nonzero panic exits. Detailed coverage and
 validation status live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
