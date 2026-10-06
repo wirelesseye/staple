@@ -140,7 +140,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 92] = [
+static CORPUS: [CorpusProgram; 93] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -2521,6 +2521,24 @@ let value = at (Ref (1, 2), (USize :: 5))
             &["first"],
         )),
         "3\n",
+    ),
+    // A generic body with a resource effect and a resource-binding call: the
+    // dynamic instance receives the provider as a pointer and passes it to the
+    // concrete callee (R7).
+    expect_stdout(
+        must_run(inline(
+            "generic_resource_effect",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "def announce: <T where Copy T> T ->{IO} () = value => {\n",
+                "    println \"announced\"\n",
+                "}\n",
+                "announce 7\n",
+                "announce (U8 :: 1)\n",
+            ),
+            "core",
+        )),
+        "announced\nannounced\n",
     ),
     // A string template inside a generic body: the interpolations have
     // concrete types, so the dynamic body calls the concrete formatter ABI

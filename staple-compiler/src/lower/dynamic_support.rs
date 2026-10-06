@@ -62,16 +62,8 @@ pub(crate) enum RejectionReason {
     BufferIntrinsic,
     /// String and CString operations (R7).
     StringIntrinsic,
-    /// A call with hidden resource bindings.
-    ResourceCall,
     /// A resource expression in the body.
-    ResourceExpression,
     /// A resource mutation target.
-    ResourcePlace,
-    /// A `with` provider scope.
-    WithExpression,
-    /// A signature declares resource effects.
-    ResourceEffects,
     /// An index expression (trait-dispatched).
     IndexExpression,
     /// An implicit thunk argument.
@@ -182,11 +174,6 @@ impl RejectionReason {
             RejectionReason::Intrinsic => "unsupported intrinsic",
             RejectionReason::BufferIntrinsic => "buffer intrinsic",
             RejectionReason::StringIntrinsic => "string intrinsic",
-            RejectionReason::ResourceCall => "resource call",
-            RejectionReason::ResourceExpression => "resource expression",
-            RejectionReason::ResourcePlace => "resource place",
-            RejectionReason::WithExpression => "with scope",
-            RejectionReason::ResourceEffects => "resource effects in the signature",
             RejectionReason::IndexExpression => "index expression",
             RejectionReason::ImplicitThunkArgument => "implicit thunk argument",
             RejectionReason::PropagatingBinding => "propagating binding",
@@ -432,9 +419,8 @@ impl LoweredProgram {
         if template.signature.effects.variable.is_some() {
             walker.reject(RejectionReason::EffectVariable);
         }
-        if !template.signature.effects.resources.is_empty() {
-            walker.reject(RejectionReason::ResourceEffects);
-        }
+        // R7: a resource effect row is an ABI fact, not a restriction. The
+        // dynamic ABI passes each resource provider as a pointer.
         if contains_parameter_product(&CheckedType::Function(template.signature.clone())) {
             walker.reject(RejectionReason::ParameterProducts);
         }
@@ -812,10 +798,16 @@ impl SupportWalker<'_> {
                     self.reject(RejectionReason::CallableValue);
                 }
             }
-            LoweredExpressionKind::Resource(_) => {
-                self.reject(RejectionReason::ResourceExpression)
+            LoweredExpressionKind::Resource(_) => {}
+            LoweredExpressionKind::With(with_id) => {
+                if let Some(with) = self.program.withs.get(*with_id) {
+                    if with.scope_exit != crate::lower::LoweredScopeExit::Ordinary {
+                        self.reject(RejectionReason::ReactiveCall);
+                    }
+                    self.expression(with.value);
+                    self.block(with.body);
+                }
             }
-            LoweredExpressionKind::With(_) => self.reject(RejectionReason::WithExpression),
             LoweredExpressionKind::Coro(_) | LoweredExpressionKind::Await(_) => {
                 self.reject(RejectionReason::CoroutineExpression)
             }
@@ -915,7 +907,7 @@ impl SupportWalker<'_> {
             crate::lower::LoweredPlaceKind::Symbol { .. }
             | crate::lower::LoweredPlaceKind::CapturedCell { .. } => {}
             crate::lower::LoweredPlaceKind::Temporary { expression } => self.expression(*expression),
-            crate::lower::LoweredPlaceKind::Resource { .. } => self.reject(RejectionReason::ResourcePlace),
+            crate::lower::LoweredPlaceKind::Resource { .. } => {}
             crate::lower::LoweredPlaceKind::Dereference { reference, .. } => {
                 self.expression(*reference)
             }
@@ -942,9 +934,6 @@ impl SupportWalker<'_> {
             self.reject(RejectionReason::Malformed);
             return;
         };
-        if !call.resource_bindings.is_empty() {
-            self.reject(RejectionReason::ResourceCall);
-        }
         if call.reactive.is_some() {
             self.reject(RejectionReason::ReactiveCall);
         }
@@ -1093,7 +1082,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 11;
+    const IN_SCOPE_BASELINE: usize = 6;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.

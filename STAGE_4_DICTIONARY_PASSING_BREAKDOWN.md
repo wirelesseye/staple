@@ -328,11 +328,23 @@ reachable from the branch.
   run-time-typed interpolation moves from the in-scope "string template"
   reason to the allowed "trait call with run-time arguments" reason (it needs
   `Display`/`Debug` dispatch, Stage 6). The corpus gains
-  `generic_string_template`, and the full differential run covers it. The
-  string-template row reaches zero, but the in-scope template count stays
-  **11** because those templates also carry resource, callable-value, capture,
-  or function-typed reasons. Resource effects, resource calls, `with` scopes,
-  and implicit thunk arguments remain.
+  `generic_string_template`.
+- **R7 resources.** The dynamic environment carries a resource map. A dynamic
+  instance reads its effect-row providers from the ABI's resource parameters
+  (one pointer each, after the result slot), a `with` scope evaluates its
+  provider once, registers it for its body, and removes it after, `resource`
+  reads and places resolve through the map, and hidden resource arguments are
+  passed at dynamic calls: pointers to a dynamic callee or dynamic-shape
+  closure, and the concrete ABI's value-or-pointer form to a concrete callee
+  or closure. The scanner no longer rejects resource effects, resource calls,
+  resource reads/places, or ordinary `with` scopes (reactive and task scopes
+  stay the allowed Stage 8 reason). The corpus gains
+  `generic_resource_effect` (a bound-free generic with a resource effect and a
+  resource-binding call), and the full differential run covers it. The
+  resource rows reach zero and the in-scope baseline drops from **11** to
+  **6**. Implicit thunk arguments, dynamic-shape constructor callable values,
+  shared-cell and compound captures, and function-typed signatures/values
+  remain.
 - **R4 shared-cell emission support (not yet routed).** A captured mutable
   local's cell is now a dynamic GC payload with a trailing value-descriptor
   word and the shared `gc-finalizer-dynamic-cell` finalizer; a shared-cell

@@ -24,6 +24,14 @@ struct DynamicBinding<'context> {
     live: bool,
 }
 
+/// One bound resource provider in a dynamic body. The dynamic ABI passes every
+/// resource as a pointer, so reads load the value through it.
+#[derive(Clone)]
+struct DynamicResource<'context> {
+    value_type: CheckedType,
+    pointer: PointerValue<'context>,
+}
+
 /// One active dynamic loop. `break` writes its value into `result` (allocated
 /// once in the entry block) and branches to `exit`; `breaks` proves the exit
 /// is reachable.
@@ -63,6 +71,7 @@ struct DynamicEnvironment<'context> {
     coercions: HashMap<ExpressionId, PointerValue<'context>>,
     loop_results: HashMap<ExpressionId, PointerValue<'context>>,
     cells: HashMap<SymbolId, PointerValue<'context>>,
+    resources: HashMap<crate::lower::LoweredResourceProviderId, DynamicResource<'context>>,
     loops: Vec<DynamicLoopContext<'context>>,
     closure: PointerValue<'context>,
     result: PointerValue<'context>,
@@ -201,12 +210,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .view
             .instance_signature(instance)
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic callee signature"))?;
-        if !call.resource_bindings.is_empty() {
-            return Err(Diagnostic::new(
-                span.clone(),
-                "concrete-to-dynamic resource calls are not yet implemented",
-            ));
-        }
         let mut argument_conversions = std::collections::BTreeMap::new();
         let mut result_conversion = None;
         if let Some(conversions) = self.view.conversions(owner) {
@@ -248,6 +251,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_alloca(result_type, "dynamic.call.result")
             .map_err(compiler_diagnostic)?;
         arguments.push(result.into());
+        let resource_count = call.resource_bindings.len();
+        let (resources, values) = values.split_at(resource_count);
+        for (index, value) in resources.iter().enumerate() {
+            let use_id = *call.resource_bindings.get(index).ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing concrete resource binding")
+            })?;
+            let use_record = self
+                .view
+                .resource_use(owner, use_id)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing concrete resource use"))?;
+            let value = BasicValueEnum::try_from(*value)
+                .map_err(|_| Diagnostic::new(span.clone(), "invalid concrete resource"))?;
+            let pointer = if use_record.pass_mode != crate::lower::LoweredArgumentPassMode::Value {
+                value.into_pointer_value()
+            } else {
+                let storage = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(value.get_type(), "dynamic.resource")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(storage, value)
+                    .map_err(compiler_diagnostic)?;
+                storage
+            };
+            arguments.push(pointer.into());
+        }
         let parameter_types = super::flattened_parameter_types(&call.function_type.parameter);
         let indirect = self.backend.indirect_parameter_mask(&call.function_type);
         let whole = call
@@ -527,6 +558,157 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "bound site is not a function",
             )),
         }
+    }
+
+    /// One hidden resource argument at a dynamic call. A dynamic callee
+    /// receives the provider pointer; a concrete callee receives the value or
+    /// pointer its concrete ABI expects.
+    fn dynamic_resource_argument(
+        &self,
+        owner: EmissionOwner,
+        call: &crate::LoweredCall,
+        index: usize,
+        dynamic_callee: bool,
+        environment: &DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<inkwell::values::BasicMetadataValueEnum<'context>> {
+        let use_id = *call.resource_bindings.get(index).ok_or_else(|| {
+            Diagnostic::new(call.origin.span.clone(), "missing hidden resource binding")
+        })?;
+        let use_record = self
+            .view
+            .resource_use(owner, use_id)
+            .ok_or_else(|| Diagnostic::new(call.origin.span.clone(), "missing hidden resource use"))?;
+        let provider = use_record.provider.ok_or_else(|| {
+            Diagnostic::new(
+                use_record.origin.span.clone(),
+                "resource use has no selected provider",
+            )
+        })?;
+        let bound = environment.resources.get(&provider).ok_or_else(|| {
+            Diagnostic::new(
+                use_record.origin.span.clone(),
+                format!(
+                    "resource `{}` is not available",
+                    use_record.resource.value_type
+                ),
+            )
+        })?;
+        if dynamic_callee || use_record.pass_mode != crate::lower::LoweredArgumentPassMode::Value {
+            return Ok(bound.pointer.into());
+        }
+        let ty = self.backend.compile_type(&bound.value_type)?;
+        Ok(self
+            .backend
+            .builder
+            .build_load(ty, bound.pointer, "resource.copy")
+            .map_err(compiler_diagnostic)?
+            .into())
+    }
+
+    /// A resource value read in a dynamic body (R7). The provider pointer is
+    /// registered by the function's effect row or a `with` scope; the value is
+    /// loaded into the expression's dynamic storage.
+    fn emit_dynamic_resource_read(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        use_id: crate::LoweredResourceUseId,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let span = self
+            .view
+            .expression(owner, id)
+            .map(|expression| expression.origin.span.clone())
+            .unwrap_or(staple_syntax::Span::Compiler);
+        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "missing dynamic resource storage")
+        })?;
+        let use_record = self
+            .view
+            .resource_use(owner, use_id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing resource use"))?;
+        let provider = use_record.provider.ok_or_else(|| {
+            Diagnostic::new(
+                use_record.origin.span.clone(),
+                "resource read has no selected provider",
+            )
+        })?;
+        let bound = environment.resources.get(&provider).ok_or_else(|| {
+            Diagnostic::new(
+                use_record.origin.span.clone(),
+                format!(
+                    "resource `{}` is not available",
+                    use_record.resource.value_type
+                ),
+            )
+        })?;
+        let ty = self.backend.compile_type(&bound.value_type)?;
+        let value = self
+            .backend
+            .builder
+            .build_load(ty, bound.pointer, "resource.value")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(storage, value)
+            .map_err(compiler_diagnostic)?;
+        Ok(storage)
+    }
+
+    /// A `with` scope in a dynamic body (R7). The provider value is evaluated
+    /// once, registered for the body, and removed after it. Reactive and task
+    /// scopes stay Stage 8.
+    fn emit_dynamic_with(
+        &mut self,
+        owner: EmissionOwner,
+        with_id: crate::LoweredWithId,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let with = self
+            .view
+            .with(owner, with_id)
+            .ok_or_else(|| Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered with"))?;
+        if with.scope_exit != crate::lower::LoweredScopeExit::Ordinary {
+            return Err(Diagnostic::new(
+                with.origin.span.clone(),
+                "dynamic reactive or task with scopes are not yet implemented",
+            ));
+        }
+        let provider = self
+            .view
+            .resource_provider(owner, with.provider)
+            .ok_or_else(|| {
+                Diagnostic::new(with.origin.span.clone(), "missing `with` provider")
+            })?;
+        let value = self.emit_dynamic_expression(owner, with.value, environment)?;
+        let pointer = match provider.storage {
+            crate::lower::LoweredProviderStorage::Place => {
+                let place = with.place.ok_or_else(|| {
+                    Diagnostic::new(
+                        with.origin.span.clone(),
+                        "`with` place provider has no place",
+                    )
+                })?;
+                self.emit_dynamic_place(owner, place, environment)?.0
+            }
+            crate::lower::LoweredProviderStorage::Materialized => value,
+        };
+        environment.resources.insert(
+            with.provider,
+            DynamicResource {
+                value_type: provider.resource.value_type.clone(),
+                pointer,
+            },
+        );
+        let result = self.emit_dynamic_block(owner, with.body, environment);
+        environment.resources.remove(&with.provider);
+        let result = result?;
+        Ok(result.unwrap_or_else(|| {
+            self.backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+        }))
     }
 
     /// A string template whose interpolations have concrete types (R7). The
@@ -1615,9 +1797,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut slots = vec![None; types.len()];
         let mut unplaced = Vec::new();
         let mut cleanups = Vec::new();
+        let mut hidden = Vec::new();
         for step in &call.steps {
             match step {
                 LoweredCallStep::Callee { .. } => {}
+                LoweredCallStep::Resource { resource } => {
+                    hidden.push(self.dynamic_resource_argument(
+                        owner,
+                        call,
+                        *resource,
+                        dynamic_shape,
+                        environment,
+                    )?);
+                }
                 LoweredCallStep::Argument { argument } => {
                     let record = &call.arguments[*argument];
                     let value = record.expression.ok_or_else(|| {
@@ -1675,6 +1867,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             // through a caller-provided out slot and every value by pointer.
             arguments.push(storage.into());
         }
+        arguments.extend(hidden);
         for (index, slot) in slots.iter().enumerate() {
             let pointer = slot.ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing dynamic closure argument")
@@ -2682,7 +2875,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
         };
         if !body.signature.effects.resources.is_empty() {
-            return Err(unsupported("resources"));
         }
         let runtime = self
             .view
@@ -2694,6 +2886,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .enumerate()
             .map(|(index, parameter)| (*parameter, parameters[index + 1].into_pointer_value()))
             .collect::<HashMap<_, _>>();
+        let resource_count = body.signature.effects.resources.len();
+        let mut resources = HashMap::new();
+        if body.function_providers.len() != resource_count {
+            return Err(unsupported("resource providers disagree with the effect row"));
+        }
+        for (position, provider_id) in body.function_providers.iter().enumerate() {
+            let provider = self
+                .view
+                .resource_provider(EmissionOwner::Instance(id), *provider_id)
+                .ok_or_else(|| unsupported("missing function resource provider"))?;
+            let pointer = parameters
+                .get(1 + runtime.len() + 1 + position)
+                .ok_or_else(|| unsupported("missing function resource parameter"))?
+                .into_pointer_value();
+            resources.insert(
+                *provider_id,
+                DynamicResource {
+                    value_type: provider.resource.value_type.clone(),
+                    pointer,
+                },
+            );
+        }
         let mut environment = DynamicEnvironment {
             descriptors,
             compound_descriptors: Vec::new(),
@@ -2704,6 +2918,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             coercions: HashMap::new(),
             loop_results: HashMap::new(),
             cells: HashMap::new(),
+            resources,
             loops: Vec::new(),
             closure: parameters[0].into_pointer_value(),
             result: parameters[1 + runtime.len()].into_pointer_value(),
@@ -2929,6 +3144,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 | LoweredExpressionKind::String(_)
                 | LoweredExpressionKind::CString(_)
                 | LoweredExpressionKind::StringTemplate(_)
+                | LoweredExpressionKind::Resource(_)
                 | LoweredExpressionKind::CallableValue(_) => {
                     let descriptor = self.dynamic_descriptor(
                         record
@@ -3006,7 +3222,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let owner = EmissionOwner::Instance(id);
-        let raw = &parameters[2 + runtime.len()..];
+        let raw = &parameters[2 + runtime.len() + resource_count..];
         let whole = body
             .signature
             .mutations
@@ -4168,6 +4384,32 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     self.dynamic_descriptor(&place.value_type, environment, &place.origin.span)?;
                 Ok((pointer, descriptor))
             }
+            crate::LoweredPlaceKind::Resource { use_ } => {
+                let use_record = self
+                    .view
+                    .resource_use(owner, *use_)
+                    .ok_or_else(|| {
+                        Diagnostic::new(place.origin.span.clone(), "missing resource place use")
+                    })?;
+                let provider = use_record.provider.ok_or_else(|| {
+                    Diagnostic::new(
+                        use_record.origin.span.clone(),
+                        "resource place has no selected provider",
+                    )
+                })?;
+                let bound = environment.resources.get(&provider).ok_or_else(|| {
+                    Diagnostic::new(
+                        use_record.origin.span.clone(),
+                        format!(
+                            "resource `{}` is not available",
+                            use_record.resource.value_type
+                        ),
+                    )
+                })?;
+                let descriptor =
+                    self.dynamic_descriptor(&place.value_type, environment, &place.origin.span)?;
+                Ok((bound.pointer, descriptor))
+            }
             crate::LoweredPlaceKind::Dereference {
                 reference,
                 dereference,
@@ -4963,12 +5205,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(call.origin.span.clone(), "missing callee key")
                     })?;
-                if !call.resource_bindings.is_empty() {
-                    return Err(Diagnostic::new(
-                        call.origin.span.clone(),
-                        "resource calls in dynamic bodies are not yet implemented",
-                    ));
-                }
                 let closure = match route {
                     LoweredCallEnvironment::None => self
                         .backend
@@ -5013,6 +5249,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 );
                 let mut cleanups = Vec::new();
                 let mut unplaced = Vec::new();
+                let mut hidden = Vec::new();
                 for step in &call.steps {
                     match step {
                         LoweredCallStep::Argument { argument } => {
@@ -5107,6 +5344,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             }
                             slots[*slot] = Some(value);
                         }
+                        LoweredCallStep::Resource { resource } => {
+                            hidden.push(self.dynamic_resource_argument(
+                                owner,
+                                call,
+                                *resource,
+                                !runtime.is_empty(),
+                                environment,
+                            )?);
+                        }
                         LoweredCallStep::Invoke => break,
                         _ => {
                             return Err(Diagnostic::new(
@@ -5116,6 +5362,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         }
                     }
                 }
+                arguments.extend(hidden);
                 if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
                     if slots.len() == 1
                         && !matches!(
@@ -5248,17 +5495,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredExpressionKind::CallableValue(value_id) => {
                 self.emit_dynamic_callable_value(owner, id, value_id, environment)?
             }
-            LoweredExpressionKind::Resource(_) => {
-                return Err(Diagnostic::new(
-                    expression.origin.span.clone(),
-                    "dynamic resource reads are not yet implemented",
-                ));
+            LoweredExpressionKind::Resource(use_id) => {
+                return self.emit_dynamic_resource_read(owner, id, use_id, environment);
             }
-            LoweredExpressionKind::With(_) => {
-                return Err(Diagnostic::new(
-                    expression.origin.span.clone(),
-                    "dynamic with scopes are not yet implemented",
-                ));
+            LoweredExpressionKind::With(with_id) => {
+                return self.emit_dynamic_with(owner, with_id, environment);
             }
             LoweredExpressionKind::Coro(_) => {
                 return Err(Diagnostic::new(
