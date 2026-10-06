@@ -14,11 +14,12 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::lower::{
-    BlockId, ExpressionId, ItemId, LoweredCallableTarget,
-    LoweredExpressionKind, LoweredItemKind, LoweredPatternKind, LoweredProductStep, LoweredProgram,
-    PatternId, PlaceId,
+    BlockId, ExpressionId, ItemId, LoweredCallableTarget, LoweredExpressionKind, LoweredItemKind,
+    LoweredPatternKind, LoweredProductStep, LoweredProgram, PatternId, PlaceId,
 };
-use crate::{CheckedFunctionType, CheckedType, FunctionId, TypeParameterId, contains_type_parameter};
+use crate::{
+    CheckedFunctionType, CheckedType, FunctionId, TypeParameterId, contains_type_parameter,
+};
 
 /// Whether a function's template can be emitted as a dynamic implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,8 +42,10 @@ pub(crate) enum RejectionReason {
     /// A callable value expression (`CallableValue`).
     CallableValue,
     /// A value whose type mentions a function type with run-time parameters.
+    #[allow(dead_code)]
     FunctionTypedValue,
     /// A coercion whose source or target mentions such a function type.
+    #[allow(dead_code)]
     FunctionTypedCoercion,
     /// A signature parameter or result is such a function type.
     FunctionTypedSignature,
@@ -67,6 +70,7 @@ pub(crate) enum RejectionReason {
     /// An implicit thunk argument. The corpus uses these as reactive callback
     /// and coroutine bodies (Stage 8); the dynamic emitter builds their
     /// closures through the same machinery as R4.
+    #[allow(dead_code)]
     ImplicitThunkArgument,
     /// A propagating or asserting pattern binding.
     PropagatingBinding,
@@ -182,9 +186,7 @@ impl RejectionReason {
             RejectionReason::ProductSpread => "product spread",
             RejectionReason::RecursiveConstruction => "recursive construction",
             RejectionReason::Deferred => "deferred expression",
-            RejectionReason::ParameterDependentNonGeneric => {
-                "parameter-dependent non-generic call"
-            }
+            RejectionReason::ParameterDependentNonGeneric => "parameter-dependent non-generic call",
             RejectionReason::ExternWithParameters => "parameter-dependent extern call",
             RejectionReason::Malformed => "malformed lowered record",
             RejectionReason::CallsExcludedTemplate => "calls an excluded template",
@@ -542,7 +544,10 @@ fn contains_function_behind_reference(ty: &CheckedType) -> bool {
             .elements
             .iter()
             .any(|field| contains_function_behind_reference(&field.value_type)),
-        CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_function_behind_reference),
+        CheckedType::Sum(sum) => sum
+            .alternatives
+            .iter()
+            .any(contains_function_behind_reference),
         CheckedType::Wrapper {
             arguments,
             representation,
@@ -552,8 +557,7 @@ fn contains_function_behind_reference(ty: &CheckedType) -> bool {
                 || contains_function_behind_reference(representation)
         }
         CheckedType::Array { element, .. } => contains_function_behind_reference(element),
-        CheckedType::Opaque { arguments, .. }
-        | CheckedType::TypeConstructor { arguments, .. } => {
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().any(contains_function_behind_reference)
         }
         _ => false,
@@ -583,8 +587,7 @@ pub(super) fn contains_unsupported_function(ty: &CheckedType) -> bool {
                 || contains_polymorphic_function(representation)
         }
         CheckedType::Array { element, .. } => contains_polymorphic_function(element),
-        CheckedType::Opaque { arguments, .. }
-        | CheckedType::TypeConstructor { arguments, .. } => {
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().any(contains_polymorphic_function)
         }
         _ => false,
@@ -593,12 +596,13 @@ pub(super) fn contains_unsupported_function(ty: &CheckedType) -> bool {
 
 /// Whether any flattened parameter type or the result needs an unsupported
 /// conversion, or sits behind a reference.
-fn signature_function_restriction(
-    function_type: &CheckedFunctionType,
-) -> Option<RejectionReason> {
+fn signature_function_restriction(function_type: &CheckedFunctionType) -> Option<RejectionReason> {
     let parameters = super::flattened_parameter_types(&function_type.parameter);
     let mut reason = None;
-    for parameter in parameters.iter().chain(std::iter::once(&*function_type.result)) {
+    for parameter in parameters
+        .iter()
+        .chain(std::iter::once(&*function_type.result))
+    {
         if contains_function_behind_reference(parameter) {
             return Some(RejectionReason::FunctionBehindReference);
         }
@@ -704,15 +708,11 @@ impl SupportWalker<'_> {
         };
         if contains_function_behind_reference(&expression.value_type) {
             self.reject(RejectionReason::FunctionBehindReference);
-        } else if contains_unsupported_function(&expression.value_type) {
-            self.reject(RejectionReason::FunctionTypedValue);
         }
         if let Some(coercion) = &expression.coercion {
             for ty in [&coercion.source, &coercion.target] {
                 if contains_function_behind_reference(ty) {
                     self.reject(RejectionReason::FunctionBehindReference);
-                } else if contains_unsupported_function(ty) {
-                    self.reject(RejectionReason::FunctionTypedCoercion);
                 }
             }
         }
@@ -745,17 +745,17 @@ impl SupportWalker<'_> {
                     self.reject(RejectionReason::Malformed);
                     return;
                 };
-                let captures = callable.closure.as_ref().map_or(&[][..], |closure| {
-                    closure.captures.as_slice()
-                });
+                let captures = callable
+                    .closure
+                    .as_ref()
+                    .map_or(&[][..], |closure| closure.captures.as_slice());
                 let captures_eligible = captures.iter().all(|capture| {
                     !contains_polymorphic_function(&capture.value_type)
                         && (matches!(&capture.value_type, CheckedType::Parameter { .. })
                             || !contains_type_parameter(&capture.value_type))
                 });
-                let dynamic_shape = contains_type_parameter(&CheckedType::Function(
-                    callable.function_type.clone(),
-                ));
+                let dynamic_shape =
+                    contains_type_parameter(&CheckedType::Function(callable.function_type.clone()));
                 let dynamic_target = matches!(
                     callable.target,
                     LoweredCallableTarget::DirectFunction { .. }
@@ -816,7 +816,9 @@ impl SupportWalker<'_> {
                             self.expression(*expression);
                         }
                         LoweredProductStep::PositionalSpread { .. }
-                        | LoweredProductStep::NamedSpread { .. } => self.reject(RejectionReason::ProductSpread),
+                        | LoweredProductStep::NamedSpread { .. } => {
+                            self.reject(RejectionReason::ProductSpread)
+                        }
                     }
                 }
                 for field in &product.fields {
@@ -892,7 +894,9 @@ impl SupportWalker<'_> {
         match &place.kind {
             crate::lower::LoweredPlaceKind::Symbol { .. }
             | crate::lower::LoweredPlaceKind::CapturedCell { .. } => {}
-            crate::lower::LoweredPlaceKind::Temporary { expression } => self.expression(*expression),
+            crate::lower::LoweredPlaceKind::Temporary { expression } => {
+                self.expression(*expression)
+            }
             crate::lower::LoweredPlaceKind::Resource { .. } => {}
             crate::lower::LoweredPlaceKind::Dereference { reference, .. } => {
                 self.expression(*reference)
@@ -936,17 +940,16 @@ impl SupportWalker<'_> {
         // A concrete callee with a dynamic function-typed argument or result
         // needs the dynamic-to-concrete direction, which the dynamic emitter
         // does not apply yet. Reject rather than emit a wrong-ABI call.
-        let mentions_parameters = contains_type_parameter(&CheckedType::Function(
-            call.function_type.clone(),
-        )) || call
-            .substitutions
-            .types
-            .iter()
-            .any(|entry| contains_type_parameter(&entry.value_type));
+        let mentions_parameters =
+            contains_type_parameter(&CheckedType::Function(call.function_type.clone()))
+                || call
+                    .substitutions
+                    .types
+                    .iter()
+                    .any(|entry| contains_type_parameter(&entry.value_type));
         if !mentions_parameters {
             let dynamic_function = |ty: &CheckedType| {
-                matches!(ty, CheckedType::Function(_))
-                    && contains_type_parameter(ty)
+                matches!(ty, CheckedType::Function(_)) && contains_type_parameter(ty)
             };
             for argument in &call.arguments {
                 let Some(expression) = argument.expression else {
@@ -969,7 +972,9 @@ impl SupportWalker<'_> {
         }
         for step in &call.steps {
             match step {
-                crate::lower::LoweredCallStep::Callee { expression } => self.expression(*expression),
+                crate::lower::LoweredCallStep::Callee { expression } => {
+                    self.expression(*expression)
+                }
                 crate::lower::LoweredCallStep::Argument { argument } => {
                     self.argument(call, *argument)
                 }
@@ -986,13 +991,13 @@ impl SupportWalker<'_> {
         for index in 0..call.arguments.len() {
             self.argument(call, index);
         }
-        let mentions_parameters = contains_type_parameter(&CheckedType::Function(
-            call.function_type.clone(),
-        )) || call
-            .substitutions
-            .types
-            .iter()
-            .any(|entry| contains_type_parameter(&entry.value_type));
+        let mentions_parameters =
+            contains_type_parameter(&CheckedType::Function(call.function_type.clone()))
+                || call
+                    .substitutions
+                    .types
+                    .iter()
+                    .any(|entry| contains_type_parameter(&entry.value_type));
         match &call.target {
             LoweredCallableTarget::DirectFunction { function, .. } => {
                 if mentions_parameters {
@@ -1010,7 +1015,12 @@ impl SupportWalker<'_> {
                 }
             }
             LoweredCallableTarget::Constructor { recursive, .. } => {
-                if recursive.is_some() {
+                if recursive.is_some()
+                    && !matches!(
+                        recursive,
+                        Some(crate::RecursiveConstruction::ManagedReference)
+                    )
+                {
                     self.reject(RejectionReason::RecursiveConstruction);
                 }
             }
@@ -1045,8 +1055,8 @@ impl SupportWalker<'_> {
         let Some(argument) = call.arguments.get(index) else {
             return;
         };
-        if argument.thunk.is_some() {
-            self.reject(RejectionReason::ImplicitThunkArgument);
+        if let Some(thunk) = argument.thunk {
+            self.dependencies.insert(thunk);
         }
         if let Some(expression) = argument.expression {
             self.expression(expression);
@@ -1068,7 +1078,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 4;
+    const IN_SCOPE_BASELINE: usize = 3;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.
@@ -1088,9 +1098,56 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn ordinary_thunks_are_selected_inside_dynamic_bodies() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let program = codegen_corpus()
+            .iter()
+            .find(|program| program.name == "dynamic_implicit_thunks")
+            .unwrap();
+        let CorpusSource::Inline(source) = program.source else {
+            panic!("thunk regression is inline");
+        };
+        let loaded = ProgramLoader::new()
+            .with_standard_library_root(workspace.join("stdlib"))
+            .load_source(source, workspace)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(loaded).unwrap();
+        let checked = TypeChecker::new().check(resolved).unwrap();
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&checked)
+            .unwrap();
+        for name in ["captured", "concrete", "indirect"] {
+            let function = lowered
+                .program
+                .functions
+                .iter()
+                .find_map(|(_, id, function)| (function.name == name).then_some(id))
+                .unwrap();
+            assert_eq!(
+                lowered.program.dynamic_support(function),
+                DynamicSupport::Supported,
+                "{name}"
+            );
+            assert!(
+                lowered.program.instances.iter().any(|(_, instance)| {
+                    instance.template == function
+                        && lowered
+                            .program
+                            .specializations
+                            .instance(instance.ordinal)
+                            .is_some_and(|key| !key.runtime().is_empty())
+                }),
+                "{name} must run dynamically rather than fall back"
+            );
+        }
+    }
+
     /// The tracked coverage report (R0.2). Every generic template in the
     /// corpus is counted once per program; a template is in scope when any of
-    /// its reasons is. The count may only go down.
+    /// its reasons is. Baseline increases require new corpus programs or
+    /// corrected classifications and an explanation in the commit message.
     #[test]
     fn coverage_report_stays_within_baseline() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -1114,7 +1171,9 @@ mod tests {
                 .lower(&checked)
             {
                 Ok(lowered) => lowered,
-                Err(diagnostics) => panic!("corpus should lower with dictionary passing: {diagnostics:?}"),
+                Err(diagnostics) => {
+                    panic!("corpus should lower with dictionary passing: {diagnostics:?}")
+                }
             };
             let program = &lowered.program;
             for (_, _, function) in program.functions.iter() {

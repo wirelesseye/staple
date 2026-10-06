@@ -229,20 +229,12 @@ That plan holds the detailed status. This section only summarizes it.
 
 ### Implementation status
 
-**Current state (`c0cb3c5`): not complete, close to the exit gate on the
-corpus.**
-
-- Steps 4a.1–4a.6 below are implemented, with the remainder plan's
-  decisions R-A to R-F. The open parts are listed in the remainder plan's
-  [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state) and
-  [Open problems](STAGE_4A_REMAINDER_BREAKDOWN.md#open-problems).
-- Under the differential option, 4,398 of the corpus's 5,951 generic
-  templates (74%) are lowered through dynamic implementations. Three are
-  still rejected for an in-scope reason.
-- Default-mode LLVM IR is unchanged: all 104 corpus and example inputs
-  report `same` against the `50565d8` release build.
-- The full differential run passes on 91 programs, 90 of which use dynamic
-  calls (10,506 call sites).
+**Stage 4a is not complete.** Dynamic implementations now support ordinary
+implicit thunks and managed references, with recursively owned descriptor
+graphs. Generic constructor values, general reabstraction at aggregate and
+nested function boundaries, and the concrete dispatch coverage correction
+remain. Detailed coverage and validation status live in the remainder plan's
+[Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
 
 **Decision R-F. The dynamic emitter stays separate.** It is too large to fold
 into the concrete emitter at this point. Consistency comes from three rules:

@@ -4,6 +4,141 @@ use inkwell::{AddressSpace, values::PointerValue};
 use super::{Backend, CodeGenerationResult, Diagnostic, Span, compiler_diagnostic};
 
 impl<'program, 'context> Backend<'program, 'context> {
+    /// Preserve a descriptor graph beyond the frame that built it. Compound
+    /// descriptors may point at other stack-built descriptors, so copying
+    /// only their header and component pointers is insufficient.
+    pub(crate) fn copy_dynamic_descriptor(
+        &self,
+        descriptor: PointerValue<'context>,
+        span: &Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let function = match self.llvm_module.get_function("__staple_copy_descriptor") {
+            Some(function) => function,
+            None => {
+                let function = self.llvm_module.add_function(
+                    "__staple_copy_descriptor",
+                    pointer.fn_type(&[pointer.into()], false),
+                    Some(inkwell::module::Linkage::Internal),
+                );
+                let builder = self.context.create_builder();
+                let entry = self.context.append_basic_block(function, "entry");
+                let loop_ = self.context.append_basic_block(function, "components");
+                let body = self.context.append_basic_block(function, "copy.component");
+                let done = self.context.append_basic_block(function, "done");
+                builder.position_at_end(entry);
+                let source = function.get_first_param().unwrap().into_pointer_value();
+                let count_slot = builder
+                    .build_struct_gep(self.type_descriptor_type(0), source, 5, "count.slot")
+                    .map_err(compiler_diagnostic)?;
+                let count = builder
+                    .build_load(self.context.i32_type(), count_slot, "count")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let count = builder
+                    .build_int_z_extend(count, self.size_type, "component.count")
+                    .map_err(compiler_diagnostic)?;
+                let header = self.size_type.const_int(
+                    self.target_data
+                        .get_store_size(&self.type_descriptor_type(0)),
+                    false,
+                );
+                let word = self
+                    .size_type
+                    .const_int(self.target_data.get_pointer_byte_size(None) as u64, false);
+                let components = builder
+                    .build_int_mul(count, word, "components.bytes")
+                    .map_err(compiler_diagnostic)?;
+                let size = builder
+                    .build_int_add(header, components, "descriptor.bytes")
+                    .map_err(compiler_diagnostic)?;
+                let allocate = self
+                    .llvm_module
+                    .get_function("__staple_gc_alloc")
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "missing descriptor allocator"))?;
+                let copy = builder
+                    .build_direct_call(allocate, &[size.into()], "descriptor.copy")
+                    .map_err(compiler_diagnostic)?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_pointer_value();
+                builder
+                    .build_memcpy(copy, 1, source, 1, size)
+                    .map_err(compiler_diagnostic)?;
+                builder
+                    .build_unconditional_branch(loop_)
+                    .map_err(compiler_diagnostic)?;
+                builder.position_at_end(loop_);
+                let index = builder
+                    .build_phi(self.size_type, "component.index")
+                    .map_err(compiler_diagnostic)?;
+                index.add_incoming(&[(&self.size_type.const_zero(), entry)]);
+                let current = index.as_basic_value().into_int_value();
+                let more = builder
+                    .build_int_compare(inkwell::IntPredicate::ULT, current, count, "has.component")
+                    .map_err(compiler_diagnostic)?;
+                builder
+                    .build_conditional_branch(more, body, done)
+                    .map_err(compiler_diagnostic)?;
+                builder.position_at_end(body);
+                let offset = builder
+                    .build_int_mul(current, word, "component.offset")
+                    .map_err(compiler_diagnostic)?;
+                let offset = builder
+                    .build_int_add(header, offset, "component.address")
+                    .map_err(compiler_diagnostic)?;
+                let source_slot = unsafe {
+                    builder.build_gep(
+                        self.context.i8_type(),
+                        source,
+                        &[offset],
+                        "source.component",
+                    )
+                }
+                .map_err(compiler_diagnostic)?;
+                let child = builder
+                    .build_load(pointer, source_slot, "child.descriptor")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let child_copy = builder
+                    .build_direct_call(function, &[child.into()], "child.copy")
+                    .map_err(compiler_diagnostic)?
+                    .try_as_basic_value()
+                    .unwrap_basic();
+                let copy_slot = unsafe {
+                    builder.build_gep(self.context.i8_type(), copy, &[offset], "copy.component")
+                }
+                .map_err(compiler_diagnostic)?;
+                builder
+                    .build_store(copy_slot, child_copy)
+                    .map_err(compiler_diagnostic)?;
+                let next = builder
+                    .build_int_add(
+                        current,
+                        self.size_type.const_int(1, false),
+                        "next.component",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                builder
+                    .build_unconditional_branch(loop_)
+                    .map_err(compiler_diagnostic)?;
+                index.add_incoming(&[(&next, body)]);
+                builder.position_at_end(done);
+                builder
+                    .build_return(Some(&copy))
+                    .map_err(compiler_diagnostic)?;
+                function
+            }
+        };
+        self.builder
+            .build_direct_call(function, &[descriptor.into()], "descriptor.copy")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .map(|value| value.into_pointer_value())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "descriptor copy has no result"))
+    }
+
     /// Allocate a descriptor-sized value in the prologue. Alignment is supplied
     /// at runtime, so reserve padding and align the resulting byte address.
     /// The active builder must still be in the entry block: layout loads must

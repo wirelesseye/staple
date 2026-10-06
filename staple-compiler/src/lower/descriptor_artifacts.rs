@@ -59,7 +59,9 @@ pub(super) fn collect_concrete_types(ty: &CheckedType, types: &mut Vec<CheckedTy
                 collect_concrete_types(alternative, types);
             }
         }
-        CheckedType::Wrapper { representation, .. } => collect_concrete_types(representation, types),
+        CheckedType::Wrapper { representation, .. } => {
+            collect_concrete_types(representation, types)
+        }
         _ => {}
     }
 }
@@ -328,9 +330,90 @@ pub(super) fn scan_instance(
                 }),
                 kind: Kind::GcFinalizer,
                 origin: record.origin.clone(),
-                use_site: Some(super::artifact_closure::ArtifactUseSite::ClosureEnvironment(
-                    *value_id,
-                )),
+                use_site: Some(
+                    super::artifact_closure::ArtifactUseSite::ClosureEnvironment(*value_id),
+                ),
+            });
+        }
+    }
+    // Implicit thunk arguments use the same descriptor-bound closure entry
+    // and capture finalizer as written lambdas.
+    for (site, target) in &body.bindings {
+        let super::LoweredBindingSite::CallArgumentThunk { call, argument } = site else {
+            continue;
+        };
+        let super::LoweredBoundTarget::Instance(callee) = target else {
+            continue;
+        };
+        let Some(runtime) = program.instance_runtime_order(*callee) else {
+            continue;
+        };
+        if runtime.is_empty() {
+            continue;
+        }
+        let Some(record) = program.instances.get(*callee) else {
+            continue;
+        };
+        let Some(thunk) = &record.body else {
+            continue;
+        };
+        requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::DescriptorBoundEntry(
+                crate::specialization::DescriptorBoundEntryKey {
+                    instance: record.ordinal,
+                },
+            ),
+            plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
+                instance: *callee,
+                runtime: runtime.clone(),
+                function_type: thunk.signature.clone(),
+            }),
+            kind: Kind::DescriptorBoundEntry,
+            origin: thunk.origin.clone(),
+            use_site: Some(
+                super::artifact_closure::ArtifactUseSite::DescriptorBoundThunk {
+                    call: *call,
+                    argument: *argument,
+                },
+            ),
+        });
+        if !thunk.captures.is_empty() {
+            requests.push(ClosureRequest::Artifact {
+                key: ArtifactRequestKey::GcFinalizer(
+                    crate::specialization::GcFinalizerKey::DynamicClosureEnvironment {
+                        closure: record.ordinal,
+                    },
+                ),
+                plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicClosureEnvironment {
+                    closure: *callee,
+                    runtime,
+                    captures: thunk
+                        .captures
+                        .iter()
+                        .map(|capture| crate::DynamicCapture {
+                            value_type: capture.value_type.clone(),
+                            access: if capture.requires_initialization_state
+                                || capture.mutable_storage
+                                || capture.derived
+                            {
+                                crate::LoweredCaptureAccess::SharedCell
+                            } else if capture.capture.borrowed {
+                                crate::LoweredCaptureAccess::Borrowed
+                            } else {
+                                crate::LoweredCaptureAccess::ByValue
+                            },
+                            owns: !capture.capture.borrowed && !capture.capture.non_owning,
+                        })
+                        .collect(),
+                }),
+                kind: Kind::GcFinalizer,
+                origin: thunk.origin.clone(),
+                use_site: Some(
+                    super::artifact_closure::ArtifactUseSite::ThunkArgumentEnvironment {
+                        call: *call,
+                        argument: *argument,
+                    },
+                ),
             });
         }
     }
@@ -357,6 +440,28 @@ pub(super) fn scan_instance(
             )),
         });
     }
+    // Managed references use the same descriptor-bearing payload as cells.
+    if let Some((call_id, _)) = body.calls.iter().find(|(_, call)| {
+        matches!(
+            &call.target,
+            super::LoweredCallableTarget::Constructor {
+                recursive: Some(crate::RecursiveConstruction::ManagedReference),
+                ..
+            }
+        )
+    }) {
+        requests.push(ClosureRequest::Artifact {
+            key: ArtifactRequestKey::GcFinalizer(
+                crate::specialization::GcFinalizerKey::DynamicCell,
+            ),
+            plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicCell),
+            kind: Kind::GcFinalizer,
+            origin: body.origin.clone(),
+            use_site: Some(super::artifact_closure::ArtifactUseSite::RefConstruction(
+                call_id,
+            )),
+        });
+    }
     // A captured mutable local allocates a dynamic shared cell and installs
     // the shared dynamic cell finalizer (R-D).
     for (_, item) in body.items() {
@@ -374,9 +479,10 @@ pub(super) fn scan_instance(
         let Some(symbol) = binding.symbol else {
             continue;
         };
-        let captured = program.symbols.get(symbol).is_some_and(|record| {
-            record.captured && (record.mutable_storage || record.derived)
-        });
+        let captured = program
+            .symbols
+            .get(symbol)
+            .is_some_and(|record| record.captured && (record.mutable_storage || record.derived));
         if !captured {
             continue;
         }
@@ -387,9 +493,7 @@ pub(super) fn scan_instance(
             plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicCell),
             kind: Kind::GcFinalizer,
             origin: body.origin.clone(),
-            use_site: Some(super::artifact_closure::ArtifactUseSite::DynamicCellFinalizer(
-                symbol,
-            )),
+            use_site: Some(super::artifact_closure::ArtifactUseSite::DynamicCellFinalizer(symbol)),
         });
     }
     requests.extend(reabstraction_requests(&body.conversions, &body.origin)?);
@@ -444,8 +548,7 @@ pub(super) fn scan_initializer(
         let ClosureRequest::Artifact { use_site, .. } = &mut request else {
             unreachable!()
         };
-        *use_site =
-            Some(super::artifact_closure::ArtifactUseSite::InstanceTypeDescriptor(index));
+        *use_site = Some(super::artifact_closure::ArtifactUseSite::InstanceTypeDescriptor(index));
         requests.push(request);
     }
     if let Some(conversions) = program.initializer_conversions.get(id.index()) {

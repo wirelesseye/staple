@@ -4714,6 +4714,24 @@ mod tests {
         assert!(dynamic_calls > 0, "the quick subset must use dynamic calls");
     }
 
+    /// In-scope remainder forms must execute through the descriptor ABI.
+    #[cfg(unix)]
+    #[test]
+    fn stage4a_remainder_differential() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
+        let mut tested = 0;
+        for program in staple_compiler::codegen_corpus() {
+            if !program.name.starts_with("dynamic_") { continue; }
+            let (source, source_root) = corpus_source(program, root);
+            let calls = differential_compare(program.name, &source, &source_root, &standard_library, &options);
+            assert!(calls > 0, "{} must exercise dynamic calls", program.name);
+            tested += 1;
+        }
+        assert!(tested > 0);
+    }
+
     /// The full Stage 4a differential exit gate: every runnable corpus program
     /// and every runnable example, both modes, identical stdout and exit
     /// status. Run explicitly with `--ignored` (R0.4).

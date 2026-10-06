@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use inkwell::{
     AddressSpace,
-    values::{FunctionValue, PointerValue},
+    values::{BasicValue, FunctionValue, PointerValue},
 };
 
 use super::{CodeGenerationResult, Diagnostic, LoweredEmitter, compiler_diagnostic};
@@ -407,7 +407,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
         use inkwell::values::{BasicValue, BasicValueEnum};
         let BasicValueEnum::StructValue(closure) = concrete else {
-            return Err(Diagnostic::new(span.clone(), "reabstraction source is not a closure"));
+            return Err(Diagnostic::new(
+                span.clone(),
+                "reabstraction source is not a closure",
+            ));
         };
         let code = self
             .backend
@@ -423,9 +426,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .into_pointer_value();
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
         let storage = self.backend.build_gc_allocation(
-            self.backend
-                .size_type
-                .const_int(2 * pointer_bytes, false),
+            self.backend.size_type.const_int(2 * pointer_bytes, false),
             "reabstraction.environment",
             span.clone(),
         )?;
@@ -461,7 +462,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<inkwell::values::BasicValueEnum<'context>> {
         use inkwell::values::{BasicValue, BasicValueEnum};
         let BasicValueEnum::StructValue(closure) = dynamic else {
-            return Err(Diagnostic::new(span.clone(), "reabstraction source is not a closure"));
+            return Err(Diagnostic::new(
+                span.clone(),
+                "reabstraction source is not a closure",
+            ));
         };
         let code = self
             .backend
@@ -477,9 +481,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .into_pointer_value();
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
         let storage = self.backend.build_gc_allocation(
-            self.backend
-                .size_type
-                .const_int(2 * pointer_bytes, false),
+            self.backend.size_type.const_int(2 * pointer_bytes, false),
             "reabstraction.environment",
             span.clone(),
         )?;
@@ -510,15 +512,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         argument: Option<usize>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<FunctionValue<'context>> {
-        let uses = self.view.artifact_uses(owner).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "missing reabstraction use records")
-        })?;
+        let uses = self
+            .view
+            .artifact_uses(owner)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing reabstraction use records"))?;
         let ordinal = uses
             .iter()
             .find_map(|use_| {
-                (use_.site
-                    == crate::ArtifactUseSite::ReabstractionThunk { call, argument })
-                .then_some(use_.artifact)
+                (use_.site == crate::ArtifactUseSite::ReabstractionThunk { call, argument })
+                    .then_some(use_.artifact)
             })
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing reabstraction plan"))?;
         self.artifacts
@@ -574,10 +576,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let use_id = *call.resource_bindings.get(index).ok_or_else(|| {
             Diagnostic::new(call.origin.span.clone(), "missing hidden resource binding")
         })?;
-        let use_record = self
-            .view
-            .resource_use(owner, use_id)
-            .ok_or_else(|| Diagnostic::new(call.origin.span.clone(), "missing hidden resource use"))?;
+        let use_record = self.view.resource_use(owner, use_id).ok_or_else(|| {
+            Diagnostic::new(call.origin.span.clone(), "missing hidden resource use")
+        })?;
         let provider = use_record.provider.ok_or_else(|| {
             Diagnostic::new(
                 use_record.origin.span.clone(),
@@ -620,9 +621,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .expression(owner, id)
             .map(|expression| expression.origin.span.clone())
             .unwrap_or(staple_syntax::Span::Compiler);
-        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "missing dynamic resource storage")
-        })?;
+        let storage = *environment
+            .temporaries
+            .get(&id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic resource storage"))?;
         let use_record = self
             .view
             .resource_use(owner, use_id)
@@ -664,10 +666,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         with_id: crate::LoweredWithId,
         environment: &mut DynamicEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
-        let with = self
-            .view
-            .with(owner, with_id)
-            .ok_or_else(|| Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered with"))?;
+        let with = self.view.with(owner, with_id).ok_or_else(|| {
+            Diagnostic::new(staple_syntax::Span::Compiler, "missing lowered with")
+        })?;
         if with.scope_exit != crate::lower::LoweredScopeExit::Ordinary {
             return Err(Diagnostic::new(
                 with.origin.span.clone(),
@@ -677,9 +678,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let provider = self
             .view
             .resource_provider(owner, with.provider)
-            .ok_or_else(|| {
-                Diagnostic::new(with.origin.span.clone(), "missing `with` provider")
-            })?;
+            .ok_or_else(|| Diagnostic::new(with.origin.span.clone(), "missing `with` provider"))?;
         let value = self.emit_dynamic_expression(owner, with.value, environment)?;
         let pointer = match provider.storage {
             crate::lower::LoweredProviderStorage::Place => {
@@ -728,9 +727,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .expression(owner, id)
             .map(|expression| expression.origin.span.clone())
             .unwrap_or(staple_syntax::Span::Compiler);
-        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "missing dynamic template storage")
-        })?;
+        let storage = *environment
+            .temporaries
+            .get(&id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic template storage"))?;
         let null = self
             .backend
             .context
@@ -781,11 +781,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )?;
                 }
                 crate::LoweredStringTemplatePart::Interpolation(interpolation) => {
-                    let value = self.emit_dynamic_expression(
-                        owner,
-                        interpolation.expression,
-                        environment,
-                    )?;
+                    let value =
+                        self.emit_dynamic_expression(owner, interpolation.expression, environment)?;
                     if environment.returned {
                         return Ok(storage);
                     }
@@ -814,11 +811,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
-        let finish = self.dynamic_bound_function(
-            owner,
-            LoweredBindingSite::FormattingFinish(id),
-            &span,
-        )?;
+        let finish =
+            self.dynamic_bound_function(owner, LoweredBindingSite::FormattingFinish(id), &span)?;
         let formatter = self
             .backend
             .builder
@@ -842,6 +836,172 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(storage)
     }
 
+    /// Materialize a written argument or its lowered implicit closure.
+    fn emit_dynamic_argument(
+        &mut self,
+        owner: EmissionOwner,
+        expression: ExpressionId,
+        call: &crate::LoweredCall,
+        index: usize,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let record = &call.arguments[index];
+        if let Some(value) = record.expression {
+            return self.emit_dynamic_expression(owner, value, environment);
+        }
+        let span = &call.origin.span;
+        let Some(LoweredExpressionKind::Call(call_id)) = self
+            .view
+            .expression(owner, expression)
+            .map(|record| &record.kind)
+        else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "argument owner is not a call",
+            ));
+        };
+        let call_id = *call_id;
+        let Some(LoweredBoundTarget::Instance(instance)) = self.view.binding(
+            owner,
+            LoweredBindingSite::CallArgumentThunk {
+                call: call_id,
+                argument: index,
+            },
+        ) else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "missing implicit thunk instance",
+            ));
+        };
+        let instance = *instance;
+        let body = self
+            .view
+            .instance(instance)
+            .and_then(|record| record.body.as_ref())
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing implicit thunk body"))?;
+        let runtime = self
+            .view
+            .instance_runtime_order(instance)
+            .unwrap_or_default();
+        let (code, captures) = if runtime.is_empty() {
+            let types = body
+                .captures
+                .iter()
+                .map(|capture| self.capture_field_type(capture))
+                .collect::<CodeGenerationResult<Vec<_>>>()?;
+            let ty = self.backend.capture_environment_type(&types);
+            let mut value = ty.const_zero();
+            for (index, capture) in body.captures.iter().enumerate() {
+                let binding = environment
+                    .bindings
+                    .get(&capture.capture.symbol)
+                    .filter(|binding| binding.live)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "missing thunk capture"))?;
+                let stored = if capture.requires_initialization_state
+                    || capture.mutable_storage
+                    || capture.derived
+                    || capture.capture.borrowed
+                {
+                    binding.pointer.into()
+                } else {
+                    self.backend
+                        .builder
+                        .build_load(
+                            self.backend.compile_type(&capture.value_type)?,
+                            binding.pointer,
+                            "thunk.capture",
+                        )
+                        .map_err(compiler_diagnostic)?
+                };
+                value = self
+                    .backend
+                    .insert_capture(value, stored, index as u32, span.clone())?;
+            }
+            let captures = if body.captures.is_empty() {
+                self.backend
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .const_null()
+            } else {
+                self.backend
+                    .allocate_capture_environment(ty, value, span.clone())?
+            };
+            if let Some(finalizer) = self.site_finalizer(
+                owner,
+                crate::ArtifactUseSite::ThunkArgumentEnvironment {
+                    call: call_id,
+                    argument: index,
+                },
+            ) {
+                self.backend.set_gc_finalizer(captures, finalizer)?;
+            }
+            (
+                *self
+                    .instances
+                    .get(&instance)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "missing thunk declaration"))?,
+                captures,
+            )
+        } else {
+            let captures = body
+                .captures
+                .iter()
+                .map(|capture| crate::LoweredClosureCapture {
+                    capture: capture.capture.clone(),
+                    value_type: capture.value_type.clone(),
+                    access: if capture.requires_initialization_state
+                        || capture.mutable_storage
+                        || capture.derived
+                    {
+                        crate::LoweredCaptureAccess::SharedCell
+                    } else if capture.capture.borrowed {
+                        crate::LoweredCaptureAccess::Borrowed
+                    } else {
+                        crate::LoweredCaptureAccess::ByValue
+                    },
+                    owns_value: !capture.capture.borrowed && !capture.capture.non_owning,
+                    requires_initialization_state: capture.requires_initialization_state,
+                })
+                .collect::<Vec<_>>();
+            let substitutions = crate::CallSubstitutions {
+                types: runtime
+                    .iter()
+                    .map(|parameter| crate::CallTypeSubstitution {
+                        parameter: *parameter,
+                        value_type: CheckedType::Parameter {
+                            id: *parameter,
+                            name: String::new(),
+                            sized: true,
+                            parameter_product_capable: false,
+                        },
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let captures = self.build_descriptor_environment(
+                instance,
+                &runtime,
+                &substitutions,
+                &captures,
+                environment,
+                span,
+            )?;
+            (self.descriptor_bound_entry_code(instance, span)?, captures)
+        };
+        let closure = self.backend.build_closure_value(code, captures)?;
+        let storage = self
+            .backend
+            .entry_builder()
+            .build_alloca(closure.get_type(), "thunk.argument")
+            .map_err(compiler_diagnostic)?;
+        self.backend
+            .builder
+            .build_store(storage, closure)
+            .map_err(compiler_diagnostic)?;
+        Ok(storage)
+    }
+
     /// A structural constructor builds its product or wrapper representation
     /// from one flattened slot per written field. The result storage was
     /// reserved from the call's result descriptor at entry.
@@ -853,17 +1013,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment: &mut DynamicEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let span = &call.origin.span;
-        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "missing dynamic constructor storage")
-        })?;
-        let mut slots = vec![None; super::flattened_parameter_types(&call.function_type.parameter).len()];
+        let storage = *environment
+            .temporaries
+            .get(&id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic constructor storage"))?;
+        let mut slots =
+            vec![None; super::flattened_parameter_types(&call.function_type.parameter).len()];
         let mut unplaced = Vec::new();
         for step in &call.steps {
             match step {
                 LoweredCallStep::Argument { argument } => {
                     let record = &call.arguments[*argument];
                     let value = record.expression.ok_or_else(|| {
-                        Diagnostic::new(span.clone(), "dynamic thunk argument is not yet implemented")
+                        Diagnostic::new(
+                            span.clone(),
+                            "dynamic thunk argument is not yet implemented",
+                        )
                     })?;
                     let value = self.emit_dynamic_expression(owner, value, environment)?;
                     match record.slot {
@@ -919,7 +1084,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value = slots.first().and_then(|slot| *slot).ok_or_else(|| {
                     Diagnostic::new(span.clone(), "missing dynamic constructor value")
                 })?;
-                self.backend.copy_dynamic_value(descriptor, value, storage)?;
+                self.backend
+                    .copy_dynamic_value(descriptor, value, storage)?;
             }
         }
         Ok(storage)
@@ -944,11 +1110,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Diagnostic::new(staple_syntax::Span::Compiler, "missing callable value")
             })?;
         let span = callable.origin.span.clone();
-        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "missing dynamic callable storage")
-        })?;
+        let storage = *environment
+            .temporaries
+            .get(&id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic callable storage"))?;
         if let Some(symbol) = self.callable_symbol(&callable)
-            && let Some(binding) = environment.bindings.get(&symbol).filter(|binding| binding.live)
+            && let Some(binding) = environment
+                .bindings
+                .get(&symbol)
+                .filter(|binding| binding.live)
         {
             return Ok(binding.pointer);
         }
@@ -986,17 +1156,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         &span,
                     )?;
                     let code = self.descriptor_bound_entry_code(*instance, &span)?;
-                    let closure =
-                        self.backend.build_closure_value(code, closure_environment)?;
+                    let closure = self
+                        .backend
+                        .build_closure_value(code, closure_environment)?;
                     self.backend
                         .builder
                         .build_store(storage, closure)
                         .map_err(compiler_diagnostic)?;
                     return Ok(storage);
                 }
-                self.instances.get(instance).copied().ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "missing callable declaration")
-                })?
+                self.instances
+                    .get(instance)
+                    .copied()
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "missing callable declaration"))?
             }
             LoweredCallableTarget::ExternalFunction { .. } => self
                 .extern_adapter_code(owner, value_id)
@@ -1018,7 +1190,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .context
             .ptr_type(AddressSpace::default())
             .const_null();
-        let closure = self.backend.build_closure_value(code, closure_environment)?;
+        let closure = self
+            .backend
+            .build_closure_value(code, closure_environment)?;
         self.backend
             .builder
             .build_store(storage, closure)
@@ -1049,9 +1223,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .iter()
                 .find(|entry| entry.parameter == *parameter)
                 .map(|entry| entry.value_type.clone())
-                .ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "missing closure substitution")
-                })?;
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing closure substitution"))?;
             descriptors.push(self.dynamic_descriptor(&value_type, environment, span)?);
         }
         let capture_descriptors = captures
@@ -1084,7 +1256,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .backend
                 .size_type
                 .const_int(index as u64 * pointer_bytes, false);
-            let slot = self.backend.dynamic_byte_offset(closure_environment, offset)?;
+            let slot = self
+                .backend
+                .dynamic_byte_offset(closure_environment, offset)?;
             self.backend
                 .builder
                 .build_store(slot, copy)
@@ -1093,11 +1267,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // Capture descriptors follow the runtime descriptors so the closure
         // body and finalizer read them instead of rebuilding compound ones.
         for (index, descriptor) in capture_descriptors.iter().enumerate() {
-            let offset = self.backend.size_type.const_int(
-                (runtime.len() + index) as u64 * pointer_bytes,
-                false,
-            );
-            let slot = self.backend.dynamic_byte_offset(closure_environment, offset)?;
+            let offset = self
+                .backend
+                .size_type
+                .const_int((runtime.len() + index) as u64 * pointer_bytes, false);
+            let slot = self
+                .backend
+                .dynamic_byte_offset(closure_environment, offset)?;
             let value = match descriptor {
                 Some(descriptor) => self.copy_descriptor_to_gc(*descriptor, span)?,
                 None => self
@@ -1112,14 +1288,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .map_err(compiler_diagnostic)?;
         }
         for (index, capture) in captures.iter().enumerate() {
-            let field = self.backend.dynamic_byte_offset(closure_environment, offsets[index])?;
+            let field = self
+                .backend
+                .dynamic_byte_offset(closure_environment, offsets[index])?;
             let binding = environment
                 .bindings
                 .get(&capture.capture.symbol)
                 .filter(|binding| binding.live)
-                .ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "missing captured dynamic binding")
-                })?;
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing captured dynamic binding"))?;
             match capture.access {
                 crate::LoweredCaptureAccess::ByValue => {
                     let descriptor = capture_descriptors[index].ok_or_else(|| {
@@ -1177,7 +1353,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .and_then(|functions| functions.first())
             .copied()
             .ok_or_else(|| {
-                Diagnostic::new(span.clone(), "missing dynamic closure finalizer declaration")
+                Diagnostic::new(
+                    span.clone(),
+                    "missing dynamic closure finalizer declaration",
+                )
             })
     }
 
@@ -1194,9 +1373,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<Option<PointerValue<'context>>> {
         match value_type {
             CheckedType::Parameter { id, .. } => {
-                let index = runtime.iter().position(|parameter| parameter == id).ok_or_else(
-                    || Diagnostic::new(span.clone(), "capture parameter is not run-time"),
-                )?;
+                let index = runtime
+                    .iter()
+                    .position(|parameter| parameter == id)
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "capture parameter is not run-time")
+                    })?;
                 Ok(Some(descriptors[index]))
             }
             ty if !crate::contains_type_parameter(ty) => {
@@ -1345,9 +1527,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
         let slot = self.backend.dynamic_byte_offset(
             buffer,
-            self.backend
-                .size_type
-                .const_int(2 * pointer_bytes, false),
+            self.backend.size_type.const_int(2 * pointer_bytes, false),
         )?;
         let frozen = self
             .backend
@@ -1439,7 +1619,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .build_load(self.backend.size_type, buffer, "buffer.length")
             .map_err(compiler_diagnostic)?
             .into_int_value();
-        let data = self.backend.dynamic_byte_offset(buffer, layout.header_offset)?;
+        let data = self
+            .backend
+            .dynamic_byte_offset(buffer, layout.header_offset)?;
         let function = self
             .backend
             .builder
@@ -1481,7 +1663,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let finished = self
             .backend
             .builder
-            .build_int_compare(inkwell::IntPredicate::UGE, index, length, "buffer.finalize.done")
+            .build_int_compare(
+                inkwell::IntPredicate::UGE,
+                index,
+                length,
+                "buffer.finalize.done",
+            )
             .map_err(compiler_diagnostic)?;
         self.backend
             .builder
@@ -1531,7 +1718,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )) => Some(artifact.ordinal),
                 _ => None,
             })
-            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic buffer finalizer plan"))?;
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing dynamic buffer finalizer plan")
+            })?;
         self.artifacts
             .get(&ordinal)
             .and_then(|functions| functions.first())
@@ -1582,8 +1771,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .backend
             .builder
             .build_load(pointer, word, "cell.value.descriptor")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
+            .map_err(compiler_diagnostic)?;
+        if let Some(instruction) = descriptor.as_instruction_value() {
+            instruction
+                .set_alignment(1)
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        }
+        let descriptor = descriptor.into_pointer_value();
         self.backend.drop_dynamic_value(descriptor, cell)?;
         Ok(())
     }
@@ -1642,7 +1836,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend
             .builder
             .build_store(word, descriptor)
-            .map_err(compiler_diagnostic)?;
+            .map_err(compiler_diagnostic)?
+            .set_alignment(1)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         let finalizer = self.dynamic_cell_finalizer_code(span)?;
         self.backend.set_gc_finalizer(cell, finalizer)?;
         Ok(cell)
@@ -1657,12 +1853,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
         let crate::GcFinalizerPlan::DynamicClosureEnvironment {
-            runtime,
-            captures,
-            ..
+            runtime, captures, ..
         } = plan
         else {
-            return Err(Diagnostic::new(span.clone(), "mismatched dynamic finalizer plan"));
+            return Err(Diagnostic::new(
+                span.clone(),
+                "mismatched dynamic finalizer plan",
+            ));
         };
         let pointer = self.backend.context.ptr_type(AddressSpace::default());
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
@@ -1670,10 +1867,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .iter()
             .enumerate()
             .map(|(index, _)| {
-                let offset = self.backend.size_type.const_int(
-                    (runtime.len() + index) as u64 * pointer_bytes,
-                    false,
-                );
+                let offset = self
+                    .backend
+                    .size_type
+                    .const_int((runtime.len() + index) as u64 * pointer_bytes, false);
                 let slot = self.backend.dynamic_byte_offset(environment, offset)?;
                 Ok(Some(
                     self.backend
@@ -1700,7 +1897,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let Some(descriptor) = capture_descriptors[index] else {
                 continue;
             };
-            let field = self.backend.dynamic_byte_offset(environment, offsets[index])?;
+            let field = self
+                .backend
+                .dynamic_byte_offset(environment, offsets[index])?;
             self.backend.drop_dynamic_value(descriptor, field)?;
         }
         Ok(())
@@ -1713,45 +1912,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         descriptor: PointerValue<'context>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<PointerValue<'context>> {
-        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
-        let header = self
-            .backend
-            .target_data
-            .get_store_size(&self.backend.type_descriptor_type(0));
-        let count = self
-            .backend
-            .load_descriptor_component_count(descriptor)?;
-        let count = self
-            .backend
-            .builder
-            .build_int_z_extend(count, self.backend.size_type, "descriptor.count.size")
-            .map_err(compiler_diagnostic)?;
-        let components = self
-            .backend
-            .builder
-            .build_int_mul(
-                count,
-                self.backend.size_type.const_int(pointer_bytes, false),
-                "descriptor.components.size",
-            )
-            .map_err(compiler_diagnostic)?;
-        let size = self
-            .backend
-            .builder
-            .build_int_add(
-                components,
-                self.backend.size_type.const_int(header, false),
-                "descriptor.size",
-            )
-            .map_err(compiler_diagnostic)?;
-        let copy = self
-            .backend
-            .build_gc_allocation(size, "descriptor.copy", span.clone())?;
-        self.backend
-            .builder
-            .build_memcpy(copy, 1, descriptor, 1, size)
-            .map_err(compiler_diagnostic)?;
-        Ok(copy)
+        self.backend.copy_dynamic_descriptor(descriptor, span)
     }
 
     /// The declared descriptor-bound entry for one dynamic instance.
@@ -1776,7 +1937,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .get(&ordinal)
             .and_then(|functions| functions.first())
             .copied()
-            .ok_or_else(|| Diagnostic::new(span.clone(), "missing descriptor-bound entry declaration"))
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing descriptor-bound entry declaration")
+            })
     }
 
     /// An indirect call through a concrete closure value (R2). The callee's
@@ -1793,9 +1956,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let span = &call.origin.span;
         let dynamic_shape =
             crate::contains_type_parameter(&CheckedType::Function(call.function_type.clone()));
-        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "missing dynamic closure call storage")
-        })?;
+        let storage = *environment
+            .temporaries
+            .get(&id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic closure call storage"))?;
         let closure = self.emit_dynamic_expression(owner, callee, environment)?;
         let closure_type = self.backend.closure_type();
         let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
@@ -1823,7 +1987,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .into_pointer_value();
         let types = super::flattened_parameter_types(&call.function_type.parameter);
         let indirect = self.backend.indirect_parameter_mask(&call.function_type);
-        let moved = super::super::abi::mutation_parameter_mask(types.len(), &call.function_type.moves);
+        let moved =
+            super::super::abi::mutation_parameter_mask(types.len(), &call.function_type.moves);
         let mut slots = vec![None; types.len()];
         let mut unplaced = Vec::new();
         let mut cleanups = Vec::new();
@@ -1842,15 +2007,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 LoweredCallStep::Argument { argument } => {
                     let record = &call.arguments[*argument];
-                    let value = record.expression.ok_or_else(|| {
-                        Diagnostic::new(span.clone(), "dynamic closure thunk argument")
-                    })?;
-                    let value = self.emit_dynamic_expression(owner, value, environment)?;
+                    let value =
+                        self.emit_dynamic_argument(owner, id, call, *argument, environment)?;
                     let cleanup = record.drops_after_call
                         || (record.temporary
-                            && record
-                                .slot
-                                .is_some_and(|slot| !moved[slot])
+                            && record.slot.is_some_and(|slot| !moved[slot])
                             && crate::contains_type_parameter(&record.expected));
                     if cleanup {
                         cleanups.push((
@@ -1899,9 +2060,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         arguments.extend(hidden);
         for (index, slot) in slots.iter().enumerate() {
-            let pointer = slot.ok_or_else(|| {
-                Diagnostic::new(span.clone(), "missing dynamic closure argument")
-            })?;
+            let pointer = slot
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic closure argument"))?;
             if dynamic_shape || indirect[index] {
                 arguments.push(pointer.into());
             } else {
@@ -1916,9 +2076,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let signature = if dynamic_shape {
-            self.backend.compile_dynamic_function_type(&call.function_type, 0)?
+            self.backend
+                .compile_dynamic_function_type(&call.function_type, 0)?
         } else {
-            self.backend.compile_closure_function_type(&call.function_type)?
+            self.backend
+                .compile_closure_function_type(&call.function_type)?
         };
         let value = self
             .backend
@@ -1951,9 +2113,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment: &mut DynamicEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let span = &call.origin.span;
-        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "missing dynamic extern storage")
-        })?;
+        let storage = *environment
+            .temporaries
+            .get(&id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic extern storage"))?;
         let types = super::flattened_parameter_types(&call.function_type.parameter);
         let indirect = self.backend.indirect_parameter_mask(&call.function_type);
         let mut slots = vec![None; types.len()];
@@ -1962,10 +2125,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             match step {
                 LoweredCallStep::Argument { argument } => {
                     let record = &call.arguments[*argument];
-                    let value = record.expression.ok_or_else(|| {
-                        Diagnostic::new(span.clone(), "dynamic extern thunk argument")
-                    })?;
-                    let value = self.emit_dynamic_expression(owner, value, environment)?;
+                    let value =
+                        self.emit_dynamic_argument(owner, id, call, *argument, environment)?;
                     match record.slot {
                         Some(slot) => slots[slot] = Some(value),
                         None => unplaced.push(value),
@@ -2001,9 +2162,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         let mut arguments = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
-            let pointer = slot.ok_or_else(|| {
-                Diagnostic::new(span.clone(), "missing dynamic extern argument")
-            })?;
+            let pointer = slot
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic extern argument"))?;
             if indirect[index] {
                 arguments.push(pointer.into());
             } else {
@@ -2052,9 +2212,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<PointerValue<'context>> {
         use inkwell::values::BasicValue;
         let span = &call.origin.span;
-        let storage = *environment.temporaries.get(&id).ok_or_else(|| {
-            Diagnostic::new(span.clone(), "missing dynamic intrinsic storage")
-        })?;
+        let storage = *environment
+            .temporaries
+            .get(&id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic intrinsic storage"))?;
         let types = super::flattened_parameter_types(&call.function_type.parameter);
         let mut slots = vec![None; types.len()];
         let mut unplaced = Vec::new();
@@ -2062,10 +2223,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             match step {
                 LoweredCallStep::Argument { argument } => {
                     let record = &call.arguments[*argument];
-                    let value = record.expression.ok_or_else(|| {
-                        Diagnostic::new(span.clone(), "dynamic intrinsic thunk argument")
-                    })?;
-                    let value = self.emit_dynamic_expression(owner, value, environment)?;
+                    let value =
+                        self.emit_dynamic_argument(owner, id, call, *argument, environment)?;
                     match record.slot {
                         Some(slot) => slots[slot] = Some(value),
                         None => unplaced.push(value),
@@ -2172,13 +2331,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "slice.out_of_bounds",
                     )
                     .map_err(compiler_diagnostic)?;
-                self.backend
-                    .build_trap_if(out_of_bounds, span.clone())?;
+                self.backend.build_trap_if(out_of_bounds, span.clone())?;
                 let crate::CheckedType::Ref(payload) = &call.result_type else {
                     return Err(Diagnostic::new(span.clone(), "get_ref result is not a Ref"));
                 };
-                let descriptor =
-                    self.dynamic_descriptor(payload, environment, span)?;
+                let descriptor = self.dynamic_descriptor(payload, environment, span)?;
                 let layout = self.backend.load_descriptor_layout(descriptor)?;
                 let offset = self
                     .backend
@@ -2205,8 +2362,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                     .map_err(compiler_diagnostic)?
                     .into_pointer_value();
-                let descriptor =
-                    self.dynamic_descriptor(&call.result_type, environment, span)?;
+                let descriptor = self.dynamic_descriptor(&call.result_type, environment, span)?;
                 self.backend
                     .copy_dynamic_value(descriptor, payload, storage)?;
                 self.backend
@@ -2234,7 +2390,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .backend
                     .builder
                     .build_struct_gep(
-                        self.backend.buffer_header_type(self.backend.context.i8_type().into()),
+                        self.backend
+                            .buffer_header_type(self.backend.context.i8_type().into()),
                         buffer,
                         field,
                         "buffer.metadata.slot",
@@ -2277,9 +2434,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_int_add(
                         concrete,
-                        self.backend
-                            .size_type
-                            .const_int(pointer_bytes, false),
+                        self.backend.size_type.const_int(pointer_bytes, false),
                         "buffer.total.size",
                     )
                     .map_err(compiler_diagnostic)?;
@@ -2292,9 +2447,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 let capacity_slot = self.backend.dynamic_byte_offset(
                     buffer,
-                    self.backend
-                        .size_type
-                        .const_int(pointer_bytes, false),
+                    self.backend.size_type.const_int(pointer_bytes, false),
                 )?;
                 self.backend
                     .builder
@@ -2302,9 +2455,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 let frozen_slot = self.backend.dynamic_byte_offset(
                     buffer,
-                    self.backend
-                        .size_type
-                        .const_int(2 * pointer_bytes, false),
+                    self.backend.size_type.const_int(2 * pointer_bytes, false),
                 )?;
                 self.backend
                     .builder
@@ -2337,7 +2488,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_int_compare(inkwell::IntPredicate::UGE, length, capacity, "buffer.full")
                     .map_err(compiler_diagnostic)?;
                 self.backend.build_trap_if(full, span.clone())?;
-                let data = self.backend.dynamic_byte_offset(buffer, layout.header_offset)?;
+                let data = self
+                    .backend
+                    .dynamic_byte_offset(buffer, layout.header_offset)?;
                 let offset = self
                     .backend
                     .builder
@@ -2371,7 +2524,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .into_int_value();
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
                 let layout = self.dynamic_buffer_layout(element)?;
-                let data = self.backend.dynamic_byte_offset(buffer, layout.header_offset)?;
+                let data = self
+                    .backend
+                    .dynamic_byte_offset(buffer, layout.header_offset)?;
                 let offset = self
                     .backend
                     .builder
@@ -2389,27 +2544,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
                 let frozen_slot = self.backend.dynamic_byte_offset(
                     buffer,
-                    self.backend
-                        .size_type
-                        .const_int(2 * pointer_bytes, false),
+                    self.backend.size_type.const_int(2 * pointer_bytes, false),
                 )?;
                 self.backend
                     .builder
-                    .build_store(frozen_slot, self.backend.context.i8_type().const_int(1, false))
+                    .build_store(
+                        frozen_slot,
+                        self.backend.context.i8_type().const_int(1, false),
+                    )
                     .map_err(compiler_diagnostic)?;
                 let length = self.load_buffer_metadata(buffer, 0)?;
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
                 let layout = self.dynamic_buffer_layout(element)?;
-                let data = self.backend.dynamic_byte_offset(buffer, layout.header_offset)?;
+                let data = self
+                    .backend
+                    .dynamic_byte_offset(buffer, layout.header_offset)?;
                 self.backend
                     .builder
                     .build_store(storage, data)
                     .map_err(compiler_diagnostic)?;
                 let length_slot = self.backend.dynamic_byte_offset(
                     storage,
-                    self.backend
-                        .size_type
-                        .const_int(pointer_bytes, false),
+                    self.backend.size_type.const_int(pointer_bytes, false),
                 )?;
                 self.backend
                     .builder
@@ -2429,8 +2585,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let layout = self.dynamic_buffer_layout(element)?;
                 self.trap_if_buffer_frozen(buffer, span)?;
                 let length = self.load_buffer_metadata(buffer, 0)?;
-                let descriptor =
-                    self.dynamic_descriptor(&call.result_type, environment, span)?;
+                let descriptor = self.dynamic_descriptor(&call.result_type, environment, span)?;
                 let result_layout = self.backend.load_descriptor_layout(descriptor)?;
                 self.backend
                     .builder
@@ -2488,7 +2643,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_store(buffer, next)
                     .map_err(compiler_diagnostic)?;
-                let data = self.backend.dynamic_byte_offset(buffer, layout.header_offset)?;
+                let data = self
+                    .backend
+                    .dynamic_byte_offset(buffer, layout.header_offset)?;
                 let offset = self
                     .backend
                     .builder
@@ -2545,28 +2702,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     )
                     .map_err(compiler_diagnostic)?;
                 self.backend.build_trap_if(overflow, span.clone())?;
-                let source_data = self.backend.dynamic_byte_offset(source, layout.header_offset)?;
-                let destination_data =
-                    self.backend.dynamic_byte_offset(destination, layout.header_offset)?;
+                let source_data = self
+                    .backend
+                    .dynamic_byte_offset(source, layout.header_offset)?;
+                let destination_data = self
+                    .backend
+                    .dynamic_byte_offset(destination, layout.header_offset)?;
                 let destination_offset = self
                     .backend
                     .builder
-                    .build_int_mul(
-                        destination_length,
-                        layout.stride,
-                        "buffer.transfer.offset",
-                    )
+                    .build_int_mul(destination_length, layout.stride, "buffer.transfer.offset")
                     .map_err(compiler_diagnostic)?;
-                let destination_field =
-                    self.backend.dynamic_byte_offset(destination_data, destination_offset)?;
+                let destination_field = self
+                    .backend
+                    .dynamic_byte_offset(destination_data, destination_offset)?;
                 let bytes = self
                     .backend
                     .builder
-                    .build_int_mul(
-                        source_length,
-                        layout.stride,
-                        "buffer.transfer.bytes",
-                    )
+                    .build_int_mul(source_length, layout.stride, "buffer.transfer.bytes")
                     .map_err(compiler_diagnostic)?;
                 self.backend
                     .builder
@@ -2681,10 +2834,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             Diagnostic::new(span.clone(), "dynamic comparison result must be Bool")
         })?;
         let sum_type = self.backend.compile_sum_type(sum)?;
-        inkwell::values::BasicValueEnum::try_from(
-            self.backend
-                .build_bool_value(condition, sum_type, span.clone())?,
-        )
+        inkwell::values::BasicValueEnum::try_from(self.backend.build_bool_value(
+            condition,
+            sum_type,
+            span.clone(),
+        )?)
         .map_err(|_| Diagnostic::new(span.clone(), "dynamic comparison result is not first-class"))
     }
 
@@ -2704,8 +2858,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .and_then(|functions| functions.first())
             .copied()
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing reabstraction declaration"))?;
-        if !plan.dynamic.effects.resources.is_empty()
-            || !plan.concrete.effects.resources.is_empty()
+        if !plan.dynamic.effects.resources.is_empty() || !plan.concrete.effects.resources.is_empty()
         {
             return Err(Diagnostic::new(
                 span.clone(),
@@ -2795,9 +2948,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         arguments.push(parameter.into());
                     } else {
                         let value = inkwell::values::BasicValueEnum::try_from(parameter)
-                            .map_err(|_| {
-                                Diagnostic::new(span.clone(), "reabstraction argument")
-                            })?;
+                            .map_err(|_| Diagnostic::new(span.clone(), "reabstraction argument"))?;
                         let slot = self
                             .backend
                             .entry_builder()
@@ -2810,9 +2961,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         arguments.push(slot.into());
                     }
                 }
-                let signature =
-                    self.backend
-                        .compile_dynamic_function_type(&plan.dynamic, 0)?;
+                let signature = self
+                    .backend
+                    .compile_dynamic_function_type(&plan.dynamic, 0)?;
                 self.backend
                     .builder
                     .build_indirect_call(signature, code, &arguments, "")
@@ -2917,7 +3068,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let resource_count = body.signature.effects.resources.len();
         let mut resources = HashMap::new();
         if body.function_providers.len() != resource_count {
-            return Err(unsupported("resource providers disagree with the effect row"));
+            return Err(unsupported(
+                "resource providers disagree with the effect row",
+            ));
         }
         for (position, provider_id) in body.function_providers.iter().enumerate() {
             let provider = self
@@ -2986,11 +3139,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .iter()
                 .enumerate()
                 .map(|(index, _)| {
-                    let offset = self.backend.size_type.const_int(
-                        (runtime.len() + index) as u64 * pointer_bytes,
-                        false,
-                    );
-                    let slot = self.backend.dynamic_byte_offset(environment.closure, offset)?;
+                    let offset = self
+                        .backend
+                        .size_type
+                        .const_int((runtime.len() + index) as u64 * pointer_bytes, false);
+                    let slot = self
+                        .backend
+                        .dynamic_byte_offset(environment.closure, offset)?;
                     Ok(Some(
                         self.backend
                             .builder
@@ -3114,8 +3269,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 )?;
             }
             if let LoweredExpressionKind::CallableValue(value_id) = &record.kind
-                && let Some(callable) =
-                    self.view.callable_value(EmissionOwner::Instance(id), *value_id)
+                && let Some(callable) = self
+                    .view
+                    .callable_value(EmissionOwner::Instance(id), *value_id)
             {
                 for entry in &callable.substitutions.types {
                     self.prepare_dynamic_descriptor(
@@ -3180,10 +3336,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         &environment,
                         &record.origin.span,
                     )?;
-                    environment.temporaries.insert(
-                        expression,
-                        self.backend.allocate_dynamic_value(descriptor)?,
-                    );
+                    environment
+                        .temporaries
+                        .insert(expression, self.backend.allocate_dynamic_value(descriptor)?);
                 }
                 LoweredExpressionKind::Loop(loop_) => {
                     let descriptor = self.dynamic_descriptor(
@@ -3191,10 +3346,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         &environment,
                         &record.origin.span,
                     )?;
-                    environment.loop_results.insert(
-                        expression,
-                        self.backend.allocate_dynamic_value(descriptor)?,
-                    );
+                    environment
+                        .loop_results
+                        .insert(expression, self.backend.allocate_dynamic_value(descriptor)?);
                 }
                 LoweredExpressionKind::Name(name) if name.singleton.is_some() => {
                     let descriptor = self.dynamic_descriptor(
@@ -3205,10 +3359,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         &environment,
                         &record.origin.span,
                     )?;
-                    environment.temporaries.insert(
-                        expression,
-                        self.backend.allocate_dynamic_value(descriptor)?,
-                    );
+                    environment
+                        .temporaries
+                        .insert(expression, self.backend.allocate_dynamic_value(descriptor)?);
                 }
                 _ => {}
             }
@@ -3386,7 +3539,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .ptr_type(AddressSpace::default())
                     .const_null(),
             )?;
-            environment.compound_descriptors.push((ty.clone(), descriptor));
+            environment
+                .compound_descriptors
+                .push((ty.clone(), descriptor));
             return Ok(descriptor);
         }
         let (shape, children): (CompoundDescriptorShape, Vec<&CheckedType>) = match ty {
@@ -3405,7 +3560,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             CheckedType::Wrapper { representation, .. } => {
                 let descriptor =
                     self.prepare_dynamic_descriptor(representation, environment, span)?;
-                environment.compound_descriptors.push((ty.clone(), descriptor));
+                environment
+                    .compound_descriptors
+                    .push((ty.clone(), descriptor));
                 return Ok(descriptor);
             }
             _ => {
@@ -3896,8 +4053,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         if environment.returned {
             return Ok(subject);
         }
-        let descriptor =
-            self.dynamic_descriptor(&match_.source, environment, span)?;
+        let descriptor = self.dynamic_descriptor(&match_.source, environment, span)?;
         let function = self.current_dynamic_function(span)?;
         let merge = self
             .backend
@@ -4009,7 +4165,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 binding,
                 pattern: nested,
             } => {
-                self.bind_dynamic_pattern(owner, *binding, pointer, descriptor, owned, environment)?;
+                self.bind_dynamic_pattern(
+                    owner,
+                    *binding,
+                    pointer,
+                    descriptor,
+                    owned,
+                    environment,
+                )?;
                 self.test_dynamic_pattern(
                     owner,
                     *nested,
@@ -4030,7 +4193,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .build_int_compare(
                             inkwell::IntPredicate::EQ,
                             tag,
-                            self.backend.context.i32_type().const_int(index as u64, false),
+                            self.backend
+                                .context
+                                .i32_type()
+                                .const_int(index as u64, false),
                             "match.tag",
                         )
                         .map_err(compiler_diagnostic)?;
@@ -4052,7 +4218,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             ));
                         };
                         let payload_count = sum.alternatives.len();
-                        let payload = self.dynamic_sum_payload(descriptor, pointer, payload_count)?;
+                        let payload =
+                            self.dynamic_sum_payload(descriptor, pointer, payload_count)?;
                         let component = self
                             .backend
                             .load_descriptor_component(descriptor, index as u32)?;
@@ -4201,7 +4368,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .build_int_compare(
                             inkwell::IntPredicate::EQ,
                             tag,
-                            self.backend.context.i32_type().const_int(index as u64, false),
+                            self.backend
+                                .context
+                                .i32_type()
+                                .const_int(index as u64, false),
                             "match.tag",
                         )
                         .map_err(compiler_diagnostic)?;
@@ -4352,8 +4522,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .ok_or_else(|| {
                             Diagnostic::new(span.clone(), "loop body result is missing")
                         })?;
-                    let descriptor =
-                        self.dynamic_descriptor(&result_type, environment, span)?;
+                    let descriptor = self.dynamic_descriptor(&result_type, environment, span)?;
                     self.backend.drop_dynamic_value(descriptor, value)?;
                 }
             }
@@ -4397,26 +4566,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         match &place.kind {
             crate::LoweredPlaceKind::Symbol { symbol }
             | crate::LoweredPlaceKind::CapturedCell { symbol } => {
-                let binding = environment
-                    .bindings
-                    .get(symbol)
-                    .ok_or_else(|| Diagnostic::new(place.origin.span.clone(), "missing place root"))?;
+                let binding = environment.bindings.get(symbol).ok_or_else(|| {
+                    Diagnostic::new(place.origin.span.clone(), "missing place root")
+                })?;
                 Ok((binding.pointer, binding.descriptor))
             }
             crate::LoweredPlaceKind::Temporary { expression } => {
-                let pointer =
-                    self.emit_dynamic_expression(owner, *expression, environment)?;
+                let pointer = self.emit_dynamic_expression(owner, *expression, environment)?;
                 let descriptor =
                     self.dynamic_descriptor(&place.value_type, environment, &place.origin.span)?;
                 Ok((pointer, descriptor))
             }
             crate::LoweredPlaceKind::Resource { use_ } => {
-                let use_record = self
-                    .view
-                    .resource_use(owner, *use_)
-                    .ok_or_else(|| {
-                        Diagnostic::new(place.origin.span.clone(), "missing resource place use")
-                    })?;
+                let use_record = self.view.resource_use(owner, *use_).ok_or_else(|| {
+                    Diagnostic::new(place.origin.span.clone(), "missing resource place use")
+                })?;
                 let provider = use_record.provider.ok_or_else(|| {
                     Diagnostic::new(
                         use_record.origin.span.clone(),
@@ -4561,11 +4725,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .pattern(owner, *argument)
                         .map(|argument| argument.test.subject.clone())
                         .unwrap_or(CheckedType::Error);
-                    let payload_descriptor = self.dynamic_descriptor(
-                        &payload_type,
-                        environment,
-                        &pattern.origin.span,
-                    )?;
+                    let payload_descriptor =
+                        self.dynamic_descriptor(&payload_type, environment, &pattern.origin.span)?;
                     self.bind_dynamic_pattern(
                         owner,
                         *argument,
@@ -4597,14 +4758,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     owned,
                     environment,
                 )?;
-                self.bind_dynamic_pattern(
-                    owner,
-                    *nested,
-                    pointer,
-                    descriptor,
-                    owned,
-                    environment,
-                )
+                self.bind_dynamic_pattern(owner, *nested, pointer, descriptor, owned, environment)
             }
             LoweredPatternKind::Binding {
                 symbol: Some(symbol),
@@ -4700,12 +4854,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         let descriptor =
                             self.dynamic_descriptor(ty, environment, &item.origin.span)?;
                         let pointer = if binding.cell {
-                            let cell = environment.cells.get(&symbol).copied().ok_or_else(|| {
-                                Diagnostic::new(
-                                    item.origin.span.clone(),
-                                    "missing dynamic binding cell",
-                                )
-                            })?;
+                            let cell =
+                                environment.cells.get(&symbol).copied().ok_or_else(|| {
+                                    Diagnostic::new(
+                                        item.origin.span.clone(),
+                                        "missing dynamic binding cell",
+                                    )
+                                })?;
                             self.backend.copy_dynamic_value(descriptor, pointer, cell)?;
                             cell
                         } else {
@@ -4808,14 +4963,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         ));
                     };
                     if let Some(expression) = break_item.value {
-                        let value =
-                            self.emit_dynamic_expression(owner, expression, environment)?;
+                        let value = self.emit_dynamic_expression(owner, expression, environment)?;
                         if let Some(result) = result {
-                            self.backend.copy_dynamic_value(
-                                result_descriptor,
-                                value,
-                                result,
-                            )?;
+                            self.backend
+                                .copy_dynamic_value(result_descriptor, value, result)?;
                         }
                     }
                     self.drop_dynamic_bindings(environment, binding_mark)?;
@@ -4995,11 +5146,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .last()
                     .cloned()
                     .unwrap_or_else(|| base_type.clone());
-                let descriptor = self.dynamic_descriptor(
-                    &container_type,
-                    environment,
-                    &expression.origin.span,
-                )?;
+                let descriptor =
+                    self.dynamic_descriptor(&container_type, environment, &expression.origin.span)?;
                 let base = self.emit_dynamic_expression(owner, access.base, environment)?;
                 let base =
                     self.dereference_dynamic_pointer(base, dereference, &expression.origin.span)?;
@@ -5095,11 +5243,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let storage = *environment.temporaries.get(&id).ok_or_else(|| {
                     Diagnostic::new(expression.origin.span.clone(), "missing literal storage")
                 })?;
-                let text = std::str::from_utf8(&string.bytes[..string.bytes.len() - 1]).map_err(
-                    |_| {
+                let text =
+                    std::str::from_utf8(&string.bytes[..string.bytes.len() - 1]).map_err(|_| {
                         Diagnostic::new(expression.origin.span.clone(), "invalid C string payload")
-                    },
-                )?;
+                    })?;
                 let value = inkwell::values::BasicValueEnum::try_from(
                     self.backend
                         .build_owned_c_string(text, expression.origin.span.clone())?,
@@ -5148,19 +5295,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     Diagnostic::new(expression.origin.span.clone(), "missing singleton storage")
                 })?
             }
-            LoweredExpressionKind::Name(name) if name.reactive.is_none() => {
-                environment
-                    .bindings
-                    .get(&name.symbol)
-                    .filter(|binding| binding.live)
-                    .map(|binding| binding.pointer)
-                    .ok_or_else(|| {
-                        Diagnostic::new(
-                            expression.origin.span.clone(),
-                            "missing or moved dynamic binding",
-                        )
-                    })?
-            }
+            LoweredExpressionKind::Name(name) if name.reactive.is_none() => environment
+                .bindings
+                .get(&name.symbol)
+                .filter(|binding| binding.live)
+                .map(|binding| binding.pointer)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "missing or moved dynamic binding",
+                    )
+                })?,
             LoweredExpressionKind::Block(block) => {
                 match self.emit_dynamic_block(owner, block, environment)? {
                     Some(value) => value,
@@ -5181,9 +5326,44 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     if recursive.is_none() {
                         return self.emit_dynamic_constructor_call(owner, id, call, environment);
                     }
+                    if matches!(
+                        recursive,
+                        Some(crate::RecursiveConstruction::ManagedReference)
+                    ) {
+                        let argument = call
+                            .arguments
+                            .first()
+                            .and_then(|argument| argument.expression)
+                            .ok_or_else(|| {
+                                Diagnostic::new(call.origin.span.clone(), "missing Ref payload")
+                            })?;
+                        let value = self.emit_dynamic_expression(owner, argument, environment)?;
+                        let CheckedType::Ref(payload) = &call.result_type else {
+                            return Err(Diagnostic::new(
+                                call.origin.span.clone(),
+                                "Ref constructor has non-Ref result",
+                            ));
+                        };
+                        let descriptor =
+                            self.dynamic_descriptor(payload, environment, &call.origin.span)?;
+                        let descriptor =
+                            self.copy_descriptor_to_gc(descriptor, &call.origin.span)?;
+                        let allocation =
+                            self.allocate_dynamic_cell(descriptor, true, &call.origin.span)?;
+                        self.backend
+                            .copy_dynamic_value(descriptor, value, allocation)?;
+                        let result = *environment.temporaries.get(&id).ok_or_else(|| {
+                            Diagnostic::new(call.origin.span.clone(), "missing Ref result storage")
+                        })?;
+                        self.backend
+                            .builder
+                            .build_store(result, allocation)
+                            .map_err(compiler_diagnostic)?;
+                        return Ok(result);
+                    }
                     return Err(Diagnostic::new(
                         call.origin.span.clone(),
-                        "recursive dynamic construction is not yet implemented",
+                        "unsupported recursive constructor",
                     ));
                 }
                 if let LoweredCallableTarget::Intrinsic { intrinsic, .. } = &call.target {
@@ -5225,12 +5405,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "missing dynamic callee binding",
                     ));
                 };
-                let runtime = self
-                    .view
-                    .instance_runtime_order(*callee)
-                    .ok_or_else(|| {
-                        Diagnostic::new(call.origin.span.clone(), "missing callee key")
-                    })?;
+                let runtime = self.view.instance_runtime_order(*callee).ok_or_else(|| {
+                    Diagnostic::new(call.origin.span.clone(), "missing callee key")
+                })?;
                 let closure = match route {
                     LoweredCallEnvironment::None => self
                         .backend
@@ -5278,15 +5455,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let mut hidden = Vec::new();
                 for step in &call.steps {
                     match step {
-                        LoweredCallStep::Argument { argument } => {
-                            let argument = &call.arguments[*argument];
-                            let value = argument.expression.ok_or_else(|| {
-                                Diagnostic::new(
-                                    call.origin.span.clone(),
-                                    "dynamic thunk argument is not yet implemented",
-                                )
-                            })?;
-                            let value = self.emit_dynamic_expression(owner, value, environment)?;
+                        LoweredCallStep::Argument {
+                            argument: argument_index,
+                        } => {
+                            let argument = &call.arguments[*argument_index];
+                            let value = self.emit_dynamic_argument(
+                                owner,
+                                id,
+                                call,
+                                *argument_index,
+                                environment,
+                            )?;
                             if let Some(slot) = argument.slot {
                                 if argument.drops_after_call
                                     || (argument.temporary

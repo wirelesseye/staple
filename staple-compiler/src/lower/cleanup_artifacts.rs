@@ -1261,6 +1261,11 @@ impl<'a> LoweredWalker<'a> {
                 "thunk argument instance has no materialized body".to_string(),
             )]);
         };
+        // Dynamic thunk environments are planned with their descriptors by
+        // descriptor_artifacts, rather than concrete capture drop glue.
+        if self.program.instance_runtime_order(thunk_instance).is_some_and(|runtime| !runtime.is_empty()) {
+            return Ok(());
+        }
         let gate = body.captures.iter().any(|capture| {
             !capture.requires_initialization_state
                 && !capture.capture.borrowed

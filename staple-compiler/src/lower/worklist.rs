@@ -3911,6 +3911,65 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_refs_preserve_payload_and_own_their_descriptor() {
+        let (text, name) = dynamic_test_module(
+            "def make: <T where Sized T> move T -> Ref T = move value => Ref value\nlet reference = make 42\n",
+            "make",
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(text.as_bytes(), "dynamic-ref");
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let finalizer_name = llvm.get_functions().find_map(|function| {
+            let name = function.get_name().to_str().unwrap();
+            name.starts_with("__staple_gc_finalizer_dynamic_cell").then(|| name.to_owned())
+        }).unwrap();
+        let engine = llvm.create_jit_execution_engine(inkwell::OptimizationLevel::None).unwrap();
+        #[repr(C)]
+        struct Descriptor { size: usize, stride: usize, align: usize, flags: u32, drop: usize, count: u32 }
+        static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        unsafe extern "C" fn drop_payload(_: *const Descriptor, _: *mut u8) {
+            DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        type Make = unsafe extern "C" fn(*const u8, *const Descriptor, *mut *mut u8, *const u8);
+        type Finalize = unsafe extern "C" fn(*mut u8);
+        let make = unsafe { engine.get_function::<Make>(&name) }.unwrap();
+        let finalize = unsafe { engine.get_function::<Finalize>(&finalizer_name) }.unwrap();
+        for size in [0_usize, 1, 3, 17] {
+            let mut descriptor = Descriptor { size, stride: size.div_ceil(16) * 16, align: 16, flags: 0, drop: drop_payload as *const () as usize, count: 0 };
+            let input = vec![42_u8; size];
+            let mut payload = std::ptr::null_mut();
+            let before = DROPS.load(std::sync::atomic::Ordering::SeqCst);
+            unsafe { make.call(std::ptr::null(), &descriptor, &mut payload, input.as_ptr()); }
+            assert!(!payload.is_null());
+            assert_eq!(unsafe { std::slice::from_raw_parts(payload, size) }, input);
+            // The allocation must not retain the caller's descriptor pointer.
+            descriptor.flags = 1;
+            descriptor.drop = 0;
+            std::hint::black_box(&descriptor);
+            unsafe { finalize.call(payload); }
+            assert_eq!(DROPS.load(std::sync::atomic::Ordering::SeqCst), before + 1);
+        }
+        #[repr(C)]
+        struct Compound { header: Descriptor, component: *const Descriptor }
+        let leaf = Descriptor { size: 3, stride: 3, align: 1, flags: 0, drop: drop_payload as *const () as usize, count: 0 };
+        let child = Compound { header: Descriptor { size: 3, stride: 3, align: 1, flags: 0, drop: 0, count: 1 }, component: &leaf };
+        let root = Compound { header: Descriptor { size: 3, stride: 3, align: 1, flags: 0, drop: drop_payload as *const () as usize, count: 1 }, component: &child.header };
+        let mut payload = std::ptr::null_mut();
+        let input = [21_u8, 42, 63];
+        unsafe { make.call(std::ptr::null(), &root.header, &mut payload, input.as_ptr()); }
+        let saved = unsafe { payload.add(3).cast::<*const Compound>().read_unaligned() };
+        assert_ne!(saved, &root as *const Compound);
+        let saved_child = unsafe { (*saved).component };
+        assert_ne!(saved_child, &child.header as *const Descriptor);
+        let saved_leaf = unsafe { (*saved_child.cast::<Compound>()).component };
+        assert_ne!(saved_leaf, &leaf as *const Descriptor);
+        assert_eq!(unsafe { (*saved_leaf).size }, 3);
+        let before = DROPS.load(std::sync::atomic::Ordering::SeqCst);
+        unsafe { finalize.call(payload); }
+        assert_eq!(DROPS.load(std::sync::atomic::Ordering::SeqCst), before + 1);
+    }
+
+    #[test]
     fn dynamic_boundaries_accept_concrete_callers() {
         for source in [
             concat!(

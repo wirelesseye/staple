@@ -118,6 +118,11 @@ pub(crate) enum ArtifactUseSite {
     ClosureEnvironment(LoweredCallableValueId),
     /// A dynamic-shape closure's descriptor-bound entry (R-C).
     DescriptorBoundEntry(LoweredCallableValueId),
+    /// Descriptor-bound entry for an implicit thunk argument.
+    DescriptorBoundThunk {
+        call: LoweredCallId,
+        argument: usize,
+    },
     /// A reabstraction conversion at a call boundary (R5).
     ReabstractionThunk {
         call: LoweredCallId,
@@ -1664,7 +1669,8 @@ impl LoweredProgram {
                     }
                     UseSiteOwner::Initializer(id) => {
                         index
-                            < super::descriptor_artifacts::concrete_initializer_types(self, id).len()
+                            < super::descriptor_artifacts::concrete_initializer_types(self, id)
+                                .len()
                     }
                 };
                 if !valid {
@@ -1746,6 +1752,17 @@ impl LoweredProgram {
             ArtifactUseSite::DescriptorBoundEntry(id) => {
                 if !callable_value(id) {
                     report("callable value", id.index());
+                }
+            }
+            ArtifactUseSite::DescriptorBoundThunk { call: id, argument } => {
+                let thunk = match site_owner {
+                    UseSiteOwner::Instance(body) => body.call(id),
+                    UseSiteOwner::Initializer(_) => self.calls.get(id),
+                }
+                .and_then(|record| record.arguments.get(argument))
+                .is_some_and(|record| record.thunk.is_some());
+                if !thunk {
+                    report("thunk argument of call", id.index());
                 }
             }
             ArtifactUseSite::ReabstractionThunk { call: id, .. } => {

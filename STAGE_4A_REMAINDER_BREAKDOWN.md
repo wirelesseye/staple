@@ -13,75 +13,58 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After the coverage-classification correction. This section is rewritten in place at each update, not
-appended to.
+After the dynamic thunk and managed-reference continuation. This section is
+rewritten in place at each update, not appended to.
 
-**Stage 4a is not complete.** The corpus is close to the exit gate, but the
-gate's measurement has gaps (see [Open problems](#open-problems)). P5 is
-fixed: lowering failures now fail the coverage test. Ordinary implicit thunks
-are counted as in scope; the measured baseline rises from 3 to 4. P1's emitter
-work and P2's finer classification remain open.
+**Stage 4a is not complete.** Ordinary implicit thunks now use dynamic closure
+entries, and dynamic `Ref` construction uses a descriptor-bearing GC payload.
+P1, P5, P6, and P7 are resolved. P2's concrete dispatch classification, R3's
+generic constructor values, and R5's general boundary conversions remain open.
 
 | Step | State |
 |---|---|
-| R0 — Measurement and hygiene | Done. R0.1 and R0.2 need the amendments from P2, P5, and P6. |
+| R0 — Measurement and hygiene | Lowering errors fail coverage; the baseline rule is documented. P2's concrete dispatch classifications remain. |
 | R1 — Descriptor order | Done |
 | R2 — Concrete function values | Done |
-| R3 — Dynamic function values | Done, except generic constructors used as dynamic-shape function values (2 templates) |
-| R4 — Dynamic environments and captures | Done, including shared cells and compound capture descriptors |
-| R5 — Reabstraction | Partial: direct function types in both directions only. Nested function types and functions inside products, sums, wrappers, and arrays are not converted (P3). |
-| R6 — Buffer intrinsics and dynamic GC payloads | Done for buffers and shared cells. `Ref` construction is still rejected and untested (P7). |
-| R7 — Remaining forms | Done for resources, `with`, and string templates. Implicit thunks were reclassified instead of implemented (P1). |
-| R8 — Exit gate | Not started |
+| R3 — Dynamic function values | Generic constructor values remain (2 templates). Nested function values within dynamic bodies are supported; unsupported boundary shapes still fall back. |
+| R4 — Dynamic environments and captures | Done. Descriptor graphs are recursively copied, including compound children. |
+| R5 — Reabstraction | Direct function boundaries only. Nested functions and functions in by-value aggregates still need general conversion (P3). |
+| R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
+| R7 — Remaining forms | Ordinary implicit thunks now work for direct and indirect calls, including captures of run-time values and concrete thunks in dynamic bodies. |
+| R8 — Exit gate | Pending the remaining implementation and final complete checks. |
 
-**Coverage** (`coverage_report_stays_within_baseline`): across the 93
-corpus programs, 4,398 of 5,951 generic templates (74%) are lowered through
-dynamic implementations. At `6a44dfa` it was 1,527 of 5,698 (27%). 1,553
-templates are rejected:
+**Coverage:** 4,500 of 6,083 generic templates (74%) across 95 corpus
+programs are eligible for dynamic implementations. There are 1,583 rejected
+templates; three have in-scope reasons: the two generic constructor-value
+templates and `keep`, which needs aggregate reabstraction. The coverage test
+passes at the lowered baseline of 3. Implicit thunks have no remaining
+in-scope rejection, and the new indirect-thunk template explicitly asserts
+dynamic selection.
 
-| Templates | Reason | Classification |
-|---|---|---|
-| 1,405 | trait bound other than `Copy`/`Sized` | allowed, Stage 6 |
-| 1,031 | trait call with run-time arguments | allowed, Stage 6 |
-| 138 | async intrinsics | allowed, Stage 8 |
-| 93 | `__buffer_clone` | allowed, Stage 6 |
-| 93 | `__slice_from_ref` | allowed, restriction |
-| 12 | coroutine, `await`, and reactive constructs | allowed, Stage 8 |
-| 1 | run-time `Natural` count | allowed, restriction |
-| 1 | implicit thunk argument | **in scope (P1)** |
-| 2 | callable value expression | **in scope** |
-| 1 | value of a function type, function-typed signature (`keep`) | **in scope** |
-
-**The four in-scope templates:**
-- two generic constructors used as dynamic-shape function values (R3);
-- `keep`, which needs a conversion R5 doesn't implement yet (P3);
-- the existing implicit-thunk template, now counted correctly (P1).
-
-**Verified at `c0cb3c5`:**
-- **IR comparison:** without the option, all 104 corpus and example inputs
-  report `same` against the `50565d8` release build.
-- **Full differential run:** identical stdout and exit status on 91
-  programs; 90 use dynamic calls, with 10,506 redirected call sites.
-- **Coverage measurement after reclassification:** 4 in-scope templates;
-  the checked-in baseline is 4. Lowering errors are no longer skipped.
-- **Not rerun in that review:** the full workspace suite.
+**Verified in this continuation:**
+- Both new corpus programs produce identical output in default and
+  differential mode; the thunk regression also asserts dynamic instances for
+  each of its three generic implementations.
+- Native `Ref` execution covers zero-sized, 1-, 3-, and 17-byte payloads,
+  exactly-once descriptor finalization, descriptor independence from the
+  caller, and recursive copying of nested component descriptors.
+- The trailing descriptor word is loaded and stored with byte alignment.
+- The full workspace run is finishing its syntax/project tests after passing
+  the CLI and compiler suites. These suites cover the initial continuation;
+  the later descriptor-copy and indirect-thunk refinements pass focused tests. The final full differential run and
+  default-mode IR comparison have not been rerun for these changes.
 
 ## Open problems
 
 Found in the review of `c0cb3c5`. Each is assigned to a step and must be
 resolved before R8.
 
-- **P1. Implicit thunks are classified as allowed regardless of cause.**
-  `d0206b8` made `ImplicitThunkArgument` an allowed Stage 8 reason because
-  the only corpus case is a `reaction { … }` callback. But implicit thunking
-  is a general language feature: any call passing an expression where
-  `() -> T` is expected creates one (`Staple.md`, "Call-site implicit
-  thunking"). A bound-free generic called as `evaluate { x }` would fall back
-  without counting.
-  → **R7:** support implicit thunks in dynamic bodies (they are ordinary
-  closures, which R4 supports), or allow them only when the thunk comes from
-  a reactive construct. Add a bound-free corpus program that thunks an
-  argument inside a generic.
+- **P1. Implicit thunk arguments — resolved.** Ordinary thunks now use
+  the same descriptor-bound entries and capture environments as written
+  closures. The support scanner follows the thunk's own transitive reasons;
+  reactive and coroutine thunks therefore remain Stage 8 fallbacks for their
+  actual bodies. `dynamic_implicit_thunks` tests bound-free generic bodies,
+  and a lowering assertion prevents silent fallback.
 - **P2. Three allowed reasons were added without a plan decision.**
   `IndexedMutation`, `SliceMutation`, and `StructuralTraitDispatch` are
   allowed in `RejectionReason::in_scope`, but R0.1's list doesn't include
@@ -106,27 +89,19 @@ resolved before R8.
   → **Fixed by this update.** Status now lives only in
   [Current state](#current-state) above, rewritten in place, and the Stage 4
   breakdown links to it.
-- **P5. The coverage test skips programs that fail to lower.** It does
-  `Err(_) => continue` when lowering with the option fails, which would
-  lower the in-scope count for the wrong reason.
-  → **R0.2:** fail the test instead.
-- **P6. No rule for raising the baseline.** `b4d1c73` raised the baseline,
-  because two new corpus programs brought 26 in-scope standard-library
-  templates with them. The reason was sound, but the ratchet only says the
-  count "may only go down".
-  → **R0.2:** the baseline may rise only in a commit that adds corpus
-  programs or reclassifies a reason (P1, P2). That commit's message states
-  the count before and after and why.
-- **P7. `Ref` construction is still unsupported, and the count can't see
-  it.** The scanner still rejects recursive construction
-  (`RejectionReason::RecursiveConstruction`, an in-scope reason), but no
-  corpus template constructs a `Ref` of a run-time type. The count stays at
-  zero for it, and R6's requested execution test was not added.
-  → **R6:** implement `Ref` construction with Decision 8's trailing
-  descriptor word and a dynamic finalizer, and add a bound-free corpus
-  program that constructs, reads, replaces, and drops a `Ref T`.
+- **P5. Skipped lowering failures — resolved.** Coverage now fails when a
+  corpus program cannot lower with the differential option.
+- **P6. Baseline increases — resolved.** The baseline may rise only for
+  added corpus programs or corrected reason classifications, with before/after
+  counts and justification in the commit message. The initial classification
+  correction raised it from 3 to 4; thunk support brings the ratchet to 3.
+- **P7. Dynamic `Ref` construction — resolved.** Managed references now
+  use trailing descriptor words and the shared descriptor-based payload
+  finalizer. The corpus constructs, reads, and replaces a `Ref T`; native
+  execution checks payload preservation, exactly-once finalization, and
+  recursive descriptor ownership, including zero-sized and odd-sized values.
 
-P3 and P7 share a cause: the coverage count only sees constructs the corpus
+P3 and the former P7 shared a cause: the coverage count only sees constructs the corpus
 uses. Before R8, every in-scope `RejectionReason` that no corpus template
 hits needs either a bound-free corpus program that exercises it or a
 recorded reason why it can't occur.
@@ -371,7 +346,8 @@ concrete (R-B), inside dynamic bodies.
   `__buffer_push`, `__buffer_pop` (which returns `Option T`, a dynamic sum),
   `__buffer_get`, `__buffer_freeze`, and `__buffer_transfer`.
 - **Measure:** the only intrinsic rejections left are allowed ones.
-- **Still open (P7):** `Ref` construction and its execution test.
+- **Completed (P7):** dynamic `Ref` construction, differential execution,
+  and native descriptor ownership/finalization tests.
 
 ### R7 — Remaining forms
 
@@ -384,9 +360,9 @@ concrete (R-B), inside dynamic bodies.
   allowed Stage 6 reason.
 - Implicit thunk arguments.
 - **Measure:** these rows reach zero or move to allowed reasons.
-- **Still open (P1):** implicit thunks were reclassified as allowed instead
-  of supported. Support them, or allow only reactive ones, and add a
-  bound-free generic that thunks an argument.
+- **Completed (P1):** ordinary implicit thunks are supported. Their own
+  transitive body restrictions decide reactive and coroutine fallbacks;
+  bound-free direct and indirect regressions assert dynamic selection.
 
 ### R8 — Exit gate
 
