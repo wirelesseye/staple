@@ -4348,7 +4348,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     owner,
                     *argument,
                     pointer,
-                    descriptor,
+                    self.dynamic_descriptor(
+                        &self.view.pattern(owner, *argument).unwrap().test.subject,
+                        environment,
+                        span,
+                    )?,
                     owned,
                     success,
                     failure,
@@ -4387,9 +4391,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     self.backend.builder.position_at_end(selected);
                     let payload =
                         self.dynamic_sum_payload(descriptor, pointer, sum.alternatives.len())?;
-                    let component = self
-                        .backend
-                        .load_descriptor_component(descriptor, index as u32)?;
+                    let payload_type = &self.view.pattern(owner, *argument).unwrap().test.subject;
+                    let component = self.dynamic_descriptor(payload_type, environment, span)?;
                     self.test_dynamic_pattern(
                         owner,
                         *argument,
@@ -4552,6 +4555,88 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// Resolve a mutation target to its storage pointer and descriptor.
+    /// Concrete MutateIndex dispatch inside a dynamic body. Its lowering
+    /// binding still selects the ordinary implementation or structural body.
+    fn emit_dynamic_indexed_assignment(
+        &mut self,
+        owner: EmissionOwner,
+        id: crate::ItemId,
+        assignment: &crate::LoweredAssignmentItem,
+        environment: &mut DynamicEnvironment<'context>,
+    ) -> CodeGenerationResult<()> {
+        let place = self
+            .view
+            .place(owner, assignment.target)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(staple_syntax::Span::Compiler, "missing indexed place")
+            })?;
+        let crate::LoweredPlaceKind::Indexed { base, index } = place.kind else {
+            return Err(Diagnostic::new(
+                place.origin.span.clone(),
+                "indexed assignment has no indexed place",
+            ));
+        };
+        let span = &place.origin.span;
+        let (base_pointer, base_descriptor) = self.emit_dynamic_place(owner, base, environment)?;
+        let position = self.emit_dynamic_expression(owner, index, environment)?;
+        if environment.returned {
+            return Ok(());
+        }
+        let position_type = self
+            .view
+            .expression(owner, index)
+            .map(|expression| &expression.value_type)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing index expression"))?;
+        let position = self
+            .backend
+            .builder
+            .build_load(
+                self.backend.compile_type(position_type)?,
+                position,
+                "mutation.index",
+            )
+            .map_err(compiler_diagnostic)?;
+        let replacement = self.emit_dynamic_expression(owner, assignment.value, environment)?;
+        if environment.returned {
+            return Ok(());
+        }
+        let replacement = self
+            .backend
+            .builder
+            .build_load(
+                self.backend.compile_type(&place.value_type)?,
+                replacement,
+                "mutation.value",
+            )
+            .map_err(compiler_diagnostic)?;
+        let function =
+            self.dynamic_bound_function(owner, LoweredBindingSite::IndexedAssignment(id), span)?;
+        let null = self
+            .backend
+            .context
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        self.backend
+            .builder
+            .build_direct_call(
+                function,
+                &[
+                    null.into(),
+                    base_pointer.into(),
+                    position.into(),
+                    replacement.into(),
+                ],
+                "mutate_index.call",
+            )
+            .map_err(compiler_diagnostic)?;
+        if assignment.drops_base_temporary {
+            self.backend
+                .drop_dynamic_value(base_descriptor, base_pointer)?;
+        }
+        Ok(())
+    }
+
     fn emit_dynamic_place(
         &mut self,
         owner: EmissionOwner,
@@ -4638,10 +4723,63 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 self.dynamic_product_field(base_descriptor, base_pointer, *index as u32)
             }
+            crate::LoweredPlaceKind::ProductElement {
+                base,
+                index,
+                slice: true,
+            } => {
+                let (slice, _) = self.emit_dynamic_place(owner, *base, environment)?;
+                let slice_type = self.backend.slice_type();
+                let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+                let data = self
+                    .backend
+                    .builder
+                    .build_struct_gep(slice_type, slice, 0, "mutation.slice.data")
+                    .map_err(compiler_diagnostic)?;
+                let data = self
+                    .backend
+                    .builder
+                    .build_load(pointer_type, data, "mutation.slice.pointer")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let length = self
+                    .backend
+                    .builder
+                    .build_struct_gep(slice_type, slice, 1, "mutation.slice.length")
+                    .map_err(compiler_diagnostic)?;
+                let length = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, length, "mutation.slice.count")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let position = self.backend.size_type.const_int(*index as u64, false);
+                let out_of_bounds = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::UGE,
+                        position,
+                        length,
+                        "mutation.slice.out_of_bounds",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .build_trap_if(out_of_bounds, place.origin.span.clone())?;
+                let descriptor =
+                    self.dynamic_descriptor(&place.value_type, environment, &place.origin.span)?;
+                let layout = self.backend.load_descriptor_layout(descriptor)?;
+                let offset = self
+                    .backend
+                    .builder
+                    .build_int_mul(position, layout.stride, "mutation.slice.offset")
+                    .map_err(compiler_diagnostic)?;
+                Ok((self.backend.dynamic_byte_offset(data, offset)?, descriptor))
+            }
             crate::LoweredPlaceKind::Representation { base } => {
                 self.emit_dynamic_place(owner, *base, environment)
             }
-            _ => Err(Diagnostic::new(
+            crate::LoweredPlaceKind::Indexed { .. } => Err(Diagnostic::new(
                 place.origin.span.clone(),
                 "dynamic mutation target is not yet implemented",
             )),
@@ -4986,10 +5124,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 LoweredItemKind::Assignment(assignment) => {
                     if assignment.mutate_index.is_some() {
-                        return Err(Diagnostic::new(
-                            item.origin.span.clone(),
-                            "dynamic indexed assignment is not yet implemented",
-                        ));
+                        self.emit_dynamic_indexed_assignment(owner, *id, assignment, environment)?;
+                        continue;
                     }
                     let (target, descriptor) =
                         self.emit_dynamic_place(owner, assignment.target, environment)?;
@@ -5397,17 +5533,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         ));
                     }
                 };
-                let Some(LoweredBoundTarget::Instance(callee)) =
-                    self.view.binding(owner, LoweredBindingSite::Call(call_id))
-                else {
-                    return Err(Diagnostic::new(
-                        call.origin.span.clone(),
-                        "missing dynamic callee binding",
-                    ));
-                };
-                let runtime = self.view.instance_runtime_order(*callee).ok_or_else(|| {
-                    Diagnostic::new(call.origin.span.clone(), "missing callee key")
-                })?;
+                let (callee, runtime) =
+                    match self.view.binding(owner, LoweredBindingSite::Call(call_id)) {
+                        Some(LoweredBoundTarget::Instance(callee)) => (
+                            Some(*callee),
+                            self.view.instance_runtime_order(*callee).ok_or_else(|| {
+                                Diagnostic::new(call.origin.span.clone(), "missing callee key")
+                            })?,
+                        ),
+                        Some(LoweredBoundTarget::Artifact(_)) => (None, Vec::new()),
+                        _ => {
+                            return Err(Diagnostic::new(
+                                call.origin.span.clone(),
+                                "missing dynamic callee binding",
+                            ));
+                        }
+                    };
                 let closure = match route {
                     LoweredCallEnvironment::None => self
                         .backend
@@ -5590,10 +5731,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         }
                     }
                 }
-                let signature = self
-                    .view
-                    .instance_signature(*callee)
-                    .expect("callee signature");
+                let signature = callee
+                    .and_then(|callee| self.view.instance_signature(callee))
+                    .unwrap_or(&call.function_type);
                 let pack = !matches!(signature.parameter.as_ref(), CheckedType::Product(_))
                     && matches!(
                         call.function_type.parameter.as_ref(),
@@ -5640,9 +5780,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         arguments.push(value.into());
                     }
                 }
-                let function = self.instances.get(callee).copied().ok_or_else(|| {
-                    Diagnostic::new(call.origin.span.clone(), "missing dynamic declaration")
-                })?;
+                let function = self.dynamic_bound_function(
+                    owner,
+                    LoweredBindingSite::Call(call_id),
+                    &call.origin.span,
+                )?;
                 let call_value = self
                     .backend
                     .builder

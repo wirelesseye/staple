@@ -140,7 +140,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 95] = [
+static CORPUS: [CorpusProgram; 96] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -1247,37 +1247,66 @@ static CORPUS: [CorpusProgram; 95] = [
         )),
         "",
     ),
-    expect_stdout(must_run(inline(
-        "dynamic_ref_construction",
-        concat!(
-            "use std.io.println\n",
-            "def make: <T where Sized T> move T -> Ref T = move value => Ref value\n",
-            "def replace: <T where Sized T> [mut Ref T, move T] -> T = [mut reference, move value] => Ref.replace reference value\n",
-            "let mut reference = make 21\n",
-            "let Ref first = reference\n",
-            "println \"${first}\"\n",
-            "let previous = replace reference 42\n",
-            "println \"${previous}\"\n",
-            "let Ref last = reference\n",
-            "println \"${last}\"\n",
-        ), "ownership",
-    )), "21\n21\n42\n"),
-    expect_stdout(must_run(inline(
-        "dynamic_implicit_thunks",
-        concat!(
-            "use std.io.println\n",
-            "def evaluate: <T where Copy T> (() -> T) -> T = callback => callback ()\n",
-            "def captured: <T where Copy T> T -> T = value => evaluate { value }\n",
-            "def concrete: <T where Copy T> T -> I32 = value => evaluate { 17 }\n",
-            "def indirect: <T where Copy T> T -> T = value => { let callback: (() -> T) -> T = evaluate; callback { value } }\n",
-            "let first = captured 42\n",
-            "println \"${first}\"\n",
-            "let second = concrete (U8 :: 1)\n",
-            "println \"${second}\"\n",
-            "let third = indirect 43\n",
-            "println \"${third}\"\n",
-        ), "core",
-    )), "42\n17\n43\n"),
+    expect_stdout(
+        must_run(inline(
+            "dynamic_ref_construction",
+            concat!(
+                "use std.io.println\n",
+                "def make: <T where Sized T> move T -> Ref T = move value => Ref value\n",
+                "def replace: <T where Sized T> [mut Ref T, move T] -> T = [mut reference, move value] => Ref.replace reference value\n",
+                "let mut reference = make 21\n",
+                "let Ref first = reference\n",
+                "println \"${first}\"\n",
+                "let previous = replace reference 42\n",
+                "println \"${previous}\"\n",
+                "let Ref last = reference\n",
+                "println \"${last}\"\n",
+            ),
+            "ownership",
+        )),
+        "21\n21\n42\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "dynamic_implicit_thunks",
+            concat!(
+                "use std.io.println\n",
+                "def evaluate: <T where Copy T> (() -> T) -> T = callback => callback ()\n",
+                "def captured: <T where Copy T> T -> T = value => evaluate { value }\n",
+                "def concrete: <T where Copy T> T -> I32 = value => evaluate { 17 }\n",
+                "def indirect: <T where Copy T> T -> T = value => { let callback: (() -> T) -> T = evaluate; callback { value } }\n",
+                "let first = captured 42\n",
+                "println \"${first}\"\n",
+                "let second = concrete (U8 :: 1)\n",
+                "println \"${second}\"\n",
+                "let third = indirect 43\n",
+                "println \"${third}\"\n",
+            ),
+            "core",
+        )),
+        "42\n17\n43\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "dynamic_concrete_dispatch",
+            concat!(
+                "use std.io.println\n",
+                "use std.slice.Slice\n",
+                "def indexed: <T where Copy T> T -> I32 = value => { let mut values = (1, 2); values[0] = 7; values.0 }\n",
+                "def make_slice: () -> Slice I32 = () => Slice.from_ref (Ref (1, 2))\n",
+                "def sliced: <T where Copy T> T -> I32 = value => { let mut values = make_slice (); values.0 = 8; values.0 }\n",
+                "def structural: <T where Copy T> T -> I32 = value => { let mut total = 0; for element in (4, 5) { total = total + element }; total }\n",
+                "let first = indexed 1\n",
+                "println \"${first}\"\n",
+                "let second = sliced 1\n",
+                "println \"${second}\"\n",
+                "let third = structural 1\n",
+                "println \"${third}\"\n",
+            ),
+            "expressions",
+        )),
+        "7\n8\n9\n",
+    ),
     // Every structural body, formatting delegates, and cleanup.
     must_run(expect_stdout(
         emits(
@@ -2712,11 +2741,12 @@ mod tests {
                 .unwrap_or_else(|diagnostics| {
                     panic!("`{}` should load: {diagnostics:?}", program.name)
                 });
-            let resolved = NameResolver::new()
-                .resolve_program(loaded)
-                .unwrap_or_else(|diagnostics| {
-                    panic!("`{}` should resolve: {diagnostics:?}", program.name)
-                });
+            let resolved =
+                NameResolver::new()
+                    .resolve_program(loaded)
+                    .unwrap_or_else(|diagnostics| {
+                        panic!("`{}` should resolve: {diagnostics:?}", program.name)
+                    });
             let checked = TypeChecker::new()
                 .check(resolved)
                 .unwrap_or_else(|diagnostics| {
@@ -2748,10 +2778,7 @@ mod tests {
             dynamic_instances += count;
             let context = Context::create();
             if let Err(diagnostics) = crate::codegen::lowered_emissions(&context, &lowered) {
-                failures.push(format!(
-                    "`{}` did not emit: {diagnostics:?}",
-                    program.name
-                ));
+                failures.push(format!("`{}` did not emit: {diagnostics:?}", program.name));
             }
         }
         eprintln!(

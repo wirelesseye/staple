@@ -4700,13 +4700,8 @@ mod tests {
                 continue;
             }
             let (source, root) = corpus_source(program, workspace_root);
-            dynamic_calls += differential_compare(
-                program.name,
-                &source,
-                &root,
-                &standard_library,
-                &options,
-            );
+            dynamic_calls +=
+                differential_compare(program.name, &source, &root, &standard_library, &options);
             matched += 1;
         }
         assert_eq!(matched, SUBSET.len(), "every subset program exists");
@@ -4723,9 +4718,17 @@ mod tests {
         let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
         let mut tested = 0;
         for program in staple_compiler::codegen_corpus() {
-            if !program.name.starts_with("dynamic_") { continue; }
+            if !program.name.starts_with("dynamic_") {
+                continue;
+            }
             let (source, source_root) = corpus_source(program, root);
-            let calls = differential_compare(program.name, &source, &source_root, &standard_library, &options);
+            let calls = differential_compare(
+                program.name,
+                &source,
+                &source_root,
+                &standard_library,
+                &options,
+            );
             assert!(calls > 0, "{} must exercise dynamic calls", program.name);
             tested += 1;
         }
@@ -4860,9 +4863,14 @@ mod tests {
         let output = Command::new(executable.path())
             .output()
             .map_err(|error| format!("could not run `{}`: {error}", executable.path().display()))?;
-        Ok((
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-        ))
+        // A signal is part of the exit status: different crashes must not
+        // compare equal merely because neither process has an exit code.
+        let status = output.status.code();
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            status.or_else(|| output.status.signal().map(|signal| -signal))
+        };
+        Ok((status, String::from_utf8_lossy(&output.stdout).into_owned()))
     }
 }

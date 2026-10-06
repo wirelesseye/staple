@@ -230,9 +230,9 @@ That plan holds the detailed status. This section only summarizes it.
 ### Implementation status
 
 **Stage 4a is not complete.** Dynamic implementations now support ordinary
-implicit thunks and managed references, with recursively owned descriptor
-graphs. Generic constructor values, general reabstraction at aggregate and
-nested function boundaries, and the concrete dispatch coverage correction
+implicit thunks, managed references, and concrete structural dispatch and
+mutation, with recursively owned descriptor graphs. Generic constructor
+values and general reabstraction at aggregate and nested function boundaries
 remain. Detailed coverage and validation status live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
 

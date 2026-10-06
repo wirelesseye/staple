@@ -99,12 +99,6 @@ pub(crate) enum RejectionReason {
     TraitBound,
     /// A trait call with run-time arguments (Stage 6).
     TraitCallRuntime,
-    /// A structural trait method dispatch (Stage 6).
-    StructuralTraitDispatch,
-    /// An indexed mutation (Stage 6).
-    IndexedMutation,
-    /// A slice mutation (Stage 6).
-    SliceMutation,
     /// An effect variable in the signature (Stage 5).
     EffectVariable,
     /// An async intrinsic: completion, task, resolver (Stage 8).
@@ -144,9 +138,6 @@ impl RejectionReason {
             self,
             RejectionReason::TraitBound
                 | RejectionReason::TraitCallRuntime
-                | RejectionReason::StructuralTraitDispatch
-                | RejectionReason::IndexedMutation
-                | RejectionReason::SliceMutation
                 | RejectionReason::EffectVariable
                 | RejectionReason::AsyncIntrinsic
                 | RejectionReason::ReactiveIntrinsic
@@ -192,9 +183,6 @@ impl RejectionReason {
             RejectionReason::CallsExcludedTemplate => "calls an excluded template",
             RejectionReason::TraitBound => "trait bound other than Copy/Sized",
             RejectionReason::TraitCallRuntime => "trait call with run-time arguments",
-            RejectionReason::StructuralTraitDispatch => "structural trait dispatch",
-            RejectionReason::IndexedMutation => "indexed mutation",
-            RejectionReason::SliceMutation => "slice mutation",
             RejectionReason::EffectVariable => "effect variable",
             RejectionReason::AsyncIntrinsic => "async intrinsic",
             RejectionReason::ReactiveIntrinsic => "reactive intrinsic",
@@ -678,8 +666,12 @@ impl SupportWalker<'_> {
                 self.expression(binding.value);
             }
             LoweredItemKind::Assignment(assignment) => {
-                if assignment.mutate_index.is_some() {
-                    self.reject(RejectionReason::IndexedMutation);
+                if assignment
+                    .mutate_index
+                    .as_ref()
+                    .is_some_and(|dispatch| dispatch.arguments.iter().any(contains_type_parameter))
+                {
+                    self.reject(RejectionReason::TraitCallRuntime);
                 }
                 if assignment.signal_notify.is_some() {
                     self.reject(RejectionReason::SignalAssignment);
@@ -901,15 +893,22 @@ impl SupportWalker<'_> {
             crate::lower::LoweredPlaceKind::Dereference { reference, .. } => {
                 self.expression(*reference)
             }
-            crate::lower::LoweredPlaceKind::ProductElement { base, slice, .. } => {
-                if *slice {
-                    self.reject(RejectionReason::SliceMutation);
-                }
-                self.place(*base);
-            }
+            crate::lower::LoweredPlaceKind::ProductElement { base, .. } => self.place(*base),
             crate::lower::LoweredPlaceKind::Representation { base } => self.place(*base),
             crate::lower::LoweredPlaceKind::Indexed { base, index } => {
-                self.reject(RejectionReason::IndexedMutation);
+                let runtime = self
+                    .program
+                    .places
+                    .get(*base)
+                    .is_some_and(|place| contains_type_parameter(&place.value_type))
+                    || self
+                        .program
+                        .expressions
+                        .get(*index)
+                        .is_some_and(|expression| contains_type_parameter(&expression.value_type));
+                if runtime {
+                    self.reject(RejectionReason::TraitCallRuntime);
+                }
                 self.place(*base);
                 self.expression(*index);
             }
@@ -1032,7 +1031,9 @@ impl SupportWalker<'_> {
                 }
             }
             LoweredCallableTarget::StructuralTraitMethod { .. } => {
-                self.reject(RejectionReason::StructuralTraitDispatch)
+                if mentions_parameters {
+                    self.reject(RejectionReason::TraitCallRuntime);
+                }
             }
             // R2: a concrete function type uses the concrete ABI. R3: a
             // dynamic-shape closure uses the dynamic shape without descriptor
@@ -1119,6 +1120,52 @@ mod tests {
             .lower(&checked)
             .unwrap();
         for name in ["captured", "concrete", "indirect"] {
+            let function = lowered
+                .program
+                .functions
+                .iter()
+                .find_map(|(_, id, function)| (function.name == name).then_some(id))
+                .unwrap();
+            assert_eq!(
+                lowered.program.dynamic_support(function),
+                DynamicSupport::Supported,
+                "{name}"
+            );
+            assert!(
+                lowered.program.instances.iter().any(|(_, instance)| {
+                    instance.template == function
+                        && lowered
+                            .program
+                            .specializations
+                            .instance(instance.ordinal)
+                            .is_some_and(|key| !key.runtime().is_empty())
+                }),
+                "{name} must run dynamically rather than fall back"
+            );
+        }
+    }
+
+    #[test]
+    fn concrete_dispatch_is_selected_inside_dynamic_bodies() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let program = codegen_corpus()
+            .iter()
+            .find(|program| program.name == "dynamic_concrete_dispatch")
+            .unwrap();
+        let CorpusSource::Inline(source) = program.source else {
+            panic!("dispatch regression is inline");
+        };
+        let loaded = ProgramLoader::new()
+            .with_standard_library_root(workspace.join("stdlib"))
+            .load_source(source, workspace)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(loaded).unwrap();
+        let checked = TypeChecker::new().check(resolved).unwrap();
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&checked)
+            .unwrap();
+        for name in ["indexed", "sliced", "structural"] {
             let function = lowered
                 .program
                 .functions

@@ -13,17 +13,17 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After the dynamic thunk and managed-reference continuation. This section is
+After the concrete dispatch continuation. This section is
 rewritten in place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks now use dynamic closure
 entries, and dynamic `Ref` construction uses a descriptor-bearing GC payload.
-P1, P5, P6, and P7 are resolved. P2's concrete dispatch classification, R3's
+P1, P2, P5, P6, and P7 are resolved. R3's
 generic constructor values, and R5's general boundary conversions remain open.
 
 | Step | State |
 |---|---|
-| R0 — Measurement and hygiene | Lowering errors fail coverage; the baseline rule is documented. P2's concrete dispatch classifications remain. |
+| R0 — Measurement and hygiene | Lowering errors fail coverage; the baseline rule is documented. Concrete structural calls and mutation no longer fall back. |
 | R1 — Descriptor order | Done |
 | R2 — Concrete function values | Done |
 | R3 — Dynamic function values | Generic constructor values remain (2 templates). Nested function values within dynamic bodies are supported; unsupported boundary shapes still fall back. |
@@ -33,26 +33,23 @@ generic constructor values, and R5's general boundary conversions remain open.
 | R7 — Remaining forms | Ordinary implicit thunks now work for direct and indirect calls, including captures of run-time values and concrete thunks in dynamic bodies. |
 | R8 — Exit gate | Pending the remaining implementation and final complete checks. |
 
-**Coverage:** 4,500 of 6,083 generic templates (74%) across 95 corpus
-programs are eligible for dynamic implementations. There are 1,583 rejected
-templates; three have in-scope reasons: the two generic constructor-value
-templates and `keep`, which needs aggregate reabstraction. The coverage test
-passes at the lowered baseline of 3. Implicit thunks have no remaining
-in-scope rejection, and the new indirect-thunk template explicitly asserts
-dynamic selection.
+**Coverage:** 4,550 of 6,148 generic templates (74%) across 96 corpus
+programs are eligible for dynamic implementations. There are 1,598 rejected
+templates; three have in-scope reasons: two generic constructor values and
+`keep`, which needs aggregate reabstraction. The coverage test passes at the
+ratchet of 3. The concrete-dispatch regression asserts dynamic selection for
+all three implementations.
 
 **Verified in this continuation:**
-- Both new corpus programs produce identical output in default and
-  differential mode; the thunk regression also asserts dynamic instances for
-  each of its three generic implementations.
-- Native `Ref` execution covers zero-sized, 1-, 3-, and 17-byte payloads,
-  exactly-once descriptor finalization, descriptor independence from the
-  caller, and recursive copying of nested component descriptors.
-- The trailing descriptor word is loaded and stored with byte alignment.
-- The full workspace run is finishing its syntax/project tests after passing
-  the CLI and compiler suites. These suites cover the initial continuation;
-  the later descriptor-copy and indirect-thunk refinements pass focused tests. The final full differential run and
-  default-mode IR comparison have not been rerun for these changes.
+- The concrete-dispatch corpus program prints `7`, `8`, and `9` identically
+  in default and differential modes; every regression named `dynamic_` passes
+  the focused CLI differential run.
+- The lowering regression asserts dynamic instances for all three concrete
+  dispatch implementations.
+- The differential harness now compares Unix terminating signals as part
+  of process status; different crashes cannot compare equal as `None`.
+- The previous full workspace run passed. Final full differential execution,
+  default-mode IR comparison, and workspace checks remain required at R8.
 
 ## Open problems
 
@@ -65,15 +62,14 @@ resolved before R8.
   reactive and coroutine thunks therefore remain Stage 8 fallbacks for their
   actual bodies. `dynamic_implicit_thunks` tests bound-free generic bodies,
   and a lowering assertion prevents silent fallback.
-- **P2. Three allowed reasons were added without a plan decision.**
-  `IndexedMutation`, `SliceMutation`, and `StructuralTraitDispatch` are
-  allowed in `RejectionReason::in_scope`, but R0.1's list doesn't include
-  them. The scanner rejects all three unconditionally, so concrete cases
-  inside dynamic bodies are hidden too: indexed mutation of a concrete
-  container, or structural dispatch with concrete arguments.
-  → **R0.1/R0.2:** allow them only when the construct involves run-time type
-  parameters (a trait call needing a dictionary, Stage 6). Classify the
-  concrete cases as in scope, and record the rule in R0.1.
+- **P2. Concrete dispatch classifications — resolved.** Concrete indexed
+  mutation, slice-field mutation, and structural trait calls execute inside
+  dynamic bodies. Parameter-dependent structural dispatch and indexed
+  mutation use the Stage 6 `TraitCallRuntime` reason. The three blanket
+  rejection reasons have been removed. `dynamic_concrete_dispatch` executes
+  all three concrete forms and asserts dynamic selection for each template.
+  Sum patterns obtain their payload descriptor from the payload type, so
+  alternative wrappers do not pass their wrapper descriptor to a product.
 - **P3. The coverage gate can reach zero without general reabstraction.**
   Converting nested function types and functions inside by-value aggregates
   (Decision 7's `value-conversion` family) is unimplemented. The scanner
