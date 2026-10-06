@@ -13,7 +13,7 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After the general reabstraction continuation. This section is rewritten in
+After the shared-cell restriction classification. This section is rewritten in
 place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks, managed references,
@@ -25,20 +25,24 @@ have dynamic implementations. P1, P2, P3, P5, P6, and P7 are resolved.
 | R0 — Measurement and hygiene | Lowering errors fail coverage; the baseline rule is documented. Concrete structural calls and mutation no longer fall back. |
 | R1 — Descriptor order | Done |
 | R2 — Concrete function values | Done |
-| R3 — Dynamic function values | Constructor adapters own their descriptors and expose the dynamic closure ABI. The nested recursive generic callable remains open. |
+| R3 — Dynamic function values | Constructor adapters own their descriptors and expose the dynamic closure ABI. Runtime-shaped function captures through shared cells report the explicit Decision 7 restriction. |
 | R4 — Dynamic environments and captures | Done. Descriptor graphs are recursively copied, including compound children. |
 | R5 — Reabstraction | Done. Lowering-owned conversions handle nested functions and functions in by-value products, sums, wrappers, and fixed arrays (normalized to products). Functions behind references retain the explicit restriction. |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
-| R7 — Remaining forms | Ordinary implicit thunks work for direct and indirect calls. The remaining recursive callable and rejection-kind audit are open. |
+| R7 — Remaining forms | Ordinary implicit thunks work for direct and indirect calls. Shared recursive callable cells report the function-behind-reference restriction. The rejection-kind audit is open. |
 | R8 — Exit gate | Pending the remaining implementation and final complete checks. |
 
 **Coverage:** The 98-program refresh measured 6,284 generic templates,
-4,658 eligible (74%), and 1,626 rejected. The only in-scope rejection is
-`recur` in `local_recursive_generic` (`CallableValue`); it is not a constructor.
-R5 removes `keep`'s function-typed signature rejection. The coverage ratchet
-is now 1, down from 2.
+4,658 eligible (74%), and 1,626 rejected. The shared-cell classification moves
+`recur` in `local_generic_cells` from `CallableValue` to the explicit
+`FunctionBehindReference` restriction. The coverage baseline is now zero,
+and the refresh passes with no in-scope rejections.
 
 **Verified in this continuation:**
+- The zero-baseline full corpus coverage refresh passes: 6,284 templates,
+  4,658 eligible, and 1,626 rejected for allowed reasons.
+- A terminating bound-free recursive generic regression requires exactly the
+  `FunctionBehindReference` reason for its shared self-closure cell.
 - The focused CLI differential execution, dynamic-selection and ABI-shape
   assertions, and complete corpus coverage refresh pass.
 - The `dynamic_reabstraction_shapes` regression executes conversions in both

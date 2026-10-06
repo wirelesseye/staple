@@ -676,10 +676,20 @@ impl SupportWalker<'_> {
                     .closure
                     .as_ref()
                     .map_or(&[][..], |closure| closure.captures.as_slice());
+                let shared_function = |capture: &crate::LoweredClosureCapture| {
+                    capture.access == crate::LoweredCaptureAccess::SharedCell
+                        && contains_polymorphic_function(&capture.value_type)
+                };
+                if captures.iter().any(shared_function) {
+                    // Shared storage cannot be copied into an adapted closure's
+                    // ABI without breaking aliasing (Decision 7).
+                    self.reject(RejectionReason::FunctionBehindReference);
+                }
                 let captures_eligible = captures.iter().all(|capture| {
-                    !contains_polymorphic_function(&capture.value_type)
-                        && (matches!(&capture.value_type, CheckedType::Parameter { .. })
-                            || !contains_type_parameter(&capture.value_type))
+                    shared_function(capture)
+                        || (!contains_polymorphic_function(&capture.value_type)
+                            && (matches!(&capture.value_type, CheckedType::Parameter { .. })
+                                || !contains_type_parameter(&capture.value_type)))
                 });
                 let dynamic_shape =
                     contains_type_parameter(&CheckedType::Function(callable.function_type.clone()));
@@ -983,7 +993,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 1;
+    const IN_SCOPE_BASELINE: usize = 0;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.
@@ -1141,6 +1151,37 @@ mod tests {
                 "{name} must run dynamically"
             );
         }
+    }
+
+    #[test]
+    fn recursive_generic_callable_is_restricted_behind_shared_cell() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let source = "def outer: () -> I32 = () => {\n def recur: <T where Copy T> (T, I32) -> T = (value, count) => if (count == 0) { value } else { recur (value, count - 1) }\n recur (42, 3)\n}\nlet answer = outer ()\n";
+        let loaded = ProgramLoader::new()
+            .with_standard_library_root(workspace.join("stdlib"))
+            .load_source(source, workspace)
+            .unwrap();
+        let checked = TypeChecker::new()
+            .check(NameResolver::new().resolve_program(loaded).unwrap())
+            .unwrap();
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&checked)
+            .unwrap();
+        let function = lowered
+            .program
+            .functions
+            .iter()
+            .find_map(|(_, id, function)| (function.name == "recur").then_some(id))
+            .unwrap();
+        assert_eq!(
+            lowered.program.dynamic_support(function),
+            DynamicSupport::Unsupported
+        );
+        assert_eq!(
+            lowered.program.dynamic_support_reasons[&function],
+            BTreeSet::from([RejectionReason::FunctionBehindReference])
+        );
     }
 
     #[test]
