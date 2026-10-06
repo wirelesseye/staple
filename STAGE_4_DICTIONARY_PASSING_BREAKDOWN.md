@@ -242,7 +242,7 @@ without evaluating their initializer. Both emitters share String/CString
 kernels. Concrete-signature closures with runtime captures use planned
 ABI adapters, and compound/function capture descriptors are supported;
 the rejection-kind
-audit and final exit checks are open. Detailed coverage and
+audit is documented, and final exit checks remain. Detailed coverage and
 validation status live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
 

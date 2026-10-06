@@ -13,7 +13,7 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After capture ABI and layout audit. This section is rewritten in
+After the rejection-kind audit. This section is rewritten in
 place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks, managed references,
@@ -29,7 +29,7 @@ have dynamic implementations. P1, P2, P3, P5, P6, and P7 are resolved.
 | R4 — Dynamic environments and captures | Compound and function capture descriptors are supported. Concrete-signature closures with runtime captures use a lowering-owned ABI adapter; capture-only descriptors come from the enclosing environment. Shared function cells retain Decision 7. |
 | R5 — Reabstraction | Done. Lowering-owned conversions handle nested functions and functions in by-value products, sums, wrappers, and fixed arrays (normalized to products). Functions behind references retain the explicit restriction. |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
-| R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. String/CString kernels share concrete emission helpers. The rejection-kind audit is open. |
+| R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. String/CString kernels share concrete emission helpers. The rejection-kind audit is recorded below; final execution, workspace, coverage, and IR gates remain. |
 | R8 — Exit gate | Pending the remaining implementation and final complete checks. |
 
 **Coverage:** The last completed 100-program refresh measured 6,420 generic templates,
@@ -85,6 +85,25 @@ The former catch-all `Intrinsic` and `BufferIntrinsic` reasons are removed;
 the rejection classifier exhaustively lists all supported variants and only
 returns allowed reasons for async/reactive operations, buffer clone, and
 slice-from-reference.
+
+### Remaining rejection-kind audit
+
+| Reason | Evidence and scope |
+|---|---|
+| `CallableValue` | Bound-free callable, constructor, compound/function capture, and concrete-signature capture cases execute dynamically. Remaining runtime-shaped targets are private compiler intrinsics, private Slice constructors, foreign externs, or trait method values; their ownership/signature restrictions below prevent a public bound-free instance. Runtime-shaped shared function cells retain Decision 7. |
+| `ParameterProducts` | Decision 6 excludes unknown-arity parameter products from the dynamic function ABI. `normalize_function_type` absorbs fixed parameter slots into a product/single value. Only unexpanded spreads retain `ParameterProduct`; `differential_call_runtime` refuses those signatures/substitutions. Stage 3 rejects capable parameters in schemes used as values (`typecheck.rs`), so an in-scope fixed-shape dynamic closure cannot carry one. The existing `parameter_products` corpus case exercises fixed slots. |
+| `RecursiveConstruction` | Managed references are implemented and exercised. Slice's wrapper representation and constructor are private (`stdlib/std/slice.sta`; `resolve.rs` uses representation visibility for wrapper constructors); public construction routes through the explicitly restricted `Slice.from_ref` intrinsic. Syntax constructors are compile-time-only (`compile_time_only_symbol` in `lower.rs`), not runtime calls. |
+| `Deferred` | The closed catalog validator reports “callable expression was not lowered” for every deferred callable. A successfully lowered runnable module cannot reach emission with one. |
+| `ParameterDependentNonGeneric` | Calls with unused type substitutions retain a concrete target, asserted by the `phantom_argument` lowering regression. This case cannot enter the runnable corpus because the concrete emitter currently diagnoses a missing stored closure for an otherwise unused local generic definition. A parameter actually appearing in a target signature/captures/body is collected by `relevant_parameters`; such a target is generic. The remaining guard detects inconsistent lowered records. |
+| `ExternWithParameters` | `TypeChecker::check_item` rejects compile-time parameters and generic function types in foreign extern signatures. Compiler-owned generic intrinsics have a distinct target kind. A valid foreign signature therefore cannot mention a runtime parameter. |
+| `Malformed` | This denotes missing or inconsistent owner-local lowered records. Closed catalog, instance graph, and artifact validation reject these before successful lowering/emission; no valid source corpus can deliberately produce one. |
+| `CallsExcludedTemplate` | This is a transitive reporting label. Support and in-scope status propagate separately to a fixed point from direct leaf reasons. It can be in scope only if a reachable direct leaf is in scope; it cannot create a new independent unsupported form. |
+
+Resolved reasons removed from the enum are covered by the bound-free dynamic
+regressions: function calls/values, patterns, products/spreads/defaults,
+indexing, propagation/assertions, generic bindings, and reference/buffer
+operations. String intrinsic reachability and the exhaustive intrinsic
+classification are documented above.
 
 ## Open problems
 

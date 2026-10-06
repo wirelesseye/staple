@@ -905,9 +905,13 @@ impl SupportWalker<'_> {
                         .is_some();
                     if generic {
                         self.dependencies.insert(*function);
-                    } else {
+                    } else if contains_type_parameter(&CheckedType::Function(
+                        call.function_type.clone(),
+                    )) {
                         self.reject(RejectionReason::ParameterDependentNonGeneric);
                     }
+                    // Substitutions for unused parameters do not change the
+                    // callee ABI or body; a fully concrete target stays native.
                 }
             }
             LoweredCallableTarget::Constructor { recursive, .. } => {
@@ -1177,9 +1181,12 @@ mod tests {
         let CorpusSource::Inline(source) = program.source else {
             panic!("audit regression is inline");
         };
+        let source = format!(
+            "{source}\ndef phantom_argument: <T where Copy T> T -> I32 = value => {{ def phantom: <U where Copy U> () -> I32 = () => 4; phantom.<T> () }}\nlet phantom_result = phantom_argument 0\n"
+        );
         let loaded = ProgramLoader::new()
             .with_standard_library_root(workspace.join("stdlib"))
-            .load_source(source, workspace)
+            .load_source(&source, workspace)
             .unwrap();
         let checked = TypeChecker::new()
             .check(NameResolver::new().resolve_program(loaded).unwrap())
@@ -1188,6 +1195,21 @@ mod tests {
             .with_dictionary_pass_generic_calls(true)
             .lower(&checked)
             .unwrap();
+        let phantom = lowered
+            .program
+            .functions
+            .iter()
+            .find_map(|(_, id, function)| (function.name == "phantom").then_some(id))
+            .unwrap();
+        assert!(
+            lowered
+                .program
+                .relevant_parameters(phantom)
+                .type_parameters()
+                .next()
+                .is_none(),
+            "unused Copy parameter must not change the target ABI"
+        );
         for name in [
             "indexed",
             "named",
@@ -1201,6 +1223,7 @@ mod tests {
             "concrete_capture",
             "compound_capture",
             "function_capture",
+            "phantom_argument",
         ] {
             let function = lowered
                 .program
