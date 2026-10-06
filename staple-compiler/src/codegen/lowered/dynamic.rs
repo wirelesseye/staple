@@ -71,6 +71,7 @@ struct DynamicEnvironment<'context> {
     coercions: HashMap<ExpressionId, PointerValue<'context>>,
     loop_results: HashMap<ExpressionId, PointerValue<'context>>,
     cells: HashMap<SymbolId, PointerValue<'context>>,
+    initialization_states: HashMap<SymbolId, PointerValue<'context>>,
     resources: HashMap<crate::lower::LoweredResourceProviderId, DynamicResource<'context>>,
     loops: Vec<DynamicLoopContext<'context>>,
     closure: PointerValue<'context>,
@@ -1049,6 +1050,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             coercions: HashMap::new(),
             loop_results: HashMap::new(),
             cells: HashMap::new(),
+            initialization_states: HashMap::new(),
             resources: HashMap::new(),
             loops: Vec::new(),
             closure,
@@ -1252,6 +1254,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Diagnostic::new(staple_syntax::Span::Compiler, "missing callable value")
             })?;
         let span = callable.origin.span.clone();
+        if callable.requires_initialization_check {
+            if let Some(symbol) = self.callable_symbol(&callable) {
+                if let Some(state) = environment.initialization_states.get(&symbol) {
+                    self.backend
+                        .build_initialization_check(*state, span.clone())?;
+                } else if let Some(state) = self.initialization_states.get(&symbol) {
+                    self.backend
+                        .build_initialization_check(state.as_pointer_value(), span.clone())?;
+                }
+            }
+        }
         let storage = *environment
             .temporaries
             .get(&id)
@@ -3161,6 +3174,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             coercions: HashMap::new(),
             loop_results: HashMap::new(),
             cells: HashMap::new(),
+            initialization_states: HashMap::new(),
             resources,
             loops: Vec::new(),
             closure: parameters[0].into_pointer_value(),
@@ -5237,6 +5251,35 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         })?;
         let mark = environment.binding_order.len();
         for id in &block.items {
+            let Some(item) = self.view.item(owner, *id) else {
+                continue;
+            };
+            let LoweredItemKind::Binding(binding) = &item.kind else {
+                continue;
+            };
+            if binding.predeclare_state_only != Some(true) {
+                continue;
+            }
+            let Some(symbol) = binding.symbol else {
+                continue;
+            };
+            if !environment.initialization_states.contains_key(&symbol) {
+                let state = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(self.backend.context.i8_type(), "dynamic.binding.state")
+                    .map_err(compiler_diagnostic)?;
+                environment.initialization_states.insert(symbol, state);
+            }
+            self.backend
+                .builder
+                .build_store(
+                    environment.initialization_states[&symbol],
+                    self.backend.context.i8_type().const_zero(),
+                )
+                .map_err(compiler_diagnostic)?;
+        }
+        for id in &block.items {
             if environment.returned {
                 break;
             }
@@ -5244,9 +5287,27 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Diagnostic::new(block.origin.span.clone(), "missing dynamic item")
             })?;
             match &item.kind {
-                LoweredItemKind::Binding(binding)
-                    if !binding.signal && !binding.derived && !binding.generic =>
-                {
+                LoweredItemKind::Binding(binding) if binding.generic => {
+                    if binding.compile_time_only {
+                        continue;
+                    }
+                    if let Some(symbol) = binding.symbol {
+                        if let Some(state) = environment.initialization_states.get(&symbol) {
+                            for value in [1, 2] {
+                                self.backend
+                                    .builder
+                                    .build_store(
+                                        *state,
+                                        self.backend.context.i8_type().const_int(value, false),
+                                    )
+                                    .map_err(compiler_diagnostic)?;
+                            }
+                        }
+                        self.store_initialization_state(symbol, 1)?;
+                        self.store_initialization_state(symbol, 2)?;
+                    }
+                }
+                LoweredItemKind::Binding(binding) if !binding.signal && !binding.derived => {
                     if binding.compile_time_only {
                         continue;
                     }
@@ -5835,6 +5896,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let call = self.view.call(owner, call_id).ok_or_else(|| {
                     Diagnostic::new(expression.origin.span.clone(), "missing dynamic call")
                 })?;
+                for symbol in &call.initialization_checks {
+                    if let Some(state) = environment.initialization_states.get(symbol) {
+                        self.backend
+                            .build_initialization_check(*state, call.origin.span.clone())?;
+                    } else if let Some(state) = self.initialization_states.get(symbol) {
+                        self.backend.build_initialization_check(
+                            state.as_pointer_value(),
+                            call.origin.span.clone(),
+                        )?;
+                    }
+                }
                 if let LoweredCallableTarget::Constructor { recursive, .. } = &call.target {
                     if recursive.is_none() {
                         return self.emit_dynamic_constructor_call(owner, id, call, environment);

@@ -49,10 +49,6 @@ pub(crate) enum RejectionReason {
     BufferIntrinsic,
     /// String and CString operations (R7).
     StringIntrinsic,
-    /// A resource expression in the body.
-    /// A resource mutation target.
-    /// A nested generic `def` binding.
-    GenericBinding,
     /// Recursive (`Ref`/`Slice`/`Syntax`) construction.
     RecursiveConstruction,
     /// A deferred callable expression reached the scanner.
@@ -134,7 +130,6 @@ impl RejectionReason {
             RejectionReason::Intrinsic => "unsupported intrinsic",
             RejectionReason::BufferIntrinsic => "buffer intrinsic",
             RejectionReason::StringIntrinsic => "string intrinsic",
-            RejectionReason::GenericBinding => "generic binding",
             RejectionReason::RecursiveConstruction => "recursive construction",
             RejectionReason::Deferred => "deferred expression",
             RejectionReason::ParameterDependentNonGeneric => "parameter-dependent non-generic call",
@@ -569,8 +564,8 @@ impl SupportWalker<'_> {
                 if binding.signal || binding.derived {
                     self.reject(RejectionReason::SignalBinding);
                 }
-                if binding.generic {
-                    self.reject(RejectionReason::GenericBinding);
+                if binding.generic || binding.compile_time_only {
+                    return;
                 }
                 if binding.reactive.is_some() {
                     self.reject(RejectionReason::ReactiveBinding);
@@ -1196,8 +1191,7 @@ mod tests {
             "summed_literal",
             "propagate",
             "asserted",
-            "propagate",
-            "asserted",
+            "nested_generic",
         ] {
             let function = lowered
                 .program

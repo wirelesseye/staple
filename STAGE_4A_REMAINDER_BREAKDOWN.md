@@ -13,7 +13,7 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-After the remaining expression-form implementation. This section is rewritten in
+After dynamic nested generic binding support. This section is rewritten in
 place at each update, not appended to.
 
 **Stage 4a is not complete.** Ordinary implicit thunks, managed references,
@@ -29,15 +29,18 @@ have dynamic implementations. P1, P2, P3, P5, P6, and P7 are resolved.
 | R4 — Dynamic environments and captures | Done. Descriptor graphs are recursively copied, including compound children. |
 | R5 — Reabstraction | Done. Lowering-owned conversions handle nested functions and functions in by-value products, sums, wrappers, and fixed arrays (normalized to products). Functions behind references retain the explicit restriction. |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done, including dynamic `Ref` construction and descriptor finalization. |
-| R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. The rejection-kind audit is open. |
+| R7 — Remaining forms | Concrete indexing, positional and named spreads, contextual defaults, string literal patterns, and propagating/asserting bindings have dynamic emission. Nested generic declarations record initialization state without evaluating their generic initializer. The rejection-kind audit is open. |
 | R8 — Exit gate | Pending the remaining implementation and final complete checks. |
 
-**Coverage:** The 100-program refresh measured 6,418 generic templates,
+**Coverage:** The last completed 100-program refresh measured 6,418 generic templates,
 4,762 eligible (74%), and 1,656 rejected for allowed reasons. The baseline
 remains zero, with no in-scope rejections.
 
 **Verified in this continuation:**
 - The zero-baseline full corpus coverage refresh passes for all 100 programs.
+- A nested generic identity declaration is selected dynamically. Initialization
+  checks run before call arguments and callable construction. Direct reads
+  before declaration are rejected by name resolution.
 - New bound-free cases cover concrete indexing, both spread forms, evaluation
   order, defaults, plain and sum string literals, propagation success/failure,
   and assertion success/failure. Dynamic expression coercions now apply to
