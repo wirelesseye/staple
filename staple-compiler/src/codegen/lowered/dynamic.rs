@@ -1057,15 +1057,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let capture_descriptors = captures
             .iter()
             .map(|capture| {
-                self.capture_descriptor(&capture.value_type, runtime, &descriptors, span)
+                self.capture_descriptor(
+                    &capture.value_type,
+                    runtime,
+                    &descriptors,
+                    environment,
+                    span,
+                )
             })
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         let accesses = captures
             .iter()
             .map(|capture| capture.access)
             .collect::<Vec<_>>();
-        let (offsets, total) =
-            self.dynamic_capture_offsets(runtime.len(), &accesses, &capture_descriptors)?;
+        let (offsets, total) = self.dynamic_capture_offsets(
+            runtime.len() + captures.len(),
+            &accesses,
+            &capture_descriptors,
+        )?;
         let closure_environment =
             self.backend
                 .build_gc_allocation(total, "closure.environment", span.clone())?;
@@ -1079,6 +1088,27 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.backend
                 .builder
                 .build_store(slot, copy)
+                .map_err(compiler_diagnostic)?;
+        }
+        // Capture descriptors follow the runtime descriptors so the closure
+        // body and finalizer read them instead of rebuilding compound ones.
+        for (index, descriptor) in capture_descriptors.iter().enumerate() {
+            let offset = self.backend.size_type.const_int(
+                (runtime.len() + index) as u64 * pointer_bytes,
+                false,
+            );
+            let slot = self.backend.dynamic_byte_offset(closure_environment, offset)?;
+            let value = match descriptor {
+                Some(descriptor) => self.copy_descriptor_to_gc(*descriptor, span)?,
+                None => self
+                    .backend
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .const_null(),
+            };
+            self.backend
+                .builder
+                .build_store(slot, value)
                 .map_err(compiler_diagnostic)?;
         }
         for (index, capture) in captures.iter().enumerate() {
@@ -1159,6 +1189,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         value_type: &CheckedType,
         runtime: &[TypeParameterId],
         descriptors: &[PointerValue<'context>],
+        environment: &DynamicEnvironment<'context>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<Option<PointerValue<'context>>> {
         match value_type {
@@ -1171,10 +1202,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             ty if !crate::contains_type_parameter(ty) => {
                 Ok(Some(self.static_dynamic_descriptor(ty, span)?))
             }
-            _ => Err(Diagnostic::new(
-                span.clone(),
-                "dynamic captures of compound run-time types are not yet implemented",
-            )),
+            // A function value keeps its static closure layout, and a compound
+            // run-time type uses its prepared descriptor (R4).
+            ty => Ok(Some(self.dynamic_descriptor(ty, environment, span)?)),
         }
     }
 
@@ -1636,33 +1666,33 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         let pointer = self.backend.context.ptr_type(AddressSpace::default());
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
-        let mut descriptors = Vec::with_capacity(runtime.len());
-        for index in 0..runtime.len() {
-            let offset = self
-                .backend
-                .size_type
-                .const_int(index as u64 * pointer_bytes, false);
-            let slot = self.backend.dynamic_byte_offset(environment, offset)?;
-            descriptors.push(
-                self.backend
-                    .builder
-                    .build_load(pointer, slot, "finalizer.descriptor")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value(),
-            );
-        }
         let capture_descriptors = captures
             .iter()
-            .map(|capture| {
-                self.capture_descriptor(&capture.value_type, runtime, &descriptors, span)
+            .enumerate()
+            .map(|(index, _)| {
+                let offset = self.backend.size_type.const_int(
+                    (runtime.len() + index) as u64 * pointer_bytes,
+                    false,
+                );
+                let slot = self.backend.dynamic_byte_offset(environment, offset)?;
+                Ok(Some(
+                    self.backend
+                        .builder
+                        .build_load(pointer, slot, "finalizer.capture.descriptor")
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value(),
+                ))
             })
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         let accesses = captures
             .iter()
             .map(|capture| capture.access)
             .collect::<Vec<_>>();
-        let (offsets, _) =
-            self.dynamic_capture_offsets(runtime.len(), &accesses, &capture_descriptors)?;
+        let (offsets, _) = self.dynamic_capture_offsets(
+            runtime.len() + captures.len(),
+            &accesses,
+            &capture_descriptors,
+        )?;
         for (index, capture) in captures.iter().enumerate().rev() {
             if !capture.owns || capture.access != crate::LoweredCaptureAccess::ByValue {
                 continue;
@@ -2933,17 +2963,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // descriptor region holds one descriptor per run-time parameter in
         // R-A order; captures follow at descriptor-computed offsets.
         if !body.captures.is_empty() {
-            let runtime_descriptors = runtime
-                .iter()
-                .map(|parameter| {
-                    environment.descriptors.get(parameter).copied().ok_or_else(|| {
-                        Diagnostic::new(
-                            body.origin.span.clone(),
-                            "missing capture runtime descriptor",
-                        )
-                    })
-                })
-                .collect::<CodeGenerationResult<Vec<_>>>()?;
             let accesses = body
                 .captures
                 .iter()
@@ -2960,20 +2979,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     }
                 })
                 .collect::<Vec<_>>();
+            let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+            let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
             let capture_descriptors = body
                 .captures
                 .iter()
-                .map(|capture| {
-                    self.capture_descriptor(
-                        &capture.value_type,
-                        &runtime,
-                        &runtime_descriptors,
-                        &body.origin.span,
-                    )
+                .enumerate()
+                .map(|(index, _)| {
+                    let offset = self.backend.size_type.const_int(
+                        (runtime.len() + index) as u64 * pointer_bytes,
+                        false,
+                    );
+                    let slot = self.backend.dynamic_byte_offset(environment.closure, offset)?;
+                    Ok(Some(
+                        self.backend
+                            .builder
+                            .build_load(pointer_type, slot, "capture.descriptor")
+                            .map_err(compiler_diagnostic)?
+                            .into_pointer_value(),
+                    ))
                 })
                 .collect::<CodeGenerationResult<Vec<_>>>()?;
             let (offsets, _) = self.dynamic_capture_offsets(
-                runtime.len(),
+                runtime.len() + body.captures.len(),
                 &accesses,
                 &capture_descriptors,
             )?;

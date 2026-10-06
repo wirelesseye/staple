@@ -52,8 +52,6 @@ pub(crate) enum RejectionReason {
     /// R2/R3; kept for future restrictions.
     #[allow(dead_code)]
     IndirectClosureCall,
-    /// A closure body captures values.
-    Captures,
     /// A parameter product appears in a dynamic signature.
     ParameterProducts,
     /// An intrinsic outside the supported and allowed sets.
@@ -172,7 +170,6 @@ impl RejectionReason {
             RejectionReason::FunctionTypedSignature => "function-typed signature",
             RejectionReason::FunctionTypeAtCallBoundary => "function type at a call boundary",
             RejectionReason::IndirectClosureCall => "indirect closure call",
-            RejectionReason::Captures => "captures",
             RejectionReason::ParameterProducts => "parameter products",
             RejectionReason::Intrinsic => "unsupported intrinsic",
             RejectionReason::BufferIntrinsic => "buffer intrinsic",
@@ -403,22 +400,9 @@ impl LoweredProgram {
             walker.reject(RejectionReason::Malformed);
             return (walker.reasons, walker.dependencies);
         };
-        // Captures are supported by value or by borrow when their types are a
-        // bare run-time parameter or concrete (R4). Shared cells, compound
-        // run-time types, and dynamic function values are later work.
-        for capture in &template.captures {
-            let simple = self
-                .symbols
-                .get(capture.symbol)
-                .is_some_and(|symbol| {
-                    !contains_polymorphic_function(&symbol.value_type)
-                        && (matches!(&symbol.value_type, CheckedType::Parameter { .. })
-                            || !contains_type_parameter(&symbol.value_type))
-                });
-            if capture.requires_cell || !simple {
-                walker.reject(RejectionReason::Captures);
-            }
-        }
+        // Captures are supported by value, by borrow, or through a shared cell,
+        // for concrete and compound run-time types and function values (R4/R5).
+        // Initialization-state cells are carried as shared cells.
         if template.signature.effects.variable.is_some() {
             walker.reject(RejectionReason::EffectVariable);
         }
@@ -1085,7 +1069,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 5;
+    const IN_SCOPE_BASELINE: usize = 3;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.

@@ -347,9 +347,17 @@ reachable from the branch.
   argument is the `reaction { ... }` callback in `generic_reaction_runner`: a
   reactive callback body (Stage 8). The reason moves to the allowed Stage 8
   set, matching R0.1's "coroutine, async, and reactive constructs", and the
-  in-scope baseline drops from **6** to **5**. Dynamic-shape constructor
-  callable values, shared-cell and compound captures, and function-typed
-  signatures/values remain.
+  in-scope baseline drops from **6** to **5**.
+- **R4 captures complete.** The closure environment now stores one descriptor
+  per capture after the run-time descriptors, so the closure body and the
+  environment finalizer read them instead of rebuilding them. A capture
+  descriptor is the stored run-time descriptor for a bare parameter, a static
+  descriptor for a concrete type, the static closure layout for a function
+  value, or the prepared compound descriptor for a compound run-time type.
+  The scanner no longer rejects any capture; initialization-state cells are
+  carried as shared cells. The `Captures` rejection reason is gone and the
+  in-scope baseline drops from **5** to **3**. Dynamic-shape constructor
+  callable values and the remaining function-typed rows (`keep`) remain.
 - **R4 shared-cell emission support (not yet routed).** A captured mutable
   local's cell is now a dynamic GC payload with a trailing value-descriptor
   word and the shared `gc-finalizer-dynamic-cell` finalizer; a shared-cell
