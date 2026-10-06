@@ -156,7 +156,6 @@ impl RejectionReason {
                 | RejectionReason::RuntimeNaturalCount
                 | RejectionReason::SliceFromRef
                 | RejectionReason::FunctionBehindReference
-                | RejectionReason::ImplicitThunkArgument
         )
     }
 
@@ -1069,7 +1068,7 @@ mod tests {
 
     /// The in-scope rejection count must never rise above this baseline.
     /// Each remainder-plan step lowers it in the same commit; R8 sets it to 0.
-    const IN_SCOPE_BASELINE: usize = 3;
+    const IN_SCOPE_BASELINE: usize = 4;
 
     /// Every corpus program with the directory its `use` paths resolve
     /// against.
@@ -1115,7 +1114,7 @@ mod tests {
                 .lower(&checked)
             {
                 Ok(lowered) => lowered,
-                Err(_) => continue,
+                Err(diagnostics) => panic!("corpus should lower with dictionary passing: {diagnostics:?}"),
             };
             let program = &lowered.program;
             for (_, _, function) in program.functions.iter() {

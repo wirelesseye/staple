@@ -13,13 +13,14 @@ directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gat
 
 ## Current state
 
-As of `c0cb3c5`. This section is rewritten in place at each update, not
+After the coverage-classification correction. This section is rewritten in place at each update, not
 appended to.
 
 **Stage 4a is not complete.** The corpus is close to the exit gate, but the
-gate's measurement has gaps (see [Open problems](#open-problems)). Fixing
-P1 and P2 will make some hidden in-scope work visible, so the in-scope count
-is expected to *rise* before it reaches zero.
+gate's measurement has gaps (see [Open problems](#open-problems)). P5 is
+fixed: lowering failures now fail the coverage test. Ordinary implicit thunks
+are counted as in scope; the measured baseline rises from 3 to 4. P1's emitter
+work and P2's finer classification remain open.
 
 | Step | State |
 |---|---|
@@ -47,20 +48,22 @@ templates are rejected:
 | 93 | `__slice_from_ref` | allowed, restriction |
 | 12 | coroutine, `await`, and reactive constructs | allowed, Stage 8 |
 | 1 | run-time `Natural` count | allowed, restriction |
-| 1 | implicit thunk argument | allowed, **misclassified (P1)** |
+| 1 | implicit thunk argument | **in scope (P1)** |
 | 2 | callable value expression | **in scope** |
 | 1 | value of a function type, function-typed signature (`keep`) | **in scope** |
 
-**The three in-scope templates:**
+**The four in-scope templates:**
 - two generic constructors used as dynamic-shape function values (R3);
-- `keep`, which needs a conversion R5 doesn't implement yet (P3).
+- `keep`, which needs a conversion R5 doesn't implement yet (P3);
+- the existing implicit-thunk template, now counted correctly (P1).
 
 **Verified at `c0cb3c5`:**
 - **IR comparison:** without the option, all 104 corpus and example inputs
   report `same` against the `50565d8` release build.
 - **Full differential run:** identical stdout and exit status on 91
   programs; 90 use dynamic calls, with 10,506 redirected call sites.
-- **Coverage test:** passes at the checked-in baseline of 3.
+- **Coverage measurement after reclassification:** 4 in-scope templates;
+  the checked-in baseline is 4. Lowering errors are no longer skipped.
 - **Not rerun in that review:** the full workspace suite.
 
 ## Open problems
