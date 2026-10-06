@@ -223,19 +223,26 @@ Breakdown-level decisions, in addition to the main plan's. Decisions 10 and
 
 ## Stage 4a — Dynamic implementations
 
-The remaining 4a work, its exit gate, and the issues found in the review
-of `6a44dfa` are planned in
-[STAGE_4A_REMAINDER_BREAKDOWN.md](STAGE_4A_REMAINDER_BREAKDOWN.md). Its R0.5
-step replaces the status log below.
+The remaining 4a work, its exit gate, and the problems found in reviews are
+planned in [STAGE_4A_REMAINDER_BREAKDOWN.md](STAGE_4A_REMAINDER_BREAKDOWN.md).
+That plan holds the detailed status. This section only summarizes it.
 
 ### Implementation status
 
-Stage 4a's foundations, the dynamic emitter, and the differential exit gate
-are in place. The remaining work is tracked in
-[STAGE_4A_REMAINDER_BREAKDOWN.md](STAGE_4A_REMAINDER_BREAKDOWN.md)
-(baseline `6a44dfa`), which also defines the tracked coverage report that
-measures completion: no corpus template may be rejected for an in-scope
-reason.
+**Current state (`c0cb3c5`): not complete, close to the exit gate on the
+corpus.**
+
+- Steps 4a.1–4a.6 below are implemented, with the remainder plan's
+  decisions R-A to R-F. The open parts are listed in the remainder plan's
+  [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state) and
+  [Open problems](STAGE_4A_REMAINDER_BREAKDOWN.md#open-problems).
+- Under the differential option, 4,398 of the corpus's 5,951 generic
+  templates (74%) are lowered through dynamic implementations. Three are
+  still rejected for an in-scope reason.
+- Default-mode LLVM IR is unchanged: all 104 corpus and example inputs
+  report `same` against the `50565d8` release build.
+- The full differential run passes on 91 programs, 90 of which use dynamic
+  calls (10,506 call sites).
 
 **Decision R-F. The dynamic emitter stays separate.** It is too large to fold
 into the concrete emitter at this point. Consistency comes from three rules:
@@ -247,129 +254,9 @@ into the concrete emitter at this point. Consistency comes from three rules:
 - the differential run compares the two emitters' behavior on the whole
   corpus.
 
-Validation details live in commit messages; commit references must be
-reachable from the branch.
-
-**Remainder progress** (plan steps in
-[STAGE_4A_REMAINDER_BREAKDOWN.md](STAGE_4A_REMAINDER_BREAKDOWN.md)):
-
-- **R0 complete.** The support analysis records every rejection reason per
-  template, classifies each as in scope or allowed (R0.1), and a tracked
-  coverage test asserts the in-scope count never rises above the checked-in
-  baseline of **3047**. The dynamic emitter's expression match is exhaustive
-  (R-F), the default suite runs a ten-program quick differential subset while
-  the full run (all runnable corpus programs plus `macros.sta`) is an ignored
-  test, and this status section is now a short summary.
-- **R1 complete.** Descriptor ABI order (R-A) is the template's declared
-  scheme order: lowering snapshots each function's scheme type parameters
-  (companion parameters first, hidden projection parameters last), and
-  `EmissionView::instance_runtime_order` filters them by the instance's
-  run-time set, with parameters a template does not declare (an enclosing
-  instance's) first. Every descriptor-passing site (dynamic entry, dynamic
-  body calls, concrete-to-dynamic bridge) uses that order, so 4b's polymorphic
-  entries need no reordering adapter.
-- **R2 complete.** Dynamic bodies build concrete closures from direct
-  functions, constructors, externs, and structural adapters (R-B), read a
-  function-typed binding's storage, and call concrete closures indirectly with
-  the concrete ABI. The in-scope baseline drops to **2780**.
-- **R3 complete.** A generic `def` used as a value with a dynamic function
-  type builds a closure to a new `descriptor-bound-entry` artifact keyed by
-  the callee's dynamic instance (R-C). The closure environment is a GC block
-  holding one deep-copied descriptor per run-time parameter in R-A order
-  (R-D), resolved through the callable site's substitutions. Indirect calls
-  through dynamic-shape closures use the dynamic shape without descriptor
-  parameters, with spilled arguments and a caller-provided result slot. The
-  callable-value and indirect-closure reason rows fall to 183 and 0; the
-  in-scope union stays at 2780 because those templates are still rejected for
-  function-typed values (R5) or other reasons.
-- **R4 complete (by-value and borrowed captures).** Dynamic closures store
-  descriptors first in R-A order, then captures at descriptor-computed
-  offsets, all in one GC environment with a
-  `gc-finalizer-dynamic-closure-environment` finalizer that drops owned
-  captures through the stored descriptors. Closure bodies seed capture
-  bindings from the environment, and curried generics now lower through
-  dynamic implementations. The captures row falls from 189 to 2 (the two
-  remaining are shared-cell captures, handled with dynamic GC payloads in
-  R6), and the in-scope baseline drops to **2596**.
-- **R5 complete for direct function types.** Lowering records a
-  `LoweredReabstraction` on every concrete-to-dynamic call boundary whose
-  dynamic type is a function type, and new `reabstraction-thunk` artifacts
-  convert a closure between the concrete and dynamic ABIs in both
-  directions. The concrete bridge builds a GC environment holding the source
-  closure and a `{thunk, environment}` closure at the boundary; the
-  initializer path resolves its callee through the differential option so its
-  conversions are recorded too. A call site whose types name a parameter
-  product stays monomorphized. The function-typed rows fall to one each;
-  nested function types, by-value aggregates containing functions, and the
-  dynamic emitter's dynamic-to-concrete direction remain and fall back with
-  an in-scope reason. The corpus gains `higher_order_map` and
-  `returns_function`, and the baseline is **1194** over the larger corpus
-  (1168 before the two programs, whose standard-library dependencies add 26
-  in-scope templates).
-- **R6 complete.** Dynamic buffers get a runtime header offset, element
-  stride, and store size from the element descriptor; `__buffer_with_capacity`
-  allocates the header, elements, and a trailing element-descriptor word and
-  installs one shared `gc-finalizer-dynamic-buffer` finalizer that drops every
-  live element. `__buffer_push`, `__buffer_pop`, `__buffer_get`,
-  `__buffer_freeze`, and `__buffer_transfer` operate through the runtime
-  layout. `__buffer_pop` builds its `Option T` result from the recorded
-  alternatives (the payload offset comes from the alternative count, and the
-  `None` tag is stored explicitly). The in-scope baseline drops from 1194 to
-  **11**. Routing `Buffer.transfer` exposed a wrapper-representation place
-  bug: a `wrap` projection (`List T` -> `Buffer T`) was read as product field
-  zero of a component-less pointer descriptor, so `let List(mut source) =
-  list` bound a garbage descriptor and the finalizer drop segfaulted. Wrapper
-  projections now pass the base descriptor and pointer through unchanged.
-- **R7 in progress.** Dynamic string templates whose interpolations have
-  concrete types call the concrete formatter ABI: the constructor, literal
-  writes, interpolation dispatches, and finish are concrete functions, each
-  interpolated value is loaded from dynamic storage as its concrete type, and
-  the resulting `String` is stored into dynamic storage. A template with a
-  run-time-typed interpolation moves from the in-scope "string template"
-  reason to the allowed "trait call with run-time arguments" reason (it needs
-  `Display`/`Debug` dispatch, Stage 6). The corpus gains
-  `generic_string_template`.
-- **R7 resources.** The dynamic environment carries a resource map. A dynamic
-  instance reads its effect-row providers from the ABI's resource parameters
-  (one pointer each, after the result slot), a `with` scope evaluates its
-  provider once, registers it for its body, and removes it after, `resource`
-  reads and places resolve through the map, and hidden resource arguments are
-  passed at dynamic calls: pointers to a dynamic callee or dynamic-shape
-  closure, and the concrete ABI's value-or-pointer form to a concrete callee
-  or closure. The scanner no longer rejects resource effects, resource calls,
-  resource reads/places, or ordinary `with` scopes (reactive and task scopes
-  stay the allowed Stage 8 reason). The corpus gains
-  `generic_resource_effect` (a bound-free generic with a resource effect and a
-  resource-binding call), and the full differential run covers it. The
-  resource rows reach zero and the in-scope baseline drops from **11** to
-  **6**.
-- **R7 implicit thunks.** The only corpus occurrence of an implicit thunk
-  argument is the `reaction { ... }` callback in `generic_reaction_runner`: a
-  reactive callback body (Stage 8). The reason moves to the allowed Stage 8
-  set, matching R0.1's "coroutine, async, and reactive constructs", and the
-  in-scope baseline drops from **6** to **5**.
-- **R4 captures complete.** The closure environment now stores one descriptor
-  per capture after the run-time descriptors, so the closure body and the
-  environment finalizer read them instead of rebuilding them. A capture
-  descriptor is the stored run-time descriptor for a bare parameter, a static
-  descriptor for a concrete type, the static closure layout for a function
-  value, or the prepared compound descriptor for a compound run-time type.
-  The scanner no longer rejects any capture; initialization-state cells are
-  carried as shared cells. The `Captures` rejection reason is gone and the
-  in-scope baseline drops from **5** to **3**. Dynamic-shape constructor
-  callable values and the remaining function-typed rows (`keep`) remain.
-- **R4 shared-cell emission support (not yet routed).** A captured mutable
-  local's cell is now a dynamic GC payload with a trailing value-descriptor
-  word and the shared `gc-finalizer-dynamic-cell` finalizer; a shared-cell
-  capture stores the cell pointer in the environment and the closure body
-  loads it. `captures_eligible` no longer excludes shared cells. Routing is
-  still blocked: a callable value with a shared-cell capture points at a
-  closure template that the support scanner rejects, and the closure targets
-  reachable once shared cells are allowed also capture compound run-time
-  types, which the environment layout cannot describe from the parameter
-  descriptors alone. The emitter therefore stays unreached and the in-scope
-  count stays **11**; the next R4 slice must store or rebuild compound
-  capture descriptors and relax the scanner accordingly.
+Status is kept in the remainder plan's "Current state" section, rewritten
+in place, not appended to. Validation details live in commit messages, and
+commit references must be reachable from the branch.
 
 ### Step 4a.1 — Keys, specialization, and validation
 

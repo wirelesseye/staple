@@ -1,7 +1,7 @@
 # Stage 4a Remainder: Function Values, Environments, and Coverage
 
 Part of [STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md](STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md).
-Baseline: `6a44dfa`. This plan replaces the open parts of Steps 4a.3–4a.7
+Planned from `6a44dfa`. This plan replaces the open parts of Steps 4a.3–4a.7
 there; their decisions (1–11) still apply unless this plan changes them.
 
 ## Goal
@@ -11,34 +11,151 @@ dynamic implementation under the differential option, unless it falls back
 for a reason that belongs to a later stage. The exit gate measures this
 directly, instead of only comparing output (see [R0.1](#r01--a-coverage-exit-gate)).
 
-## Where 4a stands
+## Current state
 
-**Done** (commits `e1a88af`..`6a44dfa`):
-- run-time instance keys, specialization, and validation (Step 4a.1);
-- static and run-time-built descriptors, with a layout sweep against
-  LLVM's `TargetData` (Step 4a.2);
-- a separate dynamic emitter (`codegen/lowered/dynamic.rs`) covering 15 of
-  the 22 non-async expression kinds: names, literals, blocks, products,
-  repeated products, access, ascription, logical operators, `match`, loops,
-  calls, strings, CStrings, mutable bindings, and assignment (Step 4a.3);
-- the dynamic ABI, direct calls between dynamic and concrete instances,
-  and the concrete-to-dynamic call bridge for non-function arguments
-  (Step 4a.4);
-- the scalar, slice, `Ref`, and buffer-metadata intrinsics (part of
-  Step 4a.6);
-- the hidden differential option with its transitive support analysis
-  (`lower/dynamic_support.rs`), and a CLI test that runs all 86 runnable
-  corpus programs both ways with identical output (9,660 redirected call
-  sites).
+As of `c0cb3c5`. This section is rewritten in place at each update, not
+appended to.
 
-**Coverage at the baseline.** Across the 89 corpus programs, there are
-5,698 generic templates (a template is counted once per program that
-contains it). The differential option lowers **1,527 (27%)** of them through
-dynamic implementations. 3,815 are rejected directly, and 356 are excluded
-transitively because they call a rejected template.
+**Stage 4a is not complete.** The corpus is close to the exit gate, but the
+gate's measurement has gaps (see [Open problems](#open-problems)). Fixing
+P1 and P2 will make some hidden in-scope work visible, so the in-scope count
+is expected to *rise* before it reaches zero.
 
-Every reason that rejects at least one template, counting every reason a
-template has, not only its first:
+| Step | State |
+|---|---|
+| R0 — Measurement and hygiene | Done. R0.1 and R0.2 need the amendments from P2, P5, and P6. |
+| R1 — Descriptor order | Done |
+| R2 — Concrete function values | Done |
+| R3 — Dynamic function values | Done, except generic constructors used as dynamic-shape function values (2 templates) |
+| R4 — Dynamic environments and captures | Done, including shared cells and compound capture descriptors |
+| R5 — Reabstraction | Partial: direct function types in both directions only. Nested function types and functions inside products, sums, wrappers, and arrays are not converted (P3). |
+| R6 — Buffer intrinsics and dynamic GC payloads | Done for buffers and shared cells. `Ref` construction is still rejected and untested (P7). |
+| R7 — Remaining forms | Done for resources, `with`, and string templates. Implicit thunks were reclassified instead of implemented (P1). |
+| R8 — Exit gate | Not started |
+
+**Coverage** (`coverage_report_stays_within_baseline`): across the 93
+corpus programs, 4,398 of 5,951 generic templates (74%) are lowered through
+dynamic implementations. At `6a44dfa` it was 1,527 of 5,698 (27%). 1,553
+templates are rejected:
+
+| Templates | Reason | Classification |
+|---|---|---|
+| 1,405 | trait bound other than `Copy`/`Sized` | allowed, Stage 6 |
+| 1,031 | trait call with run-time arguments | allowed, Stage 6 |
+| 138 | async intrinsics | allowed, Stage 8 |
+| 93 | `__buffer_clone` | allowed, Stage 6 |
+| 93 | `__slice_from_ref` | allowed, restriction |
+| 12 | coroutine, `await`, and reactive constructs | allowed, Stage 8 |
+| 1 | run-time `Natural` count | allowed, restriction |
+| 1 | implicit thunk argument | allowed, **misclassified (P1)** |
+| 2 | callable value expression | **in scope** |
+| 1 | value of a function type, function-typed signature (`keep`) | **in scope** |
+
+**The three in-scope templates:**
+- two generic constructors used as dynamic-shape function values (R3);
+- `keep`, which needs a conversion R5 doesn't implement yet (P3).
+
+**Verified at `c0cb3c5`:**
+- **IR comparison:** without the option, all 104 corpus and example inputs
+  report `same` against the `50565d8` release build.
+- **Full differential run:** identical stdout and exit status on 91
+  programs; 90 use dynamic calls, with 10,506 redirected call sites.
+- **Coverage test:** passes at the checked-in baseline of 3.
+- **Not rerun in that review:** the full workspace suite.
+
+## Open problems
+
+Found in the review of `c0cb3c5`. Each is assigned to a step and must be
+resolved before R8.
+
+- **P1. Implicit thunks are classified as allowed regardless of cause.**
+  `d0206b8` made `ImplicitThunkArgument` an allowed Stage 8 reason because
+  the only corpus case is a `reaction { … }` callback. But implicit thunking
+  is a general language feature: any call passing an expression where
+  `() -> T` is expected creates one (`Staple.md`, "Call-site implicit
+  thunking"). A bound-free generic called as `evaluate { x }` would fall back
+  without counting.
+  → **R7:** support implicit thunks in dynamic bodies (they are ordinary
+  closures, which R4 supports), or allow them only when the thunk comes from
+  a reactive construct. Add a bound-free corpus program that thunks an
+  argument inside a generic.
+- **P2. Three allowed reasons were added without a plan decision.**
+  `IndexedMutation`, `SliceMutation`, and `StructuralTraitDispatch` are
+  allowed in `RejectionReason::in_scope`, but R0.1's list doesn't include
+  them. The scanner rejects all three unconditionally, so concrete cases
+  inside dynamic bodies are hidden too: indexed mutation of a concrete
+  container, or structural dispatch with concrete arguments.
+  → **R0.1/R0.2:** allow them only when the construct involves run-time type
+  parameters (a trait call needing a dictionary, Stage 6). Classify the
+  concrete cases as in scope, and record the rule in R0.1.
+- **P3. The coverage gate can reach zero without general reabstraction.**
+  Converting nested function types and functions inside by-value aggregates
+  (Decision 7's `value-conversion` family) is unimplemented. The scanner
+  rejects these cases correctly, but only one corpus template (`keep`)
+  exercises them, and R5's required "function inside a sum" program was
+  never added. Handling `keep` alone would bring the count to zero.
+  → **R5:** implement the general conversion, and add bound-free execution
+  tests for each shape in both directions: a nested function type and a
+  function inside a product, a sum, a wrapper, and an array.
+- **P4. The status turned back into a log.** The Stage 4 breakdown's status
+  section grew again after R0.5, out of order (R4 entries after R7) and
+  self-contradictory (the in-scope count both "3" and "stays 11").
+  → **Fixed by this update.** Status now lives only in
+  [Current state](#current-state) above, rewritten in place, and the Stage 4
+  breakdown links to it.
+- **P5. The coverage test skips programs that fail to lower.** It does
+  `Err(_) => continue` when lowering with the option fails, which would
+  lower the in-scope count for the wrong reason.
+  → **R0.2:** fail the test instead.
+- **P6. No rule for raising the baseline.** `b4d1c73` raised the baseline,
+  because two new corpus programs brought 26 in-scope standard-library
+  templates with them. The reason was sound, but the ratchet only says the
+  count "may only go down".
+  → **R0.2:** the baseline may rise only in a commit that adds corpus
+  programs or reclassifies a reason (P1, P2). That commit's message states
+  the count before and after and why.
+- **P7. `Ref` construction is still unsupported, and the count can't see
+  it.** The scanner still rejects recursive construction
+  (`RejectionReason::RecursiveConstruction`, an in-scope reason), but no
+  corpus template constructs a `Ref` of a run-time type. The count stays at
+  zero for it, and R6's requested execution test was not added.
+  → **R6:** implement `Ref` construction with Decision 8's trailing
+  descriptor word and a dynamic finalizer, and add a bound-free corpus
+  program that constructs, reads, replaces, and drops a `Ref T`.
+
+P3 and P7 share a cause: the coverage count only sees constructs the corpus
+uses. Before R8, every in-scope `RejectionReason` that no corpus template
+hits needs either a bound-free corpus program that exercises it or a
+recorded reason why it can't occur.
+
+## Resolved issues from the `6a44dfa` review
+
+1. The exit gate couldn't tell finished from unfinished → R0.1 coverage gate.
+2. The coverage report undercounted → R0.2 tracked test with every reason
+   and transitive exclusions.
+3. Descriptor order differed from Decision 6 → R1 (`e825e95`).
+4. The dynamic emitter had a catch-all arm → its expression match is now
+   exhaustive.
+5. Two emitters, no recorded decision → R-F, recorded in the Stage 4
+   breakdown.
+6. The differential test was slow → a ten-program quick subset in the
+   default suite and an ignored full run.
+7. Two examples were missing from the differential run → `game_loop` is a
+   corpus entry, and the full run covers `macros.sta` separately.
+8. The status log had outgrown the plan → replaced in R0.5. It regressed
+   later; see P4.
+9. A test-build warning → gone.
+
+## Baseline at `6a44dfa` (for reference)
+
+Across the 89 corpus programs then, there were 5,698 generic templates (a
+template is counted once per program that contains it). The differential
+option lowered **1,527 (27%)** of them through dynamic implementations.
+3,815 were rejected directly, and 356 were excluded transitively because
+they called a rejected template.
+
+Every reason that rejected at least one template, counting every reason a
+template had, not only its first:
 
 | Templates | Reason | Belongs to |
 |---|---|---|
@@ -58,46 +175,8 @@ template has, not only its first:
 | 1 | implicit thunk argument | 4a: R7 |
 | 1 | run-time repeat count | Restriction (run-time `Natural`) |
 
-Many templates have several reasons. 182 are rejected *only* for captures
-and 178 only for trait bounds. Function values (the first three rows) are
-the dominant remaining 4a item: every name that refers to a function,
-constructor, extern, or intrinsic lowers to a `CallableValue`, so any
-generic body that uses a function as a value is rejected today.
-
-## Issues to fix
-
-Found in the review of the baseline. Each one is assigned to a step below.
-
-1. **The exit gate can't tell finished from unfinished.** Fallbacks always
-   produce identical output, so "both modes match" passes at any coverage.
-   → R0.1.
-2. **The coverage report undercounts.** `report_dynamic_support_reasons` is
-   `#[ignore]`d, records only each template's first reason, and counts
-   transitively excluded templates as supported. → R0.2.
-3. **Descriptor order differs from Decision 6.** Dynamic entries take
-   descriptors in sorted `TypeParameterId` order (`compile_dynamic_function_type`
-   in `codegen/abi.rs`). Decision 6 says scheme order for polymorphic
-   entries, which 4b's callers will use. → R1.
-4. **The dynamic emitter has a catch-all arm.** Its expression match
-   (`codegen/lowered/dynamic.rs:3212`) ends in `_ =>`. A new lowered
-   expression kind would then compile without a decision about its dynamic
-   behavior. The support scanner's match is exhaustive. → R0.3.
-5. **Two emitters, no recorded decision.** The dynamic emitter re-implements
-   bindings, cleanup, `match`, loops, and assignment beside the concrete
-   emitter. That is now the design and should be stated, with the rule that
-   keeps the two consistent. → R0.3.
-6. **The differential test is slow.** It takes about 705 seconds by itself,
-   the risk the Stage 4 plan anticipated. → R0.4.
-7. **Two examples are not in the differential run.** `macros.sta` and the
-   `game_loop` package in `staple-compiler/examples` are not corpus entries,
-   while the 4a gate covers every runnable example. → R0.4.
-8. **The status log has outgrown the plan.** The "Implementation status"
-   section of the Stage 4 breakdown is a 130-line log. It cites commits
-   `8c86d8c`, `ed91238`, and `db53462`, which no branch contains (left over
-   from a rewrite of history), and it lists String and CString literals as
-   both done and still required. → R0.5.
-9. **A test-build warning.** `dynamic_support.rs`'s test module has an
-   unused `use super::*`. → R0.5.
+Many templates had several reasons. 182 were rejected *only* for captures
+and 178 only for trait bounds.
 
 ## Decisions
 
@@ -175,15 +254,27 @@ reason. The allowed reasons are:
 
 Transitive exclusions count as in scope when the callee's reason is.
 
+A reason is allowed only for the cause the list names (P1, P2). Indexed
+mutation, slice mutation, and structural trait dispatch are allowed only
+when they need a trait dictionary because they involve run-time type
+parameters (Stage 6). With concrete types they are in scope. Implicit thunk
+arguments are allowed only when the thunk comes from a reactive construct
+(Stage 8). The scanner must therefore distinguish these causes, not reject
+the construct unconditionally.
+
 #### R0.2 — A tracked coverage report
 
 - Record every reason per template, and a separate "calls an excluded
   template" reason for transitive exclusions.
 - Classify each reason as in scope or allowed, by the R0.1 list.
 - Replace the ignored report with a regular test that asserts the in-scope
-  count never rises above a checked-in baseline, so the number can only go
-  down. Each step lowers the baseline in the same commit, and R8 sets it to
-  zero.
+  count never rises above a checked-in baseline. Each step lowers the
+  baseline in the same commit, and R8 sets it to zero.
+- The baseline may rise only in a commit that adds corpus programs or
+  reclassifies a reason, and that commit's message states the count before
+  and after and why (P6).
+- The test fails, instead of skipping the program, when a corpus program
+  fails to lower with the option (P5).
 - Keep a `--nocapture` printout of the full table for development.
 
 #### R0.3 — Emitter consistency
@@ -262,6 +353,11 @@ concrete (R-B), inside dynamic bodies.
   restriction. Add corpus programs for `map`-style higher-order generics, a
   generic that returns a function, and a function inside a sum, each run in
   both modes.
+- **Still open (P3):** the `value-conversion` family and nested function
+  types. They need bound-free execution tests for each shape in both
+  directions (a nested function type, and a function inside a product, a
+  sum, a wrapper, and an array), because the corpus alone barely exercises
+  them.
 
 ### R6 — Buffer intrinsics and dynamic GC payloads
 
@@ -272,6 +368,7 @@ concrete (R-B), inside dynamic bodies.
   `__buffer_push`, `__buffer_pop` (which returns `Option T`, a dynamic sum),
   `__buffer_get`, `__buffer_freeze`, and `__buffer_transfer`.
 - **Measure:** the only intrinsic rejections left are allowed ones.
+- **Still open (P7):** `Ref` construction and its execution test.
 
 ### R7 — Remaining forms
 
@@ -284,9 +381,15 @@ concrete (R-B), inside dynamic bodies.
   allowed Stage 6 reason.
 - Implicit thunk arguments.
 - **Measure:** these rows reach zero or move to allowed reasons.
+- **Still open (P1):** implicit thunks were reclassified as allowed instead
+  of supported. Support them, or allow only reactive ones, and add a
+  bound-free generic that thunks an argument.
 
 ### R8 — Exit gate
 
+- Open problems P1–P3 and P5–P7 are resolved.
+- Every in-scope `RejectionReason` is exercised by a bound-free corpus
+  program, or has a recorded reason why it can't occur.
 - The coverage test's in-scope baseline is zero.
 - The full differential run passes: identical stdout and exit status for
   every runnable corpus program and example.
