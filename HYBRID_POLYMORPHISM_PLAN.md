@@ -466,7 +466,7 @@ small plan, and they can be scheduled separately or dropped.
 | 1 — `Forall` in the syntax tree | **Required** — [written](STAGE_1_FORALL_SYNTAX_BREAKDOWN.md) |
 | 2 — Explicit checked schemes | **Required** — [written](STAGE_2_CHECKED_SCHEMES_BREAKDOWN.md) |
 | 3 — First-class polymorphism in the checker | **Required** — [written](STAGE_3_FIRST_CLASS_POLYMORPHISM_BREAKDOWN.md) |
-| 4 — Core dictionary passing | **Required** (split 4a/4b) — [written](STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md); 4a [remainder](STAGE_4A_REMAINDER_BREAKDOWN.md), 4b [written](STAGE_4B_POLYMORPHIC_VALUES_BREAKDOWN.md) |
+| 4 — Core dictionary passing | **Required** (split 4a/4b) — [written](STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md); 4a [remainder](STAGE_4A_REMAINDER_BREAKDOWN.md), 4b [written, complete](STAGE_4B_POLYMORPHIC_VALUES_BREAKDOWN.md) |
 | 5 — Effect polymorphism at run time | Not required |
 | 6 — Trait bounds via dictionaries | **Required** |
 | 7 — Independently generic trait methods | **Required** |

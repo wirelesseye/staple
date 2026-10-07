@@ -57,27 +57,37 @@ documented 4a fixes (`local_recursive_generic`, `local_generic_cells`, and
 
 ## Current state
 
-Stage 4b is in progress. B1–B6 are implemented.
+Stage 4b is complete.
 
-- **Representation, construction, calls (B1–B3).** A polymorphic value is a
-  closure with a static descriptor. Generic `def`s, generic constructors, and
+- **Values and calls (B1–B3).** A polymorphic value is a closure with a static
+  descriptor and an alpha-canonical key. Generic `def`s, constructors, and
   scheme-checked lambdas build quantified closures in concrete and dynamic
   owners, in every storage position. A call passes one descriptor per scheme
   parameter in scheme order, packs a product instantiation of a single
-  parameter, and converts function-typed arguments and results (R5).
-- **Instantiation and subsumption (B4, B5).** Using a polymorphic value at a
-  function type, or at a scheme that is not an alpha-renaming of its own, is an
-  explicit coercion with one `instantiation-adapter` artifact. An alpha-renaming
-  reuses the closure, and declared generic `def`s, constructors, and intrinsics
-  still monomorphize. Instantiating at a concrete function type that has
-  function-typed parameters or results is reported until adapters convert them.
-- **Restrictions and docs (B6).** Construction sites report each restriction
-  with its own message; every message has a negative test and a positive test
-  of the same function called directly. `Staple.md` describes polymorphic
-  values, scheme-ordered `.<…>` arguments, and the restrictions.
+  parameter, and converts function-typed arguments and results (R5) from both
+  concrete and dynamic callers.
+- **Adapters (B4, B5).** Using a value at a function type, or at a scheme that
+  is not an alpha-renaming of its own, is an explicit coercion with one
+  `instantiation-adapter` artifact. An alpha-renaming reuses the closure, and
+  declared generic `def`s, constructors, and intrinsics still monomorphize.
+- **Restrictions and docs (B6).** Each restriction has its own message at the
+  construction site, a negative test, and a positive test of the same function
+  called directly. The Generic functions section of `Staple.md` describes
+  polymorphic values.
+- **Audits (B7).** Reachability tests cover unused polymorphism, concrete
+  instantiation, and alpha-renaming. A debug assertion compares each
+  re-inferred call instantiation with the checker's type.
 
-Remaining: the B7 audits (workspace tests, full differential run, IR
-comparison, reachability).
+Verified: all workspace tests pass, including the ignored full differential
+run. The IR comparison against the `50565d8` release build is `same` for 98
+programs; the other three are the documented 4a fixes.
+
+Known limits: instantiating a value at a concrete function type with
+function-typed parameters or results, and passing a mutable function argument
+to a polymorphic value from a dynamic body, are reported as unsupported. The
+`__buffer_clone` restriction cannot be reached from user code without also
+tripping the trait-bound restriction, and the checker already rejects trait
+members as polymorphic values.
 
 ## Starting shape at the boundary (before Stage 4b)
 

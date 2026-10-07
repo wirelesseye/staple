@@ -13905,6 +13905,25 @@ fn polymorphic_call_substitutions(
         &CheckedType::Function(actual.clone()),
         &mut inferred,
     );
+    // Lowering re-infers the instantiation instead of reading the checker's,
+    // so the descriptors it passes must rebuild the type the checker recorded
+    // at this call.
+    debug_assert!(
+        {
+            let map = inferred
+                .iter()
+                .filter(|(_, value)| effect_substitution_of(value).is_none())
+                .map(|(parameter, value)| (*parameter, value.clone()))
+                .collect::<HashMap<_, _>>();
+            types_equivalent(
+                &crate::substitute_type(CheckedType::Function(template.clone()), &map),
+                &CheckedType::Function(actual.clone()),
+            )
+        },
+        "re-inferred instantiation disagrees with the checked call type: `{}` against `{}`",
+        CheckedType::Function(template.clone()),
+        CheckedType::Function(actual.clone()),
+    );
     substitutions_from_map(inferred)
 }
 
@@ -23153,6 +23172,83 @@ mod tests {
                 "{diagnostics:?}"
             );
         }
+    }
+
+    /// The artifact families and dynamic instances a lowered program
+    /// contains, for the reachability assertions.
+    fn polymorphic_census(source: &str) -> (usize, usize, usize) {
+        let module = checked_program(source);
+        let lowered = Lowerer::new().lower(&module).expect("source should lower");
+        let dynamic_instances = lowered
+            .program()
+            .instances()
+            .filter(|(id, _)| {
+                lowered
+                    .program()
+                    .instance_runtime_parameters(*id)
+                    .is_some_and(|runtime| !runtime.is_empty())
+            })
+            .count();
+        let artifacts = lowered.program().artifacts();
+        let mut descriptors = 0;
+        let mut adapters = 0;
+        for (_, artifact) in artifacts {
+            match &artifact.plan {
+                Some(LoweredArtifactPlan::TypeDescriptor(_)) => descriptors += 1,
+                Some(LoweredArtifactPlan::InstantiationAdapter(_)) => adapters += 1,
+                _ => {}
+            }
+        }
+        (dynamic_instances, descriptors, adapters)
+    }
+
+    #[test]
+    fn unused_polymorphism_builds_no_dynamic_code() {
+        const IDENTITY: &str = "def identity: <T> move T -> T = move value => value\n";
+        // A generic `def` that is only called concretely is monomorphized.
+        assert_eq!(
+            polymorphic_census(&format!("{IDENTITY}let answer = identity 42\n")),
+            (0, 0, 0)
+        );
+        // A polymorphic value built only in an unreachable generic function
+        // yields no dynamic instance, descriptor, or adapter.
+        assert_eq!(
+            polymorphic_census(&format!(
+                concat!(
+                    "{}",
+                    "def unused: <A> move A -> A = move a => {{\n",
+                    "    let f: <U> move U -> U = identity\n",
+                    "    let c: move I32 -> I32 = f\n",
+                    "    f a\n",
+                    "}}\n",
+                    "let answer = identity 42\n",
+                ),
+                IDENTITY
+            )),
+            (0, 0, 0)
+        );
+        // Instantiating a generic `def` at a concrete function type
+        // monomorphizes it and builds no adapter.
+        assert_eq!(
+            polymorphic_census(&format!(
+                "{IDENTITY}let concrete: move I32 -> I32 = identity\nlet answer = concrete 42\n"
+            )),
+            (0, 0, 0)
+        );
+        // An alpha-renaming reuses the closure: the value needs its dynamic
+        // instance, but no adapter.
+        let (dynamic, _, adapters) = polymorphic_census(&format!(
+            "{IDENTITY}let stored = identity\nlet renamed: <V> move V -> V = stored\nlet answer = renamed 42\n"
+        ));
+        assert!(dynamic > 0, "the stored value keeps its dynamic instance");
+        assert_eq!(adapters, 0);
+        // A reordering is not an alpha-renaming and does build an adapter.
+        let (_, _, adapters) = polymorphic_census(concat!(
+            "def first: <A, B> (move A, move B) -> A = (move a, move b) => a\n",
+            "let swapped: <Y, X> (move X, move Y) -> X = first\n",
+            "let answer: I32 = swapped (1, \"x\")\n",
+        ));
+        assert_eq!(adapters, 1);
     }
 
     #[test]
