@@ -72,12 +72,15 @@ against it. Shared-cell execution preserves mutation after the owner returns.
 Construction checks reject unsupported trait/effect schemes; direct functions also
 check transitive implementation bodies. B3 now preserves original expression
 schemes across instantiation/subsumption, including names, fields, returned values,
-explicit applications, concrete instantiation, and compound subsumption.
+explicit applications, concrete instantiation, and compound subsumption. Indirect
+call snapshots retain that scheme and infer body substitutions; instance cloning
+substitutes outer parameters while protecting the scheme binders. Known concrete
+callable constructions remain on their existing ABI.
 
-Eight focused polymorphic regressions and four scheme-inference tests pass,
+Nine focused polymorphic regressions and four scheme-inference tests pass,
 including two-layout execution in both modes and pure/read-only effect failures.
 Existing dynamic-capture tests passed earlier. The non-incremental workspace retry
-has reached the tests after an incremental linker failure; its result, final IR
+passed 233 CLI tests after an incremental linker failure; remaining suites, final IR
 comparison, and reachability audit remain pending.
 
 The public Stage 3 gate remains. B2 still needs remaining ownership coverage,

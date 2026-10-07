@@ -1101,6 +1101,8 @@ pub(crate) enum LoweredCallStep {
 /// requirements, and the site-specific substitution/evidence recipe.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredCall {
+    /// Source scheme for an indirect polymorphic call, before instantiation.
+    pub scheme: Option<crate::CheckedScheme>,
     pub origin: Origin,
     pub target: LoweredCallableTarget,
     /// The callee occurrence for an indirect call; direct targets reference
@@ -7342,7 +7344,14 @@ impl LoweredProgram {
             },
             |value_type| module.type_needs_drop(value_type),
         );
+        let scheme = callee.and_then(|id| self.indirect_call_scheme(module, callee_syntax, id));
+        if let Some(scheme) = &scheme
+            && let CheckedType::Function(template) = scheme.body.as_ref()
+        {
+            substitutions = call_substitutions(template, &function_type);
+        }
         let call_id = self.calls.push(LoweredCall {
+            scheme,
             origin,
             target,
             callee,
@@ -7359,6 +7368,28 @@ impl LoweredProgram {
             runtime,
         });
         Ok(LoweredExpressionKind::Call(call_id))
+    }
+
+    fn indirect_call_scheme(
+        &self,
+        module: &TypedModule,
+        syntax: SyntaxId,
+        callee: ExpressionId,
+    ) -> Option<crate::CheckedScheme> {
+        if let Some(LoweredExpression {
+            kind: LoweredExpressionKind::CallableValue(id),
+            ..
+        }) = self.expressions.get(callee)
+            && let Some(value) = self.callable_values.get(*id)
+            && value.scheme.is_none()
+            && !matches!(value.target, LoweredCallableTarget::IndirectClosure { .. })
+        {
+            // An instantiated known generic function/constructor still has a
+            // concrete closure entry. Source scheme metadata alone does not
+            // turn that existing route into a call through a Forall value.
+            return None;
+        }
+        module.scheme_of_expression(syntax).cloned()
     }
 
     /// Lowers a complete juxtaposed call chain from its checked plan. The
@@ -7485,7 +7516,10 @@ impl LoweredProgram {
             },
             |value_type| module.type_needs_drop(value_type),
         );
+        let scheme =
+            callee_field.and_then(|id| self.indirect_call_scheme(module, callee.syntax().id, id));
         let call_id = self.calls.push(LoweredCall {
+            scheme: scheme.clone(),
             origin,
             target,
             callee: callee_field,
@@ -7495,8 +7529,13 @@ impl LoweredProgram {
             initialization_checks: Vec::new(),
             steps,
             result_type: function_type.result.as_ref().clone(),
-            substitutions: symbol
-                .and_then(|symbol| symbol_function_type(module, symbol))
+            substitutions: scheme
+                .as_ref()
+                .and_then(|scheme| match scheme.body.as_ref() {
+                    CheckedType::Function(function) => Some(function.clone()),
+                    _ => None,
+                })
+                .or_else(|| symbol.and_then(|symbol| symbol_function_type(module, symbol)))
                 .map(|template| call_substitutions(&template, &function_type))
                 .unwrap_or_default(),
             evidence: None,
@@ -22464,6 +22503,67 @@ mod tests {
             tested += 1;
         }
         assert_eq!(tested, 6);
+    }
+
+    #[test]
+    fn polymorphic_calls_recover_scheme_substitutions() {
+        let module = checked_program(concat!(
+            "def identity: <T> move T -> T = move value => value\n",
+            "let stored = identity\n",
+            "let integer = stored 42\n",
+            "let string = stored \"hello\"\n",
+            "let explicit = stored.<I32> 42\n",
+            "def apply: <A> move A -> A = move value => { let local = identity; local value }\n",
+            "let generic = apply 42\n",
+        ));
+        for dictionary in [false, true] {
+            let mut program = LoweredProgram::default();
+            program.dictionary_pass_generic_calls = dictionary;
+            assert!(program.snapshot(&module).is_empty());
+            let calls = program
+                .calls
+                .iter()
+                .filter(|(_, call)| call.scheme.is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 4);
+            for (_, call) in calls {
+                let scheme = call.scheme.as_ref().unwrap();
+                assert_eq!(call.substitutions.types.len(), 1);
+                let substitution = &call.substitutions.types[0];
+                assert!(scheme.bound_ids().contains(&substitution.parameter));
+                assert_eq!(
+                    &substitution.value_type,
+                    call.function_type.parameter.as_ref()
+                );
+            }
+            if dictionary {
+                program.compute_dynamic_support();
+            }
+            let diagnostics = program.build_specialization_worklist();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.materialize_instance_bodies();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            for (_, instance) in program.instances.iter() {
+                let Some(body) = &instance.body else {
+                    continue;
+                };
+                for (_, call) in body.calls.iter() {
+                    let Some(scheme) = &call.scheme else {
+                        continue;
+                    };
+                    assert_eq!(call.substitutions.types.len(), 1);
+                    assert!(
+                        scheme
+                            .bound_ids()
+                            .contains(&call.substitutions.types[0].parameter)
+                    );
+                    assert_eq!(
+                        &call.substitutions.types[0].value_type,
+                        call.function_type.parameter.as_ref()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

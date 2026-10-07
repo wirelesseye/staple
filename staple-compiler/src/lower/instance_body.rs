@@ -2078,6 +2078,12 @@ impl<'a> BodyCloner<'a> {
         let mut call = original.clone();
         call.callee = call.callee.map(|callee| self.clone_expression(callee));
         call.function_type = self.function_type(&call.function_type);
+        call.scheme = call.scheme.take().and_then(|scheme| {
+            match self.ty(&CheckedType::Forall(Box::new(scheme))) {
+                CheckedType::Forall(scheme) => Some(*scheme),
+                _ => None,
+            }
+        });
         for argument in &mut call.arguments {
             argument.expression = argument
                 .expression
@@ -3245,6 +3251,7 @@ impl<'a> BodyCloner<'a> {
     fn error_call(&mut self) -> LoweredCallId {
         let callee = self.error_expression();
         self.body.calls.push(LoweredCall {
+            scheme: None,
             origin: Origin::compiler(),
             target: LoweredCallableTarget::IndirectClosure { callee },
             callee: Some(callee),
