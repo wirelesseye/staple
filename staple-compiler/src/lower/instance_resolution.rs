@@ -343,8 +343,8 @@ pub(super) fn collect_referenced_parameters(
     out: &mut BTreeSet<TypeParameterId>,
 ) {
     match value_type {
-        // Lowering never sees a scheme in Stage 2 (canonicalization reports one
-        // as an invariant violation); collect only its free parameters.
+        // Scheme-bound parameters are supplied at invocation, not by the
+        // enclosing instance; collect only free parameters.
         CheckedType::Forall(scheme) => {
             let mut inner = BTreeSet::new();
             collect_referenced_parameters(&scheme.body, &mut inner);
@@ -2412,8 +2412,8 @@ impl<'a> ParameterCollector<'a> {
     /// carried by the nominal ID plus arguments, matching canonical keys.
     fn collect_type(&mut self, value_type: &CheckedType) {
         match value_type {
-            // Lowering never sees a scheme in Stage 2 (canonicalization reports
-            // one as an invariant violation); notice only its free parameters.
+            // Quantified parameters belong to the value's descriptor ABI;
+            // only free parameters belong to the enclosing instance.
             CheckedType::Forall(scheme) => {
                 let outer = std::mem::take(&mut self.relevant);
                 self.collect_type(&scheme.body);
@@ -2823,6 +2823,12 @@ impl<'a> ParameterCollector<'a> {
         let Some(value) = self.program.callable_values.get(value) else {
             return;
         };
+        // A retained scheme binds these parameters at the value boundary;
+        // they must not make its enclosing function a generic template.
+        let quantified = value.scheme.as_ref().map(|scheme| scheme.bound_ids());
+        let outer = quantified
+            .as_ref()
+            .map(|_| std::mem::take(&mut self.relevant));
         self.collect_function_type(&value.function_type);
         if let Some(closure) = &value.closure {
             for capture in &closure.captures {
@@ -2846,6 +2852,10 @@ impl<'a> ParameterCollector<'a> {
         }
         if let Some(evidence) = &value.evidence {
             self.collect_evidence(evidence);
+        }
+        if let (Some(outer), Some(quantified)) = (outer, quantified) {
+            let inner = std::mem::replace(&mut self.relevant, outer);
+            self.relevant.absorb_free(inner, &quantified);
         }
     }
 

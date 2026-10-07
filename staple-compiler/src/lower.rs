@@ -22310,6 +22310,93 @@ mod tests {
     }
 
     #[test]
+    fn polymorphic_construction_returns_an_executable_dynamic_closure() {
+        let module = checked_program(concat!(
+            "def identity: <T> move T -> T = move value => value\n",
+            "def make: () -> (<T> move T -> T) = () => identity\n",
+            "let stored = make ()\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let diagnostics = program.build_specialization_worklist();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.materialize_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        program.record_reabstractions();
+        let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(
+            !program.artifacts.iter().any(|(_, artifact)| matches!(
+                artifact.plan,
+                Some(LoweredArtifactPlan::DescriptorBoundEntry(_))
+            )),
+            "top-level polymorphic values need no forwarding entry"
+        );
+        program.assign_initializer_names();
+        let name = program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (program.functions.get(instance.template).unwrap().name == "make")
+                    .then(|| instance.name.clone())
+            })
+            .unwrap();
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&LoweredModule { program })
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "polymorphic-construction",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Closure {
+            code: *const (),
+            environment: *const u8,
+        }
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Make = unsafe extern "C" fn(*const u8) -> Closure;
+        let make = unsafe { engine.get_function::<Make>(&name) }.unwrap();
+        let closure = unsafe { make.call(std::ptr::null()) };
+        assert!(closure.environment.is_null());
+        type Identity = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *mut u8);
+        let identity: Identity = unsafe { std::mem::transmute(closure.code) };
+        for (size, mut value) in [(1usize, 17u32), (4, 0x11223344)] {
+            let descriptor = Descriptor {
+                size,
+                stride: size,
+                align: size,
+                flags: 1,
+                drop: 0,
+                count: 0,
+            };
+            let mut result = 0u32;
+            unsafe {
+                identity(
+                    closure.environment,
+                    &descriptor,
+                    (&mut result as *mut u32).cast(),
+                    (&mut value as *mut u32).cast(),
+                );
+            }
+            assert_eq!(result, value);
+        }
+    }
+
+    #[test]
     fn validator_rejects_misclassified_awaits() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",

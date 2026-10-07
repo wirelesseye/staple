@@ -305,7 +305,23 @@ pub(super) fn scan_instance(
         let Some(runtime) = program.instance_runtime_order(*callee) else {
             continue;
         };
-        if runtime.is_empty() {
+        let bound = if callable.scheme.is_some() {
+            let declared = program
+                .instances
+                .get(*callee)
+                .and_then(|instance| program.functions.get(instance.template))
+                .map(|template| template.scheme_type_parameters.as_slice())
+                .unwrap_or(&[]);
+            runtime
+                .iter()
+                .take_while(|parameter| !declared.contains(parameter))
+                .count()
+        } else {
+            runtime.len()
+        };
+        // Without enclosing descriptors, the polymorphic closure points
+        // straight at the dynamic instance (B-C), without a forwarding entry.
+        if bound == 0 {
             continue;
         }
         let Some(ordinal) = program
@@ -319,11 +335,11 @@ pub(super) fn scan_instance(
             key: ArtifactRequestKey::DescriptorBoundEntry(
                 crate::specialization::DescriptorBoundEntryKey {
                     instance: ordinal,
-                    bound: runtime.len(),
+                    bound,
                 },
             ),
             plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
-                bound: runtime.len(),
+                bound,
                 instance: *callee,
                 runtime: runtime.clone(),
                 function_type: callable.function_type.clone(),
@@ -334,7 +350,11 @@ pub(super) fn scan_instance(
                 super::artifact_closure::ArtifactUseSite::DescriptorBoundEntry(*value_id),
             ),
         });
-        if !crate::contains_type_parameter(&CheckedType::Function(callable.function_type.clone())) {
+        if callable.scheme.is_none()
+            && !crate::contains_type_parameter(&CheckedType::Function(
+                callable.function_type.clone(),
+            ))
+        {
             let concrete = crate::specialization::CanonicalFunctionType::concrete(
                 &callable.function_type,
                 &record.origin,

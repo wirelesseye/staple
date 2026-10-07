@@ -73,13 +73,20 @@ request dynamic entries for retained schemes, including checked scheme lambdas;
 concrete generic instantiations still request monomorphized instances. Scheme
 metadata is substituted without substituting its quantified parameters. A
 snapshot/materialization regression verifies that distinction and the expected
-scheme's descriptor order. Closure emission, capture environments, and on-demand
-support diagnostics are not connected yet, so construction remains gated.
+scheme's descriptor order. Capture-free construction in a concrete owner now
+emits the dynamic instance directly as the closure entry, with no descriptor-
+bound forwarding artifact. A JIT regression returns that closure from a concrete
+function and calls it with one-byte and four-byte descriptors. Parameter
+collection excludes the construction's quantified parameters from its enclosing
+function, preserving concrete functions that return polymorphic values.
+Capture environments, construction inside dynamic owners, and on-demand support
+diagnostics remain pending, so the public construction gate stays in place.
 
 Focused inference, canonical-key, partial-entry execution, and construction-graph
-regressions pass.
-The earlier workspace validation has passed all 233 CLI tests (one ignored),
-including the quick differential subset, and is still running compiler tests.
+regressions pass, including the executable returned-closure regression.
+The earlier workspace validation has passed 233 CLI tests and 397 compiler unit
+tests (one ignored in each suite), including the quick differential subset, and
+is still running integration tests.
 The Stage 3 gate remains in place; B2 construction and B3–B7 remain pending.
 
 ## Current shape at the boundary
