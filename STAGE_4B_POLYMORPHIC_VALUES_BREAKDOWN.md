@@ -57,32 +57,30 @@ documented 4a fixes (`local_recursive_generic`, `local_generic_cells`, and
 
 ## Current state
 
-Stage 4b is in progress. B1 implements closure layout and static descriptors for
-closed schemes, alpha-canonical scheme keys, and scheme-aware lowering inference.
-Shallow inference applies known outer substitutions without guessing through a
-scheme or leaking its quantified parameters.
+Stage 4b is in progress. B1 implements closure layout/static descriptors for
+closed schemes, alpha-canonical keys, and scheme-aware lowering inference.
+Shallow inference uses known outer substitutions without guessing through schemes.
 
-B2 supports retained scheme metadata, dynamic entry discovery, and construction
-in concrete and dynamic owners. Partially bound entries bind enclosing descriptors
-and receive the scheme's descriptors from callers. Captured lambdas use descriptor
-layout environments and dynamic finalizers, including captures with no bound
-descriptors. Generic wrapper constructors now have distinct scheme keys and accept
-caller descriptors directly. Constructor discovery, both binding paths, declaration,
-and emission preserve this ABI. Storage coverage now includes mutable assignment,
-product/wrapper fields, function arguments/results, and top-level bindings in
-both modes. Construction support checks reject unsupported
-trait/effect schemes; direct functions also check transitive implementation bodies.
+B2 retains construction schemes and requests dynamic entries in concrete and
+dynamic owners. Partially bound entries bind enclosing descriptors; callers supply
+the scheme descriptors. Captured lambdas use descriptor-layout environments and
+dynamic finalizers. Generic wrapper constructors preserve the scheme ABI and
+caller descriptor order. Storage coverage includes mutable assignment, product/
+wrapper fields, function arguments/results, and top-level bindings in both modes.
+Scheme-checked lambdas now adopt their fixed effect row and validate their body
+against it. Shared-cell execution preserves mutation after the owner returns.
+Construction checks reject unsupported trait/effect schemes; direct functions also
+check transitive implementation bodies.
 
-Focused canonicalization, inference, graph, partial-entry, captured-lambda,
-constructor execution, and storage regressions pass. Constructor and returned-lambda tests run
-in default and differential modes with two layouts. Existing dynamic-capture tests
-also pass. The earlier full workspace run passed; a current full rerun, final IR
-comparison, and reachability audit remain pending.
+Seven focused polymorphic regressions and four scheme-inference tests pass,
+including two-layout execution in both modes and pure/read-only effect failures.
+Existing dynamic-capture tests passed earlier. The fresh workspace run failed at
+linking with missing Rust symbols; a non-incremental retry, final IR comparison,
+and reachability audit remain pending.
 
-The public Stage 3 gate remains. B2 still needs ownership/shared-cell coverage,
-remaining construction restrictions, and trait-member handling. B3–B7
-(calls, adapters, restriction/documentation completion, and final validation) remain
-pending. No Stage 4b completion is claimed.
+The public Stage 3 gate remains. B2 still needs remaining ownership coverage,
+construction restrictions, and trait-member handling. B3–B7 (calls, adapters,
+restrictions/docs, and final validation) remain pending.
 
 ## Starting shape at the boundary (before Stage 4b)
 

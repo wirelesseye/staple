@@ -5855,6 +5855,12 @@ impl TypeChecker {
                     })
                 })
             })
+            .chain(self.function_schemes.iter().filter_map(|(id, scheme)| {
+                let CheckedType::Function(function) = scheme.body.as_ref() else {
+                    return None;
+                };
+                Some((*id, function.effects.clone()))
+            }))
             .chain(
                 self.declared_coroutine_rows
                     .iter()
@@ -7945,6 +7951,14 @@ impl TypeChecker {
             let actual = if matches!(expression, Expression::Function(_)) {
                 if let Some(id) = module.function_for(expression.syntax().id) {
                     self.function_schemes.insert(id, scheme.as_ref().clone());
+                    // A contextually checked scheme fixes the lambda's effect
+                    // ABI just as a written function annotation does. Its body
+                    // is checked against this row after effect inference.
+                    if let CheckedType::Function(expected) = scheme.body.as_ref()
+                        && let Some(current) = self.function_types.get_mut(&id)
+                    {
+                        current.effects = expected.effects.clone();
+                    }
                     let bounds = self.expand_trait_bounds(scheme.trait_bounds.clone());
                     let stored = self.function_bounds.entry(id).or_default();
                     for bound in bounds {

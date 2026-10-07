@@ -22561,11 +22561,17 @@ mod tests {
 
     #[test]
     fn polymorphic_closures_capture_enclosing_values_after_return() {
-        for dictionary in [false, true] {
-            let module = checked_program(concat!(
-                "def make: <A where Copy A> A -> (<T> move T -> (A, T)) = captured => move value => (captured, value)\n",
-                "def build: () -> (<T> move T -> (I32, T)) = () => make 42\n",
-                "let stored = build ()\n",
+        for (shared_cell, dictionary) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let make_source = if shared_cell {
+                "def make: <A where Copy A> A -> (<T> move T ->{state} (I32, T)) = ignored => { let mut count: I32 = 41; move value => { count = count + 1; (count, value) } }\n"
+            } else {
+                "def make: <A where Copy A> A -> (<T> move T -> (A, T)) = captured => move value => (captured, value)\n"
+            };
+            let state = if shared_cell { "{state}" } else { "" };
+            let module = checked_program(&format!(
+                "{make_source}def build: () -> (<T> move T ->{state} (I32, T)) = () => make 42\nlet stored = build ()\n"
             ));
             let mut program = LoweredProgram::default();
             program.dictionary_pass_generic_calls = dictionary;
@@ -22630,7 +22636,9 @@ mod tests {
             assert!(!closure.environment.is_null());
             type Identity = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *mut u8);
             let identity: Identity = unsafe { std::mem::transmute(closure.code) };
-            for (size, mut value) in [(1usize, 17u32), (4, 0x11223344)] {
+            for (invocation, (size, mut value)) in
+                [(1usize, 17u32), (4, 0x11223344)].into_iter().enumerate()
+            {
                 let descriptor = Descriptor {
                     size,
                     stride: size,
@@ -22648,8 +22656,31 @@ mod tests {
                         (&mut value as *mut u32).cast(),
                     );
                 }
-                assert_eq!(result, [42, value]);
+                assert_eq!(
+                    result,
+                    [42 + if shared_cell { invocation as u32 } else { 0 }, value]
+                );
             }
+        }
+    }
+
+    #[test]
+    fn polymorphic_lambdas_enforce_declared_effect_rows() {
+        for row in ["", "{state.read}"] {
+            let source = format!(
+                "def make: () -> (<T> move T ->{row} (I32, T)) = () => {{ let mut count: I32 = 41; move value => {{ count = count + 1; (count, value) }} }}\nlet stored = make ()\n"
+            );
+            let diagnostics = checked_program_diagnostics(&source).unwrap_err();
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic
+                        .message
+                        .contains("function body requires effects {state}")
+                        && diagnostic.message.contains("declared effect set")
+                        && diagnostic.span != Span::Compiler
+                }),
+                "{diagnostics:?}"
+            );
         }
     }
 
