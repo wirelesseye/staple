@@ -22397,6 +22397,37 @@ mod tests {
     }
 
     #[test]
+    fn polymorphic_support_checks_reject_at_the_construction_site() {
+        let module = checked_program(concat!(
+            "use std.clone.Clone\n",
+            "def inner: <T where Clone T> move T -> T = move value => value\n",
+            "def outer: <T where Clone T> move T -> T = move value => inner value\n",
+            "let stored = outer\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let origin = program
+            .callable_values
+            .iter()
+            .find_map(|(_, value)| value.scheme.as_ref().map(|_| value.origin.clone()))
+            .unwrap();
+        let diagnostics = program.build_specialization_worklist();
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(
+            diagnostics[0].message,
+            "polymorphic values with trait bounds are not supported yet"
+        );
+        assert_eq!(diagnostics[0].span, origin.span);
+        let direct = checked_program(concat!(
+            "use std.clone.Clone\n",
+            "def inner: <T where Clone T> move T -> T = move value => value\n",
+            "def outer: <T where Clone T> move T -> T = move value => inner value\n",
+            "let result = outer 42\n",
+        ));
+        assert!(Lowerer::new().lower(&direct).is_ok());
+    }
+
+    #[test]
     fn validator_rejects_misclassified_awaits() {
         let module = checked_program(concat!(
             "use std.coroutine.*\n",

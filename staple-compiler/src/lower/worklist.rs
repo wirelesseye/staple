@@ -1608,6 +1608,17 @@ impl<'a> WorklistBuilder<'a> {
                 function,
                 environment,
             } => {
+                if let Some(scheme) = &value.scheme {
+                    let diagnostics = program.polymorphic_construction_diagnostics(
+                        *function,
+                        scheme,
+                        &value.origin,
+                    );
+                    if !diagnostics.is_empty() {
+                        self.diagnostics.extend(diagnostics);
+                        return;
+                    }
+                }
                 let current = *environment == LoweredCallEnvironment::Current
                     || value.closure.as_ref().is_some_and(|closure| {
                         closure.environment == LoweredClosureEnvironment::Current

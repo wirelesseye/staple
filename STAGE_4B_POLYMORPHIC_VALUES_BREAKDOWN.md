@@ -79,11 +79,20 @@ bound forwarding artifact. A JIT regression returns that closure from a concrete
 function and calls it with one-byte and four-byte descriptors. Parameter
 collection excludes the construction's quantified parameters from its enclosing
 function, preserving concrete functions that return polymorphic values.
-Capture environments, construction inside dynamic owners, and on-demand support
-diagnostics remain pending, so the public construction gate stays in place.
+Reachable direct-function and lambda constructions now run support analysis on
+demand in default mode too. The dependency walk preserves specific transitive
+restriction reasons, reports the planned messages at the construction origin,
+and treats in-scope rejections as internal invariant errors. Scheme-level trait
+and effect parameters are checked even when phantom. A negative trait-bound
+construction regression checks the exact message and span, alongside a positive
+ordinary direct-call regression. Remaining restriction coverage, constructors,
+and trait-member construction diagnostics are still pending.
+Capture environments and construction inside dynamic owners remain pending, so
+the public construction gate stays in place.
 
 Focused inference, canonical-key, partial-entry execution, and construction-graph
-regressions pass, including the executable returned-closure regression.
+regressions pass, including the executable returned-closure regression and
+construction-site support checks (three focused polymorphic tests passed).
 The earlier workspace validation has passed 233 CLI tests and 397 compiler unit
 tests (one ignored in each suite), including the quick differential subset, and
 is still running integration tests.

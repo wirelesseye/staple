@@ -330,6 +330,60 @@ impl LoweredProgram {
         self.dynamic_support_in_scope = in_scope;
     }
 
+    /// Check the reachable implementation at a polymorphic construction site.
+    /// Scan dependencies directly so a transitive restriction retains its
+    /// specific message rather than becoming `CallsExcludedTemplate`.
+    pub(crate) fn polymorphic_construction_diagnostics(
+        &self,
+        function: FunctionId,
+        scheme: &crate::CheckedScheme,
+        origin: &crate::Origin,
+    ) -> Vec<staple_syntax::Diagnostic> {
+        use RejectionReason::*;
+        fn has_effect(parameters: &[crate::CheckedSchemeParameter]) -> bool {
+            parameters.iter().any(|parameter| match parameter {
+                crate::CheckedSchemeParameter::Effect { .. } => true,
+                crate::CheckedSchemeParameter::Product(parameters) => has_effect(parameters),
+                _ => false,
+            })
+        }
+        let mut reasons = BTreeSet::new();
+        if has_effect(&scheme.parameters) {
+            reasons.insert(EffectVariable);
+        }
+        if scheme.trait_bounds.iter().any(|bound| {
+            Some(bound.trait_id) != self.semantic_ids.copy_trait
+                && Some(bound.trait_id) != self.semantic_ids.sized_trait
+        }) {
+            reasons.insert(TraitBound);
+        }
+        let mut pending = vec![function];
+        let mut visited = HashSet::new();
+        while let Some(function) = pending.pop() {
+            if !visited.insert(function) {
+                continue;
+            }
+            let (direct, dependencies) = self.scan_dynamic_support(function);
+            reasons.extend(direct);
+            pending.extend(dependencies);
+        }
+        let messages = reasons.into_iter().map(|reason| match reason {
+            TraitBound | TraitCallRuntime => "polymorphic values with trait bounds are not supported yet".to_owned(),
+            EffectVariable => "effect-polymorphic functions cannot be used as values yet".to_owned(),
+            CoroutineExpression => "functions with coroutine bodies cannot be used as polymorphic values yet".to_owned(),
+            AsyncIntrinsic => "functions with async bodies cannot be used as polymorphic values yet".to_owned(),
+            ReactiveIntrinsic | ReactiveNameRead | ReactiveCall | SignalBinding | ReactiveBinding | SignalAssignment => "functions with reactive bodies cannot be used as polymorphic values yet".to_owned(),
+            BufferClone => "`__buffer_clone` cannot be used in a polymorphic value's implementation yet".to_owned(),
+            RuntimeNaturalCount | SliceFromRef => "array lengths cannot depend on a polymorphic value's type parameters yet".to_owned(),
+            FunctionBehindReference => "function values inside references cannot be passed to a polymorphic value's implementation".to_owned(),
+            reason => format!("internal invariant violated: polymorphic implementation rejected for {}", reason.description()),
+        }).collect::<BTreeSet<_>>();
+        messages
+            .into_iter()
+            .map(|message| staple_syntax::Diagnostic::new(origin.span.clone(), message))
+            .collect()
+    }
+
     /// One template's direct reasons and the generic callees its dynamic
     /// implementation would call with run-time arguments.
     fn scan_dynamic_support(
