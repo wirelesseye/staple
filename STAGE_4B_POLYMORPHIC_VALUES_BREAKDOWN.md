@@ -70,13 +70,15 @@ wrapper fields, function arguments/results, and top-level bindings in both modes
 Scheme-checked lambdas now adopt their fixed effect row and validate their body
 against it. Shared-cell execution preserves mutation after the owner returns.
 Construction checks reject unsupported trait/effect schemes; direct functions also
-check transitive implementation bodies.
+check transitive implementation bodies. B3 now preserves original expression
+schemes across instantiation/subsumption, including names, fields, returned values,
+explicit applications, concrete instantiation, and compound subsumption.
 
-Seven focused polymorphic regressions and four scheme-inference tests pass,
+Eight focused polymorphic regressions and four scheme-inference tests pass,
 including two-layout execution in both modes and pure/read-only effect failures.
-Existing dynamic-capture tests passed earlier. The fresh workspace run failed at
-linking with missing Rust symbols; a non-incremental retry, final IR comparison,
-and reachability audit remain pending.
+Existing dynamic-capture tests passed earlier. The non-incremental workspace retry
+has reached the tests after an incremental linker failure; its result, final IR
+comparison, and reachability audit remain pending.
 
 The public Stage 3 gate remains. B2 still needs remaining ownership coverage,
 construction restrictions, and trait-member handling. B3–B7 (calls, adapters,

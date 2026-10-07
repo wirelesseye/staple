@@ -1546,6 +1546,7 @@ pub struct TypedModule {
     polymorphic_storage_symbols: HashSet<SymbolId>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     function_schemes: HashMap<FunctionId, CheckedScheme>,
+    expression_schemes: HashMap<SyntaxId, CheckedScheme>,
     expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
     function_state_accesses: HashMap<FunctionId, StateAccesses>,
     resource_types: HashMap<SyntaxId, CheckedResource>,
@@ -1761,6 +1762,17 @@ impl TypedModule {
     /// expected scheme a lambda was checked against.
     pub fn scheme_of_function(&self, function: FunctionId) -> Option<&CheckedScheme> {
         self.function_schemes.get(&function)
+    }
+
+    /// The original callable scheme before contextual instantiation or
+    /// subsumption changed this occurrence's checked expression type.
+    pub fn scheme_of_expression(&self, syntax: SyntaxId) -> Option<&CheckedScheme> {
+        self.expression_schemes
+            .get(&syntax)
+            .or_else(|| match self.type_of_expression(syntax) {
+                Some(CheckedType::Forall(scheme)) => Some(scheme.as_ref()),
+                _ => None,
+            })
     }
 
     pub(crate) fn polymorphic_value_diagnostics(&self) -> Vec<Diagnostic> {
@@ -2634,6 +2646,7 @@ pub struct TypeChecker {
     /// Generic argument templates in declaration order, including constructors.
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     function_schemes: HashMap<FunctionId, CheckedScheme>,
+    expression_schemes: HashMap<SyntaxId, CheckedScheme>,
     type_representations: HashMap<TypeId, CheckedType>,
     type_parameter_templates: HashMap<TypeId, Vec<CheckedType>>,
     expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
@@ -2950,6 +2963,7 @@ impl TypeChecker {
             polymorphic_storage_symbols: self.polymorphic_storage_symbols,
             function_types: self.function_types,
             function_schemes: self.function_schemes,
+            expression_schemes: self.expression_schemes,
             expression_effects: self.expression_effects,
             function_state_accesses: self.function_state_accesses,
             resource_types: self.resource_types,
@@ -8714,6 +8728,7 @@ impl TypeChecker {
                         Some(&receiver_type),
                         expected,
                         selector.syntax.span.clone(),
+                        Some(selector.syntax.id),
                     );
                     if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
                         self.check_function_bounds(
@@ -9262,6 +9277,7 @@ impl TypeChecker {
                             Some(&actual),
                             expected,
                             call.callee.syntax().span.clone(),
+                            Some(call.callee.syntax().id),
                         );
                         let CheckedType::Function(function) = raw_callee_type.clone() else {
                             return CheckedType::Error;
@@ -9761,6 +9777,7 @@ impl TypeChecker {
                                 Some(&argument_type),
                                 expected,
                                 call.callee.syntax().span.clone(),
+                                Some(call.callee.syntax().id),
                             );
                             let CheckedType::Function(instantiated_candidate) =
                                 instantiated_candidate
@@ -9867,6 +9884,7 @@ impl TypeChecker {
                         Some(&argument_type),
                         expected,
                         call.callee.syntax().span.clone(),
+                        Some(call.callee.syntax().id),
                     );
                     if let Some(function_id) = self.function_origin(module, &call.callee) {
                         let bound_template = self
@@ -9929,6 +9947,7 @@ impl TypeChecker {
                         None,
                         expected,
                         access.syntax.span.clone(),
+                        Some(access.syntax.id),
                     );
                     return self.finish_expression_type(expression, value_type, expected);
                 }
@@ -10207,6 +10226,7 @@ impl TypeChecker {
                     None,
                     expected,
                     name.syntax.span.clone(),
+                    Some(name.syntax.id),
                 );
                 if expected.is_some()
                     && let Some(function_id) =
@@ -11586,6 +11606,11 @@ impl TypeChecker {
         natural_type: CheckedType,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
+        if let CheckedType::Forall(scheme) = &natural_type {
+            self.expression_schemes
+                .entry(expression.syntax().id)
+                .or_insert_with(|| scheme.as_ref().clone());
+        }
         let natural_type = if matches!(natural_type, CheckedType::Forall(_)) && expected.is_some() {
             self.subsume(
                 natural_type,
@@ -11631,6 +11656,7 @@ impl TypeChecker {
                     None,
                     Some(&target.body),
                     span.clone(),
+                    None,
                 );
                 if instantiated == CheckedType::Error {
                     return instantiated;
@@ -11684,7 +11710,7 @@ impl TypeChecker {
                 }
             }
             (CheckedType::Forall(_), _) => {
-                self.instantiate_function_use(actual, None, Some(expected), span)
+                self.instantiate_function_use(actual, None, Some(expected), span, None)
             }
             _ => self.require_compatible(actual, expected.clone(), span),
         }
@@ -12597,6 +12623,12 @@ impl TypeChecker {
             );
         }
         if let Some(mut scheme) = value_scheme {
+            self.expression_schemes
+                .entry(application.value.syntax().id)
+                .or_insert_with(|| scheme.clone());
+            self.expression_schemes
+                .entry(application.syntax.id)
+                .or_insert_with(|| scheme.clone());
             self.check_instantiated_bounds(
                 scheme.trait_bounds.clone(),
                 scheme.subtype_bounds.clone(),
@@ -12695,10 +12727,16 @@ impl TypeChecker {
         argument: Option<&CheckedType>,
         expected: Option<&CheckedType>,
         span: Span,
+        syntax: Option<SyntaxId>,
     ) -> CheckedType {
         let CheckedType::Forall(scheme) = value_type else {
             return value_type;
         };
+        if let Some(syntax) = syntax {
+            self.expression_schemes
+                .entry(syntax)
+                .or_insert_with(|| scheme.as_ref().clone());
+        }
         if argument.is_none() && expected.is_none() {
             return CheckedType::Forall(scheme);
         }

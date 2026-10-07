@@ -22412,6 +22412,61 @@ mod tests {
     }
 
     #[test]
+    fn polymorphic_uses_preserve_their_original_schemes() {
+        let module = checked_program(concat!(
+            "def identity: <T> move T -> T = move value => value\n",
+            "let stored = identity\n",
+            "let implicit = stored 42\n",
+            "let written = stored.<I32> 42\n",
+            "let fields = (callable: stored, extra: 42)\n",
+            "let field = fields.callable \"hello\"\n",
+            "def returned: () -> (<T> move T -> T) = () => stored\n",
+            "let result = (returned ()) 42\n",
+            "let instantiated: move I32 -> I32 = stored\n",
+            "let compound: <U> move (U, U) -> (U, U) = stored\n",
+        ));
+        let mut tested = 0;
+        for item in &module.syntax().items {
+            let Item::Binding(binding) = item else {
+                continue;
+            };
+            if ![
+                "implicit",
+                "written",
+                "field",
+                "result",
+                "instantiated",
+                "compound",
+            ]
+            .contains(&binding.name.as_str())
+            {
+                continue;
+            }
+            let value = binding.value.as_ref().unwrap();
+            let occurrence = if let Expression::Call(call) = value {
+                call.callee.as_ref()
+            } else {
+                value
+            };
+            let scheme = module
+                .scheme_of_expression(occurrence.syntax().id)
+                .unwrap_or_else(|| panic!("{} lost its source scheme", binding.name));
+            assert_eq!(scheme.parameters.len(), 1);
+            let CheckedType::Function(body) = scheme.body.as_ref() else {
+                panic!("function scheme");
+            };
+            assert_eq!(body.parameter, body.result);
+            assert!(
+                matches!(body.parameter.as_ref(), CheckedType::Parameter { .. }),
+                "{} retained an instantiated body instead of the source scheme",
+                binding.name
+            );
+            tested += 1;
+        }
+        assert_eq!(tested, 6);
+    }
+
+    #[test]
     fn polymorphic_values_survive_storage_positions() {
         for dictionary in [false, true] {
             let module = checked_program(concat!(
