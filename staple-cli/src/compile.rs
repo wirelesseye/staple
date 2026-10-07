@@ -4695,7 +4695,7 @@ mod tests {
         let standard_library = workspace_root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")])
             .expect("corpus link options should parse");
-        const SUBSET: [&str; 15] = [
+        const SUBSET: [&str; 17] = [
             "local_recursive_generic",
             "calls_generic",
             "parameter_products",
@@ -4711,6 +4711,8 @@ mod tests {
             "polymorphic_inside_generic_body",
             "polymorphic_function_values_in_generic_body",
             "polymorphic_lambda_follows_scheme_order",
+            "polymorphic_scheme_subsumption",
+            "polymorphic_adapter_outlives_its_frame",
         ];
         let mut dynamic_calls = 0usize;
         let mut matched = 0usize;

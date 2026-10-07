@@ -26,6 +26,7 @@ use std::marker::PhantomData;
 use staple_syntax::{Diagnostic, Expression, Item, Pattern, Span, SyntaxId};
 
 use crate::specialization::SpecializationCatalog;
+use crate::types_equivalent;
 use crate::{
     BuiltinType, CheckedAccess, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
     CheckedMutation, CheckedProductType, CheckedPropagation, CheckedResource, CheckedTraitBound,
@@ -111,7 +112,7 @@ pub(crate) use artifact_plan::{
     CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorBoundEntryPlan,
     DescriptorDropPlan, DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture,
     DroppedElement, DynamicCapture, ExternAdapterPlan, ExternDeclaration, GcFinalizerPlan,
-    IndexedElement, LoweredArtifactPlan, PlanType, PlannedArtifact, PlannedCallee,
+    IndexedElement, InstantiationAdapterPlan, LoweredArtifactPlan, PlanType, PlannedArtifact, PlannedCallee,
     PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReabstractionThunkPlan,
     ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody,
     StructuralMethodPlan, SumAlternative, TraitDelegate, TypeDescriptorPlan, ValueConversionPlan,
@@ -586,6 +587,15 @@ pub(crate) enum LoweredCoercionPlan {
     /// Implicitly introduce a `from` wrapper: coerce the value to the
     /// wrapper's representation, which is also the wrapper's runtime value.
     Wrap { payload: Box<LoweredCoercionPlan> },
+    /// Instantiate a polymorphic value at a function type: a closure of the
+    /// target's ABI forwarding to the quantified closure. `types` holds one
+    /// instantiation per type parameter of the source scheme, in scheme order.
+    Instantiate { types: Vec<CheckedType> },
+    /// Subsume a polymorphic value into another scheme that is not an
+    /// alpha-renaming of it: a closure at the target's dynamic ABI that
+    /// rebuilds the source's descriptors from its own. `types` holds the
+    /// source scheme's instantiation over the target's parameters.
+    AdaptScheme { types: Vec<CheckedType> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -603,12 +613,82 @@ impl LoweredCoercionPlan {
         match self {
             LoweredCoercionPlan::Identity => false,
             LoweredCoercionPlan::Wrap { .. } => true,
+            LoweredCoercionPlan::Instantiate { .. } | LoweredCoercionPlan::AdaptScheme { .. } => {
+                false
+            }
             LoweredCoercionPlan::SumInject { payload, .. } => payload.introduces_wrapper(),
             LoweredCoercionPlan::SumWiden { arms } => arms
                 .iter()
                 .flatten()
                 .any(|arm| arm.payload.introduces_wrapper()),
         }
+    }
+
+    /// Matches a scheme's body against the function type it is used at,
+    /// recovering one instantiation per quantified type parameter.
+    fn instantiate(
+        scheme: &crate::CheckedScheme,
+        target: &CheckedFunctionType,
+    ) -> Result<Self, String> {
+        let CheckedType::Function(body) = scheme.body.as_ref() else {
+            return Err(format!("`{scheme}` is not a function scheme"));
+        };
+        let mut inferred = HashMap::new();
+        let _ = infer_type_parameters_with_schemes(
+            &CheckedType::Function(body.clone()),
+            &CheckedType::Function(target.clone()),
+            &mut inferred,
+        );
+        // The adapter forwards values without converting between the concrete
+        // and dynamic closure ABIs, so a concrete function type reaching the
+        // quantified body has no adapter yet.
+        if needs_concrete_function_conversion(&target.parameter, &body.parameter)
+            || needs_concrete_function_conversion(&target.result, &body.result)
+        {
+            return Err(
+                "instantiating a polymorphic value with function-typed parameters or results is not supported yet"
+                    .to_owned(),
+            );
+        }
+        let types = scheme
+            .type_parameter_ids()
+            .into_iter()
+            .map(|parameter| {
+                inferred.get(&parameter).cloned().ok_or_else(|| {
+                    "a polymorphic value's type parameter cannot be inferred from its use".to_owned()
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(LoweredCoercionPlan::Instantiate { types })
+    }
+
+    /// Matches a scheme's body against another scheme's, whose parameters
+    /// stay rigid, recovering the source's instantiation over them.
+    fn adapt(
+        scheme: &crate::CheckedScheme,
+        target: &crate::CheckedScheme,
+    ) -> Result<Self, String> {
+        let (CheckedType::Function(body), CheckedType::Function(expected)) =
+            (scheme.body.as_ref(), target.body.as_ref())
+        else {
+            return Err(format!("`{scheme}` is not a function scheme"));
+        };
+        let mut inferred = HashMap::new();
+        let _ = infer_type_parameters_with_schemes(
+            &CheckedType::Function(body.clone()),
+            &CheckedType::Function(expected.clone()),
+            &mut inferred,
+        );
+        let types = scheme
+            .type_parameter_ids()
+            .into_iter()
+            .map(|parameter| {
+                inferred.get(&parameter).cloned().ok_or_else(|| {
+                    "a polymorphic value's type parameter cannot be inferred from its use".to_owned()
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(LoweredCoercionPlan::AdaptScheme { types })
     }
 
     pub(crate) fn plan(source: &CheckedType, target: &CheckedType) -> Result<Self, String> {
@@ -637,6 +717,15 @@ impl LoweredCoercionPlan {
             )
         {
             return Ok(LoweredCoercionPlan::Identity);
+        }
+        if let (CheckedType::Forall(scheme), CheckedType::Function(function)) = (source, target) {
+            return Self::instantiate(scheme, function);
+        }
+        if let (CheckedType::Forall(value), CheckedType::Forall(expected)) = (source, target) {
+            if types_equivalent(source, target) {
+                return Ok(LoweredCoercionPlan::Identity);
+            }
+            return Self::adapt(value, expected);
         }
         let CheckedType::Sum(target_sum) = target else {
             if from == FromCoercion::Allowed
@@ -702,6 +791,43 @@ impl LoweredCoercionPlan {
                 })
             }
         }
+    }
+}
+
+/// Whether a concrete function type in `actual` meets a dynamic-shape function
+/// type in `expected`, so values crossing between them need a reabstraction.
+fn needs_concrete_function_conversion(actual: &CheckedType, expected: &CheckedType) -> bool {
+    match (actual, expected) {
+        (CheckedType::Function(actual), CheckedType::Function(expected)) => {
+            !contains_type_parameter(&CheckedType::Function(actual.clone()))
+                && contains_type_parameter(&CheckedType::Function(expected.clone()))
+        }
+        (CheckedType::Product(actual), CheckedType::Product(expected)) => actual
+            .elements
+            .iter()
+            .zip(&expected.elements)
+            .any(|(actual, expected)| {
+                needs_concrete_function_conversion(&actual.value_type, &expected.value_type)
+            }),
+        (CheckedType::Sum(actual), CheckedType::Sum(expected)) => actual
+            .alternatives
+            .iter()
+            .zip(&expected.alternatives)
+            .any(|(actual, expected)| needs_concrete_function_conversion(actual, expected)),
+        (
+            CheckedType::Wrapper {
+                representation: actual,
+                ..
+            },
+            CheckedType::Wrapper {
+                representation: expected,
+                ..
+            },
+        ) => needs_concrete_function_conversion(actual, expected),
+        (CheckedType::Array { element: actual, .. }, CheckedType::Array { element: expected, .. }) => {
+            needs_concrete_function_conversion(actual, expected)
+        }
+        _ => false,
     }
 }
 
@@ -2857,6 +2983,10 @@ pub(crate) struct LoweredProgram {
     /// Transient lowering state: inner call syntaxes consumed by an outer
     /// juxtaposed call's checked plan. They are never lowered on their own.
     consumed_calls: HashSet<SyntaxId>,
+    /// Transient lowering state: callee occurrences of calls lowered so far.
+    /// A polymorphic value in callee position is applied directly rather than
+    /// instantiated into a closure of the instantiated type.
+    callee_expressions: HashSet<SyntaxId>,
     /// Transient lowering state: the active lexical provider stack while one
     /// function body or module initializer lowers. The last matching provider
     /// by checked value type agrees with the recorded cleanup selection.
@@ -5003,6 +5133,43 @@ impl LoweredProgram {
         self.lower_expression_occurrence(module, owner, context, expression, None)
     }
 
+    /// The source scheme of a polymorphic value this expression instantiates
+    /// at a non-scheme type, or `None` when it is not an instantiation: a
+    /// callee applied directly, a declared generic `def`, constructor, or
+    /// intrinsic (which instantiates by monomorphization), or an expression
+    /// that carries no retained scheme.
+    fn instantiated_scheme(
+        &self,
+        module: &TypedModule,
+        syntax: SyntaxId,
+        value_type: &CheckedType,
+    ) -> Option<crate::CheckedScheme> {
+        let scheme = module.scheme_of_expression(syntax)?;
+        if module.trait_dispatch_for(syntax).is_some() {
+            return None;
+        }
+        match value_type {
+            CheckedType::Function(_) => {
+                if self.callee_expressions.contains(&syntax)
+                    || module
+                        .symbol_for(syntax)
+                        .is_some_and(|symbol| module.is_declared_generic(symbol))
+                {
+                    return None;
+                }
+                Some(scheme.clone())
+            }
+            // Subsumption into a different scheme: an alpha-renaming of the
+            // same scheme reuses the closure.
+            CheckedType::Forall(_) => (!types_equivalent(
+                &CheckedType::Forall(Box::new(scheme.clone())),
+                value_type,
+            ))
+            .then(|| scheme.clone()),
+            _ => None,
+        }
+    }
+
     /// Lowers one expression occurrence with an optional root type override.
     /// Contextual product defaults use it because the shared default syntax
     /// node may have been checked last for a different instantiation; the
@@ -5032,6 +5199,7 @@ impl LoweredProgram {
                 "compile-time-only expression reached lowering",
             ));
         }
+        let type_override_absent = type_override.is_none();
         let value_type = match type_override {
             Some(value_type) => value_type,
             None => match module.type_of_expression(syntax.id).cloned() {
@@ -5047,7 +5215,26 @@ impl LoweredProgram {
             .effects_of_expression(syntax.id)
             .cloned()
             .unwrap_or_default();
-        let coercion = module.coercion_for(syntax.id).cloned();
+        let mut coercion = module.coercion_for(syntax.id).cloned();
+        let mut value_type = value_type;
+        // A polymorphic value used at an instantiated function type holds its
+        // quantified closure: the instantiation is an explicit coercion into a
+        // closure of the instantiated type's ABI.
+        if type_override_absent
+            && let Some(scheme) = self.instantiated_scheme(module, syntax.id, &value_type)
+        {
+            if coercion.is_some() {
+                return Err(Diagnostic::new(
+                    syntax.span.clone(),
+                    "instantiating a polymorphic value inside another coercion is not supported yet",
+                ));
+            }
+            let source = CheckedType::Forall(Box::new(scheme));
+            coercion = Some(crate::CheckedCoercion {
+                source: source.clone(),
+                target: std::mem::replace(&mut value_type, source),
+            });
+        }
         let coercion_plan = match &coercion {
             Some(coercion) => match LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
                 Ok(plan) => Some(plan),
@@ -6575,16 +6762,24 @@ impl LoweredProgram {
         // A callable value can be checked as a sum alternative or another
         // coercible type; its underlying callable type comes from the
         // semantic target in that case.
-        let scheme = match module.type_of_expression(syntax) {
-            Some(CheckedType::Forall(scheme)) => Some(scheme.as_ref().clone()),
-            _ => None,
-        };
-        let checked_function_type = match module.type_of_expression(syntax) {
-            Some(CheckedType::Function(function_type)) => Some(function_type.clone()),
-            Some(CheckedType::Forall(scheme)) => match scheme.body.as_ref() {
+        // The construction keeps the value's own scheme. A use at an
+        // instantiated type or at a different scheme still constructs the
+        // quantified closure; the expression's coercion adapts it.
+        let scheme = module
+            .type_of_expression(syntax)
+            .and_then(|ty| match self.instantiated_scheme(module, syntax, ty) {
+                Some(source) => Some(source),
+                None => match ty {
+                    CheckedType::Forall(scheme) => Some(scheme.as_ref().clone()),
+                    _ => None,
+                },
+            });
+        let checked_function_type = match (&scheme, module.type_of_expression(syntax)) {
+            (Some(scheme), _) => match scheme.body.as_ref() {
                 CheckedType::Function(function_type) => Some(function_type.clone()),
                 _ => None,
             },
+            (None, Some(CheckedType::Function(function_type))) => Some(function_type.clone()),
             _ => None,
         };
         let resolved = module.resolved();
@@ -7035,6 +7230,7 @@ impl LoweredProgram {
         context: ExpressionContext,
         call: &staple_syntax::CallExpression,
     ) -> Result<LoweredExpressionKind, Diagnostic> {
+        self.callee_expressions.insert(call.callee.syntax().id);
         let route = self.classify_call_route(module, owner, call)?;
         if self.consumed_calls.contains(&call.syntax.id) {
             return Err(Diagnostic::new(
@@ -14562,17 +14758,13 @@ impl Lowerer {
     }
 
     pub fn lower(&self, module: &TypedModule) -> Result<LoweredModule, Vec<Diagnostic>> {
-        let polymorphic = module.polymorphic_value_diagnostics();
-        if !polymorphic.is_empty() {
-            return Err(polymorphic);
-        }
         let mut program = LoweredProgram::default();
         program.dictionary_pass_generic_calls = self.dictionary_pass_generic_calls;
         let mut diagnostics = validate_checked_module(module);
         if diagnostics.is_empty() {
             diagnostics.extend(program.snapshot(module));
         }
-        if diagnostics.is_empty() && self.dictionary_pass_generic_calls {
+        if diagnostics.is_empty() && program.dictionary_pass_generic_calls {
             program.compute_dynamic_support();
         }
         diagnostics.extend(program.validate());

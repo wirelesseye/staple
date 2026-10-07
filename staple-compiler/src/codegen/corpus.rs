@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 112] = [
+static CORPUS: [CorpusProgram; 118] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -2953,6 +2953,67 @@ let value = at (Ref (1, 2), (USize :: 5))
     ),
     expect_stdout(
         must_run(inline(
+            "polymorphic_instantiation_binding",
+            concat!(
+                "use std.io.println\n",
+                "def identity: <T> move T -> T = move value => value\n",
+                "let f = identity\n",
+                "let c: move I32 -> I32 = f\n",
+                "let a = c 5\n",
+                "let g = f.<I32>\n",
+                "let b = g 6\n",
+                "println \"${a} ${b}\"\n",
+            ),
+            "polymorphic",
+        )),
+        "5 6\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "polymorphic_instantiation_parameter",
+            concat!(
+                "use std.io.println\n",
+                "def identity: <T> move T -> T = move value => value\n",
+                "def consume: (<U> move U -> U) -> I32 = f => {\n",
+                "    let c: move I32 -> I32 = f\n",
+                "    c 6\n",
+                "}\n",
+                "type Functions = wrap (identity: <T> move T -> T,)\n",
+                "let fs = Functions (identity: identity)\n",
+                "let s: move String -> String = fs.identity\n",
+                "let r = consume identity\n",
+                "let t: String = s \"nine\"\n",
+                "println \"${r} ${t}\"\n",
+            ),
+            "polymorphic",
+        )),
+        "6 nine\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "polymorphic_instantiation_inside_generic_body",
+            concat!(
+                "use std.io.println\n",
+                "def identity: <T> move T -> T = move value => value\n",
+                "def apply: <A> (<U> move U -> U, move A) -> A = (f, move a) => {\n",
+                "    let c: move A -> A = f\n",
+                "    c a\n",
+                "}\n",
+                "def pair: <A where Copy A> A -> (A, A) = a => {\n",
+                "    let f: <U> move U -> U = identity\n",
+                "    let c: move (A, A) -> (A, A) = f\n",
+                "    c (a, a)\n",
+                "}\n",
+                "let x = apply (identity, 8)\n",
+                "let p = pair 3\n",
+                "println \"${x} ${p.0} ${p.1}\"\n",
+            ),
+            "polymorphic",
+        )),
+        "8 3 3\n",
+    ),
+    expect_stdout(
+        must_run(inline(
             "polymorphic_function_values_across_the_boundary",
             concat!(
                 "use std.io.println\n",
@@ -2970,6 +3031,50 @@ let value = at (Ref (1, 2), (USize :: 5))
             "polymorphic",
         )),
         "42 7\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "polymorphic_lambda_scheme_instantiation",
+            concat!(
+                "use std.io.println\n",
+                "def identity: <T> move T -> T = move value => value\n",
+                "let id: <T> move T -> T = move (x: T) => x\n",
+                "let c: move I32 -> I32 = id\n",
+                "let a = c 5\n",
+                "let b = id 6\n",
+                "println \"${a} ${b}\"\n",
+            ),
+            "polymorphic",
+        )),
+        "5 6\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "polymorphic_scheme_subsumption",
+            concat!(
+                "use std.io.println\n",
+                "def identity: <T> move T -> T = move value => value\n",
+                "def first: <A, B> (move A, move B) -> A = (move a, move b) => a\n",
+                "let swapped: <Y, X> (move X, move Y) -> X = first\n",
+                "let pairs: <T> move (T, T) -> (T, T) = identity\n",
+                "let renamed: <V> move V -> V = identity\n",
+                "def apply: (<A> move (A, A) -> (A, A)) -> I32 = f => {\n",
+                "    let p = f (4, 5)\n",
+                "    p.0 + p.1\n",
+                "}\n",
+                "let a: I32 = swapped (1, \"x\")\n",
+                "let b: String = swapped (\"s\", 2)\n",
+                "let c = pairs (\"x\", \"y\")\n",
+                "let d = renamed 3\n",
+                "let e = apply identity\n",
+                "def pass: (<Y, X> (move X, move Y) -> X) -> I32 = f => f (6, 7)\n",
+                "def run: () -> I32 = () => pass first\n",
+                "let f = run ()\n",
+                "println \"${a} ${b} ${c.0}${c.1} ${d} ${e} ${f}\"\n",
+            ),
+            "polymorphic",
+        )),
+        "1 s xy 3 9 6\n",
     ),
     expect_stdout(
         must_run(inline(
@@ -3007,6 +3112,30 @@ let value = at (Ref (1, 2), (USize :: 5))
             "polymorphic",
         )),
         "x 2\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "polymorphic_adapter_outlives_its_frame",
+            concat!(
+                "use std.io.println\n",
+                "def identity: <T> move T -> T = move value => value\n",
+                "def make: <A where Copy A> A -> (A -> A) = a => {\n",
+                "    let f: <U> move U -> U = identity\n",
+                "    let c: A -> A = f\n",
+                "    c\n",
+                "}\n",
+                "def churn: <A where Copy A> A -> I32 = a => {\n",
+                "    let tuple = (a, a, a)\n",
+                "    1\n",
+                "}\n",
+                "let c = make 5\n",
+                "let ignored = churn 1\n",
+                "let r = c 9\n",
+                "println \"${r}\"\n",
+            ),
+            "polymorphic",
+        )),
+        "9\n",
     ),
 ];
 

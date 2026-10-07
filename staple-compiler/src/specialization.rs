@@ -998,6 +998,19 @@ pub(crate) struct DescriptorBoundEntryKey {
     pub bound: usize,
 }
 
+/// The identity of one polymorphic-value adapter: a closure forwarding to a
+/// polymorphic closure, keyed by the alpha-canonical source scheme and the
+/// canonical target. A function-type target is an instantiation (B-G): the
+/// instantiation's descriptors travel in the adapter's environment. A scheme
+/// target is a subsumption (B-H): the adapter receives the target's
+/// descriptors and builds the source's. The mapping is recomputed from the
+/// pair, so it is not part of the key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct InstantiationAdapterKey {
+    pub scheme: CanonicalType,
+    pub target: CanonicalType,
+}
+
 /// The direction of a reabstraction conversion (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ReabstractionDirection {
@@ -1035,6 +1048,7 @@ pub(crate) enum ArtifactRequestKey {
     DescriptorDrop(CanonicalType),
     CompoundDescriptorDrop(CompoundDescriptorDropKey),
     DescriptorBoundEntry(DescriptorBoundEntryKey),
+    InstantiationAdapter(InstantiationAdapterKey),
     ReabstractionThunk(ReabstractionThunkKey),
     ValueConversion(ValueConversionKey),
     GcFinalizer(GcFinalizerKey),
@@ -1057,6 +1071,7 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::DescriptorDrop(_) => "descriptor-drop",
             ArtifactRequestKey::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             ArtifactRequestKey::DescriptorBoundEntry(_) => "descriptor-bound-entry",
+            ArtifactRequestKey::InstantiationAdapter(_) => "instantiation-adapter",
             ArtifactRequestKey::ReabstractionThunk(_) => "reabstraction-thunk",
             ArtifactRequestKey::ValueConversion(_) => "value-conversion",
             ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => "gc-finalizer-payload",
@@ -1285,6 +1300,7 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
             "__staple_compound_descriptor_drop".to_owned()
         }
         ArtifactRequestKey::DescriptorBoundEntry(_) => "__staple_descriptor_bound_entry".to_owned(),
+        ArtifactRequestKey::InstantiationAdapter(_) => "__staple_instantiation_adapter".to_owned(),
         ArtifactRequestKey::ReabstractionThunk(_) => "__staple_reabstraction".to_owned(),
         ArtifactRequestKey::ValueConversion(_) => "__staple_value_conversion".to_owned(),
         ArtifactRequestKey::GcFinalizer(GcFinalizerKey::Payload(_)) => {

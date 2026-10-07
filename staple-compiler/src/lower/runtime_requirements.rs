@@ -361,7 +361,8 @@ fn record_plan_requirements(
         | LoweredArtifactPlan::TypeDescriptor(_)
         | LoweredArtifactPlan::DescriptorDrop(_)
         | LoweredArtifactPlan::CompoundDescriptorDrop(_)
-        | LoweredArtifactPlan::DescriptorBoundEntry(_) => {}
+        | LoweredArtifactPlan::DescriptorBoundEntry(_)
+        | LoweredArtifactPlan::InstantiationAdapter(_) => {}
         LoweredArtifactPlan::ReabstractionThunk(_) | LoweredArtifactPlan::ValueConversion(_) => {
             requirements.record(RuntimeRequirement::GarbageCollector)
         }

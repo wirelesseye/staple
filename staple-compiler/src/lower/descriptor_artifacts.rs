@@ -62,6 +62,50 @@ pub(super) fn collect_concrete_types(ty: &CheckedType, types: &mut Vec<CheckedTy
     }
 }
 
+/// The instantiation types of an expression's polymorphic-value coercion.
+fn instantiation_types(expression: &super::LoweredExpression) -> &[CheckedType] {
+    match &expression.coercion_plan {
+        Some(super::LoweredCoercionPlan::Instantiate { types }) => types,
+        _ => &[],
+    }
+}
+
+/// The adapter request for one expression that instantiates a polymorphic
+/// value, or `None` for every other expression.
+fn instantiation_request(
+    id: super::ExpressionId,
+    expression: &super::LoweredExpression,
+) -> Result<Option<ClosureRequest>, Vec<Diagnostic>> {
+    let (Some(coercion), Some(plan)) = (&expression.coercion, &expression.coercion_plan) else {
+        return Ok(None);
+    };
+    let (super::LoweredCoercionPlan::Instantiate { types }
+    | super::LoweredCoercionPlan::AdaptScheme { types }) = plan
+    else {
+        return Ok(None);
+    };
+    let CheckedType::Forall(scheme) = &coercion.source else {
+        return Ok(None);
+    };
+    let key = crate::specialization::InstantiationAdapterKey {
+        scheme: CanonicalType::dynamic(&coercion.source, &expression.origin)
+            .map_err(|error| vec![error])?,
+        target: CanonicalType::dynamic(&coercion.target, &expression.origin)
+            .map_err(|error| vec![error])?,
+    };
+    Ok(Some(ClosureRequest::Artifact {
+        key: ArtifactRequestKey::InstantiationAdapter(key),
+        plan: Plan::InstantiationAdapter(crate::InstantiationAdapterPlan {
+            scheme: scheme.as_ref().clone(),
+            target: coercion.target.clone(),
+            types: types.clone(),
+        }),
+        kind: Kind::InstantiationAdapter,
+        origin: expression.origin.clone(),
+        use_site: Some(super::artifact_closure::ArtifactUseSite::InstantiationAdapter(id)),
+    }))
+}
+
 /// Concrete leaves used by a dynamic body. The deterministic order also names
 /// scanner use sites, so closure validation can prove each descriptor is owned.
 pub(super) fn concrete_body_types(body: &super::LoweredInstanceBody) -> Vec<CheckedType> {
@@ -76,6 +120,9 @@ pub(super) fn concrete_body_types(body: &super::LoweredInstanceBody) -> Vec<Chec
         if let Some(coercion) = &expression.coercion {
             collect(&coercion.source, &mut types);
             collect(&coercion.target, &mut types);
+        }
+        for ty in instantiation_types(expression) {
+            collect(ty, &mut types);
         }
     }
     for (_, place) in body.places.iter() {
@@ -150,6 +197,9 @@ pub(super) fn compound_body_shapes(
         if let Some(coercion) = &expression.coercion {
             collect_compound_shapes(&coercion.source, &mut shapes);
             collect_compound_shapes(&coercion.target, &mut shapes);
+        }
+        for ty in instantiation_types(expression) {
+            collect_compound_shapes(ty, &mut shapes);
         }
     }
     if let Some(coercion) = &body.body_coercion {
@@ -255,7 +305,16 @@ pub(super) fn scan_instance(
             .is_some_and(|key| !key.runtime().is_empty()),
         _ => false,
     });
-    let polymorphic_call = body.calls.iter().any(|(_, call)| call.scheme.is_some());
+    let polymorphic_call = body.calls.iter().any(|(_, call)| call.scheme.is_some())
+        || body.expressions().any(|(_, expression)| {
+            matches!(
+                expression.coercion_plan,
+                Some(
+                    super::LoweredCoercionPlan::Instantiate { .. }
+                        | super::LoweredCoercionPlan::AdaptScheme { .. }
+                )
+            )
+        });
     if !dynamic && !dynamic_call && !polymorphic_call {
         return Ok(Vec::new());
     }
@@ -587,6 +646,9 @@ pub(super) fn scan_instance(
             use_site: Some(super::artifact_closure::ArtifactUseSite::DynamicCellFinalizer(symbol)),
         });
     }
+    for (id, expression) in body.expressions() {
+        requests.extend(instantiation_request(id, expression)?);
+    }
     requests.extend(reabstraction_requests(&body.conversions, &body.origin)?);
     Ok(requests)
 }
@@ -619,7 +681,15 @@ pub(super) fn scan_initializer(
     id: super::InitializerId,
 ) -> super::artifact_closure::ScanResult {
     let types = concrete_initializer_types(program, id);
-    if types.is_empty() {
+    let mut adapters = InitializerAdapterVisitor {
+        requests: Vec::new(),
+    };
+    super::cleanup_artifacts::walk_owner(
+        program,
+        super::emission::OwnerArenas::Initializer(id),
+        &mut adapters,
+    )?;
+    if types.is_empty() && adapters.requests.is_empty() {
         return Ok(Vec::new());
     }
     let origin = program
@@ -628,7 +698,7 @@ pub(super) fn scan_initializer(
         .map_or_else(crate::Origin::compiler, |initializer| {
             initializer.origin.clone()
         });
-    let mut requests = Vec::new();
+    let mut requests = adapters.requests;
     for (index, ty) in types.iter().enumerate() {
         let mut request = descriptor_request(ty, &origin).map_err(|diagnostic| vec![diagnostic])?;
         let ClosureRequest::Artifact { use_site, .. } = &mut request else {
@@ -648,7 +718,35 @@ struct InitializerDescriptorVisitor<'a> {
     types: Vec<CheckedType>,
 }
 
+/// Collects the instantiation-adapter requests of an initializer's
+/// polymorphic-value coercions.
+struct InitializerAdapterVisitor {
+    requests: Vec<ClosureRequest>,
+}
+
+impl super::cleanup_artifacts::LoweredOwnerVisitor for InitializerAdapterVisitor {
+    fn expression_site(
+        &mut self,
+        id: super::ExpressionId,
+        expression: &super::LoweredExpression,
+    ) -> Result<(), Vec<staple_syntax::Diagnostic>> {
+        self.requests.extend(instantiation_request(id, expression)?);
+        Ok(())
+    }
+}
+
 impl super::cleanup_artifacts::LoweredOwnerVisitor for InitializerDescriptorVisitor<'_> {
+    fn expression_site(
+        &mut self,
+        _id: super::ExpressionId,
+        expression: &super::LoweredExpression,
+    ) -> Result<(), Vec<staple_syntax::Diagnostic>> {
+        for ty in instantiation_types(expression) {
+            collect_concrete_types(ty, &mut self.types);
+        }
+        Ok(())
+    }
+
     fn call_site(
         &mut self,
         call: &super::LoweredCall,
@@ -746,6 +844,32 @@ pub(super) fn expand(
         }
         Plan::CompoundDescriptorDrop(plan) => Plan::CompoundDescriptorDrop(plan),
         Plan::DescriptorBoundEntry(plan) => Plan::DescriptorBoundEntry(plan),
+        Plan::InstantiationAdapter(plan) => {
+            // A scheme-target adapter builds the source scheme's descriptors
+            // at entry: its concrete leaves need static descriptors and its
+            // compound shapes their cleanup entries.
+            if matches!(plan.target, CheckedType::Forall(_)) {
+                let mut leaves = Vec::new();
+                let mut shapes = Vec::new();
+                for ty in &plan.types {
+                    collect_concrete_types(ty, &mut leaves);
+                    collect_compound_shapes(ty, &mut shapes);
+                }
+                for ty in &leaves {
+                    requests.push(descriptor_request(ty, &origin).map_err(|error| vec![error])?);
+                }
+                for key in shapes {
+                    requests.push(ClosureRequest::Artifact {
+                        key: ArtifactRequestKey::CompoundDescriptorDrop(key),
+                        plan: Plan::CompoundDescriptorDrop(key),
+                        kind: Kind::CompoundDescriptorDrop,
+                        origin: origin.clone(),
+                        use_site: None,
+                    });
+                }
+            }
+            Plan::InstantiationAdapter(plan)
+        }
         Plan::ReabstractionThunk(plan) => Plan::ReabstractionThunk(plan),
         Plan::ValueConversion(plan) => Plan::ValueConversion(plan),
         Plan::DescriptorDrop(mut plan) => {

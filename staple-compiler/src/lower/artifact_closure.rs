@@ -120,6 +120,9 @@ pub(crate) enum ArtifactUseSite {
     DescriptorBoundEntry(LoweredCallableValueId),
     /// Adapt a descriptor-bound closure with a concrete signature.
     ConcreteCapturedClosure(LoweredCallableValueId),
+    /// The instantiation adapter a polymorphic value's use-site coercion
+    /// builds its closure from (B-G).
+    InstantiationAdapter(ExpressionId),
     /// Descriptor-bound entry for an implicit thunk argument.
     DescriptorBoundThunk {
         call: LoweredCallId,
@@ -332,7 +335,8 @@ impl ArtifactFamilyHooks for ProductionHooks {
             ArtifactRequestKey::TypeDescriptor(_)
             | ArtifactRequestKey::DescriptorDrop(_)
             | ArtifactRequestKey::CompoundDescriptorDrop(_)
-            | ArtifactRequestKey::DescriptorBoundEntry(_) => {
+            | ArtifactRequestKey::DescriptorBoundEntry(_)
+            | ArtifactRequestKey::InstantiationAdapter(_) => {
                 super::descriptor_artifacts::expand(program, artifact, plan)
             }
             ArtifactRequestKey::ReabstractionThunk(_) | ArtifactRequestKey::ValueConversion(_) => {
@@ -429,6 +433,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::DescriptorDrop(_)
                 | ArtifactRequestKey::CompoundDescriptorDrop(_)
                 | ArtifactRequestKey::DescriptorBoundEntry(_)
+                | ArtifactRequestKey::InstantiationAdapter(_)
                 | ArtifactRequestKey::ReabstractionThunk(_)
                 | ArtifactRequestKey::ValueConversion(_)
                 | ArtifactRequestKey::GcFinalizer(_)
@@ -1689,6 +1694,11 @@ impl LoweredProgram {
             ArtifactUseSite::ReplacedValue(id) => {
                 if !item(id) {
                     report("item", id.index());
+                }
+            }
+            ArtifactUseSite::InstantiationAdapter(id) => {
+                if !expression(id) {
+                    report("expression", id.index());
                 }
             }
             ArtifactUseSite::LoopBodyResult(id) => {

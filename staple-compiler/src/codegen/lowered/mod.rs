@@ -496,6 +496,41 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .add_function(name, ty, Some(Linkage::Internal)),
                     ]
                 }
+                LoweredArtifactPlan::InstantiationAdapter(plan) => {
+                    let ty = match &plan.target {
+                        CheckedType::Forall(scheme) => {
+                            let CheckedType::Function(target) = scheme.body.as_ref() else {
+                                return Err(Diagnostic::new(
+                                    artifact.origin.span.clone(),
+                                    "scheme adapter target is not a function",
+                                ));
+                            };
+                            self.backend.compile_dynamic_function_type(
+                                target,
+                                scheme.type_parameter_ids().len(),
+                            )?
+                        }
+                        CheckedType::Function(target)
+                            if crate::contains_type_parameter(&plan.target) =>
+                        {
+                            self.backend.compile_dynamic_function_type(target, 0)?
+                        }
+                        CheckedType::Function(target) => {
+                            self.backend.compile_closure_function_type(target)?
+                        }
+                        _ => {
+                            return Err(Diagnostic::new(
+                                artifact.origin.span.clone(),
+                                "instantiation adapter target is not a function",
+                            ));
+                        }
+                    };
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
                 LoweredArtifactPlan::ValueConversion(_) => {
                     let pointer = self.backend.context.ptr_type(AddressSpace::default());
                     let ty = self
@@ -1849,6 +1884,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
                 self.emit_descriptor_bound_entry(ordinal, plan, &artifact.origin.span)
             }
+            LoweredArtifactPlan::InstantiationAdapter(plan) => {
+                self.emit_instantiation_adapter(ordinal, plan, &artifact.origin.span)
+            }
             LoweredArtifactPlan::ValueConversion(plan) => {
                 self.emit_value_conversion(ordinal, plan, &artifact.origin.span)
             }
@@ -3103,6 +3141,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // Apply the recorded coercion plan. Lowering already selected the
         // alternatives, so emission never re-selects one.
         let value = match (&expression.coercion, &expression.coercion_plan) {
+            (Some(_), Some(crate::LoweredCoercionPlan::Instantiate { types })) => {
+                self.emit_instantiation(owner, id, value, types, &expression.origin.span)?
+            }
+            (Some(_), Some(crate::LoweredCoercionPlan::AdaptScheme { .. })) => {
+                self.emit_instantiation(owner, id, value, &[], &expression.origin.span)?
+            }
             (Some(coercion), Some(plan)) => self.emit_coercion(
                 value,
                 &coercion.source,
@@ -3178,6 +3222,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         match plan {
             crate::LoweredCoercionPlan::Identity => Ok(value),
+            crate::LoweredCoercionPlan::Instantiate { .. }
+            | crate::LoweredCoercionPlan::AdaptScheme { .. } => Err(Diagnostic::new(
+                span.clone(),
+                "polymorphic value adapters are emitted with their expression",
+            )),
             crate::LoweredCoercionPlan::Wrap { payload } => {
                 // A wrapper shares its representation's runtime value.
                 let Some(representation) =

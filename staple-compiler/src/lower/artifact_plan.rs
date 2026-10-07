@@ -37,6 +37,11 @@ pub(crate) enum LoweredArtifactPlan {
     /// A dynamic-shape closure's forwarding entry (R-C). The entry loads the
     /// instance's descriptors from its environment and forwards the call.
     DescriptorBoundEntry(DescriptorBoundEntryPlan),
+    /// A closure that forwards to a polymorphic closure: at an instantiated
+    /// function type's ABI with the instantiation's descriptors (B-G), or at
+    /// another scheme's dynamic ABI with descriptors rebuilt from its own
+    /// (B-H).
+    InstantiationAdapter(InstantiationAdapterPlan),
     /// A reabstraction thunk (R5): converts a closure between the concrete and
     /// dynamic ABIs.
     ReabstractionThunk(ReabstractionThunkPlan),
@@ -73,6 +78,22 @@ pub(crate) struct DescriptorBoundEntryPlan {
     pub runtime: Vec<crate::TypeParameterId>,
     /// The closure's function type: the dynamic shape without descriptors.
     pub function_type: CheckedFunctionType,
+}
+
+/// A polymorphic-value adapter (B-G, B-H). Its environment holds the
+/// polymorphic closure's code and environment; an instantiation adapter
+/// follows them with one descriptor per type parameter of the scheme, in
+/// scheme order.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InstantiationAdapterPlan {
+    pub scheme: crate::CheckedScheme,
+    /// The type the adapter exposes: an instantiated function type, whose ABI
+    /// is the dynamic shape when it mentions run-time parameters and the
+    /// concrete closure ABI otherwise, or another scheme.
+    pub target: CheckedType,
+    /// The scheme's instantiation, one type per type parameter. For a scheme
+    /// target the types mention the target's own parameters.
+    pub types: Vec<CheckedType>,
 }
 
 /// A reabstraction thunk (R5). The concrete side uses the concrete closure
@@ -166,6 +187,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::DescriptorDrop(_) => "descriptor-drop",
             LoweredArtifactPlan::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             LoweredArtifactPlan::DescriptorBoundEntry(_) => "descriptor-bound-entry",
+            LoweredArtifactPlan::InstantiationAdapter(_) => "instantiation-adapter",
             LoweredArtifactPlan::ReabstractionThunk(_) => "reabstraction-thunk",
             LoweredArtifactPlan::ValueConversion(_) => "value-conversion",
             LoweredArtifactPlan::GcFinalizer(GcFinalizerPlan::Payload { .. }) => {
@@ -271,6 +293,15 @@ impl LoweredArtifactPlan {
                 plan.instance.index() == key.instance.index()
                     && plan.bound == key.bound
                     && plan.bound <= plan.runtime.len()
+            }
+            (
+                LoweredArtifactPlan::InstantiationAdapter(plan),
+                ArtifactRequestKey::InstantiationAdapter(key),
+            ) => {
+                CanonicalType::dynamic(&CheckedType::Forall(Box::new(plan.scheme.clone())), origin)
+                    .is_ok_and(|scheme| scheme == key.scheme)
+                    && CanonicalType::dynamic(&plan.target, origin)
+                        .is_ok_and(|target| target == key.target)
             }
             (
                 LoweredArtifactPlan::ReabstractionThunk(plan),
@@ -405,6 +436,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::TypeDescriptor(plan) => plan.expanded,
             LoweredArtifactPlan::DescriptorDrop(plan) => plan.glue.is_some(),
             LoweredArtifactPlan::DescriptorBoundEntry(_) => true,
+            LoweredArtifactPlan::InstantiationAdapter(_) => true,
             LoweredArtifactPlan::ReabstractionThunk(_) => true,
             LoweredArtifactPlan::ValueConversion(_) => true,
             LoweredArtifactPlan::CompoundDescriptorDrop(_) => true,
@@ -759,6 +791,13 @@ impl LoweredArtifactPlan {
                 runtime: _,
                 function_type: _,
             }) => {}
+            // The scheme and target mention the caller's run-time parameters by
+            // design, like the descriptor-bound entry above.
+            LoweredArtifactPlan::InstantiationAdapter(InstantiationAdapterPlan {
+                scheme: _,
+                target: _,
+                types: _,
+            }) => {}
             LoweredArtifactPlan::ReabstractionThunk(ReabstractionThunkPlan {
                 concrete: _,
                 dynamic: _,
@@ -801,6 +840,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::CompoundDescriptorDrop(_)
             | LoweredArtifactPlan::DescriptorBoundEntry(_)
+            | LoweredArtifactPlan::InstantiationAdapter(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
@@ -840,6 +880,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::CompoundDescriptorDrop(_)
             | LoweredArtifactPlan::DescriptorBoundEntry(_)
+            | LoweredArtifactPlan::InstantiationAdapter(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)

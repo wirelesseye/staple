@@ -13414,21 +13414,46 @@ fn stage3_rejects_invalid_polymorphic_values() {
 }
 
 #[test]
-fn stage3_lowering_reports_pending_polymorphic_forms_at_the_boundary() {
+fn stage4b_lowers_instantiation_and_subsumption() {
     let module = type_check(concat!(
         "def id: <T> move T -> T = move x => x\n",
+        "def first: <A, B> (move A, move B) -> A = (move a, move b) => a\n",
         "let f = id\n",
         "let c: move I32 -> I32 = f\n",
+        "let explicit = f.<I32>\n",
+        "let swapped: <Y, X> (move X, move Y) -> X = first\n",
+        "let pairs: <T> move (T, T) -> (T, T) = id\n",
+    ));
+    lower(&module);
+}
+
+#[test]
+fn stage4b_reports_instantiation_that_needs_function_conversion() {
+    let module = type_check(concat!(
+        "def twice: <T where Copy T> (T -> T, T) -> T = (f, x) => f (f x)\n",
+        "let stored = twice\n",
+        "let concrete: (I32 -> I32, I32) -> I32 = stored\n",
     ));
     let diagnostics = Lowerer::new()
         .lower(&module)
-        .expect_err_diagnostics("instantiating a polymorphic value is not lowered yet");
+        .expect_err_diagnostics("a concrete function type cannot cross the adapter yet");
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(
         diagnostics[0].message,
-        "polymorphic function values are not supported yet"
+        "instantiating a polymorphic value with function-typed parameters or results is not supported yet"
     );
-    assert_ne!(diagnostics[0].span, staple_syntax::Span::Compiler);
+    assert_eq!(diagnostic_line(&diagnostics[0]), 3);
+}
+
+/// The 1-based line of a diagnostic's span.
+fn diagnostic_line(diagnostic: &staple_syntax::Diagnostic) -> usize {
+    match &diagnostic.span {
+        staple_syntax::Span::User {
+            location: Some(location),
+            ..
+        } => location.line,
+        span => panic!("diagnostic has no source line: {span:?}"),
+    }
 }
 
 #[test]

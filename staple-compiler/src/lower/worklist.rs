@@ -256,6 +256,7 @@ pub(crate) enum LoweredArtifactDependencyKind {
     DescriptorDrop,
     CompoundDescriptorDrop,
     DescriptorBoundEntry,
+    InstantiationAdapter,
     ReabstractionThunk,
     ValueConversion,
     /// A generated garbage-collector finalizer.
@@ -283,6 +284,7 @@ impl LoweredArtifactDependencyKind {
             LoweredArtifactDependencyKind::DescriptorDrop => "descriptor-drop",
             LoweredArtifactDependencyKind::CompoundDescriptorDrop => "compound-descriptor-drop",
             LoweredArtifactDependencyKind::DescriptorBoundEntry => "descriptor-bound-entry",
+            LoweredArtifactDependencyKind::InstantiationAdapter => "instantiation-adapter",
             LoweredArtifactDependencyKind::ReabstractionThunk => "reabstraction-thunk",
             LoweredArtifactDependencyKind::ValueConversion => "value-conversion",
             LoweredArtifactDependencyKind::GcFinalizer => "gc-finalizer",
@@ -321,6 +323,9 @@ impl LoweredArtifactDependencyKind {
             ) | (
                 LoweredArtifactDependencyKind::DescriptorBoundEntry,
                 ArtifactRequestKey::DescriptorBoundEntry(_)
+            ) | (
+                LoweredArtifactDependencyKind::InstantiationAdapter,
+                ArtifactRequestKey::InstantiationAdapter(_)
             ) | (
                 LoweredArtifactDependencyKind::ReabstractionThunk,
                 ArtifactRequestKey::ReabstractionThunk(_)

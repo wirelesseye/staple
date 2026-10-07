@@ -57,32 +57,36 @@ documented 4a fixes (`local_recursive_generic`, `local_generic_cells`, and
 
 ## Current state
 
-Stage 4b is in progress. B1–B3 are implemented.
+Stage 4b is in progress. B1–B5 are implemented.
 
-- **Representation (B1).** A polymorphic value is a closure with a static
-  descriptor. Schemes have alpha-canonical keys, and inference has a
-  scheme-aware shallow mode.
-- **Construction (B2).** Generic `def`s, generic constructors, and
+- **Representation, construction, calls (B1–B3).** A polymorphic value is a
+  closure with a static descriptor. Generic `def`s, generic constructors, and
   scheme-checked lambdas build quantified closures in concrete and dynamic
-  owners. Bound entries, descriptor-layout environments, finalizers, and fixed
-  effect rows are in place, and every storage position works. Construction
-  sites run the support analysis and report restrictions.
-- **Calls (B3).** A call through a polymorphic value passes one descriptor per
-  scheme parameter, in scheme order, from concrete owners, module
-  initializers, and dynamic bodies. Phantom and compound instantiations work,
-  a product instantiation of the scheme's single parameter is packed, and
-  function-typed arguments and results are converted at the boundary (R5).
-- **Gate.** Stage 3's diagnostic now reports only forms not lowered yet:
-  instantiation at a non-scheme type, and subsumption that is not an
-  alpha-renaming.
+  owners, in every storage position. A call passes one descriptor per scheme
+  parameter in scheme order, packs a product instantiation of a single
+  parameter, and converts function-typed arguments and results (R5).
+- **Instantiation and subsumption (B4, B5).** Using a polymorphic value at a
+  function type, or at a scheme that is not an alpha-renaming of its own, is an
+  explicit coercion with one `instantiation-adapter` artifact, keyed by the
+  canonical source scheme and target.
+  - An instantiation adapter's environment holds the quantified closure and
+    the instantiation's descriptors (deep-copied in dynamic owners). Its entry
+    uses the target's concrete or dynamic ABI.
+  - A scheme adapter takes the target's descriptors and rebuilds the source's,
+    including compound ones, at entry.
+  - An alpha-renaming reuses the closure. A function binding read at an
+    instantiated type builds its quantified closure first. Declared generic
+    `def`s, constructors, and intrinsics still monomorphize.
+- **Gate.** Stage 3's blanket diagnostic is gone. Construction sites report
+  restrictions; instantiating at a concrete function type that has
+  function-typed parameters or results is reported until adapters convert
+  them.
 
-Remaining: B4 instantiation adapters, B5 scheme adapters, B6 restriction
-tests and `Staple.md`, and the B7 audits (workspace tests, full differential
-run, IR comparison, reachability).
+Remaining: B6 restriction tests and `Staple.md`, and the B7 audits (workspace
+tests, full differential run, IR comparison, reachability).
 
-Verified: the Goal program and one program per value position run from
-concrete and from generic bodies; the differential corpus run emits all of
-them.
+Verified: the Goal program, one program per value position, and one program
+per instantiation and subsumption form run from concrete and generic bodies.
 
 ## Starting shape at the boundary (before Stage 4b)
 

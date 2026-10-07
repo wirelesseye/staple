@@ -3491,6 +3491,415 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         .map_err(|_| Diagnostic::new(span.clone(), "dynamic comparison result is not first-class"))
     }
 
+
+    /// The declared function of the instantiation adapter one expression's
+    /// coercion builds its closure from.
+    fn instantiation_adapter_code(
+        &self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        let ordinal = self
+            .view
+            .artifact_uses(owner)
+            .and_then(|uses| {
+                uses.iter().find_map(|use_| {
+                    (use_.site == crate::ArtifactUseSite::InstantiationAdapter(id))
+                        .then_some(use_.artifact)
+                })
+            })
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing instantiation adapter use"))?;
+        self.artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing instantiation adapter code"))
+    }
+
+    /// The adapter's environment: the polymorphic closure's code and
+    /// environment, then one descriptor per scheme parameter. Descriptors must
+    /// already live outside the building frame.
+    fn build_instantiation_environment(
+        &self,
+        code: PointerValue<'context>,
+        closure_environment: PointerValue<'context>,
+        descriptors: &[PointerValue<'context>],
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let environment = self.backend.build_gc_allocation(
+            self.backend
+                .size_type
+                .const_int((2 + descriptors.len() as u64) * pointer_bytes, false),
+            "instantiation.environment",
+            span.clone(),
+        )?;
+        let words = [code, closure_environment]
+            .into_iter()
+            .chain(descriptors.iter().copied())
+            .collect::<Vec<_>>();
+        for (index, word) in words.into_iter().enumerate() {
+            let slot = self.backend.dynamic_byte_offset(
+                environment,
+                self.backend
+                    .size_type
+                    .const_int(index as u64 * pointer_bytes, false),
+            )?;
+            self.backend
+                .builder
+                .build_store(slot, word)
+                .map_err(compiler_diagnostic)?;
+        }
+        Ok(environment)
+    }
+
+    /// Instantiates a polymorphic closure from a concrete owner: the result is
+    /// a closure of the instantiated type's ABI, whose environment carries the
+    /// quantified closure and the instantiation's static descriptors.
+    pub(super) fn emit_instantiation(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        value: inkwell::values::AnyValueEnum<'context>,
+        types: &[CheckedType],
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
+        use inkwell::values::AnyValue;
+        let inkwell::values::AnyValueEnum::StructValue(closure) = value else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "polymorphic value is not a closure",
+            ));
+        };
+        let code = self
+            .backend
+            .builder
+            .build_extract_value(closure, 0, "polymorphic.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let closure_environment = self
+            .backend
+            .builder
+            .build_extract_value(closure, 1, "polymorphic.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let descriptors = types
+            .iter()
+            .map(|ty| self.static_dynamic_descriptor(ty, span))
+            .collect::<CodeGenerationResult<Vec<_>>>()?;
+        let environment =
+            self.build_instantiation_environment(code, closure_environment, &descriptors, span)?;
+        let adapter = self.instantiation_adapter_code(owner, id, span)?;
+        Ok(self
+            .backend
+            .build_closure_value(adapter, environment)?
+            .as_any_value_enum())
+    }
+
+    /// Instantiates a polymorphic closure inside a dynamic body. The
+    /// descriptors are deep-copied into GC memory so the adapter can outlive
+    /// this frame (R-D).
+    fn emit_dynamic_instantiation(
+        &mut self,
+        owner: EmissionOwner,
+        id: ExpressionId,
+        source: PointerValue<'context>,
+        types: &[CheckedType],
+        destination: PointerValue<'context>,
+        environment: &DynamicEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let closure_type = self.backend.closure_type();
+        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+        let mut parts = Vec::new();
+        for index in 0..2 {
+            let slot = self
+                .backend
+                .builder
+                .build_struct_gep(closure_type, source, index, "polymorphic.slot")
+                .map_err(compiler_diagnostic)?;
+            parts.push(
+                self.load_dynamic_storage(pointer_type, slot, "polymorphic.part")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value(),
+            );
+        }
+        let mut descriptors = Vec::new();
+        for ty in types {
+            let descriptor = self.dynamic_descriptor(ty, environment, span)?;
+            descriptors.push(self.copy_descriptor_to_gc(descriptor, span)?);
+        }
+        let adapter_environment =
+            self.build_instantiation_environment(parts[0], parts[1], &descriptors, span)?;
+        let adapter = self.instantiation_adapter_code(owner, id, span)?;
+        let closure = self
+            .backend
+            .build_closure_value(adapter, adapter_environment)?;
+        self.backend
+            .builder
+            .build_store(destination, closure)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// The forwarding entry of one polymorphic-value adapter (B-G, B-H). It
+    /// loads the polymorphic closure from its environment and calls the
+    /// quantified entry in the dynamic ABI, packing the arguments when the
+    /// scheme's single type parameter was instantiated at a product. An
+    /// instantiation adapter's descriptors come from its environment; a scheme
+    /// adapter builds them from the descriptors it was called with.
+    pub(super) fn emit_instantiation_adapter(
+        &mut self,
+        ordinal: crate::specialization::ArtifactOrdinal,
+        plan: &crate::InstantiationAdapterPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+        let function = self
+            .artifacts
+            .get(&ordinal)
+            .and_then(|functions| functions.first())
+            .copied()
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing instantiation adapter declaration")
+            })?;
+        let CheckedType::Function(signature) = plan.scheme.body.as_ref() else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "instantiation adapter scheme is not a function",
+            ));
+        };
+        let (target, target_scheme) = match &plan.target {
+            CheckedType::Function(target) => (target, None),
+            CheckedType::Forall(scheme) => match scheme.body.as_ref() {
+                CheckedType::Function(target) => (target, Some(scheme)),
+                _ => {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "instantiation adapter target is not a function scheme",
+                    ));
+                }
+            },
+            _ => {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "instantiation adapter target is not a function",
+                ));
+            }
+        };
+        let own_descriptors = target_scheme.map_or(0, |scheme| scheme.type_parameter_ids().len());
+        let dynamic_shape = target_scheme.is_some()
+            || crate::contains_type_parameter(&CheckedType::Function(target.clone()));
+        let entry = self.backend.context.append_basic_block(function, "entry");
+        self.backend.builder.position_at_end(entry);
+        let parameters = function.get_params();
+        let pointer = self.backend.context.ptr_type(AddressSpace::default());
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let environment = parameters[0].into_pointer_value();
+        let environment_words = if target_scheme.is_some() {
+            2
+        } else {
+            2 + plan.types.len()
+        };
+        let mut words = Vec::new();
+        for index in 0..environment_words {
+            let slot = self.backend.dynamic_byte_offset(
+                environment,
+                self.backend
+                    .size_type
+                    .const_int(index as u64 * pointer_bytes, false),
+            )?;
+            words.push(
+                self.load_dynamic_storage(pointer, slot, "instantiation.word")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value(),
+            );
+        }
+        let code = words[0];
+        // The descriptors the quantified entry receives, in its scheme order.
+        let source_descriptors = match target_scheme {
+            None => words[2..].to_vec(),
+            Some(target_scheme) => {
+                let mut dynamic = DynamicEnvironment {
+                    descriptors: target_scheme
+                        .type_parameter_ids()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, parameter)| (parameter, parameters[1 + index].into_pointer_value()))
+                        .collect(),
+                    compound_descriptors: Vec::new(),
+                    bindings: HashMap::new(),
+                    binding_order: Vec::new(),
+                    temporaries: HashMap::new(),
+                    packed_arguments: HashMap::new(),
+                    coercions: HashMap::new(),
+                    loop_results: HashMap::new(),
+                    cells: HashMap::new(),
+                    initialization_states: HashMap::new(),
+                    resources: HashMap::new(),
+                    loops: Vec::new(),
+                    closure: environment,
+                    result: parameters[1 + own_descriptors].into_pointer_value(),
+                    result_descriptor: pointer.const_null(),
+                    returned: false,
+                };
+                let mut built = Vec::new();
+                for ty in &plan.types {
+                    built.push(self.prepare_dynamic_descriptor(ty, &mut dynamic, span)?);
+                }
+                built
+            }
+        };
+        let mut arguments: Vec<BasicMetadataValueEnum<'context>> = vec![words[1].into()];
+        for descriptor in &source_descriptors {
+            arguments.push((*descriptor).into());
+        }
+        let resources = target.effects.resources.len();
+        let whole = target.mutations.contains(&crate::CheckedMutation::Whole);
+        let types = super::flattened_parameter_types(&target.parameter);
+        let slot_count = if whole { 1 } else { types.len() };
+        let pack = !whole
+            && !matches!(signature.parameter.as_ref(), CheckedType::Product(_))
+            && matches!(target.parameter.as_ref(), CheckedType::Product(_));
+        // Result storage: the dynamic ABI hands it in, the concrete ABI
+        // returns by value.
+        let result = if dynamic_shape {
+            parameters[1 + own_descriptors].into_pointer_value()
+        } else {
+            self.backend
+                .entry_builder()
+                .build_alloca(self.backend.compile_type(&target.result)?, "instantiation.result")
+                .map_err(compiler_diagnostic)?
+        };
+        arguments.push(result.into());
+        let first_resource = if dynamic_shape {
+            2 + own_descriptors
+        } else {
+            1
+        };
+        for index in 0..resources {
+            let parameter = parameters[first_resource + index];
+            if dynamic_shape {
+                arguments.push(parameter.into());
+                continue;
+            }
+            let resource = &target.effects.resources[index];
+            if resource.mutable || !self.backend.layout.is_copy(&resource.value_type) {
+                arguments.push(parameter.into());
+            } else {
+                let storage = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(parameter.get_type(), "instantiation.resource")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(storage, parameter)
+                    .map_err(compiler_diagnostic)?;
+                arguments.push(storage.into());
+            }
+        }
+        let first_argument = first_resource + resources;
+        let indirect = self.backend.indirect_parameter_mask(target);
+        // One pointer to each argument value.
+        let mut slots = Vec::new();
+        for index in 0..slot_count {
+            let parameter = parameters[first_argument + index];
+            if dynamic_shape || whole || indirect[index] {
+                slots.push(parameter.into_pointer_value());
+            } else {
+                let storage = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(parameter.get_type(), "instantiation.argument")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(storage, parameter)
+                    .map_err(compiler_diagnostic)?;
+                slots.push(storage);
+            }
+        }
+        if pack && dynamic_shape {
+            let CheckedType::Parameter { id, .. } = signature.parameter.as_ref() else {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "instantiation adapter packs only a bare type parameter",
+                ));
+            };
+            let index = plan
+                .scheme
+                .type_parameter_ids()
+                .iter()
+                .position(|parameter| parameter == id)
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "instantiation adapter parameter is unbound")
+                })?;
+            let descriptor = source_descriptors[index];
+            let packed = self.backend.allocate_dynamic_value(descriptor)?;
+            for (field_index, slot) in slots.iter().enumerate() {
+                let (field, component) =
+                    self.dynamic_product_field(descriptor, packed, field_index as u32)?;
+                self.backend.copy_dynamic_value(component, *slot, field)?;
+            }
+            slots = vec![packed];
+        } else if pack {
+            let fields = slots
+                .iter()
+                .enumerate()
+                .map(|(index, slot)| {
+                    self.load_dynamic_storage(
+                        self.backend.compile_type(types[index])?,
+                        *slot,
+                        "instantiation.field",
+                    )
+                    .map_err(compiler_diagnostic)
+                })
+                .collect::<CodeGenerationResult<Vec<BasicValueEnum<'context>>>>()?;
+            let product = self.backend.build_product_value(&fields, span.clone())?;
+            let storage = self
+                .backend
+                .entry_builder()
+                .build_alloca(product.get_type(), "instantiation.packed")
+                .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_store(storage, product)
+                .map_err(compiler_diagnostic)?;
+            slots = vec![storage];
+        }
+        for slot in &slots {
+            arguments.push((*slot).into());
+        }
+        let function_type = self
+            .backend
+            .compile_dynamic_function_type(signature, source_descriptors.len())?;
+        self.backend
+            .builder
+            .build_indirect_call(function_type, code, &arguments, "instantiation.call")
+            .map_err(compiler_diagnostic)?;
+        if dynamic_shape {
+            self.backend
+                .builder
+                .build_return(None)
+                .map_err(compiler_diagnostic)?;
+        } else {
+            let value = self
+                .load_dynamic_storage(
+                    self.backend.compile_type(&target.result)?,
+                    result,
+                    "instantiation.value",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_return(Some(&value))
+                .map_err(compiler_diagnostic)?;
+        }
+        Ok(())
+    }
+
     /// The forwarding entry a dynamic-shape closure points at (R-C). Its
     /// parameters include the unbound descriptors. It loads the leading bound
     /// descriptors from the closure environment and forwards both sets to the
@@ -3733,6 +4142,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     &mut environment,
                     &record.origin.span,
                 )?;
+                if let Some(LoweredCoercionPlan::Instantiate { types }) = &record.coercion_plan {
+                    for ty in types {
+                        self.prepare_dynamic_descriptor(
+                            ty,
+                            &mut environment,
+                            &record.origin.span,
+                        )?;
+                    }
+                }
                 if !matches!(record.coercion_plan, Some(LoweredCoercionPlan::Identity)) {
                     environment.coercions.insert(
                         expression_id,
@@ -4272,6 +4690,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             LoweredCoercionPlan::Identity => {
                 self.backend
                     .copy_dynamic_value(descriptor, value, destination)
+            }
+            LoweredCoercionPlan::Instantiate { .. } | LoweredCoercionPlan::AdaptScheme { .. } => {
+                Err(Diagnostic::new(
+                    span.clone(),
+                    "polymorphic value adapters are emitted with their expression",
+                ))
             }
             LoweredCoercionPlan::SumInject {
                 alternative,
@@ -6029,6 +6453,31 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })?;
             if matches!(plan, LoweredCoercionPlan::Identity) {
                 value
+            } else if let LoweredCoercionPlan::Instantiate { .. }
+            | LoweredCoercionPlan::AdaptScheme { .. } = plan
+            {
+                // A scheme adapter rebuilds the quantified descriptors at its
+                // own entry; only an instantiation carries them.
+                let types = match plan {
+                    LoweredCoercionPlan::Instantiate { types } => types.as_slice(),
+                    _ => &[],
+                };
+                let target = *environment.coercions.get(&id).ok_or_else(|| {
+                    Diagnostic::new(
+                        expression.origin.span.clone(),
+                        "missing dynamic coercion storage",
+                    )
+                })?;
+                self.emit_dynamic_instantiation(
+                    owner,
+                    id,
+                    value,
+                    types,
+                    target,
+                    environment,
+                    &expression.origin.span,
+                )?;
+                target
             } else {
                 let target = *environment.coercions.get(&id).ok_or_else(|| {
                     Diagnostic::new(
