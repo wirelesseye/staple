@@ -1720,7 +1720,15 @@ order, with `_` for an argument that is still inferred: `id.<I32> 42`.
 **Instantiation.** Used where an ordinary function type is expected, a
 polymorphic value is instantiated: `let increment: I32 -> I32 = id`. The result
 is an ordinary function value of the instantiated type. `id.<I32>` without an
-argument does the same.
+argument does the same. The instantiated type may take and return functions,
+including `mut` function parameters, and the instantiated value may be stored
+directly into a `from` wrapper or a sum:
+
+```staple
+def apply: <T> (T -> T) -> T -> T = f => x => f x
+let poly: <T> (T -> T) -> T -> T = apply
+let concrete: (I32 -> I32) -> I32 -> I32 = poly
+```
 
 **Subsumption.** A polymorphic value may be used where another scheme is
 expected when the value's scheme can be instantiated to the expected body with
@@ -1751,11 +1759,14 @@ same function still works when it is called directly:
   release);
 * an effect parameter in the scheme;
 * a coroutine, async, or reactive body;
-* `__buffer_clone` in the implementation;
 * an array length that depends on a type parameter of the scheme;
 * a function value behind `Ref`, `Slice`, `Buffer`, or a shared cell that
   crosses into the implementation;
-* a trait member used as a polymorphic value.
+* a trait member used as a polymorphic value;
+* inside another polymorphic value's implementation, an instantiation at a
+  type where one argument or the result combines that implementation's type
+  parameters with a concrete function type, such as `(I32 -> I32, A)` used
+  where the scheme expects `(T -> T, U)`.
 
 The checker separately rejects signals, ordinary `extern` declarations,
 parameter-product-capable type parameters, and polymorphic recursion in

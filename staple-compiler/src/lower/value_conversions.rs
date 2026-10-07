@@ -8,6 +8,75 @@ use crate::specialization::{
 use crate::{CheckedType, Origin, ReabstractionThunkPlan, ValueConversionPlan};
 use staple_syntax::Diagnostic;
 
+/// One value an instantiation adapter converts between the concrete closure
+/// ABI of its target and the dynamic shape of the scheme body.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AdapterConversion {
+    pub concrete: CheckedType,
+    pub dynamic: CheckedType,
+}
+
+/// The conversions an instantiation adapter applies, one entry per argument
+/// slot of its target signature and one for the result. The slots mirror the
+/// adapter's own layout: a whole-parameter mutation is one slot, a product
+/// packed into a bare type parameter converts nothing (the body sees an opaque
+/// value), and otherwise the target's and the body's flattened parameters pair
+/// up.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AdapterConversions {
+    pub arguments: Vec<Option<AdapterConversion>>,
+    pub result: Option<AdapterConversion>,
+}
+
+/// The adapter conversions for instantiating `body` (a scheme's body) at
+/// `target`. A value whose target type mixes the caller's run-time
+/// parameters with a concrete function that needs converting is not
+/// supported: conversions work on concrete layouts.
+pub(crate) fn adapter_conversions(
+    target: &crate::CheckedFunctionType,
+    body: &crate::CheckedFunctionType,
+) -> Result<AdapterConversions, String> {
+    let pair = |concrete: &CheckedType, dynamic: &CheckedType| {
+        if !super::needs_concrete_function_conversion(concrete, dynamic) {
+            return Ok(None);
+        }
+        if crate::contains_type_parameter(concrete) {
+            return Err("instantiating a polymorphic value at a type that combines \
+                 the surrounding type parameters with a concrete function type is not \
+                 supported yet"
+                .to_owned());
+        }
+        Ok(Some(AdapterConversion {
+            concrete: concrete.clone(),
+            dynamic: dynamic.clone(),
+        }))
+    };
+    let whole = target.mutations.contains(&crate::CheckedMutation::Whole);
+    let target_slots = super::flattened_parameter_types(&target.parameter);
+    let pack = !whole
+        && !matches!(body.parameter.as_ref(), CheckedType::Product(_))
+        && matches!(target.parameter.as_ref(), CheckedType::Product(_));
+    let arguments = if whole {
+        vec![pair(&target.parameter, &body.parameter)?]
+    } else if pack {
+        vec![None; target_slots.len()]
+    } else {
+        let body_slots = super::flattened_parameter_types(&body.parameter);
+        if body_slots.len() != target_slots.len() {
+            return Err("instantiation adapter parameter shapes disagree".to_owned());
+        }
+        target_slots
+            .iter()
+            .zip(&body_slots)
+            .map(|(concrete, dynamic)| pair(concrete, dynamic))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(AdapterConversions {
+        arguments,
+        result: pair(&target.result, &body.result)?,
+    })
+}
+
 pub(super) fn needs_conversion(concrete: &CheckedType, dynamic: &CheckedType) -> bool {
     match (concrete, dynamic) {
         (CheckedType::Function(_), CheckedType::Function(function)) => {

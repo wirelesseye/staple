@@ -13428,19 +13428,37 @@ fn stage4b_lowers_instantiation_and_subsumption() {
 }
 
 #[test]
-fn stage4b_reports_instantiation_that_needs_function_conversion() {
+fn stage4b_instantiation_converts_function_typed_arguments() {
+    // The adapter converts the concrete callback into the scheme body's
+    // dynamic shape (R5); the corpus program
+    // `polymorphic_function_typed_instantiation` runs it.
     let module = type_check(concat!(
         "def twice: <T where Copy T> (T -> T, T) -> T = (f, x) => f (f x)\n",
         "let stored = twice\n",
         "let concrete: (I32 -> I32, I32) -> I32 = stored\n",
     ));
+    lower(&module);
+}
+
+#[test]
+fn stage4b_reports_instantiation_mixing_type_parameters_with_function_conversion() {
+    // One argument whose instantiated type mixes the surrounding run-time
+    // parameter `A` with a concrete callback would need a conversion over a
+    // run-time layout.
+    let module = type_check(concat!(
+        "let outer: <A where Copy A> A -> A = a => {\n",
+        "    let poly: <T, U where Copy T, Copy U> ((T -> T, U), I32) -> U = (pair, n) => { let (f, u) = pair; u }\n",
+        "    let mixed: ((I32 -> I32, A), I32) -> A = poly\n",
+        "    mixed ((x => x, a), 1)\n",
+        "}\n",
+    ));
     let diagnostics = Lowerer::new()
         .lower(&module)
-        .expect_err_diagnostics("a concrete function type cannot cross the adapter yet");
+        .expect_err_diagnostics("a run-time layout cannot be converted");
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(
         diagnostics[0].message,
-        "instantiating a polymorphic value with function-typed parameters or results is not supported yet"
+        "instantiating a polymorphic value at a type that combines the surrounding type parameters with a concrete function type is not supported yet"
     );
     assert_eq!(diagnostic_line(&diagnostics[0]), 3);
 }

@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 118] = [
+static CORPUS: [CorpusProgram; 121] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -3075,6 +3075,79 @@ let value = at (Ref (1, 2), (USize :: 5))
             "polymorphic",
         )),
         "1 s xy 3 9 6\n",
+    ),
+    // B-G: instantiating at concrete function types converts callbacks and
+    // results between the concrete and dynamic closure ABIs (R5), including a
+    // mutated callback written back. `inside` instantiates at a dynamic shape
+    // when the differential run dictionary-passes it.
+    expect_stdout(
+        must_run(inline(
+            "polymorphic_function_typed_instantiation",
+            concat!(
+                "use std.io.println\n",
+                "def twice: <T where Copy T> (T -> T) -> (T -> T) = f => x => f (f x)\n",
+                "let poly_twice: <T where Copy T> (T -> T) -> (T -> T) = twice\n",
+                "let concrete_twice: (I32 -> I32) -> (I32 -> I32) = poly_twice\n",
+                "let add_two = concrete_twice (x => x + 1)\n",
+                "let pair_apply: <T where Copy T> (T -> T, T) -> T = (f, x) => f x\n",
+                "let concrete_pair: (I32 -> I32, I32) -> I32 = pair_apply\n",
+                "let nested: <T where Copy T> ((T -> T) -> T) -> T = g => g (x => x)\n",
+                "let concrete_nested: ((I32 -> I32) -> I32) -> I32 = nested\n",
+                "let replace: <T where Copy T> (mut (T -> T), T) -> T = (mut f, x) => { let before = f x; f = y => y; before }\n",
+                "let concrete_replace: (mut (I32 -> I32), I32) -> I32 = replace\n",
+                "let mut doubler: I32 -> I32 = x => x * 2\n",
+                "let first = concrete_replace (doubler, 5)\n",
+                "let second = doubler 5\n",
+                "def inside: <A where Copy A> A -> A = a => {\n",
+                "    let poly: <T, U where Copy T, Copy U> (T -> T, U) -> U = (f, u) => { let ignored = f; u }\n",
+                "    let mixed: (I32 -> I32, A) -> A = poly\n",
+                "    mixed (x => x, a)\n",
+                "}\n",
+                "println \"${add_two 40} ${concrete_pair (x => x * 2, 21)} ${concrete_nested (f => f 9)} ${first} ${second} ${inside 7}\"\n",
+            ),
+            "polymorphic",
+        )),
+        "42 42 9 10 5 7\n",
+    ),
+    // A mutated concrete callback passed to a polymorphic value from a
+    // dynamic body converts into the dynamic shape and back.
+    expect_stdout(
+        must_run(inline(
+            "polymorphic_mutable_callback_from_dynamic_body",
+            concat!(
+                "use std.io.println\n",
+                "let replace: <T where Copy T> (mut (T -> T), T) -> T = (mut f, x) => { let before = f x; f = y => y; before }\n",
+                "let user: <A where Copy A> A -> I32 = a => {\n",
+                "    let mut doubler: I32 -> I32 = x => x * 2\n",
+                "    let first = replace.<I32> (doubler, 5)\n",
+                "    let second = doubler 5\n",
+                "    first * 100 + second\n",
+                "}\n",
+                "println \"${user 0}\"\n",
+            ),
+            "polymorphic",
+        )),
+        "1005\n",
+    ),
+    // An instantiation that the checker also coerces into a `from` wrapper or
+    // a sum instantiates first, then wraps or injects the adapter closure.
+    expect_stdout(
+        must_run(inline(
+            "polymorphic_instantiation_inside_coercion",
+            concat!(
+                "use std.io.println\n",
+                "let poly: <T where Copy T> T -> T = value => value\n",
+                "type Op = from (I32 -> I32)\n",
+                "let op: Op = poly\n",
+                "let Op(f) = op\n",
+                "type Missing = wrap ()\n",
+                "let maybe: (I32 -> I32) | Missing = poly\n",
+                "let tag = match maybe { Missing () => 0, _ => 1 }\n",
+                "println \"${f 3} ${tag}\"\n",
+            ),
+            "polymorphic",
+        )),
+        "3 1\n",
     ),
     expect_stdout(
         must_run(inline(

@@ -3140,16 +3140,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         // Apply the recorded coercion plan. Lowering already selected the
         // alternatives, so emission never re-selects one.
-        let value = match (&expression.coercion, &expression.coercion_plan) {
-            (Some(_), Some(crate::LoweredCoercionPlan::Instantiate { types })) => {
-                self.emit_instantiation(owner, id, value, types, &expression.origin.span)?
+        let instantiation = match (&expression.coercion, &expression.coercion_plan) {
+            (Some(coercion), Some(plan)) => plan.split_instantiation(&coercion.target),
+            _ => None,
+        };
+        // A polymorphic value is instantiated (or adapted) first; any wrapper
+        // introduction or sum injection then applies to the produced closure.
+        let (value, coercion_plan) = match (&expression.coercion, instantiation) {
+            (Some(_), Some((leaf, _, rest))) => {
+                let types = match leaf {
+                    crate::LoweredCoercionPlan::Instantiate { types } => types.as_slice(),
+                    _ => &[],
+                };
+                let instantiated =
+                    self.emit_instantiation(owner, id, value, types, &expression.origin.span)?;
+                (instantiated, Some(rest))
             }
-            (Some(_), Some(crate::LoweredCoercionPlan::AdaptScheme { .. })) => {
-                self.emit_instantiation(owner, id, value, &[], &expression.origin.span)?
-            }
+            _ => (value, expression.coercion_plan.clone()),
+        };
+        let produced = match (&expression.coercion, &expression.coercion_plan) {
+            (Some(coercion), Some(plan)) => plan
+                .split_instantiation(&coercion.target)
+                .map(|(_, produced, _)| produced),
+            _ => None,
+        };
+        let value = match (&expression.coercion, &coercion_plan) {
             (Some(coercion), Some(plan)) => self.emit_coercion(
                 value,
-                &coercion.source,
+                produced.as_ref().unwrap_or(&coercion.source),
                 &coercion.target,
                 plan,
                 &expression.origin.span,

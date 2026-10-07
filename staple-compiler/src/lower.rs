@@ -60,6 +60,7 @@ mod value_conversions;
 mod worklist;
 
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
+pub(crate) use value_conversions::{AdapterConversion, adapter_conversions};
 
 // Read-only emission view. `LoweredModule::program` returns this
 // type; `codegen::layout::LayoutContext` stores it so the shared
@@ -624,6 +625,63 @@ impl LoweredCoercionPlan {
         }
     }
 
+    /// Splits off a polymorphic value's instantiation or scheme adaptation
+    /// that this plan applies first, possibly under a wrapper introduction or
+    /// sum injection. Returns the instantiating plan, the type it produces
+    /// (`target` narrowed to the leaf), and the rest of the plan with an
+    /// identity leaf, which applies to that produced value.
+    pub(crate) fn split_instantiation(
+        &self,
+        target: &CheckedType,
+    ) -> Option<(&LoweredCoercionPlan, CheckedType, LoweredCoercionPlan)> {
+        match self {
+            LoweredCoercionPlan::Instantiate { .. } | LoweredCoercionPlan::AdaptScheme { .. } => {
+                Some((self, target.clone(), LoweredCoercionPlan::Identity))
+            }
+            LoweredCoercionPlan::Wrap { payload } => {
+                let representation = crate::implicit_wrapper_representation(target)?;
+                let (leaf, produced, inner) = payload.split_instantiation(representation)?;
+                Some((
+                    leaf,
+                    produced,
+                    LoweredCoercionPlan::Wrap {
+                        payload: Box::new(inner),
+                    },
+                ))
+            }
+            LoweredCoercionPlan::SumInject {
+                alternative,
+                payload,
+            } => {
+                let CheckedType::Sum(sum) = target else {
+                    return None;
+                };
+                let (leaf, produced, inner) =
+                    payload.split_instantiation(sum.alternatives.get(*alternative)?)?;
+                Some((
+                    leaf,
+                    produced,
+                    LoweredCoercionPlan::SumInject {
+                        alternative: *alternative,
+                        payload: Box::new(inner),
+                    },
+                ))
+            }
+            LoweredCoercionPlan::Identity | LoweredCoercionPlan::SumWiden { .. } => None,
+        }
+    }
+
+    /// The instantiation types of the polymorphic value this plan instantiates,
+    /// wherever the instantiation sits.
+    pub(crate) fn instantiation_types(&self) -> &[CheckedType] {
+        match self {
+            LoweredCoercionPlan::Instantiate { types } => types,
+            LoweredCoercionPlan::Wrap { payload }
+            | LoweredCoercionPlan::SumInject { payload, .. } => payload.instantiation_types(),
+            _ => &[],
+        }
+    }
+
     /// Matches a scheme's body against the function type it is used at,
     /// recovering one instantiation per quantified type parameter.
     fn instantiate(
@@ -639,23 +697,16 @@ impl LoweredCoercionPlan {
             &CheckedType::Function(target.clone()),
             &mut inferred,
         );
-        // The adapter forwards values without converting between the concrete
-        // and dynamic closure ABIs, so a concrete function type reaching the
-        // quantified body has no adapter yet.
-        if needs_concrete_function_conversion(&target.parameter, &body.parameter)
-            || needs_concrete_function_conversion(&target.result, &body.result)
-        {
-            return Err(
-                "instantiating a polymorphic value with function-typed parameters or results is not supported yet"
-                    .to_owned(),
-            );
-        }
+        // The adapter converts concrete function values reaching the quantified
+        // body (R5). Only a value that mixes run-time parameters with such a
+        // function has no conversion.
+        value_conversions::adapter_conversions(target, body)?;
         let types = scheme
             .type_parameter_ids()
             .into_iter()
             .map(|parameter| {
                 inferred.get(&parameter).cloned().ok_or_else(|| {
-                    "a polymorphic value's type parameter cannot be inferred from its use".to_owned()
+                    "internal invariant violated: a polymorphic value's instantiation leaves a type parameter unsolved".to_owned()
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -684,7 +735,7 @@ impl LoweredCoercionPlan {
             .into_iter()
             .map(|parameter| {
                 inferred.get(&parameter).cloned().ok_or_else(|| {
-                    "a polymorphic value's type parameter cannot be inferred from its use".to_owned()
+                    "internal invariant violated: a polymorphic value's instantiation leaves a type parameter unsolved".to_owned()
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -726,6 +777,29 @@ impl LoweredCoercionPlan {
                 return Ok(LoweredCoercionPlan::Identity);
             }
             return Self::adapt(value, expected);
+        }
+        // A polymorphic value reaches a sum through its instantiation: inject
+        // into the one alternative the scheme can be used at.
+        if let (CheckedType::Forall(_), CheckedType::Sum(target_sum)) = (source, target) {
+            let candidates = target_sum
+                .alternatives
+                .iter()
+                .enumerate()
+                .filter_map(|(index, alternative)| {
+                    Self::plan_with(source, alternative, from)
+                        .ok()
+                        .map(|plan| (index, plan))
+                })
+                .collect::<Vec<_>>();
+            return match candidates.as_slice() {
+                [(alternative, payload)] => Ok(LoweredCoercionPlan::SumInject {
+                    alternative: *alternative,
+                    payload: Box::new(payload.clone()),
+                }),
+                _ => Err(format!(
+                    "polymorphic value `{source}` does not match exactly one alternative of `{target}`"
+                )),
+            };
         }
         let CheckedType::Sum(target_sum) = target else {
             if from == FromCoercion::Allowed
@@ -5220,20 +5294,22 @@ impl LoweredProgram {
         // A polymorphic value used at an instantiated function type holds its
         // quantified closure: the instantiation is an explicit coercion into a
         // closure of the instantiated type's ABI.
+        // When the checker also coerced the instantiated value (into a `from`
+        // wrapper or a sum), the instantiation is the first step of that
+        // coercion: the plan instantiates, then wraps or injects.
+        let natural = coercion
+            .as_ref()
+            .map_or_else(|| value_type.clone(), |coercion| coercion.source.clone());
         if type_override_absent
-            && let Some(scheme) = self.instantiated_scheme(module, syntax.id, &value_type)
+            && let Some(scheme) = self.instantiated_scheme(module, syntax.id, &natural)
         {
-            if coercion.is_some() {
-                return Err(Diagnostic::new(
-                    syntax.span.clone(),
-                    "instantiating a polymorphic value inside another coercion is not supported yet",
-                ));
-            }
             let source = CheckedType::Forall(Box::new(scheme));
-            coercion = Some(crate::CheckedCoercion {
-                source: source.clone(),
-                target: std::mem::replace(&mut value_type, source),
-            });
+            let target = match coercion.take() {
+                Some(existing) => existing.target,
+                None => value_type.clone(),
+            };
+            value_type = source.clone();
+            coercion = Some(crate::CheckedCoercion { source, target });
         }
         let coercion_plan = match &coercion {
             Some(coercion) => match LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
@@ -6765,8 +6841,9 @@ impl LoweredProgram {
         // The construction keeps the value's own scheme. A use at an
         // instantiated type or at a different scheme still constructs the
         // quantified closure; the expression's coercion adapts it.
-        let scheme = module
-            .type_of_expression(syntax)
+        let natural = natural_expression_type(module, syntax);
+        let scheme = natural
+            .as_ref()
             .and_then(|ty| match self.instantiated_scheme(module, syntax, ty) {
                 Some(source) => Some(source),
                 None => match ty {
@@ -6774,12 +6851,12 @@ impl LoweredProgram {
                     _ => None,
                 },
             });
-        let checked_function_type = match (&scheme, module.type_of_expression(syntax)) {
+        let checked_function_type = match (&scheme, natural) {
             (Some(scheme), _) => match scheme.body.as_ref() {
                 CheckedType::Function(function_type) => Some(function_type.clone()),
                 _ => None,
             },
-            (None, Some(CheckedType::Function(function_type))) => Some(function_type.clone()),
+            (None, Some(CheckedType::Function(function_type))) => Some(function_type),
             _ => None,
         };
         let resolved = module.resolved();
@@ -13925,6 +14002,16 @@ fn polymorphic_call_substitutions(
         CheckedType::Function(actual.clone()),
     );
     substitutions_from_map(inferred)
+}
+
+/// The type an expression has before the checker's own coercion (into a
+/// `from` wrapper or a sum) applies: the coercion's source, or the recorded
+/// type when nothing coerced it.
+fn natural_expression_type(module: &TypedModule, syntax: SyntaxId) -> Option<CheckedType> {
+    module
+        .coercion_for(syntax)
+        .map(|coercion| coercion.source.clone())
+        .or_else(|| module.type_of_expression(syntax).cloned())
 }
 
 fn call_substitutions(

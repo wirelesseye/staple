@@ -94,6 +94,12 @@ pub(crate) struct InstantiationAdapterPlan {
     /// The scheme's instantiation, one type per type parameter. For a scheme
     /// target the types mention the target's own parameters.
     pub types: Vec<CheckedType>,
+    /// Value conversions for function-typed arguments and results (R5), in
+    /// `value_conversions::adapter_conversions` order: per argument slot the
+    /// concrete-to-dynamic conversion and, for a mutated slot, the
+    /// dynamic-to-concrete writeback, then the result's dynamic-to-concrete
+    /// conversion. Codegen finds each by its key.
+    pub children: Vec<PlannedArtifact>,
 }
 
 /// A reabstraction thunk (R5). The concrete side uses the concrete closure
@@ -797,6 +803,7 @@ impl LoweredArtifactPlan {
                 scheme: _,
                 target: _,
                 types: _,
+                children: _,
             }) => {}
             LoweredArtifactPlan::ReabstractionThunk(ReabstractionThunkPlan {
                 concrete: _,
@@ -821,6 +828,11 @@ impl LoweredArtifactPlan {
                     visit(PlannedCalleeRef::Artifact(child));
                 }
             }
+            LoweredArtifactPlan::InstantiationAdapter(plan) => {
+                for child in &plan.children {
+                    visit(PlannedCalleeRef::Artifact(child));
+                }
+            }
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::TypeDescriptor(plan) => {
                 for component in &plan.components {
@@ -840,7 +852,6 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::CompoundDescriptorDrop(_)
             | LoweredArtifactPlan::DescriptorBoundEntry(_)
-            | LoweredArtifactPlan::InstantiationAdapter(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)
@@ -857,6 +868,11 @@ impl LoweredArtifactPlan {
                 }
             }
             LoweredArtifactPlan::ReabstractionThunk(plan) => {
+                for child in &mut plan.children {
+                    visit(PlannedCalleeRefMut::Artifact(child));
+                }
+            }
+            LoweredArtifactPlan::InstantiationAdapter(plan) => {
                 for child in &mut plan.children {
                     visit(PlannedCalleeRefMut::Artifact(child));
                 }
@@ -880,7 +896,6 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::CompoundDescriptorDrop(_)
             | LoweredArtifactPlan::DescriptorBoundEntry(_)
-            | LoweredArtifactPlan::InstantiationAdapter(_)
             | LoweredArtifactPlan::ReactionRunner(_)
             | LoweredArtifactPlan::UntilRunner(_)
             | LoweredArtifactPlan::DerivedRunner(_)

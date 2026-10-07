@@ -2665,22 +2665,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             arguments.push(storage.into());
         }
         arguments.extend(hidden);
+        let mut writebacks = Vec::new();
         for (index, slot) in slots.iter().enumerate() {
             let mut pointer = slot
                 .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic closure argument"))?;
             // A concrete function value reaching a quantified parameter
-            // converts into the dynamic closure ABI first.
+            // converts into the dynamic closure ABI first; a mutated one
+            // converts back after the call.
             if let Some(conversion) = self
                 .view
                 .conversions(owner)
                 .and_then(|conversions| conversions.get(&(call_id, Some(index))))
             {
-                if conversion.writeback {
-                    return Err(Diagnostic::new(
-                        span.clone(),
-                        "mutable function arguments to polymorphic values are not supported yet",
-                    ));
-                }
+                let writeback = conversion.writeback;
                 let destination = self
                     .backend
                     .entry_builder()
@@ -2694,6 +2691,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_direct_call(thunk, &[destination.into(), pointer.into()], "")
                     .map_err(compiler_diagnostic)?;
+                if writeback {
+                    let function = self.reabstraction_writeback_code(owner, call_id, index, span)?;
+                    writebacks.push((function, pointer, destination));
+                }
                 pointer = destination;
             }
             if dynamic_shape || indirect[index] {
@@ -2727,6 +2728,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.backend
                 .builder
                 .build_store(storage, value)
+                .map_err(compiler_diagnostic)?;
+        }
+        for (function, original, converted) in writebacks {
+            self.backend
+                .builder
+                .build_direct_call(function, &[original.into(), converted.into()], "")
                 .map_err(compiler_diagnostic)?;
         }
         if polymorphic_types.is_some()
@@ -3649,6 +3656,37 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// scheme's single type parameter was instantiated at a product. An
     /// instantiation adapter's descriptors come from its environment; a scheme
     /// adapter builds them from the descriptors it was called with.
+    /// One of an instantiation adapter's planned value conversions, found by
+    /// its key.
+    fn adapter_conversion_function(
+        &self,
+        plan: &crate::InstantiationAdapterPlan,
+        conversion: &crate::lower::AdapterConversion,
+        direction: crate::specialization::ReabstractionDirection,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
+        use crate::specialization::{ArtifactRequestKey, CanonicalType};
+        let origin = crate::Origin {
+            span: span.clone(),
+            syntax: staple_syntax::SyntaxId::COMPILER,
+        };
+        let concrete = CanonicalType::concrete(&conversion.concrete, &origin)?;
+        let dynamic = CanonicalType::dynamic(&conversion.dynamic, &origin)?;
+        let child = plan
+            .children
+            .iter()
+            .find(|child| {
+                matches!(&child.key, ArtifactRequestKey::ValueConversion(key)
+                    if key.concrete == concrete
+                        && key.dynamic == dynamic
+                        && key.direction == direction)
+            })
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing instantiation adapter conversion")
+            })?;
+        self.planned_conversion_function(child, span)
+    }
+
     pub(super) fn emit_instantiation_adapter(
         &mut self,
         ordinal: crate::specialization::ArtifactOrdinal,
@@ -3821,6 +3859,48 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 slots.push(storage);
             }
         }
+        // Concrete function values reaching the scheme body convert into its
+        // dynamic shape (R5); a mutated slot converts back after the call.
+        let conversions = crate::lower::adapter_conversions(target, signature)
+            .map_err(|message| Diagnostic::new(span.clone(), message))?;
+        let mut writebacks = Vec::new();
+        for (index, conversion) in conversions.arguments.iter().enumerate() {
+            let Some(conversion) = conversion else {
+                continue;
+            };
+            let into_dynamic = self.adapter_conversion_function(
+                plan,
+                conversion,
+                crate::specialization::ReabstractionDirection::ConcreteToDynamic,
+                span,
+            )?;
+            let converted = self
+                .backend
+                .entry_builder()
+                .build_alloca(
+                    self.backend.compile_type(&conversion.concrete)?,
+                    "instantiation.converted",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.backend
+                .builder
+                .build_direct_call(into_dynamic, &[converted.into(), slots[index].into()], "")
+                .map_err(compiler_diagnostic)?;
+            if whole
+                || target
+                    .mutations
+                    .contains(&crate::CheckedMutation::Element(index))
+            {
+                let into_concrete = self.adapter_conversion_function(
+                    plan,
+                    conversion,
+                    crate::specialization::ReabstractionDirection::DynamicToConcrete,
+                    span,
+                )?;
+                writebacks.push((into_concrete, slots[index], converted));
+            }
+            slots[index] = converted;
+        }
         if pack && dynamic_shape {
             let CheckedType::Parameter { id, .. } = signature.parameter.as_ref() else {
                 return Err(Diagnostic::new(
@@ -3879,6 +3959,43 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_indirect_call(function_type, code, &arguments, "instantiation.call")
             .map_err(compiler_diagnostic)?;
+        for (writeback, original, converted) in writebacks {
+            self.backend
+                .builder
+                .build_direct_call(writeback, &[original.into(), converted.into()], "")
+                .map_err(compiler_diagnostic)?;
+        }
+        // A function-typed result comes back in the body's dynamic shape and
+        // converts into the target's (R5).
+        let result_source = match &conversions.result {
+            Some(conversion) => {
+                let into_concrete = self.adapter_conversion_function(
+                    plan,
+                    conversion,
+                    crate::specialization::ReabstractionDirection::DynamicToConcrete,
+                    span,
+                )?;
+                let converted = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(
+                        self.backend.compile_type(&conversion.concrete)?,
+                        "instantiation.converted_result",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_direct_call(into_concrete, &[converted.into(), result.into()], "")
+                    .map_err(compiler_diagnostic)?;
+                if dynamic_shape {
+                    self.conversion_copy(&conversion.concrete, converted, result)?;
+                    result
+                } else {
+                    converted
+                }
+            }
+            None => result,
+        };
         if dynamic_shape {
             self.backend
                 .builder
@@ -3888,7 +4005,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let value = self
                 .load_dynamic_storage(
                     self.backend.compile_type(&target.result)?,
-                    result,
+                    result_source,
                     "instantiation.value",
                 )
                 .map_err(compiler_diagnostic)?;
@@ -6453,12 +6570,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             })?;
             if matches!(plan, LoweredCoercionPlan::Identity) {
                 value
-            } else if let LoweredCoercionPlan::Instantiate { .. }
-            | LoweredCoercionPlan::AdaptScheme { .. } = plan
+            } else if let Some((leaf, produced, rest)) = plan.split_instantiation(&coercion.target)
             {
                 // A scheme adapter rebuilds the quantified descriptors at its
                 // own entry; only an instantiation carries them.
-                let types = match plan {
+                let types = match leaf {
                     LoweredCoercionPlan::Instantiate { types } => types.as_slice(),
                     _ => &[],
                 };
@@ -6468,15 +6584,43 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "missing dynamic coercion storage",
                     )
                 })?;
-                self.emit_dynamic_instantiation(
-                    owner,
-                    id,
-                    value,
-                    types,
-                    target,
-                    environment,
-                    &expression.origin.span,
-                )?;
+                if matches!(rest, LoweredCoercionPlan::Identity) {
+                    self.emit_dynamic_instantiation(
+                        owner,
+                        id,
+                        value,
+                        types,
+                        target,
+                        environment,
+                        &expression.origin.span,
+                    )?;
+                } else {
+                    // The instantiated closure then enters the wrapper or sum
+                    // the checker coerced it into.
+                    let produced_storage = self
+                        .backend
+                        .entry_builder()
+                        .build_alloca(self.backend.closure_type(), "instantiation.produced")
+                        .map_err(compiler_diagnostic)?;
+                    self.emit_dynamic_instantiation(
+                        owner,
+                        id,
+                        value,
+                        types,
+                        produced_storage,
+                        environment,
+                        &expression.origin.span,
+                    )?;
+                    self.coerce_dynamic_value(
+                        produced_storage,
+                        &produced,
+                        &coercion.target,
+                        &rest,
+                        target,
+                        environment,
+                        &expression.origin.span,
+                    )?;
+                }
                 target
             } else {
                 let target = *environment.coercions.get(&id).ok_or_else(|| {

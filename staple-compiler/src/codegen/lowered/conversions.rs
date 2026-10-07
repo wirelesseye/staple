@@ -310,7 +310,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .dynamic_byte_offset(storage, self.backend.size_type.const_int(offset, false))
     }
 
-    fn conversion_copy(
+    pub(super) fn conversion_copy(
         &self,
         ty: &CheckedType,
         source: PointerValue<'context>,

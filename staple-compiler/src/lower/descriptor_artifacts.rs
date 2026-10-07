@@ -64,10 +64,10 @@ pub(super) fn collect_concrete_types(ty: &CheckedType, types: &mut Vec<CheckedTy
 
 /// The instantiation types of an expression's polymorphic-value coercion.
 fn instantiation_types(expression: &super::LoweredExpression) -> &[CheckedType] {
-    match &expression.coercion_plan {
-        Some(super::LoweredCoercionPlan::Instantiate { types }) => types,
-        _ => &[],
-    }
+    expression
+        .coercion_plan
+        .as_ref()
+        .map_or(&[], super::LoweredCoercionPlan::instantiation_types)
 }
 
 /// The adapter request for one expression that instantiates a polymorphic
@@ -79,8 +79,13 @@ fn instantiation_request(
     let (Some(coercion), Some(plan)) = (&expression.coercion, &expression.coercion_plan) else {
         return Ok(None);
     };
+    // The instantiation may be the first step of a wrapper introduction or a
+    // sum injection; the adapter produces the leaf's type.
+    let Some((leaf, produced, _)) = plan.split_instantiation(&coercion.target) else {
+        return Ok(None);
+    };
     let (super::LoweredCoercionPlan::Instantiate { types }
-    | super::LoweredCoercionPlan::AdaptScheme { types }) = plan
+    | super::LoweredCoercionPlan::AdaptScheme { types }) = leaf
     else {
         return Ok(None);
     };
@@ -90,15 +95,16 @@ fn instantiation_request(
     let key = crate::specialization::InstantiationAdapterKey {
         scheme: CanonicalType::dynamic(&coercion.source, &expression.origin)
             .map_err(|error| vec![error])?,
-        target: CanonicalType::dynamic(&coercion.target, &expression.origin)
+        target: CanonicalType::dynamic(&produced, &expression.origin)
             .map_err(|error| vec![error])?,
     };
     Ok(Some(ClosureRequest::Artifact {
         key: ArtifactRequestKey::InstantiationAdapter(key),
         plan: Plan::InstantiationAdapter(crate::InstantiationAdapterPlan {
             scheme: scheme.as_ref().clone(),
-            target: coercion.target.clone(),
+            target: produced,
             types: types.clone(),
+            children: Vec::new(),
         }),
         kind: Kind::InstantiationAdapter,
         origin: expression.origin.clone(),
@@ -308,11 +314,8 @@ pub(super) fn scan_instance(
     let polymorphic_call = body.calls.iter().any(|(_, call)| call.scheme.is_some())
         || body.expressions().any(|(_, expression)| {
             matches!(
-                expression.coercion_plan,
-                Some(
-                    super::LoweredCoercionPlan::Instantiate { .. }
-                        | super::LoweredCoercionPlan::AdaptScheme { .. }
-                )
+                (&expression.coercion, &expression.coercion_plan),
+                (Some(coercion), Some(plan)) if plan.split_instantiation(&coercion.target).is_some()
             )
         });
     if !dynamic && !dynamic_call && !polymorphic_call {
@@ -844,7 +847,61 @@ pub(super) fn expand(
         }
         Plan::CompoundDescriptorDrop(plan) => Plan::CompoundDescriptorDrop(plan),
         Plan::DescriptorBoundEntry(plan) => Plan::DescriptorBoundEntry(plan),
-        Plan::InstantiationAdapter(plan) => {
+        Plan::InstantiationAdapter(mut plan) => {
+            // A function-target adapter converts function-typed arguments and
+            // results between the target's ABI and the scheme body's (R5).
+            plan.children.clear();
+            if let (CheckedType::Function(target), CheckedType::Function(body)) =
+                (&plan.target, plan.scheme.body.as_ref())
+            {
+                use crate::specialization::ReabstractionDirection as Direction;
+                let conversions = super::value_conversions::adapter_conversions(target, body)
+                    .map_err(|message| vec![Diagnostic::new(origin.span.clone(), message)])?;
+                let whole = target.mutations.contains(&crate::CheckedMutation::Whole);
+                let mut children = Vec::new();
+                for (index, conversion) in conversions.arguments.iter().enumerate() {
+                    let Some(conversion) = conversion else {
+                        continue;
+                    };
+                    children.push(
+                        super::value_conversions::request(
+                            &conversion.concrete,
+                            &conversion.dynamic,
+                            Direction::ConcreteToDynamic,
+                            &origin,
+                        )
+                        .map_err(|error| vec![error])?,
+                    );
+                    if whole
+                        || target
+                            .mutations
+                            .contains(&crate::CheckedMutation::Element(index))
+                    {
+                        children.push(
+                            super::value_conversions::request(
+                                &conversion.concrete,
+                                &conversion.dynamic,
+                                Direction::DynamicToConcrete,
+                                &origin,
+                            )
+                            .map_err(|error| vec![error])?,
+                        );
+                    }
+                }
+                if let Some(conversion) = &conversions.result {
+                    children.push(
+                        super::value_conversions::request(
+                            &conversion.concrete,
+                            &conversion.dynamic,
+                            Direction::DynamicToConcrete,
+                            &origin,
+                        )
+                        .map_err(|error| vec![error])?,
+                    );
+                }
+                plan.children = children.iter().map(planned).collect();
+                requests.extend(children);
+            }
             // A scheme-target adapter builds the source scheme's descriptors
             // at entry: its concrete leaves need static descriptors and its
             // compound shapes their cleanup entries.

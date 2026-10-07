@@ -78,16 +78,32 @@ Stage 4b is complete.
   instantiation, and alpha-renaming. A debug assertion compares each
   re-inferred call instantiation with the checker's type.
 
-Verified: all workspace tests pass, including the ignored full differential
-run. The IR comparison against the `50565d8` release build is `same` for 98
-programs; the other three are the documented 4a fixes.
+- **Review of `9a3dc33`.** The review found B-G unfinished and four limits
+  reported to users but documented nowhere. All are resolved:
+  - Instantiation adapters now apply R5 conversions per argument slot and
+    for the result, with writeback for `mut` slots (B-G as planned).
+  - A `mut` function argument passed to a polymorphic value from a dynamic
+    body converts back after the call; this was a codegen-time error.
+  - An instantiation the checker also coerces into a `from` wrapper or a sum
+    composes with that coercion. The wrapper case used to fail with
+    "cannot resolve type parameter `T`", and the sum case monomorphized the
+    `let`-bound lambda instead of building the adapter.
+  - "a polymorphic value's type parameter cannot be inferred from its use" is
+    an internal invariant: the checker already rejects scheme parameters
+    the body doesn't determine.
+  - The one remaining limit, a single argument or result mixing the
+    surrounding run-time parameters with a concrete function type, is a
+    documented [restriction](#restrictions) with a test.
 
-Known limits: instantiating a value at a concrete function type with
-function-typed parameters or results, and passing a mutable function argument
-to a polymorphic value from a dynamic body, are reported as unsupported. The
-`__buffer_clone` restriction cannot be reached from user code without also
-tripping the trait-bound restriction, and the checker already rejects trait
-members as polymorphic values.
+Verified at the review fixes:
+- `cargo test --workspace --quiet`: 1,496 passed, 2 ignored.
+- Full differential run (ignored by default): 119 programs identical in both
+  modes; 118 use dynamic calls (13,728 call sites).
+- IR against the `50565d8` release build, 4 compilations per binary, over
+  132 inputs (121 corpus programs and 11 examples): every existing input is
+  `same` (109); `local_recursive_generic` and `local_generic_cells` differ as
+  documented 4a fixes; and 21 programs (the 20 polymorphic-value programs and
+  `dynamic_audit_forms`) cannot compile on `50565d8`, as expected.
 
 ## Starting shape at the boundary (before Stage 4b)
 
@@ -166,22 +182,33 @@ members as polymorphic values.
   - dynamic shape when it mentions the caller's run-time parameters.
 
   The adapter's environment holds the polymorphic closure and deep-copied
-  descriptors (R-D). Its entry passes them on, with R5 conversions for the
-  concrete case. New artifact family `instantiation-adapter`, keyed by
-  `(canonical scheme, canonical target function type, symbolic dynamic
-  shape)`. A generic `def` instantiated this way is still monomorphized, as
-  today; only `Forall` *values* use the adapter.
+  descriptors (R-D). Its entry passes them on, with R5 conversions per
+  argument slot and for the result wherever the target side is a concrete
+  function type and the scheme body's side is a dynamic-shape one; a mutated
+  slot is written back after the call. The plan records those conversions as
+  children, chosen by `value_conversions::adapter_conversions`, which both
+  lowering and codegen use. New artifact family `instantiation-adapter`,
+  keyed by `(canonical scheme, canonical target type)`. A generic `def`
+  instantiated this way is still monomorphized, as today; only `Forall`
+  *values* use the adapter.
+
+  When the checker also coerces the instantiated value into a `from` wrapper
+  or a sum, the instantiation is that coercion's first step: the coercion
+  plan wraps or injects an `Instantiate` leaf, and the adapter produces the
+  leaf's function type (`LoweredCoercionPlan::split_instantiation`).
 - **B-H. Scheme adapters.** Subsumption between two schemes (Stage 3
   rule 3) needs no code when the value's parameters map one-to-one, in
   order, onto the target's: the closure is reused. Otherwise, for example
   reordered parameters or a parameter instantiated to a compound type of
-  the target's parameters, a `scheme-adapter` entry receives the target's
+  the target's parameters, an adapter entry receives the target's
   descriptors, builds the value's descriptors at entry, and forwards. Both
   sides use the dynamic shape, so no reabstraction is involved. Lowering
   recomputes the mapping by matching the value's scheme body against the
-  target's with the target's parameters rigid, as B-F does. New artifact
-  family `scheme-adapter`, keyed by
-  `(canonical value scheme, canonical target scheme, mapping)`.
+  target's with the target's parameters rigid, as B-F does. A scheme target
+  is just another adapter target, so this shares B-G's
+  `instantiation-adapter` family (a scheme target's key differs from every
+  function target's); the separate `scheme-adapter` family first planned
+  here was not needed.
 - **B-I. Construction sites decide support.** Every site that constructs a
   polymorphic value (a generic `def`, constructor, or companion member used
   as a value, a lambda checked against a scheme, or an adapter) requests its
@@ -257,8 +284,8 @@ generic body, so the differential run executes it in both modes.
 
 ### B5 — Scheme adapters
 
-- B-H: identity subsumption reuses the closure; other subsumptions build a
-  `scheme-adapter`. Corpus programs cover reordered parameters
+- B-H: identity subsumption reuses the closure; other subsumptions build an
+  `instantiation-adapter` with a scheme target. Corpus programs cover reordered parameters
   (`<A, B> (A, B) -> A` assigned to `<Y, X> (X, Y) -> X`) and a compound
   instantiation (`<A> A -> A` used as `<T> (T, T) -> (T, T)`).
 - **Gate:** the blanket gate is gone. Its message remains only as an
@@ -292,7 +319,7 @@ generic body, so the differential run executes it in both modes.
     no dynamic instance, descriptor, or adapter;
   - `let concrete: I32 -> I32 = identity` monomorphizes and builds no
     adapter;
-  - an identity subsumption builds no scheme adapter.
+  - an identity subsumption builds no adapter.
 - **IR comparison** against the `50565d8` release build: every existing
   input `same`, apart from the three documented 4a fixes.
 - The 4a coverage test still has zero in-scope rejections.
@@ -306,10 +333,11 @@ Reported at the construction site (B-I), each with a test.
 | Trait bound other than `Copy`/`Sized` in the scheme, or reached transitively | "polymorphic values with trait bounds are not supported yet" | Stage 6 |
 | Effect variable in the scheme | "effect-polymorphic functions cannot be used as values yet" | Stage 5 |
 | Coroutine, async, or reactive body, transitively | "functions with coroutine bodies cannot be used as polymorphic values yet" (and the async and reactive forms) | Stage 8 |
-| `__buffer_clone`, transitively | "`__buffer_clone` cannot be used in a polymorphic value's implementation yet" | Stage 6 |
+| `__buffer_clone`, transitively | "`__buffer_clone` cannot be used in a polymorphic value's implementation yet" | Stage 6. Unreachable from user code: `__buffer_clone` is private and its public callers need a `Clone` bound, so the trait-bound restriction applies first. Kept as an internal reason and left out of `Staple.md`. |
 | Run-time `Natural` count, including `__slice_from_ref` | "array lengths cannot depend on a polymorphic value's type parameters yet" | Not planned |
 | Function value behind `Ref`, `Slice`, `Buffer`, or a shared cell crossing into a polymorphic implementation | "function values inside references cannot be passed to a polymorphic value's implementation" | Not planned |
 | Trait member used as a polymorphic value | "trait members cannot be used as polymorphic values yet" | Stage 7 |
+| Inside a polymorphic implementation, an instantiation where one argument or the result mixes that implementation's run-time parameters with a concrete function type needing conversion, such as `(I32 -> I32, A)` for `(T -> T, U)` | "instantiating a polymorphic value at a type that combines the surrounding type parameters with a concrete function type is not supported yet" | Not planned: R5 conversions work on concrete layouts, and this needs a conversion over a run-time layout. Separate slots, such as `(I32 -> I32, A)` matched against `(T -> T, U)` as two parameters, convert normally. |
 
 Restrictions enforced by the checker since Stage 3 (signals, ordinary
 externs, capable parameters, polymorphic recursion) are unchanged.
