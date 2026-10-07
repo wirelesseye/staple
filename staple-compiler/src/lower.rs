@@ -7348,7 +7348,8 @@ impl LoweredProgram {
         if let Some(scheme) = &scheme
             && let CheckedType::Function(template) = scheme.body.as_ref()
         {
-            substitutions = call_substitutions(template, &function_type);
+            substitutions =
+                polymorphic_call_substitutions(module, callee_syntax, template, &function_type);
         }
         let call_id = self.calls.push(LoweredCall {
             scheme,
@@ -7536,7 +7537,18 @@ impl LoweredProgram {
                     _ => None,
                 })
                 .or_else(|| symbol.and_then(|symbol| symbol_function_type(module, symbol)))
-                .map(|template| call_substitutions(&template, &function_type))
+                .map(|template| {
+                    if scheme.is_some() {
+                        polymorphic_call_substitutions(
+                            module,
+                            callee.syntax().id,
+                            &template,
+                            &function_type,
+                        )
+                    } else {
+                        call_substitutions(&template, &function_type)
+                    }
+                })
                 .unwrap_or_default(),
             evidence: None,
             reactive,
@@ -13669,6 +13681,24 @@ fn mutation_slot_mask(count: usize, mutations: &[CheckedMutation]) -> Vec<bool> 
 /// Compile-time substitutions from a function template to the concrete type
 /// recorded at a use site. Effect variables are inferred by the checker as
 /// error-shaped function types and are split back into effect substitutions.
+fn polymorphic_call_substitutions(
+    module: &TypedModule,
+    syntax: SyntaxId,
+    template: &CheckedFunctionType,
+    actual: &CheckedFunctionType,
+) -> CallSubstitutions {
+    let mut inferred = module
+        .explicit_value_substitutions(syntax)
+        .cloned()
+        .unwrap_or_default();
+    let _ = infer_type_parameters_with_schemes(
+        &CheckedType::Function(template.clone()),
+        &CheckedType::Function(actual.clone()),
+        &mut inferred,
+    );
+    substitutions_from_map(inferred)
+}
+
 fn call_substitutions(
     template: &CheckedFunctionType,
     actual: &CheckedFunctionType,
@@ -22564,6 +22594,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn polymorphic_calls_preserve_explicit_phantom_arguments() {
+        let module = checked_program(concat!(
+            "def ignore: <T where Sized T> () -> I32 = () => 42\n",
+            "let stored = ignore\n",
+            "let result = stored.<String> ()\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let call = program
+            .calls
+            .iter()
+            .find_map(|(_, call)| call.scheme.as_ref().map(|_| call))
+            .unwrap();
+        assert_eq!(call.substitutions.types.len(), 1);
+        assert_eq!(call.substitutions.types[0].value_type, CheckedType::String);
+        assert!(
+            call.scheme
+                .as_ref()
+                .unwrap()
+                .bound_ids()
+                .contains(&call.substitutions.types[0].parameter)
+        );
     }
 
     #[test]

@@ -75,9 +75,11 @@ schemes across instantiation/subsumption, including names, fields, returned valu
 explicit applications, concrete instantiation, and compound subsumption. Indirect
 call snapshots retain that scheme and infer body substitutions; instance cloning
 substitutes outer parameters while protecting the scheme binders. Known concrete
-callable constructions remain on their existing ABI.
+callable constructions remain on their existing ABI. Written value type arguments
+are retained separately, so phantom parameters recover substitutions even when
+the function body cannot reveal them.
 
-Nine focused polymorphic regressions and four scheme-inference tests pass,
+Ten focused polymorphic regressions and four scheme-inference tests pass,
 including two-layout execution in both modes and pure/read-only effect failures.
 Existing dynamic-capture tests passed earlier. The non-incremental workspace retry
 passed 233 CLI tests after an incremental linker failure; remaining suites, final IR

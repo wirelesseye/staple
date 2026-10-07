@@ -1547,6 +1547,7 @@ pub struct TypedModule {
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     function_schemes: HashMap<FunctionId, CheckedScheme>,
     expression_schemes: HashMap<SyntaxId, CheckedScheme>,
+    explicit_value_substitutions: HashMap<SyntaxId, HashMap<TypeParameterId, CheckedType>>,
     expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
     function_state_accesses: HashMap<FunctionId, StateAccesses>,
     resource_types: HashMap<SyntaxId, CheckedResource>,
@@ -1773,6 +1774,13 @@ impl TypedModule {
                 Some(CheckedType::Forall(scheme)) => Some(scheme.as_ref()),
                 _ => None,
             })
+    }
+
+    pub(crate) fn explicit_value_substitutions(
+        &self,
+        syntax: SyntaxId,
+    ) -> Option<&HashMap<TypeParameterId, CheckedType>> {
+        self.explicit_value_substitutions.get(&syntax)
     }
 
     pub(crate) fn polymorphic_value_diagnostics(&self) -> Vec<Diagnostic> {
@@ -2647,6 +2655,7 @@ pub struct TypeChecker {
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     function_schemes: HashMap<FunctionId, CheckedScheme>,
     expression_schemes: HashMap<SyntaxId, CheckedScheme>,
+    explicit_value_substitutions: HashMap<SyntaxId, HashMap<TypeParameterId, CheckedType>>,
     type_representations: HashMap<TypeId, CheckedType>,
     type_parameter_templates: HashMap<TypeId, Vec<CheckedType>>,
     expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
@@ -2964,6 +2973,7 @@ impl TypeChecker {
             function_types: self.function_types,
             function_schemes: self.function_schemes,
             expression_schemes: self.expression_schemes,
+            explicit_value_substitutions: self.explicit_value_substitutions,
             expression_effects: self.expression_effects,
             function_state_accesses: self.function_state_accesses,
             resource_types: self.resource_types,
@@ -12623,6 +12633,8 @@ impl TypeChecker {
             );
         }
         if let Some(mut scheme) = value_scheme {
+            self.explicit_value_substitutions
+                .insert(application.syntax.id, substitutions.clone());
             self.expression_schemes
                 .entry(application.value.syntax().id)
                 .or_insert_with(|| scheme.clone());
