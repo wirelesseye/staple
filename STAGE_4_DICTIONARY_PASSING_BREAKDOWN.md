@@ -345,6 +345,11 @@ commit references must be reachable from the branch.
 
 ## Stage 4b — Polymorphic values
 
+Stage 4b is planned in
+[STAGE_4B_POLYMORPHIC_VALUES_BREAKDOWN.md](STAGE_4B_POLYMORPHIC_VALUES_BREAKDOWN.md),
+which replaces Steps 4b.1–4b.5 below with decisions B-A to B-J and steps
+B1–B7. The steps below are kept as the original outline.
+
 ### Step 4b.1 — Constructing polymorphic closures
 
 - A generic `def` used as a value builds `{polymorphic entry, null env}`.
