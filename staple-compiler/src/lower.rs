@@ -22412,6 +22412,100 @@ mod tests {
     }
 
     #[test]
+    fn polymorphic_closures_capture_enclosing_values_after_return() {
+        for dictionary in [false, true] {
+            let module = checked_program(concat!(
+                "def make: <A where Copy A> A -> (<T> move T -> (A, T)) = captured => move value => (captured, value)\n",
+                "def build: () -> (<T> move T -> (I32, T)) = () => make 42\n",
+                "let stored = build ()\n",
+            ));
+            let mut program = LoweredProgram::default();
+            program.dictionary_pass_generic_calls = dictionary;
+            assert!(program.snapshot(&module).is_empty());
+            if dictionary {
+                program.compute_dynamic_support();
+            }
+            let diagnostics = program.build_specialization_worklist();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.materialize_instance_bodies();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let dynamic_make = program.instances.iter().any(|(id, instance)| {
+                program.functions.get(instance.template).unwrap().name == "make"
+                    && !program.instance_runtime_order(id).unwrap().is_empty()
+            });
+            assert_eq!(
+                dynamic_make, dictionary,
+                "construction must exercise the selected owner ABI"
+            );
+            program.record_reabstractions();
+            let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            program.assign_initializer_names();
+            let name = program
+                .instances
+                .iter()
+                .find_map(|(_, instance)| {
+                    (program.functions.get(instance.template).unwrap().name == "build")
+                        .then(|| instance.name.clone())
+                })
+                .unwrap();
+            let context = inkwell::context::Context::create();
+            let text = crate::CodeGenerator::new(&context)
+                .compile_module(&LoweredModule { program })
+                .unwrap();
+            let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+                text.as_bytes(),
+                "polymorphic-construction",
+            );
+            let llvm = context.create_module_from_ir(buffer).unwrap();
+            llvm.verify().unwrap();
+            let engine = llvm
+                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                .unwrap();
+            #[repr(C)]
+            struct Closure {
+                code: *const (),
+                environment: *const u8,
+            }
+            #[repr(C)]
+            struct Descriptor {
+                size: usize,
+                stride: usize,
+                align: usize,
+                flags: u32,
+                drop: usize,
+                count: u32,
+            }
+            type Make = unsafe extern "C" fn(*const u8) -> Closure;
+            let make = unsafe { engine.get_function::<Make>(&name) }.unwrap();
+            let closure = unsafe { make.call(std::ptr::null()) };
+            assert!(!closure.environment.is_null());
+            type Identity = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *mut u8);
+            let identity: Identity = unsafe { std::mem::transmute(closure.code) };
+            for (size, mut value) in [(1usize, 17u32), (4, 0x11223344)] {
+                let descriptor = Descriptor {
+                    size,
+                    stride: size,
+                    align: size,
+                    flags: 1,
+                    drop: 0,
+                    count: 0,
+                };
+                let mut result = [0u32; 2];
+                unsafe {
+                    identity(
+                        closure.environment,
+                        &descriptor,
+                        result.as_mut_ptr().cast(),
+                        (&mut value as *mut u32).cast(),
+                    );
+                }
+                assert_eq!(result, [42, value]);
+            }
+        }
+    }
+
+    #[test]
     fn polymorphic_support_checks_reject_at_the_construction_site() {
         let module = checked_program(concat!(
             "use std.clone.Clone\n",

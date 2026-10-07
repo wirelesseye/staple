@@ -1550,6 +1550,86 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// A GC-allocated closure environment holding one deep-copied descriptor
     /// per run-time parameter, in descriptor ABI order (R-D), then the
     /// captures at descriptor-computed offsets.
+    /// Concrete owners use the same descriptor-layout capture environment as
+    /// dynamic owners. Spill by-value captures only for the construction copy.
+    pub(super) fn build_polymorphic_capture_environment(
+        &mut self,
+        owner: EmissionOwner,
+        instance: FunctionInstanceId,
+        callable: &crate::LoweredCallableValue,
+        native: &super::FunctionEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let pointer = self
+            .backend
+            .context
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        let mut environment = DynamicEnvironment {
+            descriptors: HashMap::new(),
+            compound_descriptors: Vec::new(),
+            bindings: HashMap::new(),
+            binding_order: Vec::new(),
+            temporaries: HashMap::new(),
+            packed_arguments: HashMap::new(),
+            coercions: HashMap::new(),
+            loop_results: HashMap::new(),
+            cells: HashMap::new(),
+            initialization_states: HashMap::new(),
+            resources: HashMap::new(),
+            loops: Vec::new(),
+            closure: pointer,
+            result: pointer,
+            result_descriptor: pointer,
+            returned: false,
+        };
+        let captures = callable
+            .closure
+            .as_ref()
+            .map_or(&[][..], |closure| closure.captures.as_slice());
+        for capture in captures {
+            let value = self.closure_capture_value(owner, capture, native, span)?;
+            let storage = if capture.access == crate::LoweredCaptureAccess::ByValue {
+                let storage = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(value.get_type(), "polymorphic.capture")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(storage, value)
+                    .map_err(compiler_diagnostic)?;
+                storage
+            } else {
+                value.into_pointer_value()
+            };
+            environment.bindings.insert(
+                capture.capture.symbol,
+                DynamicBinding {
+                    pointer: storage,
+                    descriptor: pointer,
+                    owned: false,
+                    live: true,
+                },
+            );
+        }
+        let runtime = self.view.instance_runtime_order(instance).ok_or_else(|| {
+            Diagnostic::new(
+                span.clone(),
+                "missing polymorphic instance descriptor order",
+            )
+        })?;
+        self.build_descriptor_environment(
+            instance,
+            &runtime,
+            0,
+            &callable.substitutions,
+            captures,
+            &environment,
+            span,
+        )
+    }
+
     fn build_descriptor_environment(
         &self,
         instance: FunctionInstanceId,

@@ -1318,6 +1318,11 @@ impl<'a> LoweredWalker<'a> {
         let Some(closure) = &value.closure else {
             return Ok(());
         };
+        // Quantified closures always use descriptor-layout environments;
+        // descriptor artifact scanning owns their finalizers.
+        if value.scheme.is_some() {
+            return Ok(());
+        }
         // Only a fresh, non-empty environment installs a closure finalizer.
         if closure.environment != super::LoweredClosureEnvironment::Fresh
             || closure.captures.is_empty()

@@ -4764,6 +4764,28 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 ));
             }
         };
+        if callable.scheme.is_some()
+            && callable
+                .closure
+                .as_ref()
+                .is_some_and(|closure| !closure.captures.is_empty())
+        {
+            let Some(LoweredBoundTarget::Instance(instance)) = binding else {
+                return Err(unsupported("polymorphic capture instance"));
+            };
+            let callable = callable.clone();
+            let pointer = self.build_polymorphic_capture_environment(
+                owner,
+                *instance,
+                &callable,
+                environment,
+                &callable.origin.span,
+            )?;
+            return self
+                .backend
+                .build_closure_value(code, pointer)
+                .map(|closure| closure.as_any_value_enum());
+        }
         let pointer = match &callable.closure {
             Some(closure) => match closure.environment {
                 LoweredClosureEnvironment::Fresh => {

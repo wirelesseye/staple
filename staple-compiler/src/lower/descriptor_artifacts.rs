@@ -321,7 +321,12 @@ pub(super) fn scan_instance(
         };
         // Without enclosing descriptors, the polymorphic closure points
         // straight at the dynamic instance (B-C), without a forwarding entry.
-        if bound == 0 {
+        if bound == 0
+            && callable
+                .closure
+                .as_ref()
+                .is_none_or(|closure| closure.captures.is_empty())
+        {
             continue;
         }
         let Some(ordinal) = program
@@ -331,25 +336,27 @@ pub(super) fn scan_instance(
         else {
             continue;
         };
-        requests.push(ClosureRequest::Artifact {
-            key: ArtifactRequestKey::DescriptorBoundEntry(
-                crate::specialization::DescriptorBoundEntryKey {
-                    instance: ordinal,
+        if bound > 0 {
+            requests.push(ClosureRequest::Artifact {
+                key: ArtifactRequestKey::DescriptorBoundEntry(
+                    crate::specialization::DescriptorBoundEntryKey {
+                        instance: ordinal,
+                        bound,
+                    },
+                ),
+                plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
                     bound,
-                },
-            ),
-            plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
-                bound,
-                instance: *callee,
-                runtime: runtime.clone(),
-                function_type: callable.function_type.clone(),
-            }),
-            kind: Kind::DescriptorBoundEntry,
-            origin: record.origin.clone(),
-            use_site: Some(
-                super::artifact_closure::ArtifactUseSite::DescriptorBoundEntry(*value_id),
-            ),
-        });
+                    instance: *callee,
+                    runtime: runtime.clone(),
+                    function_type: callable.function_type.clone(),
+                }),
+                kind: Kind::DescriptorBoundEntry,
+                origin: record.origin.clone(),
+                use_site: Some(
+                    super::artifact_closure::ArtifactUseSite::DescriptorBoundEntry(*value_id),
+                ),
+            });
+        }
         if callable.scheme.is_none()
             && !crate::contains_type_parameter(&CheckedType::Function(
                 callable.function_type.clone(),

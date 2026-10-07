@@ -99,12 +99,27 @@ capture regressions still pass.
 
 Generic calls returning a scheme now distinguish the expected result scheme from
 an unapplied scheme-to-scheme subsumption; the execution regression uses an
-implicit generic call. Captured polymorphic environments, constructors, and the
-remaining B2 storage cases are still pending, so the public gate stays in place.
+implicit generic call. Captured polymorphic lambdas now share descriptor-layout
+environments in concrete and dynamic owners. Concrete owners spill by-value
+captures for the construction copy and preserve borrowed/shared-cell pointers;
+the existing descriptor builder copies capture data and descriptors into GC
+storage. Captured entries without bound descriptors still point directly at the
+dynamic instance, while dynamic owners use partially bound entries. Descriptor
+scanning owns their dynamic environment finalizers, including the zero-bound
+case, and native environment finalizers are not requested for those values.
+
+A JIT regression captures an enclosing generic value, returns the closure, and
+invokes it with two layouts after the constructing function returns, in both
+modes. Shallow scheme matching now compares after known outer substitutions;
+a regression proves it neither guesses through the scheme nor leaks quantified
+parameters into the outer substitution map. Additional ownership/shared-cell
+coverage, constructors, and the remaining B2 storage cases are still pending,
+so the public gate stays in place.
 
 Focused inference, canonical-key, partial-entry execution, and construction-graph
 regressions pass, including the executable returned-closure regression and
-construction-site support checks (three focused polymorphic tests passed).
+construction-site support checks (four focused polymorphic tests passed).
+The four scheme-inference regressions pass too.
 The earlier workspace run completed successfully, including 233 CLI tests,
 397 compiler unit tests (one ignored in each suite), all integration suites,
 and the quick differential subset. Newer construction changes have passing

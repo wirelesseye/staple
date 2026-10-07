@@ -16543,6 +16543,12 @@ fn infer_type_parameters_mode(
     substitutions: &mut HashMap<TypeParameterId, CheckedType>,
 ) -> bool {
     match template {
+        // Schemes are opaque inference nodes. Outer substitutions may already
+        // resolve their free parameters; compare the resulting schemes without
+        // inferring through their quantified bodies.
+        CheckedType::Forall(_) => {
+            types_equivalent(&substitute_type(template.clone(), substitutions), actual)
+        }
         CheckedType::Parameter {
             id,
             parameter_product_capable,
@@ -18886,6 +18892,24 @@ mod first_class_scheme_tests {
                 effects: CheckedEffectSet::default(),
             })),
         }))
+    }
+
+    #[test]
+    fn scheme_inference_uses_outer_substitutions_without_guessing_inside() {
+        let mut template = identity(100, "T");
+        let mut actual = identity(101, "U");
+        let CheckedType::Forall(scheme) = &mut template else { unreachable!() };
+        let CheckedType::Function(body) = scheme.body.as_mut() else { unreachable!() };
+        body.result = Box::new(CheckedType::Parameter { id: TypeParameterId(7), name: "Outer".into(), sized: true, parameter_product_capable: false });
+        let CheckedType::Forall(scheme) = &mut actual else { unreachable!() };
+        let CheckedType::Function(body) = scheme.body.as_mut() else { unreachable!() };
+        body.result = Box::new(CheckedType::I32);
+        let mut inferred = HashMap::new();
+        assert!(!infer_type_parameters(&template, &actual, &mut inferred));
+        assert!(inferred.is_empty());
+        inferred.insert(TypeParameterId(7), CheckedType::I32);
+        assert!(infer_type_parameters(&template, &actual, &mut inferred));
+        assert_eq!(inferred.len(), 1, "quantified parameters never enter the outer substitution map");
     }
 
     #[test]
