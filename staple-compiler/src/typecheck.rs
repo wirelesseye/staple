@@ -327,6 +327,27 @@ impl CheckedSchemeParameter {
 }
 
 impl CheckedScheme {
+    /// The type parameters this scheme quantifies, in declaration order with
+    /// grouped parameters flattened. Descriptor order for run-time calls.
+    pub(crate) fn type_parameter_ids(&self) -> Vec<TypeParameterId> {
+        fn collect(parameter: &CheckedSchemeParameter, out: &mut Vec<TypeParameterId>) {
+            match parameter {
+                CheckedSchemeParameter::Type { id, .. } => out.push(*id),
+                CheckedSchemeParameter::Effect { .. } => {}
+                CheckedSchemeParameter::Product(parameters) => {
+                    for parameter in parameters {
+                        collect(parameter, out);
+                    }
+                }
+            }
+        }
+        let mut ids = Vec::new();
+        for parameter in &self.parameters {
+            collect(parameter, &mut ids);
+        }
+        ids
+    }
+
     /// The type and effect parameters this scheme quantifies.
     pub(crate) fn bound_ids(&self) -> HashSet<TypeParameterId> {
         self.parameters
@@ -1791,26 +1812,51 @@ impl TypedModule {
             diagnostics: Vec<Diagnostic>,
             collect_free: bool,
             free: HashSet<TypeParameterId>,
+            callees: HashSet<SyntaxId>,
         }
         impl Visitor<'_> {
-            /// Expressions are reported where they are polymorphic values
-            /// themselves; patterns and declarations also when a scheme is
-            /// only nested in their type, since nothing else may construct it.
-            fn report(
-                &mut self,
-                syntax: &staple_syntax::Syntax,
-                ty: Option<&CheckedType>,
-                nested: bool,
-            ) {
+            /// Records free parameters for the eager-root dependency scan.
+            fn report(&mut self, ty: Option<&CheckedType>) {
                 if self.collect_free
                     && let Some(ty) = ty
                 {
                     self.free.extend(type_parameter_ids(ty));
                 }
-                let polymorphic = ty.is_some_and(|ty| {
-                    matches!(ty, CheckedType::Forall(_)) || nested && type_contains_scheme(ty)
-                });
-                if self.visited.insert(syntax.id) && polymorphic {
+            }
+            /// Reports the polymorphic-value forms lowering does not support
+            /// yet: a scheme instantiated at a non-scheme type, and
+            /// subsumption that is not an alpha-renaming of the same scheme.
+            fn pending(&mut self, syntax: &staple_syntax::Syntax) {
+                if self.collect_free || !self.visited.insert(syntax.id) {
+                    return;
+                }
+                let Some(scheme) = self.module.scheme_of_expression(syntax.id) else {
+                    return;
+                };
+                // A declared generic `def`, constructor, or intrinsic
+                // instantiated at a concrete type stays monomorphized.
+                if self
+                    .module
+                    .symbol_for(syntax.id)
+                    .is_some_and(|symbol| self.module.is_declared_generic(symbol))
+                    && !matches!(
+                        self.module.type_of_expression(syntax.id),
+                        Some(CheckedType::Forall(_))
+                    )
+                {
+                    return;
+                }
+                let unsupported = match self.module.type_of_expression(syntax.id) {
+                    Some(CheckedType::Forall(target)) => {
+                        !types_equivalent(
+                            &CheckedType::Forall(target.clone()),
+                            &CheckedType::Forall(Box::new(scheme.clone())),
+                        )
+                    }
+                    Some(_) => !self.callees.contains(&syntax.id),
+                    None => false,
+                };
+                if unsupported {
                     self.diagnostics.push(Diagnostic::new(
                         syntax.span.clone(),
                         "polymorphic function values are not supported yet",
@@ -1840,11 +1886,7 @@ impl TypedModule {
                 }
             }
             fn pattern(&mut self, pattern: &Pattern) {
-                self.report(
-                    pattern.syntax(),
-                    self.module.type_of_pattern(pattern.syntax().id),
-                    true,
-                );
+                self.report(self.module.type_of_pattern(pattern.syntax().id));
                 match pattern {
                     Pattern::Product(p) => {
                         for element in &p.elements {
@@ -1865,7 +1907,7 @@ impl TypedModule {
                         if let Some(value) = &binding.value {
                             self.expression(value);
                         } else if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
-                            self.report(&binding.syntax, self.module.type_of_symbol(symbol), true);
+                            self.report(self.module.type_of_symbol(symbol));
                         }
                     }
                     Item::PatternBinding(binding) => {
@@ -1887,11 +1929,8 @@ impl TypedModule {
                 }
             }
             fn expression(&mut self, expression: &Expression) {
-                self.report(
-                    expression.syntax(),
-                    self.module.type_of_expression(expression.syntax().id),
-                    false,
-                );
+                self.report(self.module.type_of_expression(expression.syntax().id));
+                self.pending(expression.syntax());
                 if !self.collect_free
                     && let Some(symbol) = self.module.symbol_for(expression.syntax().id)
                     && let Some(function) = self.module.function_for_symbol(symbol)
@@ -1904,9 +1943,16 @@ impl TypedModule {
                             self.function(id);
                         }
                     }
-                    Expression::TypeApplication(value) => self.expression(&value.value),
+                    Expression::TypeApplication(value) => {
+                        // `f.<T> x` applies the instantiated value directly.
+                        if self.callees.contains(&value.syntax.id) {
+                            self.callees.insert(value.value.syntax().id);
+                        }
+                        self.expression(&value.value)
+                    }
                     Expression::TypeAscription(value) => self.expression(&value.value),
                     Expression::Call(value) => {
+                        self.callees.insert(value.callee.syntax().id);
                         self.expression(&value.callee);
                         self.expression(&value.argument);
                     }
@@ -1980,6 +2026,7 @@ impl TypedModule {
             diagnostics: Vec::new(),
             collect_free: false,
             free: HashSet::new(),
+            callees: HashSet::new(),
         };
         for source in self.resolved.program().modules() {
             for item in &source.syntax.items {
@@ -2000,6 +2047,7 @@ impl TypedModule {
                     diagnostics: Vec::new(),
                     collect_free: true,
                     free: HashSet::new(),
+                    callees: HashSet::new(),
                 };
                 dependencies.function(function.id);
                 if dependencies.free.is_empty() {
@@ -2438,6 +2486,16 @@ impl TypedModule {
     pub(crate) fn has_declared_scheme(&self, symbol: SymbolId) -> bool {
         self.scheme_of_symbol(symbol).is_some()
             && !self.polymorphic_storage_symbols.contains(&symbol)
+    }
+
+    /// Whether `symbol` names a generic `def`, constructor, or intrinsic: a
+    /// declaration whose instantiation monomorphizes, as opposed to a
+    /// parameter, field, or binding that holds a polymorphic value.
+    pub(crate) fn is_declared_generic(&self, symbol: SymbolId) -> bool {
+        self.has_declared_scheme(symbol)
+            && (self.function_symbols.contains_key(&symbol)
+                || self.resolved.constructor_type(symbol).is_some()
+                || self.resolved.intrinsic_function(symbol).is_some())
     }
 
     /// The declared type of `symbol`, falling back to its function's own

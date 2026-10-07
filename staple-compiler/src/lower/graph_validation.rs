@@ -346,17 +346,44 @@ impl<'a> GraphValidator<'a> {
             .cloned()
             .unwrap_or_default();
         for (_, call) in body.calls.iter() {
-            self.check_substitutions(&call.origin, &call.substitutions, "call", &runtime);
+            let bound = call
+                .scheme
+                .as_ref()
+                .map(|scheme| scheme.bound_ids())
+                .unwrap_or_default();
+            self.check_substitutions(&call.origin, &call.substitutions, "call", &runtime, &bound);
             if let Some(evidence) = &call.evidence {
                 self.check_evidence(&call.origin, evidence);
             }
         }
         for (_, value) in body.callable_values.iter() {
+            let mut bound = value
+                .scheme
+                .as_ref()
+                .map(|scheme| scheme.bound_ids())
+                .unwrap_or_default();
+            if value.scheme.is_some() {
+                // The entry's own scheme parameters, which a generic `def`
+                // declares separately from the written scheme's binders.
+                let function = match &value.closure {
+                    Some(closure) => Some(closure.function),
+                    None => match &value.target {
+                        crate::LoweredCallableTarget::DirectFunction { function, .. } => {
+                            Some(*function)
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some(template) = function.and_then(|id| self.program.functions.get(id)) {
+                    bound.extend(template.scheme_type_parameters.iter().copied());
+                }
+            }
             self.check_substitutions(
                 &value.origin,
                 &value.substitutions,
                 "callable value",
                 &runtime,
+                &bound,
             );
             if let Some(evidence) = &value.evidence {
                 self.check_evidence(&value.origin, evidence);
@@ -369,6 +396,7 @@ impl<'a> GraphValidator<'a> {
                 &closure.substitutions,
                 "closure construction",
                 &runtime,
+                &bound,
             );
             for capture in &closure.captures {
                 if contains_parameter_outside_scope(&capture.value_type, &runtime) {
@@ -419,9 +447,13 @@ impl<'a> GraphValidator<'a> {
         substitutions: &CallSubstitutions,
         what: &str,
         runtime: &BTreeSet<crate::TypeParameterId>,
+        bound: &std::collections::HashSet<crate::TypeParameterId>,
     ) {
+        // A quantified value's own scheme parameters stay symbolic: callers
+        // supply their descriptors.
         for entry in &substitutions.types {
-            if contains_parameter_outside_scope(&entry.value_type, runtime) {
+            if !bound.contains(&entry.parameter)
+                && contains_parameter_outside_scope(&entry.value_type, runtime) {
                 self.report(
                     origin,
                     format!(

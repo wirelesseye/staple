@@ -13414,11 +13414,15 @@ fn stage3_rejects_invalid_polymorphic_values() {
 }
 
 #[test]
-fn stage3_lowering_reports_polymorphic_values_at_the_boundary() {
-    let module = type_check("def id: <T> move T -> T = move x => x\nlet f = id\n");
+fn stage3_lowering_reports_pending_polymorphic_forms_at_the_boundary() {
+    let module = type_check(concat!(
+        "def id: <T> move T -> T = move x => x\n",
+        "let f = id\n",
+        "let c: move I32 -> I32 = f\n",
+    ));
     let diagnostics = Lowerer::new()
         .lower(&module)
-        .expect_err_diagnostics("polymorphic values need Stage 4");
+        .expect_err_diagnostics("instantiating a polymorphic value is not lowered yet");
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(
         diagnostics[0].message,
@@ -13526,30 +13530,14 @@ fn stage3_effect_parameters_bind_to_rigid_effect_rows() {
 }
 
 #[test]
-fn stage3_lowering_reports_each_polymorphic_value_once() {
+fn stage3_lowering_admits_polymorphic_values_stored_and_called() {
     let module = type_check(concat!(
         "def identity: <T> move T -> T = move value => value\n",
         "def consume: (<T> move T -> T) -> I32 = f => f 1\n",
-        "let r = (consume identity) + 1\n",
-    ));
-    let diagnostics = Lowerer::new()
-        .lower(&module)
-        .expect_err_diagnostics("polymorphic values need Stage 4");
-    // The parameter `f` and the argument `identity`; not the callee
-    // `consume`, whose type only mentions a scheme.
-    assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
-    assert_ne!(diagnostics[0].span, diagnostics[1].span);
-}
-
-#[test]
-fn stage3_lowering_reports_schemes_nested_in_parameter_types() {
-    let module = type_check(concat!(
         "type Functions = wrap (identity: <T> move T -> T,)\n",
-        "def count: Functions -> I32 = fs => 1\n",
-        "let answer = 1\n",
+        "let r = (consume identity) + 1\n",
+        "let fs = Functions (identity: identity)\n",
+        "let s = fs.identity 2\n",
     ));
-    let diagnostics = Lowerer::new()
-        .lower(&module)
-        .expect_err_diagnostics("a scheme field still needs Stage 4");
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    lower(&module);
 }

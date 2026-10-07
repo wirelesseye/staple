@@ -215,7 +215,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         closure: PointerValue<'context>,
         values: &[inkwell::values::BasicMetadataValueEnum<'context>],
     ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
-        use inkwell::values::{AnyValue, BasicValueEnum};
         let span = &call.origin.span;
         let runtime = self
             .view
@@ -225,6 +224,89 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .view
             .instance_signature(instance)
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic callee signature"))?;
+        let mut descriptors = Vec::new();
+        for parameter in &runtime {
+            let ty = call
+                .substitutions
+                .types
+                .iter()
+                .find(|entry| entry.parameter == *parameter)
+                .map(|entry| &entry.value_type)
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "missing concrete runtime substitution")
+                })?;
+            descriptors.push(self.static_dynamic_descriptor(ty, span)?);
+        }
+        let function =
+            self.instances.get(&instance).copied().ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing dynamic callee declaration")
+            })?;
+        self.emit_concrete_dynamic_call_with(
+            owner,
+            call_id,
+            call,
+            &signature,
+            closure,
+            descriptors,
+            values,
+            DynamicCallee::Direct(function),
+        )
+    }
+
+    /// A call through a polymorphic value from a concrete owner: the closure's
+    /// entry has the dynamic signature, so each scheme parameter's static
+    /// descriptor travels as an argument.
+    pub(super) fn emit_concrete_polymorphic_call(
+        &self,
+        owner: EmissionOwner,
+        call_id: crate::LoweredCallId,
+        call: &crate::LoweredCall,
+        code: PointerValue<'context>,
+        closure: PointerValue<'context>,
+        values: &[inkwell::values::BasicMetadataValueEnum<'context>],
+    ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
+        let span = &call.origin.span;
+        let scheme = call
+            .scheme
+            .as_ref()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "polymorphic call has no scheme"))?;
+        let CheckedType::Function(signature) = scheme.body.as_ref() else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "polymorphic call scheme is not a function",
+            ));
+        };
+        let mut descriptors = Vec::new();
+        for ty in polymorphic_call_types(call, span)? {
+            descriptors.push(self.static_dynamic_descriptor(&ty, span)?);
+        }
+        let count = descriptors.len();
+        self.emit_concrete_dynamic_call_with(
+            owner,
+            call_id,
+            call,
+            signature,
+            closure,
+            descriptors,
+            values,
+            DynamicCallee::Indirect { code, count },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_concrete_dynamic_call_with(
+        &self,
+        owner: EmissionOwner,
+        call_id: crate::LoweredCallId,
+        call: &crate::LoweredCall,
+        signature: &crate::CheckedFunctionType,
+        closure: PointerValue<'context>,
+        descriptors: Vec<PointerValue<'context>>,
+        values: &[inkwell::values::BasicMetadataValueEnum<'context>],
+        callee: DynamicCallee<'context>,
+    ) -> CodeGenerationResult<inkwell::values::AnyValueEnum<'context>> {
+        use inkwell::values::{AnyValue, BasicValueEnum};
+        let span = &call.origin.span;
         let mut argument_conversions = std::collections::BTreeMap::new();
         let mut result_conversion = None;
         let mut writebacks = Vec::new();
@@ -242,17 +324,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let mut arguments = vec![closure.into()];
-        for parameter in &runtime {
-            let ty = call
-                .substitutions
-                .types
-                .iter()
-                .find(|entry| entry.parameter == *parameter)
-                .map(|entry| &entry.value_type)
-                .ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "missing concrete runtime substitution")
-                })?;
-            arguments.push(self.static_dynamic_descriptor(ty, span)?.into());
+        for descriptor in &descriptors {
+            arguments.push((*descriptor).into());
         }
         let result_type = self.backend.compile_type(&call.result_type)?;
         let result = self
@@ -403,14 +476,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 arguments.push(pointer.into());
             }
         }
-        let function =
-            self.instances.get(&instance).copied().ok_or_else(|| {
-                Diagnostic::new(span.clone(), "missing dynamic callee declaration")
-            })?;
-        self.backend
-            .builder
-            .build_direct_call(function, &arguments, "")
-            .map_err(compiler_diagnostic)?;
+        match callee {
+            DynamicCallee::Direct(function) => {
+                self.backend
+                    .builder
+                    .build_direct_call(function, &arguments, "")
+                    .map_err(compiler_diagnostic)?;
+            }
+            DynamicCallee::Indirect { code, count } => {
+                let function_type = self.backend.compile_dynamic_function_type(signature, count)?;
+                self.backend
+                    .builder
+                    .build_indirect_call(function_type, code, &arguments, "polymorphic.call")
+                    .map_err(compiler_diagnostic)?;
+            }
+        }
         for (function, destination, source) in writebacks {
             self.backend
                 .builder
@@ -2429,13 +2509,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         &mut self,
         owner: EmissionOwner,
         id: ExpressionId,
+        call_id: crate::LoweredCallId,
         call: &crate::LoweredCall,
         callee: ExpressionId,
         environment: &mut DynamicEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let span = &call.origin.span;
-        let dynamic_shape =
-            crate::contains_type_parameter(&CheckedType::Function(call.function_type.clone()));
+        // A polymorphic callee always has the dynamic signature, whatever the
+        // instantiation looks like at this call.
+        let polymorphic_types = if call.scheme.is_some() {
+            Some(polymorphic_call_types(call, span)?)
+        } else {
+            None
+        };
+        let dynamic_shape = polymorphic_types.is_some()
+            || crate::contains_type_parameter(&CheckedType::Function(call.function_type.clone()));
         let storage = *environment
             .temporaries
             .get(&id)
@@ -2518,7 +2606,44 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
-        if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
+        let signature = match &call.scheme {
+            Some(scheme) => match scheme.body.as_ref() {
+                CheckedType::Function(signature) => signature,
+                _ => {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "polymorphic call scheme is not a function",
+                    ));
+                }
+            },
+            None => &call.function_type,
+        };
+        // A scheme's single `T` parameter instantiated to a product arrives as
+        // one value: pack the placed elements, or pass the whole product.
+        let pack = call.scheme.is_some()
+            && !matches!(signature.parameter.as_ref(), CheckedType::Product(_))
+            && matches!(
+                call.function_type.parameter.as_ref(),
+                CheckedType::Product(_)
+            );
+        if pack && slots.iter().all(Option::is_none) && unplaced.len() == 1 {
+            slots = vec![Some(unplaced[0])];
+        } else if pack {
+            let packed = *environment.packed_arguments.get(&id).ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing packed argument storage")
+            })?;
+            let descriptor =
+                self.dynamic_descriptor(&call.function_type.parameter, environment, span)?;
+            for (index, slot) in slots.iter().enumerate() {
+                let value = slot.ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "missing packed argument field")
+                })?;
+                let (field, component) =
+                    self.dynamic_product_field(descriptor, packed, index as u32)?;
+                self.backend.copy_dynamic_value(component, value, field)?;
+            }
+            slots = vec![Some(packed)];
+        } else if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
             let descriptor =
                 self.dynamic_descriptor(&call.function_type.parameter, environment, span)?;
             for (index, slot) in slots.iter_mut().enumerate() {
@@ -2529,15 +2654,48 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let mut arguments = vec![closure_environment.into()];
+        if let Some(types) = &polymorphic_types {
+            for ty in types {
+                arguments.push(self.dynamic_descriptor(ty, environment, span)?.into());
+            }
+        }
         if dynamic_shape {
-            // The dynamic shape has no descriptor parameters; the result goes
-            // through a caller-provided out slot and every value by pointer.
+            // The result goes through a caller-provided out slot and every
+            // value by pointer.
             arguments.push(storage.into());
         }
         arguments.extend(hidden);
         for (index, slot) in slots.iter().enumerate() {
-            let pointer = slot
+            let mut pointer = slot
                 .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic closure argument"))?;
+            // A concrete function value reaching a quantified parameter
+            // converts into the dynamic closure ABI first.
+            if let Some(conversion) = self
+                .view
+                .conversions(owner)
+                .and_then(|conversions| conversions.get(&(call_id, Some(index))))
+            {
+                if conversion.writeback {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "mutable function arguments to polymorphic values are not supported yet",
+                    ));
+                }
+                let destination = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(
+                        self.backend.compile_type(&conversion.concrete)?,
+                        "conversion.argument",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let thunk = self.reabstraction_thunk_code(owner, call_id, Some(index), span)?;
+                self.backend
+                    .builder
+                    .build_direct_call(thunk, &[destination.into(), pointer.into()], "")
+                    .map_err(compiler_diagnostic)?;
+                pointer = destination;
+            }
             if dynamic_shape || indirect[index] {
                 arguments.push(pointer.into());
             } else {
@@ -2550,8 +2708,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let signature = if dynamic_shape {
-            self.backend
-                .compile_dynamic_function_type(&call.function_type, 0)?
+            self.backend.compile_dynamic_function_type(
+                signature,
+                polymorphic_types.as_ref().map_or(0, Vec::len),
+            )?
         } else {
             self.backend
                 .compile_closure_function_type(&call.function_type)?
@@ -2567,6 +2727,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.backend
                 .builder
                 .build_store(storage, value)
+                .map_err(compiler_diagnostic)?;
+        }
+        if polymorphic_types.is_some()
+            && self
+                .view
+                .conversions(owner)
+                .is_some_and(|conversions| conversions.contains_key(&(call_id, None)))
+        {
+            let result_type = self.backend.compile_type(&call.result_type)?;
+            let value = self
+                .load_dynamic_storage(result_type, storage, "closure.result")
+                .map_err(compiler_diagnostic)?;
+            let converted = self.convert_boundary_value(value, owner, call_id, None, span)?;
+            self.backend
+                .builder
+                .build_store(storage, converted)
                 .map_err(compiler_diagnostic)?;
         }
         for (descriptor, pointer) in cleanups.into_iter().rev() {
@@ -3714,16 +3890,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .view
                 .call(EmissionOwner::Instance(id), call_id)
                 .expect("owned call");
-            let Some(LoweredBoundTarget::Instance(callee)) = self.view.binding(
-                EmissionOwner::Instance(id),
-                LoweredBindingSite::Call(call_id),
-            ) else {
-                continue;
+            let polymorphic = match (&call.scheme, &call.target) {
+                (Some(scheme), LoweredCallableTarget::IndirectClosure { .. }) => {
+                    match scheme.body.as_ref() {
+                        CheckedType::Function(signature) => Some(signature),
+                        _ => None,
+                    }
+                }
+                _ => None,
             };
-            let signature = self
-                .view
-                .instance_signature(*callee)
-                .expect("callee signature");
+            let signature = match polymorphic {
+                Some(signature) => signature,
+                None => {
+                    let Some(LoweredBoundTarget::Instance(callee)) = self.view.binding(
+                        EmissionOwner::Instance(id),
+                        LoweredBindingSite::Call(call_id),
+                    ) else {
+                        continue;
+                    };
+                    self.view
+                        .instance_signature(*callee)
+                        .expect("callee signature")
+                }
+            };
             if !matches!(signature.parameter.as_ref(), CheckedType::Product(_))
                 && matches!(
                     call.function_type.parameter.as_ref(),
@@ -6252,6 +6441,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return self.emit_dynamic_indirect_concrete_call(
                         owner,
                         id,
+                        call_id,
                         call,
                         callee,
                         environment,
@@ -6679,4 +6869,39 @@ fn is_static_layout_type(value_type: &CheckedType) -> bool {
             | CheckedType::Function(_)
             | CheckedType::Forall(_)
     )
+}
+
+/// How a concrete caller reaches a dynamic-ABI callee.
+enum DynamicCallee<'context> {
+    Direct(FunctionValue<'context>),
+    Indirect {
+        code: PointerValue<'context>,
+        count: usize,
+    },
+}
+
+/// The instantiated types a polymorphic call passes descriptors for, one per
+/// type parameter of its scheme in declaration order.
+fn polymorphic_call_types(
+    call: &crate::LoweredCall,
+    span: &staple_syntax::Span,
+) -> CodeGenerationResult<Vec<CheckedType>> {
+    let scheme = call
+        .scheme
+        .as_ref()
+        .ok_or_else(|| Diagnostic::new(span.clone(), "polymorphic call has no scheme"))?;
+    scheme
+        .type_parameter_ids()
+        .into_iter()
+        .map(|parameter| {
+            call.substitutions
+                .types
+                .iter()
+                .find(|entry| entry.parameter == parameter)
+                .map(|entry| entry.value_type.clone())
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "missing polymorphic call substitution")
+                })
+        })
+        .collect()
 }

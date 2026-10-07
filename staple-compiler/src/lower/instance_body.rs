@@ -3350,6 +3350,47 @@ impl LoweredProgram {
                 })
                 .collect::<Vec<_>>();
             let mut conversions = BTreeMap::new();
+            // Calls through polymorphic values reach a quantified entry in
+            // the dynamic ABI, so a concrete caller converts across it.
+            let polymorphic = body
+                .calls
+                .iter()
+                .filter_map(|(call, record)| {
+                    let signature = match record.scheme.as_ref()?.body.as_ref() {
+                        CheckedType::Function(signature) => signature.clone(),
+                        _ => return None,
+                    };
+                    matches!(
+                        record.target,
+                        super::LoweredCallableTarget::IndirectClosure { .. }
+                    )
+                    .then_some((call, signature))
+                })
+                .collect::<Vec<_>>();
+            for (call, signature) in polymorphic {
+                let Some(record) = body.call(call) else {
+                    continue;
+                };
+                let argument_type = |index: usize| {
+                    let expression = record.arguments.get(index)?.expression?;
+                    let expression = body.expression(expression)?;
+                    let value_type = expression
+                        .coercion
+                        .as_ref()
+                        .map_or(&expression.value_type, |coercion| &coercion.target);
+                    Some(value_type.clone())
+                };
+                Self::reabstraction_across(
+                    call,
+                    record,
+                    argument_type,
+                    &signature,
+                    false,
+                    caller_runtime_empty,
+                    !caller_runtime_empty,
+                    &mut conversions,
+                );
+            }
             for (call, callee) in calls {
                 let Some(record) = body.call(call) else {
                     continue;
@@ -3391,6 +3432,31 @@ impl LoweredProgram {
                 let Some(record) = self.calls.get(call) else {
                     continue;
                 };
+                if let (Some(scheme), super::LoweredCallableTarget::IndirectClosure { .. }) =
+                    (&record.scheme, &record.target)
+                    && let CheckedType::Function(signature) = scheme.body.as_ref()
+                {
+                    let argument_type = |argument_index: usize| {
+                        let expression = record.arguments.get(argument_index)?.expression?;
+                        let expression = self.expressions.get(expression)?;
+                        let value_type = expression
+                            .coercion
+                            .as_ref()
+                            .map_or(&expression.value_type, |coercion| &coercion.target);
+                        Some(value_type.clone())
+                    };
+                    Self::reabstraction_across(
+                        call,
+                        record,
+                        argument_type,
+                        signature,
+                        false,
+                        true,
+                        false,
+                        &mut conversions,
+                    );
+                    continue;
+                }
                 let super::LoweredCallableTarget::DirectFunction { function, .. } = &record.target
                 else {
                     continue;
@@ -3494,6 +3560,35 @@ impl LoweredProgram {
         let Some(signature) = instance.body.as_ref().map(|body| body.signature.clone()) else {
             return;
         };
+        Self::reabstraction_across(
+            call_id,
+            call,
+            argument_type,
+            &signature,
+            callee_runtime_empty,
+            caller_runtime_empty,
+            false,
+            conversions,
+        );
+    }
+
+    /// Records the conversions between a caller and a callee whose ABIs
+    /// differ: `signature` is the callee's own (dynamic-shape) function type.
+    fn reabstraction_across(
+        call_id: LoweredCallId,
+        call: &LoweredCall,
+        argument_type: impl Fn(usize) -> Option<CheckedType>,
+        signature: &CheckedFunctionType,
+        callee_runtime_empty: bool,
+        caller_runtime_empty: bool,
+        dynamic_caller_of_scheme: bool,
+        conversions: &mut BTreeMap<(LoweredCallId, Option<usize>), super::LoweredReabstraction>,
+    ) {
+        // A dynamic caller of a polymorphic value still holds concrete
+        // function values whose ABI differs from the quantified body's.
+        if !dynamic_caller_of_scheme && caller_runtime_empty == callee_runtime_empty {
+            return;
+        }
         let concrete_to_dynamic = !callee_runtime_empty;
         let whole = signature.mutations.contains(&crate::CheckedMutation::Whole);
         let parameter_types = if whole {
@@ -3520,6 +3615,9 @@ impl LoweredProgram {
             let Some(actual) = actual else {
                 continue;
             };
+            if dynamic_caller_of_scheme && crate::contains_type_parameter(&actual) {
+                continue;
+            }
             let (concrete, dynamic) = if concrete_to_dynamic {
                 (actual, parameter.clone())
             } else {
@@ -3543,6 +3641,9 @@ impl LoweredProgram {
                     },
                 );
             }
+        }
+        if dynamic_caller_of_scheme && crate::contains_type_parameter(&call.result_type) {
+            return;
         }
         let (concrete, dynamic) = if concrete_to_dynamic {
             (call.result_type.clone(), signature.result.as_ref().clone())
@@ -4418,11 +4519,13 @@ impl<'a> BodyValidator<'a> {
         let Some(value) = self.body.callable_values.get(id) else {
             return;
         };
-        self.check_concrete_type(
-            &value.origin,
-            &CheckedType::Function(value.function_type.clone()),
-            "callable function type",
-        );
+        // A quantified value's function type mentions its own bound
+        // parameters; only the scheme's free parameters must be in scope.
+        let checked = match &value.scheme {
+            Some(scheme) => CheckedType::Forall(Box::new(scheme.clone())),
+            None => CheckedType::Function(value.function_type.clone()),
+        };
+        self.check_concrete_type(&value.origin, &checked, "callable function type");
         if let Some(closure) = &value.closure {
             for capture in &closure.captures {
                 self.check_concrete_type(&value.origin, &capture.value_type, "capture type");

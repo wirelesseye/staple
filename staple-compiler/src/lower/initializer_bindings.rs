@@ -178,6 +178,30 @@ impl<'a> InitializerBinder<'a> {
         evidence: Option<TraitEvidence>,
         differential: bool,
     ) -> Option<FunctionInstanceId> {
+        self.bind_instance_with(
+            site,
+            origin,
+            function,
+            function_type,
+            substitutions,
+            evidence,
+            differential,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_instance_with(
+        &mut self,
+        site: LoweredBindingSite,
+        origin: &Origin,
+        function: FunctionId,
+        function_type: CheckedFunctionType,
+        substitutions: CallSubstitutions,
+        evidence: Option<TraitEvidence>,
+        differential: bool,
+        polymorphic: bool,
+    ) -> Option<FunctionInstanceId> {
         // A function with no relevant template parameters has exactly one
         // instance; the site's callable type may be a coerced view of the
         // template, so the template signature is the correct request.
@@ -204,7 +228,12 @@ impl<'a> InitializerBinder<'a> {
             evidence,
             target: InstanceResolutionTarget::Root,
         };
-        let runtime = if differential {
+        let runtime = if polymorphic {
+            self.program
+                .functions
+                .get(function)
+                .map(|template| template.scheme_type_parameters.iter().copied().collect())
+        } else if differential {
             self.program.differential_call_runtime(
                 function,
                 &BTreeSet::new(),
@@ -332,7 +361,7 @@ impl<'a> InitializerBinder<'a> {
         let site = LoweredBindingSite::CallableValue(id);
         match &value.target {
             LoweredCallableTarget::DirectFunction { function, .. } => {
-                self.bind_instance(
+                self.bind_instance_with(
                     site,
                     &value.origin,
                     *function,
@@ -340,6 +369,7 @@ impl<'a> InitializerBinder<'a> {
                     value.substitutions.clone(),
                     value.evidence.clone(),
                     false,
+                    value.scheme.is_some(),
                 );
             }
             LoweredCallableTarget::TraitImplementation {

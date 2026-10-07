@@ -57,33 +57,32 @@ documented 4a fixes (`local_recursive_generic`, `local_generic_cells`, and
 
 ## Current state
 
-Stage 4b is in progress. B1 implements closure layout/static descriptors for
-closed schemes, alpha-canonical keys, and scheme-aware shallow inference.
+Stage 4b is in progress. B1–B3 are implemented.
 
-B2 constructs retained schemes in concrete and dynamic owners. Partially bound
-entries bind enclosing descriptors; callers supply scheme descriptors, including
-phantom parameters. Captured lambdas use descriptor-layout environments and
-finalizers; shared-cell execution survives the owner's return. Wrapper constructor
-entries preserve scheme order. Storage coverage includes mutable assignment,
-product/wrapper fields, arguments/results, and top-level bindings in both modes.
-Scheme-checked lambdas enforce fixed effect rows. Construction checks reject
-unsupported trait/effect schemes and inspect direct functions' transitive bodies.
+- **Representation (B1).** A polymorphic value is a closure with a static
+  descriptor. Schemes have alpha-canonical keys, and inference has a
+  scheme-aware shallow mode.
+- **Construction (B2).** Generic `def`s, generic constructors, and
+  scheme-checked lambdas build quantified closures in concrete and dynamic
+  owners. Bound entries, descriptor-layout environments, finalizers, and fixed
+  effect rows are in place, and every storage position works. Construction
+  sites run the support analysis and report restrictions.
+- **Calls (B3).** A call through a polymorphic value passes one descriptor per
+  scheme parameter, in scheme order, from concrete owners, module
+  initializers, and dynamic bodies. Phantom and compound instantiations work,
+  a product instantiation of the scheme's single parameter is packed, and
+  function-typed arguments and results are converted at the boundary (R5).
+- **Gate.** Stage 3's diagnostic now reports only forms not lowered yet:
+  instantiation at a non-scheme type, and subsumption that is not an
+  alpha-renaming.
 
-B3 retains original expression/call schemes and written type arguments, recovers
-substitutions (including phantom arguments), and protects binders during cloning.
-Known concrete callable constructions retain their existing ABI. Descriptor scans
-now cover polymorphic calls in concrete owners and initializers, plus compound
-shapes in dynamic owners. Call emission and its R5 boundary conversions remain.
+Remaining: B4 instantiation adapters, B5 scheme adapters, B6 restriction
+tests and `Staple.md`, and the B7 audits (workspace tests, full differential
+run, IR comparison, reachability).
 
-Eleven focused polymorphic regressions and four scheme-inference tests pass.
-Descriptor catalog tests pass instance, specialization, graph, and artifact
-validation in both modes. The non-incremental workspace retry passed 233 CLI and
-408 compiler tests (one ignored each); its remaining suites are running. Newer
-call changes have focused checks; final workspace/IR/reachability audits remain.
-
-The public Stage 3 gate remains. B2 needs remaining ownership/restriction coverage
-and trait-member handling. B3–B7 (call execution, adapters, restrictions/docs,
-and final validation) remain pending.
+Verified: the Goal program and one program per value position run from
+concrete and from generic bodies; the differential corpus run emits all of
+them.
 
 ## Starting shape at the boundary (before Stage 4b)
 

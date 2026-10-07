@@ -5422,6 +5422,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     return Err(unsupported("indirect call binding"));
                 }
                 let (code, pointer) = callee_parts.ok_or_else(|| unsupported("indirect callee"))?;
+                if call.scheme.is_some() {
+                    let value = self.emit_concrete_polymorphic_call(
+                        owner, id, &call, code, pointer, &values,
+                    )?;
+                    self.emit_call_cleanup(owner, id, cleanups, &call.origin.span)?;
+                    return Ok(value);
+                }
                 let mut arguments = vec![pointer.into()];
                 arguments.extend(values);
                 let signature = self

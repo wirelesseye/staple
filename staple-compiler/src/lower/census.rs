@@ -55,8 +55,10 @@ pub(crate) fn assert_catalog_census(
     }
     for (_, artifact) in program.artifacts.iter() {
         match artifact.plan.as_ref() {
-            // Drop glue is inlined at its use sites.
-            Some(LoweredArtifactPlan::DropGlue(_)) | None => {}
+            // Drop glue is inlined at its use sites; a type descriptor is a
+            // constant global, not a function.
+            Some(LoweredArtifactPlan::DropGlue(_) | LoweredArtifactPlan::TypeDescriptor(_))
+            | None => {}
             Some(LoweredArtifactPlan::CoroutineCodes(_)) => {
                 let (resume, cleanup) = program
                     .planned_coroutine_pair_names(artifact.ordinal)
@@ -89,6 +91,8 @@ pub(crate) fn assert_catalog_census(
     let mut allowed = expected.clone();
     allowed.insert("main".to_owned());
     allowed.insert("__staple_is_valid_utf8".to_owned());
+    // The backend defines this helper on first use for run-time descriptors.
+    allowed.insert("__staple_copy_descriptor".to_owned());
     let mut unexplained = defined.difference(&allowed).cloned().collect::<Vec<_>>();
     unexplained.sort();
     assert!(

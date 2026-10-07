@@ -7390,6 +7390,19 @@ impl LoweredProgram {
             // turn that existing route into a call through a Forall value.
             return None;
         }
+        // A call's value is polymorphic only when the call itself returns a
+        // quantified type. A partially applied generic function returns its
+        // already-instantiated remainder, whatever scheme the checker
+        // retained for the occurrence.
+        if let Some(LoweredExpression {
+            kind: LoweredExpressionKind::Call(id),
+            ..
+        }) = self.expressions.get(callee)
+            && let Some(inner) = self.calls.get(*id)
+            && !matches!(inner.function_type.result.as_ref(), CheckedType::Forall(_))
+        {
+            return None;
+        }
         module.scheme_of_expression(syntax).cloned()
     }
 
