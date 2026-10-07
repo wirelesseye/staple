@@ -16525,6 +16525,15 @@ pub(crate) fn infer_type_parameters(
     infer_type_parameters_mode(false, template, actual, substitutions)
 }
 
+/// Lowering may recover explicitly written impredicative instantiations.
+pub(crate) fn infer_type_parameters_with_schemes(
+    template: &CheckedType,
+    actual: &CheckedType,
+    substitutions: &mut HashMap<TypeParameterId, CheckedType>,
+) -> bool {
+    infer_type_parameters_mode(true, template, actual, substitutions)
+}
+
 fn infer_type_parameters_mode(
     allow_schemes: bool,
     template: &CheckedType,
@@ -18875,6 +18884,21 @@ mod first_class_scheme_tests {
                 effects: CheckedEffectSet::default(),
             })),
         }))
+    }
+
+    #[test]
+    fn lowering_recovers_explicit_scheme_instantiations() {
+        let template = CheckedType::Parameter {
+            id: TypeParameterId(7),
+            name: "T".into(),
+            sized: true,
+            parameter_product_capable: false,
+        };
+        let actual = identity(100, "U");
+        let mut inferred = HashMap::new();
+        assert!(!infer_type_parameters(&template, &actual, &mut inferred));
+        assert!(infer_type_parameters_with_schemes(&template, &actual, &mut inferred));
+        assert_eq!(inferred.get(&TypeParameterId(7)), Some(&actual));
     }
 
     #[test]

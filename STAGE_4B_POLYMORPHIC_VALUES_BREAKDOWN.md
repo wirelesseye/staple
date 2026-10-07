@@ -55,6 +55,13 @@ documented 4a fixes (`local_recursive_generic`, `local_generic_cells`, and
   scope or allowed. The corpus has zero in-scope rejections.
 - **The differential option** (Decision 11) as a testing tool.
 
+## Current state
+
+Stage 4b is in progress. B1 now recovers scheme-valued explicit call
+substitutions using the checker’s scheme-permitting inference mode.
+Representation and canonical keys remain pending; the Stage 3 gate stays
+in place. B2–B7 remain pending.
+
 ## Current shape at the boundary
 
 - `TypedModule::polymorphic_value_diagnostics` (`typecheck.rs`) is Stage 3's

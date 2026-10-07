@@ -33,7 +33,8 @@ use crate::{
     IntegerType, IntrinsicFunction, ModuleId, RecursiveConstruction, ResolvedFunction,
     ResolvedModule, SourceModule, StructuralTraitMethod, SymbolId, TraitId, TraitMethodId, TypeId,
     TypeParameterId, TypedModule, contains_type_parameter, implicit_wrapper_representation,
-    infer_type_parameters, select_sum_alternative_with, sum_through_implicit_wrapper,
+    infer_type_parameters, infer_type_parameters_with_schemes, select_sum_alternative_with,
+    sum_through_implicit_wrapper,
 };
 
 mod artifact_closure;
@@ -13623,7 +13624,7 @@ fn call_substitutions(
     actual: &CheckedFunctionType,
 ) -> CallSubstitutions {
     let mut inferred = HashMap::new();
-    let _ = infer_type_parameters(
+    let _ = infer_type_parameters_with_schemes(
         &CheckedType::Function(template.clone()),
         &CheckedType::Function(actual.clone()),
         &mut inferred,
