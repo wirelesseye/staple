@@ -3150,7 +3150,15 @@ impl LoweredProgram {
                 format!("function {} has no lowered template", function.0),
             ));
         };
-        let relevant = self.relevant_parameters(function);
+        let mut relevant = self.relevant_parameters(function);
+        // A Forall entry accepts every declared scheme descriptor, including
+        // phantom parameters absent from the signature and implementation.
+        // Ordinary monomorphized requests keep their existing relevance set.
+        for parameter in &template.scheme_type_parameters {
+            if requested_runtime.contains(parameter) {
+                relevant.notice_type(*parameter, "");
+            }
+        }
         let signature = template.signature.clone();
         let mut builder = EnvironmentBuilder::new(origin);
         let enclosing_map = enclosing

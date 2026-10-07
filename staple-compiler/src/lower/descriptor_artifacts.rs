@@ -255,7 +255,8 @@ pub(super) fn scan_instance(
             .is_some_and(|key| !key.runtime().is_empty()),
         _ => false,
     });
-    if !dynamic && !dynamic_call {
+    let polymorphic_call = body.calls.iter().any(|(_, call)| call.scheme.is_some());
+    if !dynamic && !dynamic_call && !polymorphic_call {
         return Ok(Vec::new());
     }
     let mut requests = concrete_body_types(body)
@@ -590,18 +591,13 @@ pub(super) fn scan_instance(
     Ok(requests)
 }
 
-/// Descriptors a module initializer's concrete bridge into a dynamic
-/// implementation needs: the concrete types named by the calls it redirects.
-/// Concrete types a module initializer's differential bridge needs, in the
-/// deterministic scanner order. Used by both the scanner and use-site
-/// validation.
+/// Concrete descriptors used by an initializer's polymorphic calls and
+/// differential bridges, in deterministic scanner order. Shared by the
+/// scanner and use-site validation.
 pub(super) fn concrete_initializer_types(
     program: &LoweredProgram,
     id: super::InitializerId,
 ) -> Vec<CheckedType> {
-    if !program.dictionary_pass_generic_calls {
-        return Vec::new();
-    }
     let mut visitor = InitializerDescriptorVisitor {
         program,
         types: Vec::new(),
@@ -657,25 +653,21 @@ impl super::cleanup_artifacts::LoweredOwnerVisitor for InitializerDescriptorVisi
         &mut self,
         call: &super::LoweredCall,
     ) -> Result<(), Vec<staple_syntax::Diagnostic>> {
-        // Only the calls the differential option actually redirects need
-        // concrete descriptors for their run-time type arguments.
-        let Some(function) = (match &call.target {
-            super::LoweredCallableTarget::DirectFunction { function, .. } => Some(*function),
-            _ => None,
-        }) else {
-            return Ok(());
-        };
-        if self
-            .program
-            .differential_call_runtime(
-                function,
-                &std::collections::BTreeSet::new(),
-                false,
-                &call.function_type,
-                &call.substitutions,
-            )
-            .is_none()
-        {
+        let needs_descriptors = call.scheme.is_some()
+            || match &call.target {
+                super::LoweredCallableTarget::DirectFunction { function, .. } => self
+                    .program
+                    .differential_call_runtime(
+                        *function,
+                        &std::collections::BTreeSet::new(),
+                        false,
+                        &call.function_type,
+                        &call.substitutions,
+                    )
+                    .is_some(),
+                _ => false,
+            };
+        if !needs_descriptors {
             return Ok(());
         }
         collect_concrete_types(&call.function_type.parameter, &mut self.types);

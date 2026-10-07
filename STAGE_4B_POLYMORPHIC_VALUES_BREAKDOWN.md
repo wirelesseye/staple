@@ -58,36 +58,32 @@ documented 4a fixes (`local_recursive_generic`, `local_generic_cells`, and
 ## Current state
 
 Stage 4b is in progress. B1 implements closure layout/static descriptors for
-closed schemes, alpha-canonical keys, and scheme-aware lowering inference.
-Shallow inference uses known outer substitutions without guessing through schemes.
+closed schemes, alpha-canonical keys, and scheme-aware shallow inference.
 
-B2 retains construction schemes and requests dynamic entries in concrete and
-dynamic owners. Partially bound entries bind enclosing descriptors; callers supply
-the scheme descriptors. Captured lambdas use descriptor-layout environments and
-dynamic finalizers. Generic wrapper constructors preserve the scheme ABI and
-caller descriptor order. Storage coverage includes mutable assignment, product/
-wrapper fields, function arguments/results, and top-level bindings in both modes.
-Scheme-checked lambdas now adopt their fixed effect row and validate their body
-against it. Shared-cell execution preserves mutation after the owner returns.
-Construction checks reject unsupported trait/effect schemes; direct functions also
-check transitive implementation bodies. B3 now preserves original expression
-schemes across instantiation/subsumption, including names, fields, returned values,
-explicit applications, concrete instantiation, and compound subsumption. Indirect
-call snapshots retain that scheme and infer body substitutions; instance cloning
-substitutes outer parameters while protecting the scheme binders. Known concrete
-callable constructions remain on their existing ABI. Written value type arguments
-are retained separately, so phantom parameters recover substitutions even when
-the function body cannot reveal them.
+B2 constructs retained schemes in concrete and dynamic owners. Partially bound
+entries bind enclosing descriptors; callers supply scheme descriptors, including
+phantom parameters. Captured lambdas use descriptor-layout environments and
+finalizers; shared-cell execution survives the owner's return. Wrapper constructor
+entries preserve scheme order. Storage coverage includes mutable assignment,
+product/wrapper fields, arguments/results, and top-level bindings in both modes.
+Scheme-checked lambdas enforce fixed effect rows. Construction checks reject
+unsupported trait/effect schemes and inspect direct functions' transitive bodies.
 
-Ten focused polymorphic regressions and four scheme-inference tests pass,
-including two-layout execution in both modes and pure/read-only effect failures.
-Existing dynamic-capture tests passed earlier. The non-incremental workspace retry
-passed 233 CLI tests after an incremental linker failure; remaining suites, final IR
-comparison, and reachability audit remain pending.
+B3 retains original expression/call schemes and written type arguments, recovers
+substitutions (including phantom arguments), and protects binders during cloning.
+Known concrete callable constructions retain their existing ABI. Descriptor scans
+now cover polymorphic calls in concrete owners and initializers, plus compound
+shapes in dynamic owners. Call emission and its R5 boundary conversions remain.
 
-The public Stage 3 gate remains. B2 still needs remaining ownership coverage,
-construction restrictions, and trait-member handling. B3–B7 (calls, adapters,
-restrictions/docs, and final validation) remain pending.
+Eleven focused polymorphic regressions and four scheme-inference tests pass.
+Descriptor catalog tests pass instance, specialization, graph, and artifact
+validation in both modes. The non-incremental workspace retry passed 233 CLI and
+408 compiler tests (one ignored each); its remaining suites are running. Newer
+call changes have focused checks; final workspace/IR/reachability audits remain.
+
+The public Stage 3 gate remains. B2 needs remaining ownership/restriction coverage
+and trait-member handling. B3–B7 (call execution, adapters, restrictions/docs,
+and final validation) remain pending.
 
 ## Starting shape at the boundary (before Stage 4b)
 

@@ -22622,6 +22622,62 @@ mod tests {
     }
 
     #[test]
+    fn polymorphic_calls_plan_phantom_and_compound_descriptors() {
+        let module = checked_program(concat!(
+            "def ignore: <T where Sized T> () -> I32 = () => 42\n",
+            "let stored = ignore\n",
+            "let result = stored.<String> ()\n",
+            "def run: () -> I32 = () => stored.<(I32, I32)> ()\n",
+            "def apply: <A> move A -> I32 = move value => stored.<(A, A)> ()\n",
+            "let nested = apply 42\n",
+        ));
+        for dictionary in [false, true] {
+            let mut program = LoweredProgram::default();
+            program.dictionary_pass_generic_calls = dictionary;
+            assert!(program.snapshot(&module).is_empty());
+            if dictionary {
+                program.compute_dynamic_support();
+            }
+            let diagnostics = program.build_specialization_worklist();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.materialize_instance_bodies();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            program.record_reabstractions();
+            let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            for diagnostics in [
+                program.validate_instance_bodies(),
+                program.validate_specializations(),
+                program.validate_specialization_graph(),
+                program.validate_artifact_closure(&artifact_closure::ProductionHooks),
+            ] {
+                assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            }
+            assert!(
+                program.artifacts.iter().any(|(_, artifact)| matches!(
+                    &artifact.plan, Some(LoweredArtifactPlan::TypeDescriptor(plan))
+                    if plan.value_type == CheckedType::String
+                )),
+                "initializer phantom argument needs its own descriptor"
+            );
+            assert!(program.artifacts.iter().any(|(_, artifact)| matches!(
+                &artifact.plan, Some(LoweredArtifactPlan::TypeDescriptor(plan))
+                if matches!(&plan.value_type, CheckedType::Product(product)
+                    if product.elements.len() == 2 && product.elements.iter().all(|field| field.value_type == CheckedType::I32))
+            )), "concrete owner needs a compound descriptor");
+            if dictionary {
+                assert!(
+                    program.artifacts.iter().any(|(_, artifact)| matches!(
+                        &artifact.plan,
+                        Some(LoweredArtifactPlan::CompoundDescriptorDrop(_))
+                    )),
+                    "dynamic owner needs the compound descriptor shape"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn polymorphic_values_survive_storage_positions() {
         for dictionary in [false, true] {
             let module = checked_program(concat!(
