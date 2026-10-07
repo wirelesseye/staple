@@ -22,33 +22,74 @@ conventional commits on this branch.
 | R0 — Measurement and hygiene | Done. Lowering failures fail coverage, the baseline is zero, and status is maintained in place. |
 | R1 — Descriptor order | Done. Descriptors follow declared scheme order. |
 | R2 — Concrete function values | Done. Concrete closure calls and boundary adapters are supported. |
-| R3 — Dynamic function values | Done. Constructor adapters own their descriptors and expose the dynamic closure ABI. Shared function cells retain the explicit Decision 7 restriction. |
+| R3 — Dynamic function values | Done. Constructor adapters own their descriptors and expose the dynamic closure ABI. Shared cells that hold a function value retain the explicit Decision 7 restriction. A generic binding's initialization-state cell holds no value and is exempt. |
 | R4 — Dynamic environments and captures | Done. Compound/function captures, concrete-signature adapters, native child environments, initialization bytes, and owned descriptors are supported. |
 | R5 — Reabstraction | Done. Lowering-owned recursive conversions cover nested functions and by-value products, sums, wrappers, and fixed arrays normalized to products, including mutable writeback. Functions behind references retain Decision 7. |
 | R6 — Buffer intrinsics and dynamic GC payloads | Done. Dynamic buffers and managed references own their descriptors and finalizers; dynamic storage loads accept packed alignment. |
 | R7 — Remaining forms | Done. Concrete indexing, spreads, defaults, string patterns, propagating/asserting bindings, nested generic declarations, and shared String/CString kernels are supported. Every remaining in-scope rejection kind is audited below. |
 | R8 — Exit gate | Done. Coverage, complete workspace tests, full differential execution, and default IR comparisons pass. |
 
-**Final validation:**
+**Final validation** (after the review fixes below):
 
-- Coverage across 100 programs: 6,429 generic templates, 4,773 eligible
-  (74.24%), and 1,656 rejected for allowed reasons. In-scope rejections and
-  their baseline are both zero.
-- `cargo test --workspace --quiet`: 1,476 tests passed, zero failed, two
-  intentionally ignored. This includes all 233 CLI tests, 397 compiler unit
-  tests, and 574 compiler integration tests.
-- The separately invoked full ignored differential run passes all 98 runnable
-  inputs with identical stdout and exit status. Dynamic calls are used by
-  97 inputs, covering 11,311 call sites.
-- All 111 default IR inputs (100 corpus programs and 11 standalone example
-  files) match the `50565d8` release build. Each input has one stable variant:
-  19 were compared with four samples and 92 with two samples per compiler.
+- Coverage across 101 programs: 6,493 generic templates, 4,823 eligible
+  (74.3%), and 1,670 rejected for allowed reasons. In-scope rejections and
+  their baseline are both zero, and no template is rejected as a function
+  value behind a reference.
+- `cargo test --workspace --quiet`: 1,477 tests passed, zero failed, two
+  intentionally ignored.
+- The full differential run (ignored by default) passes all 99 runnable
+  inputs with identical stdout and exit status. Dynamic calls are used by 98
+  inputs, covering 11,426 call sites.
+- Default IR against the `50565d8` release build, 4 compilations per
+  binary for every input: 109 of 112 inputs are `same`. The three
+  differences are intended bug fixes that `50565d8` miscompiles:
+  - `local_recursive_generic` (new) and `local_generic_cells`: a local
+    recursive generic `def` read its own state-only cell with the value-cell
+    layout, out of bounds, and trapped. Only the state load changes.
+  - `dynamic_audit_forms` fails to compile on `50565d8` because it
+    includes the phantom-parameter case fixed in `5a5fb60`.
 - Bound-free native regressions require dynamic selection for the repaired
   forms, exercise recursive conversions and mutable writeback, and assert
   alignment-one loads for packed buffer fields. The managed-reference JIT
   ownership/finalizer test checks the initialization byte and trailing
-  descriptor at the current cell offsets. Trap cases compare exact statuses
-  and pin expected stdout, including empty assertion-failure output.
+  descriptor at the current cell offsets.
+- The default corpus gate checks exact exit statuses: `expect_trap`
+  programs must end in the platform's `llvm.trap` signal, `expect_panic`
+  programs in a Staple panic (exit status 1), and all others in 0. Expected
+  stdout is pinned, including empty output.
+
+### Review of `89de0eb`
+
+The review that confirmed the completion claims found three problems. All
+are resolved.
+
+1. **Trap programs were not checked for the right failure.** `a0cc824` had
+   relaxed the default corpus gate to accept any nonzero status for trap
+   programs, so a segfault would pass. The four programs fail in two ways:
+   three hit `llvm.trap`, and `dynamic_asserting_trap` panics (a failed
+   `let!` exits with status 1). The corpus now distinguishes
+   `expect_trap` from `expect_panic`, and the gate asserts the exact
+   status of each.
+2. **A local recursive generic `def` was classified as a Decision 7
+   restriction.** `3acdbb9` reached zero in-scope rejections by calling its
+   self-capture a function value behind a reference. But a generic binding's
+   cell holds only its initialization state, never a function value, so
+   nothing needs converting. The scanner now exempts captures of
+   initialization-state-only symbols, and the program runs through dynamic
+   implementations.
+
+   This exposed a pre-existing default-mode bug: such a program trapped at
+   run time on `50565d8` too. Whether a symbol is state-only was recomputed
+   from its *substituted* type, so inside the `def`'s own instances, where
+   its parameters are substituted, the self-capture was read as a value cell.
+   A generic `def`'s binding now stays state-only in every instance
+   (`LoweredSymbol::declared_scheme`, from
+   `TypedModule::has_declared_scheme`). The `local_recursive_generic`
+   corpus program covers both modes and is in the quick differential subset.
+3. **An audit justification rested on a compiler bug.** The
+   `ParameterDependentNonGeneric` row cited a default-emitter crash on a
+   phantom-parameter local generic. Fixed in `5a5fb60`; the row was updated
+   there.
 
 ### Intrinsic audit
 

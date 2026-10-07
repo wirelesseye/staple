@@ -674,9 +674,17 @@ impl SupportWalker<'_> {
                     .closure
                     .as_ref()
                     .map_or(&[][..], |closure| closure.captures.as_slice());
+                // A generic binding's cell holds only its initialization state,
+                // never a function value, so a closure capturing it (a local
+                // generic `def` referring to itself) converts nothing.
                 let shared_function = |capture: &crate::LoweredClosureCapture| {
                     capture.access == crate::LoweredCaptureAccess::SharedCell
                         && contains_polymorphic_function(&capture.value_type)
+                        && !self
+                            .program
+                            .symbols
+                            .get(capture.capture.symbol)
+                            .is_some_and(|symbol| symbol.initialization_state_only)
                 };
                 if captures.iter().any(shared_function) {
                     // Shared storage cannot be copied into an adapted closure's
@@ -1141,9 +1149,18 @@ mod tests {
     }
 
     #[test]
-    fn recursive_generic_callable_is_restricted_behind_shared_cell() {
+    fn local_recursive_generic_is_selected_dynamically() {
+        // A local generic `def` that calls itself captures its own binding's
+        // initialization-state cell. The cell holds no function value, so the
+        // capture is not Decision 7's function-behind-a-reference restriction.
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let source = "def outer: () -> I32 = () => {\n def recur: <T where Copy T> (T, I32) -> T = (value, count) => if (count == 0) { value } else { recur (value, count - 1) }\n recur (42, 3)\n}\nlet answer = outer ()\n";
+        let program = codegen_corpus()
+            .iter()
+            .find(|program| program.name == "local_recursive_generic")
+            .unwrap();
+        let CorpusSource::Inline(source) = program.source else {
+            panic!("the regression is inline");
+        };
         let loaded = ProgramLoader::new()
             .with_standard_library_root(workspace.join("stdlib"))
             .load_source(source, workspace)
@@ -1163,12 +1180,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             lowered.program.dynamic_support(function),
-            DynamicSupport::Unsupported
+            DynamicSupport::Supported,
+            "{:?}",
+            lowered.program.dynamic_support_reasons.get(&function)
         );
-        assert_eq!(
-            lowered.program.dynamic_support_reasons[&function],
-            BTreeSet::from([RejectionReason::FunctionBehindReference])
-        );
+        assert!(lowered.differential_dynamic_call_count() > 0);
     }
 
     #[test]

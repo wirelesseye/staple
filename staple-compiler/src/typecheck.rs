@@ -2411,6 +2411,15 @@ impl TypedModule {
         }
     }
 
+    /// Whether `symbol` is bound by its own declared scheme (a generic `def`,
+    /// constructor, or intrinsic) rather than holding a polymorphic value. Such
+    /// a binding has no value storage in any instance, only initialization
+    /// state.
+    pub(crate) fn has_declared_scheme(&self, symbol: SymbolId) -> bool {
+        self.scheme_of_symbol(symbol).is_some()
+            && !self.polymorphic_storage_symbols.contains(&symbol)
+    }
+
     /// The declared type of `symbol`, falling back to its function's own
     /// checked signature when `type_of_symbol` has no entry for it.
     ///

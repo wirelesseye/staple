@@ -4644,15 +4644,25 @@ mod tests {
             }
             let behavior = compile_link_run(&lowered, &options)
                 .unwrap_or_else(|error| panic!("`{}` should link and run: {error}", program.name));
-            assert!(
-                if program.traps {
-                    behavior.0 != Some(0)
-                } else {
-                    behavior.0 == Some(0)
-                },
-                "`{}` has unexpected exit status {:?}",
-                program.name,
+            // `compile_link_run` reports a signal as its negated number.
+            // `llvm.trap` is `ud2` (SIGILL) on x86-64 and `brk` (SIGTRAP) on
+            // AArch64; a Staple panic exits with status 1.
+            #[cfg(target_arch = "x86_64")]
+            const TRAP_STATUS: i32 = -4;
+            #[cfg(not(target_arch = "x86_64"))]
+            const TRAP_STATUS: i32 = -5;
+            let expected_status = if program.traps {
+                TRAP_STATUS
+            } else if program.panics {
+                1
+            } else {
+                0
+            };
+            assert_eq!(
                 behavior.0,
+                Some(expected_status),
+                "`{}` has unexpected exit status",
+                program.name,
             );
             let expected = program
                 .expected_stdout
@@ -4685,7 +4695,8 @@ mod tests {
         let standard_library = workspace_root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")])
             .expect("corpus link options should parse");
-        const SUBSET: [&str; 10] = [
+        const SUBSET: [&str; 11] = [
+            "local_recursive_generic",
             "calls_generic",
             "parameter_products",
             "from_types",

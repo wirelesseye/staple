@@ -55,9 +55,12 @@ pub struct CorpusProgram {
     /// The exact stdout a `MustRun` program prints. The CLI harness asserts it
     /// under the default emitter.
     pub expected_stdout: Option<&'static str>,
-    /// A `MustRun` program that must fail with a nonzero exit or signal
-    /// under the default emitter.
+    /// A `MustRun` program that must end in an `llvm.trap` (killed by the
+    /// platform's trap signal) under the default emitter.
     pub traps: bool,
+    /// A `MustRun` program that must end in a Staple panic (exit status 1,
+    /// with the message on stderr) under the default emitter.
+    pub panics: bool,
     /// A `MustRun` program's generic artifact family: the in-process harness
     /// requires two distinct artifacts of it.
     pub generic_artifacts: Option<CorpusGenericArtifacts>,
@@ -72,6 +75,7 @@ const fn inline(name: &'static str, source: &'static str, topic: &'static str) -
         emits: &[],
         expected_stdout: None,
         traps: false,
+        panics: false,
         generic_artifacts: None,
     }
 }
@@ -85,6 +89,7 @@ const fn file(name: &'static str, path: &'static str, topic: &'static str) -> Co
         emits: &[],
         expected_stdout: None,
         traps: false,
+        panics: false,
         generic_artifacts: None,
     }
 }
@@ -111,9 +116,17 @@ const fn must_run(mut program: CorpusProgram) -> CorpusProgram {
     program
 }
 
-/// Requires a `MustRun` entry to fail under the default emitter.
+/// Requires a `MustRun` entry to end in an `llvm.trap` under the default
+/// emitter.
 const fn expect_trap(mut program: CorpusProgram) -> CorpusProgram {
     program.traps = true;
+    program
+}
+
+/// Requires a `MustRun` entry to end in a Staple panic under the default
+/// emitter.
+const fn expect_panic(mut program: CorpusProgram) -> CorpusProgram {
+    program.panics = true;
     program
 }
 
@@ -140,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 100] = [
+static CORPUS: [CorpusProgram; 101] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -1248,7 +1261,7 @@ static CORPUS: [CorpusProgram; 100] = [
         "",
     ),
     expect_stdout(
-        expect_trap(must_run(inline(
+        expect_panic(must_run(inline(
             "dynamic_asserting_trap",
             concat!(
                 "type Found T = wrap T\n",
@@ -1317,6 +1330,27 @@ static CORPUS: [CorpusProgram; 100] = [
             "expressions",
         )),
         "6 17\n3 7 8\n8 3\n1\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n4\n",
+    ),
+    // A local generic `def` that calls itself captures its own binding's
+    // initialization-state cell, which holds no function value, so its
+    // dynamic implementation needs no reabstraction.
+    expect_stdout(
+        must_run(inline(
+            "local_recursive_generic",
+            concat!(
+                "use std.io.println\n",
+                "def outer: () -> (I32, I32, I32) = () => {\n",
+                "    def recur: <T where Copy T> (T, I32) -> T = (value, count) => if (count == 0) { value } else { recur (value, count - 1) }\n",
+                "    let single = recur (42, 3)\n",
+                "    let (left, right) = recur ((5, 6), 2)\n",
+                "    (single, left, right)\n",
+                "}\n",
+                "let (single, left, right) = outer ()\n",
+                "println \"${single} ${left} ${right}\"\n",
+            ),
+            "expressions",
+        )),
+        "42 5 6\n",
     ),
     expect_stdout(
         must_run(inline(

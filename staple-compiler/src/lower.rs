@@ -2620,6 +2620,10 @@ pub(crate) struct LoweredSymbol {
     /// Checked symbol type used for initialization-state layout specialization.
     pub initialization_state_type: CheckedType,
     pub initialization_state_only: bool,
+    /// The symbol is bound by its own declared scheme (a generic `def`), so
+    /// it stays initialization-state-only in every instance, including the
+    /// instances of its own function, which substitute its parameters.
+    pub declared_scheme: bool,
     pub origin: Origin,
     pub semantic_id: SymbolId,
     pub module: ModuleId,
@@ -3237,6 +3241,7 @@ impl LoweredProgram {
             initialization_state_only: module
                 .type_of_symbol(symbol)
                 .is_some_and(contains_type_parameter),
+            declared_scheme: module.has_declared_scheme(symbol),
             origin: origin.clone(),
             semantic_id: symbol,
             module: module_id,

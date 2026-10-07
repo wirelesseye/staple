@@ -239,9 +239,12 @@ bindings, and nested generic declarations have dynamic emission. Both emitters
 share String/CString kernels, and dynamic storage loads accept packed alignment.
 The explicit later-stage restrictions and remaining rejection guards are audited.
 
-The complete workspace suite, zero-baseline coverage, full differential
-execution, and all 111 default IR comparisons pass. Detailed final results
-live in the remainder plan's
+The complete workspace suite, zero-baseline coverage, and full differential
+execution pass. Default IR matches the `50565d8` release build for 109 of 112
+inputs; the three differences are intended fixes of programs `50565d8`
+miscompiles (a local recursive generic `def`, and the phantom-parameter case).
+Detailed final results, and the problems the review of `89de0eb` found and
+fixed, live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
 
 **Decision R-F. The dynamic emitter stays separate.** It is too large to fold

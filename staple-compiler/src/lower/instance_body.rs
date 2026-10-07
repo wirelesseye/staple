@@ -872,9 +872,13 @@ impl<'a> BodyCloner<'a> {
         }
     }
 
+    /// A generic `def`'s binding stays state-only even where this instance
+    /// substitutes its own parameters, so every owner agrees on its cell
+    /// layout with the owner that allocated it.
     fn symbol_initialization_state_only(&self, symbol: SymbolId) -> bool {
         self.program.symbols.get(symbol).is_some_and(|record| {
-            contains_type_parameter(&self.ty(&record.initialization_state_type))
+            record.declared_scheme
+                || contains_type_parameter(&self.ty(&record.initialization_state_type))
         })
     }
 
@@ -3575,10 +3579,11 @@ impl<'a> BodyValidator<'a> {
     fn check_state_layout(&mut self, symbol: SymbolId, state_only: bool, origin: &Origin) {
         let substitutions = self.instance.environment.substitution_map();
         let expected = self.program.symbols.get(symbol).is_some_and(|record| {
-            contains_type_parameter(&substitute_type(
-                record.initialization_state_type.clone(),
-                &substitutions,
-            ))
+            record.declared_scheme
+                || contains_type_parameter(&substitute_type(
+                    record.initialization_state_type.clone(),
+                    &substitutions,
+                ))
         });
         if state_only != expected {
             self.report(
