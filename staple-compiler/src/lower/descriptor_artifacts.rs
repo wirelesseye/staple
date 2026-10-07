@@ -317,9 +317,13 @@ pub(super) fn scan_instance(
         };
         requests.push(ClosureRequest::Artifact {
             key: ArtifactRequestKey::DescriptorBoundEntry(
-                crate::specialization::DescriptorBoundEntryKey { instance: ordinal },
+                crate::specialization::DescriptorBoundEntryKey {
+                    instance: ordinal,
+                    bound: runtime.len(),
+                },
             ),
             plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
+                bound: runtime.len(),
                 instance: *callee,
                 runtime: runtime.clone(),
                 function_type: callable.function_type.clone(),
@@ -418,9 +422,11 @@ pub(super) fn scan_instance(
             key: ArtifactRequestKey::DescriptorBoundEntry(
                 crate::specialization::DescriptorBoundEntryKey {
                     instance: record.ordinal,
+                    bound: runtime.len(),
                 },
             ),
             plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
+                bound: runtime.len(),
                 instance: *callee,
                 runtime: runtime.clone(),
                 function_type: thunk.signature.clone(),

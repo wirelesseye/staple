@@ -479,10 +479,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     ]
                 }
                 LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
-                    // The dynamic shape without descriptor parameters.
-                    let ty = self
-                        .backend
-                        .compile_dynamic_function_type(&plan.function_type, 0)?;
+                    // Only descriptors bound by the environment are omitted.
+                    let ty = self.backend.compile_dynamic_function_type(
+                        &plan.function_type,
+                        plan.runtime.len() - plan.bound,
+                    )?;
                     vec![
                         self.backend
                             .llvm_module

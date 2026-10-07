@@ -961,10 +961,11 @@ pub(crate) struct CompoundDescriptorDropKey {
 }
 
 /// The identity of one descriptor-bound entry (R-C): a dynamic-shape closure's
-/// forwarding function, keyed by the dynamic instance it calls.
+/// forwarding function, keyed by its instance and number of bound descriptors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct DescriptorBoundEntryKey {
     pub instance: InstanceOrdinal,
+    pub bound: usize,
 }
 
 /// The direction of a reabstraction conversion (R5).

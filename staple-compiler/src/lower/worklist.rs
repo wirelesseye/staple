@@ -3827,6 +3827,15 @@ mod tests {
         function_name: &str,
         caller_name: Option<&str>,
     ) -> (String, String) {
+        dynamic_test_module_with_entry(source, function_name, caller_name, None)
+    }
+
+    fn dynamic_test_module_with_entry(
+        source: &str,
+        function_name: &str,
+        caller_name: Option<&str>,
+        bound: Option<usize>,
+    ) -> (String, String) {
         let (_, mut program) = lower(source);
         let function = function_id(&program, function_name);
         let call = program
@@ -3890,6 +3899,38 @@ mod tests {
             }
             caller
         });
+        let entry = bound.map(|bound| {
+            let record = program.instances.get(dynamic).unwrap();
+            let runtime = program
+                .emission_view()
+                .instance_runtime_order(dynamic)
+                .unwrap()
+                .to_vec();
+            let origin = record.origin.clone();
+            let key = ArtifactRequestKey::DescriptorBoundEntry(
+                crate::specialization::DescriptorBoundEntryKey {
+                    instance: record.ordinal,
+                    bound,
+                },
+            );
+            let plan =
+                LoweredArtifactPlan::DescriptorBoundEntry(super::super::DescriptorBoundEntryPlan {
+                    bound,
+                    instance: dynamic,
+                    runtime,
+                    function_type: record.body.as_ref().unwrap().signature.clone(),
+                });
+            let mut recorder = GraphRecorder::from_parts(program.take_graph());
+            let (entry, _) = recorder.request_artifact(
+                key,
+                Some(plan),
+                &origin,
+                TraversalOwner::Instance(dynamic),
+                LoweredArtifactDependencyKind::DescriptorBoundEntry,
+            );
+            program.install_graph(recorder.into_parts());
+            entry
+        });
         program.record_reabstractions();
         let diagnostics =
             program.close_artifact_catalog(&super::super::artifact_closure::ProductionHooks);
@@ -3906,11 +3947,82 @@ mod tests {
             .unwrap()
             .name
             .clone();
+        let name = entry
+            .map(|entry| {
+                program
+                    .artifacts
+                    .get(LoweredArtifactRequestId::from_index(entry.index()))
+                    .unwrap()
+                    .name
+                    .clone()
+            })
+            .unwrap_or(name);
         let context = inkwell::context::Context::create();
         let text = crate::CodeGenerator::new(&context)
             .compile_module(&super::super::LoweredModule { program })
             .unwrap();
         (text, name)
+    }
+
+    #[test]
+    fn partially_bound_entries_forward_caller_descriptors_in_order() {
+        let (text, name) = dynamic_test_module_with_entry(
+            "def second: <A, B where Sized A, Sized B> (move A, move B) -> B = (move a, move b) => b\nlet value = second (U8 :: 1, 42)\n",
+            "second",
+            None,
+            Some(1),
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "partial-entry",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        let first = Descriptor {
+            size: 1,
+            stride: 1,
+            align: 1,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let second = Descriptor {
+            size: 4,
+            stride: 4,
+            align: 4,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let environment = [&first as *const Descriptor];
+        type Entry = unsafe extern "C" fn(
+            *const *const Descriptor,
+            *const Descriptor,
+            *mut i32,
+            *mut u8,
+            *mut i32,
+        );
+        let entry = unsafe { engine.get_function::<Entry>(&name) }.unwrap();
+        let mut a = 1u8;
+        let mut b = 42i32;
+        let mut result = 0;
+        unsafe {
+            entry.call(environment.as_ptr(), &second, &mut result, &mut a, &mut b);
+        }
+        assert_eq!(result, 42);
     }
 
     #[test]

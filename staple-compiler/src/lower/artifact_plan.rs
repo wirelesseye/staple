@@ -60,11 +60,13 @@ pub(crate) enum LoweredArtifactPlan {
 }
 
 /// A descriptor-bound entry (R-C): the forwarding function a dynamic-shape
-/// closure points at. Its signature is the dynamic shape without descriptor
-/// parameters; the body loads the instance's descriptors from the closure
-/// environment and forwards the call.
+/// closure points at. Its signature receives the descriptors not bound by the
+/// environment; the body loads the leading bound descriptors from the closure
+/// environment and forwards them followed by the caller's descriptors.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DescriptorBoundEntryPlan {
+    /// Number of leading descriptors supplied by the closure environment.
+    pub bound: usize,
     /// The dynamic instance the entry forwards to.
     pub instance: FunctionInstanceId,
     /// The instance's run-time parameters in descriptor ABI order (R-A).
@@ -253,7 +255,11 @@ impl LoweredArtifactPlan {
             (
                 LoweredArtifactPlan::DescriptorBoundEntry(plan),
                 ArtifactRequestKey::DescriptorBoundEntry(key),
-            ) => plan.instance.index() == key.instance.index(),
+            ) => {
+                plan.instance.index() == key.instance.index()
+                    && plan.bound == key.bound
+                    && plan.bound <= plan.runtime.len()
+            }
             (
                 LoweredArtifactPlan::ReabstractionThunk(plan),
                 ArtifactRequestKey::ReabstractionThunk(key),
@@ -735,6 +741,7 @@ impl LoweredArtifactPlan {
             // The function type mentions the instance's run-time parameters by
             // design; the plan is not part of the concrete closed catalog.
             LoweredArtifactPlan::DescriptorBoundEntry(DescriptorBoundEntryPlan {
+                bound: _,
                 instance: _,
                 runtime: _,
                 function_type: _,

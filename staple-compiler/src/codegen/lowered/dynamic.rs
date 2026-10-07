@@ -2258,7 +2258,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .artifacts()
             .find_map(|(_, artifact)| match &artifact.plan {
                 Some(crate::LoweredArtifactPlan::DescriptorBoundEntry(plan))
-                    if plan.instance == instance =>
+                    if plan.instance == instance && plan.bound == plan.runtime.len() =>
                 {
                     Some(artifact.ordinal)
                 }
@@ -3168,9 +3168,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// The forwarding entry a dynamic-shape closure points at (R-C). Its
-    /// parameters are the dynamic shape without descriptors; the body loads
-    /// the instance's descriptors from the closure environment and calls the
-    /// instance with them.
+    /// parameters include the unbound descriptors. It loads the leading bound
+    /// descriptors from the closure environment and forwards both sets to the
+    /// instance in ABI order.
     pub(super) fn emit_descriptor_bound_entry(
         &mut self,
         ordinal: crate::specialization::ArtifactOrdinal,
@@ -3195,7 +3195,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
         let environment = parameters[0].into_pointer_value();
         let mut arguments = vec![parameters[0].into()];
-        for index in 0..plan.runtime.len() {
+        for index in 0..plan.bound {
             let offset = self
                 .backend
                 .size_type

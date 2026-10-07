@@ -57,13 +57,22 @@ documented 4a fixes (`local_recursive_generic`, `local_generic_cells`, and
 
 ## Current state
 
-Stage 4b is in progress. B1 now provides closure layout for `Forall`,
-static descriptor collection for closed schemes, alpha-canonical scheme
-keys (including nested binders, bound sets, and effect parameters), and
+Stage 4b is in progress. B1 provides closure layout for `Forall`, static
+descriptor collection for closed schemes, alpha-canonical scheme keys
+(including nested binders, bound sets, and effect parameters), and
 scheme-permitting inference for lowering explicit call substitutions.
-Focused inference and canonical-key regression tests pass. The Stage 3
-gate remains in place; B2–B7 remain pending. The workspace and quick
-differential validation are running.
+
+B2's partially bound entry foundation (B-D) is implemented: artifact keys
+include the bound-descriptor count; entries load that leading prefix from
+their environment and accept the remaining descriptors from callers. Existing
+4a closures continue binding every descriptor. A JIT regression with distinct
+argument layouts verifies the partially bound ABI and forwarding order.
+Construction sites and their capture environments are not connected yet.
+
+Focused inference, canonical-key, and partial-entry execution regressions pass.
+The earlier workspace validation has passed all 233 CLI tests (one ignored),
+including the quick differential subset, and is still running compiler tests.
+The Stage 3 gate remains in place; B2 construction and B3–B7 remain pending.
 
 ## Current shape at the boundary
 
