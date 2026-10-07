@@ -24,6 +24,15 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum CanonicalType {
     RuntimeParameter(TypeParameterId),
+    BoundParameter {
+        depth: usize,
+        index: usize,
+    },
+    Forall {
+        parameters: Vec<CanonicalSchemeParameter>,
+        bounds: Vec<CanonicalSchemeBound>,
+        body: Box<CanonicalType>,
+    },
     Never,
     I8,
     I16,
@@ -71,6 +80,19 @@ pub(crate) enum CanonicalType {
         alternatives: Vec<CanonicalType>,
     },
     Function(Box<CanonicalFunctionType>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CanonicalSchemeParameter {
+    Type { sized: bool, capable: bool },
+    Effect,
+    Product(Vec<CanonicalSchemeParameter>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CanonicalSchemeBound {
+    Trait(TraitId, Vec<CanonicalType>),
+    Subtype(CanonicalType, CanonicalType),
 }
 
 /// The declared nominal form. Kept distinct for the same `TypeId` because the
@@ -121,6 +143,7 @@ pub(crate) enum CanonicalMutation {
 /// effect variable, so a key's row is always fully resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CanonicalEffectSet {
+    pub variable: Option<(usize, usize)>,
     pub resources: Vec<CanonicalResource>,
     pub state: Option<CanonicalStateEffect>,
 }
@@ -143,20 +166,81 @@ impl CanonicalType {
     /// parameters and checker placeholders with a diagnostic at the
     /// requesting record's origin.
     pub(crate) fn concrete(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
-        Self::convert(value_type, origin, false)
+        Self::convert(value_type, origin, false, &[])
     }
 
     fn convert(
         value_type: &CheckedType,
         origin: &Origin,
         runtime: bool,
+        binders: &[Vec<TypeParameterId>],
     ) -> Result<Self, Diagnostic> {
         let key = match value_type {
-            CheckedType::Forall(_) => {
-                return Err(origin_diagnostic(
-                    origin,
-                    "generic function types never reach lowering",
-                ));
+            CheckedType::Forall(scheme) => {
+                fn parameter(
+                    p: &crate::CheckedSchemeParameter,
+                    ids: &mut Vec<TypeParameterId>,
+                ) -> CanonicalSchemeParameter {
+                    match p {
+                        crate::CheckedSchemeParameter::Type {
+                            id,
+                            sized,
+                            parameter_product_capable,
+                            ..
+                        } => {
+                            ids.push(*id);
+                            CanonicalSchemeParameter::Type {
+                                sized: *sized,
+                                capable: *parameter_product_capable,
+                            }
+                        }
+                        crate::CheckedSchemeParameter::Effect { id, .. } => {
+                            ids.push(*id);
+                            CanonicalSchemeParameter::Effect
+                        }
+                        crate::CheckedSchemeParameter::Product(ps) => {
+                            CanonicalSchemeParameter::Product(
+                                ps.iter().map(|p| parameter(p, ids)).collect(),
+                            )
+                        }
+                    }
+                }
+                let mut ids = Vec::new();
+                let parameters = scheme
+                    .parameters
+                    .iter()
+                    .map(|p| parameter(p, &mut ids))
+                    .collect();
+                let mut nested = binders.to_vec();
+                nested.push(ids);
+                let mut bounds = Vec::new();
+                for bound in &scheme.trait_bounds {
+                    bounds.push(CanonicalSchemeBound::Trait(
+                        bound.trait_id,
+                        Self::convert_arguments(&bound.arguments, origin, runtime, &nested)?,
+                    ));
+                }
+                for bound in &scheme.subtype_bounds {
+                    let parameter = CheckedType::Parameter {
+                        id: bound.parameter,
+                        name: String::new(),
+                        sized: true,
+                        parameter_product_capable: false,
+                    };
+                    bounds.push(CanonicalSchemeBound::Subtype(
+                        Self::convert(&parameter, origin, runtime, &nested)?,
+                        Self::convert(&bound.supertype, origin, runtime, &nested)?,
+                    ));
+                }
+                // Bound order is semantically irrelevant; structural debug output
+                // contains only canonical IDs and shapes, never source names.
+                bounds.sort_by_key(|bound| format!("{bound:?}"));
+                bounds.dedup();
+                CanonicalType::Forall {
+                    parameters,
+                    bounds,
+                    body: Box::new(Self::convert(&scheme.body, origin, runtime, &nested)?),
+                }
             }
             CheckedType::Inferred => {
                 return Err(origin_diagnostic(
@@ -189,21 +273,34 @@ impl CanonicalType {
                 CanonicalType::StringLiteralSet(values.clone())
             }
             CheckedType::Ref(payload) => {
-                CanonicalType::Ref(Box::new(Self::convert(payload, origin, runtime)?))
+                CanonicalType::Ref(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
             CheckedType::Slice(payload) => {
-                CanonicalType::Slice(Box::new(Self::convert(payload, origin, runtime)?))
+                CanonicalType::Slice(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
             CheckedType::Buffer(payload) => {
-                CanonicalType::Buffer(Box::new(Self::convert(payload, origin, runtime)?))
+                CanonicalType::Buffer(Box::new(Self::convert(payload, origin, runtime, binders)?))
             }
             CheckedType::Array { element, count } => CanonicalType::Array {
-                element: Box::new(Self::convert(element, origin, runtime)?),
-                count: Box::new(Self::convert(count, origin, runtime)?),
+                element: Box::new(Self::convert(element, origin, runtime, binders)?),
+                count: Box::new(Self::convert(count, origin, runtime, binders)?),
             },
             CheckedType::CString => CanonicalType::CString,
             CheckedType::CChar => CanonicalType::CChar,
             CheckedType::COpaquePointer => CanonicalType::COpaquePointer,
+            CheckedType::Parameter { id, .. } if binders.iter().any(|ids| ids.contains(id)) => {
+                let (depth, index) = binders
+                    .iter()
+                    .rev()
+                    .enumerate()
+                    .find_map(|(depth, ids)| {
+                        ids.iter()
+                            .position(|bound| bound == id)
+                            .map(|index| (depth, index))
+                    })
+                    .unwrap();
+                CanonicalType::BoundParameter { depth, index }
+            }
             CheckedType::Parameter { id, .. } if runtime => CanonicalType::RuntimeParameter(*id),
             CheckedType::Parameter { name, .. } => {
                 return Err(origin_diagnostic(
@@ -214,15 +311,15 @@ impl CanonicalType {
             CheckedType::TypeConstructor { id, arguments, .. } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::TypeConstructor,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin, runtime)?,
+                arguments: Self::convert_arguments(arguments, origin, runtime, binders)?,
             },
             CheckedType::Opaque { id, arguments, .. } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::Opaque,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin, runtime)?,
+                arguments: Self::convert_arguments(arguments, origin, runtime, binders)?,
             },
             CheckedType::CPointer { pointee } => CanonicalType::CPointer {
-                pointee: Box::new(Self::convert(pointee, origin, runtime)?),
+                pointee: Box::new(Self::convert(pointee, origin, runtime, binders)?),
             },
             CheckedType::ParameterProduct(product) => CanonicalType::ParameterProduct {
                 elements: product
@@ -231,7 +328,12 @@ impl CanonicalType {
                     .map(|element| {
                         Ok(CanonicalProductElement {
                             name: element.name.clone(),
-                            value_type: Self::convert(&element.value_type, origin, runtime)?,
+                            value_type: Self::convert(
+                                &element.value_type,
+                                origin,
+                                runtime,
+                                binders,
+                            )?,
                         })
                     })
                     .collect::<Result<Vec<_>, Diagnostic>>()?,
@@ -245,14 +347,19 @@ impl CanonicalType {
                     .map(|element| {
                         Ok(CanonicalProductElement {
                             name: element.name.clone(),
-                            value_type: Self::convert(&element.value_type, origin, runtime)?,
+                            value_type: Self::convert(
+                                &element.value_type,
+                                origin,
+                                runtime,
+                                binders,
+                            )?,
                         })
                     })
                     .collect::<Result<Vec<_>, Diagnostic>>()?,
                 variadic: product.variadic,
             },
             CheckedType::Sum(sum) => CanonicalType::Sum {
-                alternatives: Self::convert_arguments(&sum.alternatives, origin, runtime)?,
+                alternatives: Self::convert_arguments(&sum.alternatives, origin, runtime, binders)?,
             },
             CheckedType::Function(function) => {
                 // A concrete effect row is encoded as a function type with
@@ -271,11 +378,11 @@ impl CanonicalType {
                         ..function.clone()
                     };
                     CanonicalType::Function(Box::new(CanonicalFunctionType::convert(
-                        &marker, origin, runtime,
+                        &marker, origin, runtime, binders,
                     )?))
                 } else {
                     CanonicalType::Function(Box::new(CanonicalFunctionType::convert(
-                        function, origin, runtime,
+                        function, origin, runtime, binders,
                     )?))
                 }
             }
@@ -287,7 +394,7 @@ impl CanonicalType {
             } => CanonicalType::Nominal {
                 kind: CanonicalNominalKind::Wrapper,
                 id: *id,
-                arguments: Self::convert_arguments(arguments, origin, runtime)?,
+                arguments: Self::convert_arguments(arguments, origin, runtime, binders)?,
             },
         };
         Ok(key)
@@ -297,17 +404,18 @@ impl CanonicalType {
         arguments: &[CheckedType],
         origin: &Origin,
         runtime: bool,
+        binders: &[Vec<TypeParameterId>],
     ) -> Result<Vec<CanonicalType>, Diagnostic> {
         arguments
             .iter()
-            .map(|argument| Self::convert(argument, origin, runtime))
+            .map(|argument| Self::convert(argument, origin, runtime, binders))
             .collect()
     }
 }
 
 impl CanonicalType {
     pub(crate) fn dynamic(value_type: &CheckedType, origin: &Origin) -> Result<Self, Diagnostic> {
-        Self::convert(value_type, origin, true)
+        Self::convert(value_type, origin, true, &[])
     }
 }
 
@@ -316,26 +424,28 @@ impl CanonicalFunctionType {
         function: &CheckedFunctionType,
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
-        Self::convert(function, origin, true)
+        Self::convert(function, origin, true, &[])
     }
 
     pub(crate) fn concrete(
         function: &CheckedFunctionType,
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
-        Self::convert(function, origin, false)
+        Self::convert(function, origin, false, &[])
     }
 
     fn convert(
         function: &CheckedFunctionType,
         origin: &Origin,
         runtime: bool,
+        binders: &[Vec<TypeParameterId>],
     ) -> Result<Self, Diagnostic> {
         Ok(CanonicalFunctionType {
             parameter: Box::new(CanonicalType::convert(
                 &function.parameter,
                 origin,
                 runtime,
+                binders,
             )?),
             parameter_style: match function.parameter_style {
                 staple_syntax::FunctionParameterStyle::Single => CanonicalParameterStyle::Single,
@@ -345,8 +455,13 @@ impl CanonicalFunctionType {
             },
             mutations: function.mutations.iter().cloned().map(Into::into).collect(),
             moves: function.moves.iter().cloned().map(Into::into).collect(),
-            effects: CanonicalEffectSet::convert(&function.effects, origin, runtime)?,
-            result: Box::new(CanonicalType::convert(&function.result, origin, runtime)?),
+            effects: CanonicalEffectSet::convert(&function.effects, origin, runtime, binders)?,
+            result: Box::new(CanonicalType::convert(
+                &function.result,
+                origin,
+                runtime,
+                binders,
+            )?),
         })
     }
 }
@@ -356,28 +471,45 @@ impl CanonicalEffectSet {
         effects: &CheckedEffectSet,
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
-        Self::convert(effects, origin, false)
+        Self::convert(effects, origin, false, &[])
     }
 
     fn convert(
         effects: &CheckedEffectSet,
         origin: &Origin,
         runtime: bool,
+        binders: &[Vec<TypeParameterId>],
     ) -> Result<Self, Diagnostic> {
-        if let Some(variable) = &effects.variable {
-            return Err(origin_diagnostic(
-                origin,
-                format!(
-                    "effect variable `{}` is not resolved for a concrete key",
-                    variable.name
-                ),
-            ));
-        }
+        let variable = effects
+            .variable
+            .as_ref()
+            .map(|variable| {
+                binders
+                    .iter()
+                    .rev()
+                    .enumerate()
+                    .find_map(|(depth, ids)| {
+                        ids.iter()
+                            .position(|id| *id == variable.id)
+                            .map(|index| (depth, index))
+                    })
+                    .ok_or_else(|| {
+                        origin_diagnostic(
+                            origin,
+                            format!(
+                                "effect variable `{}` is not resolved for a concrete key",
+                                variable.name
+                            ),
+                        )
+                    })
+            })
+            .transpose()?;
         Ok(CanonicalEffectSet {
+            variable,
             resources: effects
                 .resources
                 .iter()
-                .map(|resource| CanonicalResource::convert(resource, origin, runtime))
+                .map(|resource| CanonicalResource::convert(resource, origin, runtime, binders))
                 .collect::<Result<Vec<_>, Diagnostic>>()?,
             state: effects.state.map(Into::into),
         })
@@ -389,9 +521,10 @@ impl CanonicalResource {
         resource: &CheckedResource,
         origin: &Origin,
         runtime: bool,
+        binders: &[Vec<TypeParameterId>],
     ) -> Result<Self, Diagnostic> {
         Ok(CanonicalResource {
-            value_type: CanonicalType::convert(&resource.value_type, origin, runtime)?,
+            value_type: CanonicalType::convert(&resource.value_type, origin, runtime, binders)?,
             mutable: resource.mutable,
         })
     }
@@ -1178,6 +1311,73 @@ mod tests {
     use crate::{
         CheckedFunctionParameterDefault, CheckedProductType, CheckedSumType, CheckedTypeElement,
     };
+
+    #[test]
+    fn scheme_keys_preserve_parameter_order_and_alpha_equivalence() {
+        fn scheme(first: usize, second: usize, reverse: bool) -> CheckedType {
+            let parameter = |id| CheckedType::Parameter {
+                id: TypeParameterId(id),
+                name: format!("P{id}"),
+                sized: true,
+                parameter_product_capable: false,
+            };
+            let order = if reverse {
+                [second, first]
+            } else {
+                [first, second]
+            };
+            CheckedType::Forall(Box::new(crate::CheckedScheme {
+                parameters: order
+                    .into_iter()
+                    .map(|id| crate::CheckedSchemeParameter::Type {
+                        id: TypeParameterId(id),
+                        name: format!("P{id}"),
+                        sized: true,
+                        parameter_product_capable: false,
+                    })
+                    .collect(),
+                trait_bounds: vec![],
+                trait_bound_names: vec![],
+                subtype_bounds: vec![],
+                body: Box::new(CheckedType::Function(CheckedFunctionType {
+                    parameter: Box::new(parameter(first)),
+                    result: Box::new(parameter(second)),
+                    parameter_style: staple_syntax::FunctionParameterStyle::Single,
+                    mutations: vec![],
+                    moves: vec![],
+                    default: None,
+                    effects: CheckedEffectSet::default(),
+                })),
+            }))
+        }
+        let key = |ty| CanonicalType::concrete(&ty, &requesting_origin()).unwrap();
+        assert_eq!(key(scheme(10, 11, false)), key(scheme(20, 21, false)));
+        assert_ne!(key(scheme(10, 11, false)), key(scheme(20, 21, true)));
+        let mut a = scheme(10, 11, false);
+        let mut b = scheme(20, 21, false);
+        for (ty, ids, traits) in [(&mut a, [10, 11], [1, 2]), (&mut b, [20, 21], [2, 1])] {
+            let CheckedType::Forall(scheme) = ty else {
+                unreachable!()
+            };
+            for trait_id in traits {
+                scheme.trait_bounds.push(crate::CheckedTraitBound {
+                    trait_id: TraitId(trait_id),
+                    arguments: vec![CheckedType::Parameter {
+                        id: TypeParameterId(ids[0]),
+                        name: "Bound".into(),
+                        sized: true,
+                        parameter_product_capable: false,
+                    }],
+                });
+            }
+        }
+        assert_eq!(key(a.clone()), key(b.clone()));
+        let CheckedType::Forall(scheme) = &mut b else {
+            unreachable!()
+        };
+        scheme.trait_bounds.pop();
+        assert_ne!(key(a), key(b));
+    }
 
     fn requesting_origin() -> Origin {
         Origin {

@@ -57,10 +57,13 @@ documented 4a fixes (`local_recursive_generic`, `local_generic_cells`, and
 
 ## Current state
 
-Stage 4b is in progress. B1 now recovers scheme-valued explicit call
-substitutions using the checker’s scheme-permitting inference mode.
-Representation and canonical keys remain pending; the Stage 3 gate stays
-in place. B2–B7 remain pending.
+Stage 4b is in progress. B1 now provides closure layout for `Forall`,
+static descriptor collection for closed schemes, alpha-canonical scheme
+keys (including nested binders, bound sets, and effect parameters), and
+scheme-permitting inference for lowering explicit call substitutions.
+Focused inference and canonical-key regression tests pass. The Stage 3
+gate remains in place; B2–B7 remain pending. The workspace and quick
+differential validation are running.
 
 ## Current shape at the boundary
 

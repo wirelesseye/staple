@@ -33,8 +33,7 @@ pub(super) fn descriptor_request(
 pub(super) fn collect_concrete_types(ty: &CheckedType, types: &mut Vec<CheckedType>) {
     if matches!(
         ty,
-        CheckedType::Forall(_)
-            | CheckedType::ParameterProduct(_)
+        CheckedType::ParameterProduct(_)
             | CheckedType::TypeConstructor { .. }
     ) {
         return;

@@ -221,10 +221,7 @@ impl<'program, 'context> Backend<'program, 'context> {
         value_type: &CheckedType,
     ) -> CodeGenerationResult<BasicTypeEnum<'context>> {
         match value_type {
-            CheckedType::Forall(_) => Err(Diagnostic::new(
-                Span::Compiler,
-                "generic function types never reach lowering",
-            )),
+            CheckedType::Forall(_) => Ok(self.closure_type().into()),
             CheckedType::ParameterProduct(_) => {
                 unreachable!("parameter products have no value layout")
             }

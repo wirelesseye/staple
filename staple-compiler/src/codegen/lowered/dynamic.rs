@@ -6514,5 +6514,6 @@ fn is_static_layout_type(value_type: &CheckedType) -> bool {
             | CheckedType::CPointer { .. }
             | CheckedType::COpaquePointer
             | CheckedType::Function(_)
+            | CheckedType::Forall(_)
     )
 }
