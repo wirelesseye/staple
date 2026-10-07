@@ -12688,7 +12688,9 @@ impl TypeChecker {
         if argument.is_none() && expected.is_none() {
             return CheckedType::Forall(scheme);
         }
-        if let Some(CheckedType::Forall(_)) = expected {
+        if argument.is_none()
+            && let Some(CheckedType::Forall(_)) = expected
+        {
             return self.subsume(CheckedType::Forall(scheme), expected.unwrap(), span);
         }
         let bounds = scheme.trait_bounds.clone();

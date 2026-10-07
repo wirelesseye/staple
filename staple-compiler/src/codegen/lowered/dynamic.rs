@@ -902,6 +902,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let captures = self.build_descriptor_environment(
                 instance,
                 &runtime,
+                runtime.len(),
                 &substitutions,
                 &captures,
                 environment,
@@ -1360,21 +1361,43 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .closure
                         .as_ref()
                         .map_or(&[][..], |closure| closure.captures.as_slice());
+                    let bound = if callable.scheme.is_some() {
+                        let declared = self
+                            .view
+                            .instance(*instance)
+                            .and_then(|instance| self.view.function(instance.template))
+                            .map(|function| function.scheme_type_parameters.as_slice())
+                            .unwrap_or(&[]);
+                        runtime
+                            .iter()
+                            .take_while(|parameter| !declared.contains(parameter))
+                            .count()
+                    } else {
+                        runtime.len()
+                    };
                     let closure_environment = self.build_descriptor_environment(
                         *instance,
                         &runtime,
+                        bound,
                         &callable.substitutions,
                         captures,
                         environment,
                         &span,
                     )?;
-                    let code = self.descriptor_bound_entry_code(*instance, &span)?;
+                    let code = if bound == 0 {
+                        self.instances.get(instance).copied().ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "missing polymorphic entry")
+                        })?
+                    } else {
+                        self.descriptor_bound_entry_code_with_bound(*instance, bound, &span)?
+                    };
                     let closure = self
                         .backend
                         .build_closure_value(code, closure_environment)?;
-                    let closure = if !crate::contains_type_parameter(&CheckedType::Function(
-                        callable.function_type.clone(),
-                    )) {
+                    let closure = if callable.scheme.is_none()
+                        && !crate::contains_type_parameter(&CheckedType::Function(
+                            callable.function_type.clone(),
+                        )) {
                         let ordinal = self
                             .view
                             .artifact_uses(owner)
@@ -1531,6 +1554,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         &self,
         instance: FunctionInstanceId,
         runtime: &[TypeParameterId],
+        bound: usize,
         substitutions: &crate::CallSubstitutions,
         captures: &[crate::LoweredClosureCapture],
         environment: &DynamicEnvironment<'context>,
@@ -1538,7 +1562,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
         let mut descriptors = Vec::with_capacity(runtime.len());
-        for parameter in runtime {
+        if bound == 0 && captures.is_empty() {
+            return Ok(self
+                .backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null());
+        }
+        for parameter in &runtime[..bound] {
             // The callee's run-time parameter is supplied at this site by the
             // substitution's value, which may itself mention the enclosing
             // instance's run-time parameters.
@@ -1556,6 +1587,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             };
             descriptors.push(descriptor);
         }
+        // Reserve the full descriptor prefix used by the instance's capture
+        // layout. Its own scheme descriptors arrive as ABI arguments and are
+        // never read from these reserved environment slots.
+        descriptors.resize(
+            runtime.len(),
+            self.backend
+                .context
+                .ptr_type(AddressSpace::default())
+                .const_null(),
+        );
         let capture_descriptors = captures
             .iter()
             .map(|capture| {
@@ -1581,7 +1622,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             self.backend
                 .build_gc_allocation(total, "closure.environment", span.clone())?;
         for (index, descriptor) in descriptors.iter().enumerate() {
-            let copy = self.copy_descriptor_to_gc(*descriptor, span)?;
+            let copy = if index < bound {
+                self.copy_descriptor_to_gc(*descriptor, span)?
+            } else {
+                *descriptor
+            };
             let offset = self
                 .backend
                 .size_type
@@ -2253,12 +2298,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         instance: FunctionInstanceId,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<FunctionValue<'context>> {
+        let bound = self
+            .view
+            .instance_runtime_order(instance)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing instance descriptor order"))?
+            .len();
+        self.descriptor_bound_entry_code_with_bound(instance, bound, span)
+    }
+
+    fn descriptor_bound_entry_code_with_bound(
+        &self,
+        instance: FunctionInstanceId,
+        bound: usize,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
         let ordinal = self
             .view
             .artifacts()
             .find_map(|(_, artifact)| match &artifact.plan {
                 Some(crate::LoweredArtifactPlan::DescriptorBoundEntry(plan))
-                    if plan.instance == instance && plan.bound == plan.runtime.len() =>
+                    if plan.instance == instance && plan.bound == bound =>
                 {
                     Some(artifact.ordinal)
                 }
@@ -3446,7 +3505,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .view
                     .callable_value(EmissionOwner::Instance(id), *value_id)
             {
+                let quantified = if callable.scheme.is_some() {
+                    match callable.target {
+                        LoweredCallableTarget::DirectFunction { function, .. } => self
+                            .view
+                            .function(function)
+                            .map(|function| function.scheme_type_parameters.as_slice())
+                            .unwrap_or(&[]),
+                        _ => &[],
+                    }
+                } else {
+                    &[]
+                };
                 for entry in &callable.substitutions.types {
+                    if quantified.contains(&entry.parameter) {
+                        continue;
+                    }
                     self.prepare_dynamic_descriptor(
                         &entry.value_type,
                         &mut environment,
@@ -3874,7 +3948,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .artifacts()
             .find_map(|(_, artifact)| match &artifact.plan {
                 Some(crate::LoweredArtifactPlan::TypeDescriptor(plan))
-                    if plan.value_type == *ty =>
+                    if crate::types_equivalent(&plan.value_type, ty) =>
                 {
                     Some(artifact.ordinal)
                 }

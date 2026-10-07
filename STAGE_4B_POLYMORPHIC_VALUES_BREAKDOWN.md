@@ -87,15 +87,29 @@ and effect parameters are checked even when phantom. A negative trait-bound
 construction regression checks the exact message and span, alongside a positive
 ordinary direct-call regression. Remaining restriction coverage, constructors,
 and trait-member construction diagnostics are still pending.
-Capture environments and construction inside dynamic owners remain pending, so
-the public construction gate stays in place.
+Capture-free construction now executes inside dynamic owners too. Construction
+binds only enclosing descriptors; the closure's own scheme descriptors arrive
+at invocation. The environment builder reserves the instance's descriptor prefix
+for future captures without trying to resolve unbound scheme descriptors.
+Descriptor preparation also excludes those quantified substitutions, and static
+descriptor lookup respects alpha-equivalent scheme keys. The returned-closure
+JIT regression checks both default and differential modes, asserts the owner ABI,
+and invokes the same closure with two layouts. Existing fully bound dynamic
+capture regressions still pass.
+
+Generic calls returning a scheme now distinguish the expected result scheme from
+an unapplied scheme-to-scheme subsumption; the execution regression uses an
+implicit generic call. Captured polymorphic environments, constructors, and the
+remaining B2 storage cases are still pending, so the public gate stays in place.
 
 Focused inference, canonical-key, partial-entry execution, and construction-graph
 regressions pass, including the executable returned-closure regression and
 construction-site support checks (three focused polymorphic tests passed).
-The earlier workspace validation has passed 233 CLI tests and 397 compiler unit
-tests (one ignored in each suite), including the quick differential subset, and
-is still running integration tests.
+The earlier workspace run completed successfully, including 233 CLI tests,
+397 compiler unit tests (one ignored in each suite), all integration suites,
+and the quick differential subset. Newer construction changes have passing
+focused execution and existing dynamic-capture regressions; the current full
+workspace rerun and final IR comparison remain pending.
 The Stage 3 gate remains in place; B2 construction and B3–B7 remain pending.
 
 ## Current shape at the boundary
