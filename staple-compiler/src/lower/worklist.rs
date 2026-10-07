@@ -947,6 +947,7 @@ impl<'a> WorklistBuilder<'a> {
         owner: TraversalOwner,
         kind: LoweredInstanceDependencyKind,
         differential: bool,
+        polymorphic: bool,
     ) -> Option<FunctionInstanceId> {
         // A function with no relevant template parameters has exactly one
         // instance. The requesting site's callable type may be a coerced view
@@ -978,7 +979,16 @@ impl<'a> WorklistBuilder<'a> {
             evidence,
             target,
         };
-        let resolved = if differential {
+        let resolved = if polymorphic {
+            let runtime = self
+                .program
+                .functions
+                .get(function)
+                .map(|template| template.scheme_type_parameters.iter().copied().collect())
+                .unwrap_or_default();
+            self.program
+                .resolve_instance_request_with_runtime(&request, &runtime)
+        } else if differential {
             match self.program.differential_call_runtime(
                 function,
                 &caller_runtime,
@@ -1392,6 +1402,7 @@ impl<'a> WorklistBuilder<'a> {
             owner,
             LoweredInstanceDependencyKind::CoroutineBody,
             false,
+            false,
         );
     }
 
@@ -1477,6 +1488,7 @@ impl<'a> WorklistBuilder<'a> {
             owner,
             kind,
             false,
+            false,
         );
     }
 
@@ -1514,6 +1526,7 @@ impl<'a> WorklistBuilder<'a> {
                 owner,
                 LoweredInstanceDependencyKind::ImplicitThunkArgument,
                 false,
+                false,
             );
         }
     }
@@ -1543,6 +1556,7 @@ impl<'a> WorklistBuilder<'a> {
                     owner,
                     LoweredInstanceDependencyKind::DirectCall,
                     true,
+                    false,
                 );
             }
             LoweredCallableTarget::TraitImplementation {
@@ -1613,6 +1627,7 @@ impl<'a> WorklistBuilder<'a> {
                     owner,
                     LoweredInstanceDependencyKind::CallableValue,
                     false,
+                    value.scheme.is_some(),
                 );
             }
             LoweredCallableTarget::TraitImplementation {
@@ -1771,6 +1786,7 @@ impl<'a> WorklistBuilder<'a> {
                     nested_target(enclosing),
                     owner,
                     LoweredInstanceDependencyKind::TraitMethod,
+                    false,
                     false,
                 );
             }
@@ -1933,6 +1949,7 @@ impl<'a> WorklistBuilder<'a> {
                     owner,
                     LoweredInstanceDependencyKind::DerivedEvaluator,
                     false,
+                    false,
                 );
             }
             LoweredReactiveOperationKind::Reaction { callback, .. }
@@ -1975,6 +1992,7 @@ impl<'a> WorklistBuilder<'a> {
                 nested_target(enclosing),
                 owner,
                 LoweredInstanceDependencyKind::ReactiveCallback,
+                false,
                 false,
             );
         }

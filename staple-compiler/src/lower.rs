@@ -1181,6 +1181,8 @@ impl LoweredOptionAlternatives {
 /// plan.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredCallableValue {
+    /// A construction retaining its quantified calling convention.
+    pub scheme: Option<crate::CheckedScheme>,
     pub origin: Origin,
     pub target: LoweredCallableTarget,
     /// The checked function type of the value after call-site inference.
@@ -6571,8 +6573,16 @@ impl LoweredProgram {
         // A callable value can be checked as a sum alternative or another
         // coercible type; its underlying callable type comes from the
         // semantic target in that case.
+        let scheme = match module.type_of_expression(syntax) {
+            Some(CheckedType::Forall(scheme)) => Some(scheme.as_ref().clone()),
+            _ => None,
+        };
         let checked_function_type = match module.type_of_expression(syntax) {
             Some(CheckedType::Function(function_type)) => Some(function_type.clone()),
+            Some(CheckedType::Forall(scheme)) => match scheme.body.as_ref() {
+                CheckedType::Function(function_type) => Some(function_type.clone()),
+                _ => None,
+            },
             _ => None,
         };
         let resolved = module.resolved();
@@ -6737,6 +6747,7 @@ impl LoweredProgram {
         };
         let requires_initialization_check = resolved.requires_initialization_check(syntax);
         Ok(self.callable_values.push(LoweredCallableValue {
+            scheme,
             origin,
             target,
             function_type,
@@ -22214,6 +22225,88 @@ mod tests {
             .get(use_.provider.expect("provider"))
             .expect("provider record");
         assert_eq!(provider.owner, ExpressionOwner::Function(driver_plan.thunk));
+    }
+
+    #[test]
+    fn callable_snapshot_retains_quantified_schemes_and_descriptor_order() {
+        let module = checked_program(concat!(
+            "def identity: <T> move T -> T = move value => value\n",
+            "let stored = identity\n",
+            "let concrete: I32 -> I32 = identity\n",
+            "let swap: <A, B> (move B, move A) -> (A, B) = (move b, move a) => (a, b)\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let schemes = program
+            .callable_values
+            .iter()
+            .filter_map(|(_, value)| value.scheme.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(schemes.len(), 2);
+        let swap = program
+            .callable_values
+            .iter()
+            .find_map(|(_, value)| {
+                let scheme = value.scheme.as_ref()?;
+                (scheme.parameters.len() == 2).then_some(value)
+            })
+            .unwrap();
+        let LoweredCallableTarget::DirectFunction { function, .. } = swap.target else {
+            panic!("lambda instance target")
+        };
+        let expected = swap
+            .scheme
+            .as_ref()
+            .unwrap()
+            .parameters
+            .iter()
+            .map(|p| match p {
+                crate::CheckedSchemeParameter::Type { id, .. } => *id,
+                _ => panic!("type quantifier"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            program
+                .functions
+                .get(function)
+                .unwrap()
+                .scheme_type_parameters,
+            expected
+        );
+        assert!(
+            program
+                .callable_values
+                .iter()
+                .any(|(_, value)| value.scheme.is_none()
+                    && !contains_type_parameter(&CheckedType::Function(
+                        value.function_type.clone()
+                    )))
+        );
+        let diagnostics = program.build_specialization_worklist();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.materialize_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let identity = program
+            .functions
+            .iter()
+            .find_map(|(_, id, f)| (f.name == "identity").then_some(id))
+            .unwrap();
+        let orders = program
+            .instances
+            .iter()
+            .filter_map(|(id, instance)| {
+                (instance.template == identity).then(|| program.instance_runtime_order(id).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            orders.iter().any(Vec::is_empty),
+            "concrete instantiation remains monomorphized"
+        );
+        assert!(
+            orders.iter().any(|order| order.len() == 1),
+            "retained scheme requests a dynamic entry"
+        );
     }
 
     #[test]

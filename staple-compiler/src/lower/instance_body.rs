@@ -2204,6 +2204,13 @@ impl<'a> BodyCloner<'a> {
             let callee = self.clone_expression(*callee);
             value.target = LoweredCallableTarget::IndirectClosure { callee };
         }
+        value.scheme =
+            value.scheme.map(
+                |scheme| match self.ty(&CheckedType::Forall(Box::new(scheme))) {
+                    CheckedType::Forall(scheme) => *scheme,
+                    _ => unreachable!("substitution preserves quantified callable schemes"),
+                },
+            );
         value.function_type = self.function_type(&value.function_type);
         let concrete_function_type = value.function_type.clone();
         value.closure = value
@@ -2422,6 +2429,7 @@ impl<'a> BodyCloner<'a> {
                 None,
                 false,
                 false,
+                false,
             ) {
                 self.body.bindings.insert(
                     LoweredBindingSite::DerivedEvaluator(new),
@@ -2536,6 +2544,7 @@ impl<'a> BodyCloner<'a> {
                 function_type,
                 CallSubstitutions::default(),
                 None,
+                false,
                 false,
                 false,
             ) {
@@ -2673,6 +2682,7 @@ impl<'a> BodyCloner<'a> {
         evidence: Option<TraitEvidence>,
         current: bool,
         differential: bool,
+        polymorphic: bool,
     ) -> Option<FunctionInstanceId> {
         let (function_type, substitutions, evidence) =
             if self.program.relevant_parameters(function).is_empty() {
@@ -2710,7 +2720,15 @@ impl<'a> BodyCloner<'a> {
                 }
             }
         } else {
-            let runtime = if differential {
+            let runtime = if polymorphic {
+                Some(
+                    self.program
+                        .functions
+                        .get(function)
+                        .map(|template| template.scheme_type_parameters.iter().copied().collect())
+                        .unwrap_or_default(),
+                )
+            } else if differential {
                 self.program.differential_call_runtime(
                     function,
                     self.enclosing.key.runtime(),
@@ -2780,6 +2798,7 @@ impl<'a> BodyCloner<'a> {
             None,
             false,
             false,
+            false,
         ) {
             self.body
                 .bindings
@@ -2834,6 +2853,7 @@ impl<'a> BodyCloner<'a> {
                 None,
                 false,
                 false,
+                false,
             ) {
                 self.body
                     .bindings
@@ -2858,6 +2878,7 @@ impl<'a> BodyCloner<'a> {
                     original.evidence.clone(),
                     current,
                     true,
+                    false,
                 ) {
                     self.body
                         .bindings
@@ -2921,6 +2942,7 @@ impl<'a> BodyCloner<'a> {
                     original.evidence.clone(),
                     current,
                     false,
+                    original.scheme.is_some(),
                 ) {
                     self.body
                         .bindings
@@ -3041,6 +3063,7 @@ impl<'a> BodyCloner<'a> {
                     function_type,
                     substitutions,
                     evidence,
+                    false,
                     false,
                     false,
                 ) {
@@ -3246,6 +3269,7 @@ fn error_callable_value(cloner: &mut BodyCloner<'_>) -> LoweredCallableValueId {
     let callee = cloner.error_expression();
     let function_type = cloner.error_signature();
     cloner.body.callable_values.push(LoweredCallableValue {
+        scheme: None,
         origin: Origin::compiler(),
         target: LoweredCallableTarget::IndirectClosure { callee },
         function_type,
