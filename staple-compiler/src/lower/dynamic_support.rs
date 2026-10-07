@@ -335,7 +335,7 @@ impl LoweredProgram {
     /// specific message rather than becoming `CallsExcludedTemplate`.
     pub(crate) fn polymorphic_construction_diagnostics(
         &self,
-        function: FunctionId,
+        function: Option<FunctionId>,
         scheme: &crate::CheckedScheme,
         origin: &crate::Origin,
     ) -> Vec<staple_syntax::Diagnostic> {
@@ -357,7 +357,7 @@ impl LoweredProgram {
         }) {
             reasons.insert(TraitBound);
         }
-        let mut pending = vec![function];
+        let mut pending = function.into_iter().collect::<Vec<_>>();
         let mut visited = HashSet::new();
         while let Some(function) = pending.pop() {
             if !visited.insert(function) {

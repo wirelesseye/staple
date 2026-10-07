@@ -222,8 +222,20 @@ impl LoweredArtifactPlan {
                 plan.symbol == key.symbol
                     && plan.type_id == key.type_id
                     && CanonicalAdapterKind::from(plan.adapter) == key.adapter
-                    && CanonicalFunctionType::dynamic(&plan.callable_type, origin)
-                        .is_ok_and(|shape| shape == key.callable_type)
+                    && if let Some(scheme) = &plan.scheme {
+                        crate::specialization::ConstructorAdapterKey::polymorphic(
+                            plan.symbol,
+                            plan.type_id,
+                            plan.adapter,
+                            scheme,
+                            origin,
+                        )
+                        .is_ok_and(|expected| expected == *key)
+                    } else {
+                        key.scheme.is_none()
+                            && CanonicalFunctionType::dynamic(&plan.callable_type, origin)
+                                .is_ok_and(|shape| shape == key.callable_type)
+                    }
             }
             (
                 LoweredArtifactPlan::StructuralMethod(plan),
@@ -473,6 +485,7 @@ impl LoweredArtifactPlan {
         }
         match self {
             LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
+                scheme: _,
                 symbol: _,
                 type_id: _,
                 adapter: _,
@@ -838,6 +851,7 @@ impl LoweredArtifactPlan {
 /// The plan shape of a constructor value's adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ConstructorAdapterPlan {
+    pub scheme: Option<crate::CheckedScheme>,
     /// The constructor's semantic symbol; part of the artifact key.
     pub symbol: SymbolId,
     /// The constructor's nominal type; part of the artifact key.
@@ -884,6 +898,26 @@ pub(crate) enum ConstructorConstruction {
 impl ConstructorAdapterPlan {
     /// Private environment order for descriptors captured by a dynamic constructor.
     pub(crate) fn runtime_parameters(&self) -> Vec<crate::TypeParameterId> {
+        if let Some(scheme) = &self.scheme {
+            fn collect(
+                parameters: &[crate::CheckedSchemeParameter],
+                ids: &mut Vec<crate::TypeParameterId>,
+            ) {
+                for parameter in parameters {
+                    match parameter {
+                        crate::CheckedSchemeParameter::Type { id, .. } => ids.push(*id),
+                        crate::CheckedSchemeParameter::Product(parameters) => {
+                            collect(parameters, ids)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut ids = Vec::new();
+            collect(&scheme.parameters, &mut ids);
+            return ids;
+        }
+
         fn collect(ty: &CheckedType, ids: &mut std::collections::BTreeSet<crate::TypeParameterId>) {
             match ty {
                 CheckedType::Parameter { id, .. } => {

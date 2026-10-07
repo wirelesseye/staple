@@ -1022,21 +1022,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.builder.position_at_end(entry);
         let parameters = function.get_params();
         let closure = parameters[0].into_pointer_value();
-        let result = parameters[1].into_pointer_value();
+        let explicit = if plan.scheme.is_some() {
+            plan.runtime_parameters().len()
+        } else {
+            0
+        };
+        let result = parameters[1 + explicit].into_pointer_value();
         let pointer = self.backend.context.ptr_type(AddressSpace::default());
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
         let mut descriptors = HashMap::new();
         for (index, parameter) in plan.runtime_parameters().into_iter().enumerate() {
-            let slot = self.backend.dynamic_byte_offset(
-                closure,
-                self.backend
-                    .size_type
-                    .const_int(index as u64 * pointer_bytes, false),
-            )?;
-            let descriptor = self
-                .load_dynamic_storage(pointer, slot, "constructor.descriptor")
-                .map_err(compiler_diagnostic)?
-                .into_pointer_value();
+            let descriptor = if plan.scheme.is_some() {
+                parameters[1 + index].into_pointer_value()
+            } else {
+                let slot = self.backend.dynamic_byte_offset(
+                    closure,
+                    self.backend
+                        .size_type
+                        .const_int(index as u64 * pointer_bytes, false),
+                )?;
+                self.load_dynamic_storage(pointer, slot, "constructor.descriptor")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value()
+            };
             descriptors.insert(parameter, descriptor);
         }
         let mut environment = DynamicEnvironment {
@@ -1085,11 +1093,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     self.dynamic_product_field(descriptor, result, index as u32)?;
                 self.backend.copy_dynamic_value(
                     descriptor,
-                    parameters[2 + index].into_pointer_value(),
+                    parameters[2 + explicit + index].into_pointer_value(),
                     field,
                 )?;
             }
-        } else if let Some(value) = parameters.get(2) {
+        } else if let Some(value) = parameters.get(2 + explicit) {
             self.backend
                 .copy_dynamic_value(descriptor, value.into_pointer_value(), result)?;
         }
@@ -1280,7 +1288,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let binding = self
             .view
             .binding(owner, LoweredBindingSite::CallableValue(value_id));
-        if matches!(callable.target, LoweredCallableTarget::Constructor { .. })
+        if callable.scheme.is_none()
+            && matches!(callable.target, LoweredCallableTarget::Constructor { .. })
             && crate::contains_type_parameter(&CheckedType::Function(
                 callable.function_type.clone(),
             ))

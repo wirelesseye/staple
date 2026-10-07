@@ -372,6 +372,7 @@ impl<'a> InitializerBinder<'a> {
                     value.adapter,
                     &value.function_type,
                     &value.origin,
+                    value.scheme.as_ref(),
                 );
             }
             LoweredCallableTarget::IndirectClosure { .. }
@@ -539,6 +540,7 @@ impl<'a> InitializerBinder<'a> {
         adapter: super::LoweredCallableAdapter,
         callable_type: &CheckedFunctionType,
         origin: &Origin,
+        scheme: Option<&crate::CheckedScheme>,
     ) {
         let concrete = match concretize_function_type(callable_type, None, origin) {
             Ok(concrete) => concrete,
@@ -547,7 +549,22 @@ impl<'a> InitializerBinder<'a> {
                 return;
             }
         };
-        match ConstructorAdapterKey::new(symbol, type_id, adapter, &concrete, origin) {
+        let scheme = scheme.map(|scheme| {
+            let map = None::<&super::SubstitutionEnvironment>
+                .map(|environment| environment.substitution_map())
+                .unwrap_or_default();
+            match crate::substitute_type(crate::CheckedType::Forall(Box::new(scheme.clone())), &map)
+            {
+                crate::CheckedType::Forall(scheme) => *scheme,
+                _ => unreachable!(),
+            }
+        });
+        let key = if let Some(scheme) = &scheme {
+            ConstructorAdapterKey::polymorphic(symbol, type_id, adapter, scheme, origin)
+        } else {
+            ConstructorAdapterKey::shape(symbol, type_id, adapter, &concrete, origin)
+        };
+        match key {
             Ok(key) => {
                 let key = ArtifactRequestKey::ConstructorAdapter(key);
                 match self.program.specializations.artifact_ordinal(&key) {

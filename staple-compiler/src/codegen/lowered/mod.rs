@@ -437,12 +437,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 })?;
             let functions = match plan {
                 LoweredArtifactPlan::ConstructorAdapter(plan) => {
-                    let ty = if plan.runtime_parameters().is_empty() {
+                    let ty = if plan.scheme.is_none() && plan.runtime_parameters().is_empty() {
                         self.backend
                             .compile_closure_function_type(&plan.callable_type)?
                     } else {
-                        self.backend
-                            .compile_dynamic_function_type(&plan.callable_type, 0)?
+                        self.backend.compile_dynamic_function_type(
+                            &plan.callable_type,
+                            if plan.scheme.is_some() {
+                                plan.runtime_parameters().len()
+                            } else {
+                                0
+                            },
+                        )?
                     };
                     vec![
                         self.backend
@@ -2196,7 +2202,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing constructor adapter declaration")
             })?;
-        if !plan.runtime_parameters().is_empty() {
+        if plan.scheme.is_some() || !plan.runtime_parameters().is_empty() {
             return self.emit_dynamic_constructor_adapter(function, plan, span);
         }
         let entry = self.backend.context.append_basic_block(function, "entry");

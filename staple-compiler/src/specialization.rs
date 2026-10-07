@@ -791,6 +791,7 @@ impl From<LoweredCallableAdapter> for CanonicalAdapterKind {
 /// callable type the adapter must expose.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ConstructorAdapterKey {
+    pub scheme: Option<CanonicalType>,
     pub symbol: SymbolId,
     pub type_id: TypeId,
     pub adapter: CanonicalAdapterKind,
@@ -798,6 +799,33 @@ pub(crate) struct ConstructorAdapterKey {
 }
 
 impl ConstructorAdapterKey {
+    pub(crate) fn polymorphic(
+        symbol: SymbolId,
+        type_id: TypeId,
+        adapter: LoweredCallableAdapter,
+        scheme: &crate::CheckedScheme,
+        origin: &Origin,
+    ) -> Result<Self, Diagnostic> {
+        let canonical =
+            CanonicalType::dynamic(&CheckedType::Forall(Box::new(scheme.clone())), origin)?;
+        let CanonicalType::Forall { body, .. } = &canonical else {
+            unreachable!()
+        };
+        let CanonicalType::Function(function) = body.as_ref() else {
+            return Err(origin_diagnostic(
+                origin,
+                "constructor scheme has no function body",
+            ));
+        };
+        Ok(Self {
+            symbol,
+            type_id,
+            adapter: adapter.into(),
+            callable_type: *function.clone(),
+            scheme: Some(canonical),
+        })
+    }
+
     pub(crate) fn shape(
         symbol: SymbolId,
         type_id: TypeId,
@@ -809,6 +837,7 @@ impl ConstructorAdapterKey {
             return Self::new(symbol, type_id, adapter, callable_type, origin);
         }
         Ok(Self {
+            scheme: None,
             symbol,
             type_id,
             adapter: adapter.into(),
@@ -823,6 +852,7 @@ impl ConstructorAdapterKey {
         origin: &Origin,
     ) -> Result<Self, Diagnostic> {
         Ok(ConstructorAdapterKey {
+            scheme: None,
             symbol,
             type_id,
             adapter: adapter.into(),
@@ -2703,6 +2733,7 @@ mod tests {
         };
         let plans = vec![
             LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
+                scheme: None,
                 symbol: SymbolId(1),
                 type_id: TypeId(7),
                 adapter: LoweredCallableAdapter::Constructor,

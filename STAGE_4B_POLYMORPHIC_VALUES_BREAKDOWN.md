@@ -57,75 +57,30 @@ documented 4a fixes (`local_recursive_generic`, `local_generic_cells`, and
 
 ## Current state
 
-Stage 4b is in progress. B1 provides closure layout for `Forall`, static
-descriptor collection for closed schemes, alpha-canonical scheme keys
-(including nested binders, bound sets, and effect parameters), and
-scheme-permitting inference for lowering explicit call substitutions.
+Stage 4b is in progress. B1 implements closure layout and static descriptors for
+closed schemes, alpha-canonical scheme keys, and scheme-aware lowering inference.
+Shallow inference applies known outer substitutions without guessing through a
+scheme or leaking its quantified parameters.
 
-B2's partially bound entry foundation (B-D) is implemented: artifact keys
-include the bound-descriptor count; entries load that leading prefix from
-their environment and accept the remaining descriptors from callers. Existing
-4a closures continue binding every descriptor. A JIT regression with distinct
-argument layouts verifies the partially bound ABI and forwarding order.
-Callable construction snapshots now retain the checked scheme separately from
-the function signature. Specialization discovery and instance-body binding
-request dynamic entries for retained schemes, including checked scheme lambdas;
-concrete generic instantiations still request monomorphized instances. Scheme
-metadata is substituted without substituting its quantified parameters. A
-snapshot/materialization regression verifies that distinction and the expected
-scheme's descriptor order. Capture-free construction in a concrete owner now
-emits the dynamic instance directly as the closure entry, with no descriptor-
-bound forwarding artifact. A JIT regression returns that closure from a concrete
-function and calls it with one-byte and four-byte descriptors. Parameter
-collection excludes the construction's quantified parameters from its enclosing
-function, preserving concrete functions that return polymorphic values.
-Reachable direct-function and lambda constructions now run support analysis on
-demand in default mode too. The dependency walk preserves specific transitive
-restriction reasons, reports the planned messages at the construction origin,
-and treats in-scope rejections as internal invariant errors. Scheme-level trait
-and effect parameters are checked even when phantom. A negative trait-bound
-construction regression checks the exact message and span, alongside a positive
-ordinary direct-call regression. Remaining restriction coverage, constructors,
-and trait-member construction diagnostics are still pending.
-Capture-free construction now executes inside dynamic owners too. Construction
-binds only enclosing descriptors; the closure's own scheme descriptors arrive
-at invocation. The environment builder reserves the instance's descriptor prefix
-for future captures without trying to resolve unbound scheme descriptors.
-Descriptor preparation also excludes those quantified substitutions, and static
-descriptor lookup respects alpha-equivalent scheme keys. The returned-closure
-JIT regression checks both default and differential modes, asserts the owner ABI,
-and invokes the same closure with two layouts. Existing fully bound dynamic
-capture regressions still pass.
+B2 supports retained scheme metadata, dynamic entry discovery, and construction
+in concrete and dynamic owners. Partially bound entries bind enclosing descriptors
+and receive the scheme's descriptors from callers. Captured lambdas use descriptor
+layout environments and dynamic finalizers, including captures with no bound
+descriptors. Generic wrapper constructors now have distinct scheme keys and accept
+caller descriptors directly. Constructor discovery, both binding paths, declaration,
+and emission preserve this ABI. Construction support checks reject unsupported
+trait/effect schemes; direct functions also check transitive implementation bodies.
 
-Generic calls returning a scheme now distinguish the expected result scheme from
-an unapplied scheme-to-scheme subsumption; the execution regression uses an
-implicit generic call. Captured polymorphic lambdas now share descriptor-layout
-environments in concrete and dynamic owners. Concrete owners spill by-value
-captures for the construction copy and preserve borrowed/shared-cell pointers;
-the existing descriptor builder copies capture data and descriptors into GC
-storage. Captured entries without bound descriptors still point directly at the
-dynamic instance, while dynamic owners use partially bound entries. Descriptor
-scanning owns their dynamic environment finalizers, including the zero-bound
-case, and native environment finalizers are not requested for those values.
+Focused canonicalization, inference, graph, partial-entry, captured-lambda, and
+constructor execution regressions pass. Constructor and returned-lambda tests run
+in default and differential modes with two layouts. Existing dynamic-capture tests
+also pass. The earlier full workspace run passed; a current full rerun, final IR
+comparison, and reachability audit remain pending.
 
-A JIT regression captures an enclosing generic value, returns the closure, and
-invokes it with two layouts after the constructing function returns, in both
-modes. Shallow scheme matching now compares after known outer substitutions;
-a regression proves it neither guesses through the scheme nor leaks quantified
-parameters into the outer substitution map. Additional ownership/shared-cell
-coverage, constructors, and the remaining B2 storage cases are still pending,
-so the public gate stays in place.
-
-Focused inference, canonical-key, partial-entry execution, and construction-graph
-regressions pass, including the executable returned-closure regression and
-construction-site support checks (four focused polymorphic tests passed).
-The four scheme-inference regressions pass too.
-The earlier workspace run completed successfully, including 233 CLI tests,
-397 compiler unit tests (one ignored in each suite), all integration suites,
-and the quick differential subset. Newer construction changes have passing
-focused execution and existing dynamic-capture regressions; the current full
-workspace rerun and final IR comparison remain pending.
-The Stage 3 gate remains in place; B2 construction and B3–B7 remain pending.
+The public Stage 3 gate remains. B2 still needs ownership/shared-cell and storage
+coverage, remaining construction restrictions, and trait-member handling. B3–B7
+(calls, adapters, restriction/documentation completion, and final validation) remain
+pending. No Stage 4b completion is claimed.
 
 ## Current shape at the boundary
 

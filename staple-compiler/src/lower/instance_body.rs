@@ -2982,6 +2982,7 @@ impl<'a> BodyCloner<'a> {
                     original.adapter,
                     &original.function_type,
                     &original.origin,
+                    original.scheme.as_ref(),
                 );
             }
             LoweredCallableTarget::IndirectClosure { .. }
@@ -3195,6 +3196,7 @@ impl<'a> BodyCloner<'a> {
         adapter: super::LoweredCallableAdapter,
         callable_type: &CheckedFunctionType,
         origin: &Origin,
+        scheme: Option<&crate::CheckedScheme>,
     ) {
         let concrete = match concretize_function_type(
             callable_type,
@@ -3207,7 +3209,21 @@ impl<'a> BodyCloner<'a> {
                 return;
             }
         };
-        match ConstructorAdapterKey::shape(symbol, type_id, adapter, &concrete, origin) {
+        let scheme = scheme.map(|scheme| {
+            let map = Some(&self.enclosing.environment)
+                .map(|environment| environment.substitution_map())
+                .unwrap_or_default();
+            match crate::substitute_type(CheckedType::Forall(Box::new(scheme.clone())), &map) {
+                CheckedType::Forall(scheme) => *scheme,
+                _ => unreachable!(),
+            }
+        });
+        let key = if let Some(scheme) = &scheme {
+            ConstructorAdapterKey::polymorphic(symbol, type_id, adapter, scheme, origin)
+        } else {
+            ConstructorAdapterKey::shape(symbol, type_id, adapter, &concrete, origin)
+        };
+        match key {
             Ok(key) => {
                 let key = ArtifactRequestKey::ConstructorAdapter(key);
                 match self.artifacts_by_key.get(&key) {

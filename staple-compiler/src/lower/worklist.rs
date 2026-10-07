@@ -1610,7 +1610,7 @@ impl<'a> WorklistBuilder<'a> {
             } => {
                 if let Some(scheme) = &value.scheme {
                     let diagnostics = program.polymorphic_construction_diagnostics(
-                        *function,
+                        Some(*function),
                         scheme,
                         &value.origin,
                     );
@@ -1668,6 +1668,14 @@ impl<'a> WorklistBuilder<'a> {
             LoweredCallableTarget::Constructor {
                 symbol, type_id, ..
             } => {
+                if let Some(scheme) = &value.scheme {
+                    let diagnostics =
+                        program.polymorphic_construction_diagnostics(None, scheme, &value.origin);
+                    if !diagnostics.is_empty() {
+                        self.diagnostics.extend(diagnostics);
+                        return;
+                    }
+                }
                 self.request_constructor_adapter(
                     *symbol,
                     *type_id,
@@ -1676,6 +1684,7 @@ impl<'a> WorklistBuilder<'a> {
                     &value.origin,
                     enclosing,
                     owner,
+                    value.scheme.as_ref(),
                 );
             }
             LoweredCallableTarget::IndirectClosure { .. }
@@ -1693,6 +1702,7 @@ impl<'a> WorklistBuilder<'a> {
         origin: &Origin,
         enclosing: Option<&ResolvedInstanceRequest>,
         owner: TraversalOwner,
+        scheme: Option<&crate::CheckedScheme>,
     ) {
         let environment = enclosing.map(|enclosing| &enclosing.environment);
         let concrete = match concretize_function_type(callable_type, environment, origin) {
@@ -1702,9 +1712,24 @@ impl<'a> WorklistBuilder<'a> {
                 return;
             }
         };
-        match ConstructorAdapterKey::shape(symbol, type_id, adapter, &concrete, origin) {
+        let scheme = scheme.map(|scheme| {
+            let map = environment
+                .map(|environment| environment.substitution_map())
+                .unwrap_or_default();
+            match crate::substitute_type(CheckedType::Forall(Box::new(scheme.clone())), &map) {
+                CheckedType::Forall(scheme) => *scheme,
+                _ => unreachable!(),
+            }
+        });
+        let key = if let Some(scheme) = &scheme {
+            ConstructorAdapterKey::polymorphic(symbol, type_id, adapter, scheme, origin)
+        } else {
+            ConstructorAdapterKey::shape(symbol, type_id, adapter, &concrete, origin)
+        };
+        match key {
             Ok(key) => {
                 let plan = LoweredArtifactPlan::ConstructorAdapter(ConstructorAdapterPlan {
+                    scheme,
                     symbol,
                     type_id,
                     adapter,
