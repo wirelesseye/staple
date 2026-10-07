@@ -1652,6 +1652,13 @@ impl<'a> WorklistBuilder<'a> {
             | LoweredCallableTarget::StructuralTraitMethod {
                 trait_id, method, ..
             } => {
+                if value.scheme.is_some() {
+                    self.diagnostics.push(Diagnostic::new(
+                        value.origin.span.clone(),
+                        "trait members cannot be used as polymorphic values yet",
+                    ));
+                    return;
+                }
                 let Some(evidence) = &value.evidence else {
                     self.diagnostics.push(Diagnostic::new(
                         value.origin.span.clone(),

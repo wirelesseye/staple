@@ -1609,8 +1609,9 @@ let add: (x: I32, y: I32) -> I32
 
 ### Generic functions
 
-A function-valued `def` may introduce compile-time type parameters in angle
-brackets before its ordinary function type:
+A function type may be quantified by compile-time type parameters written in
+angle brackets before it, as in `<T> T -> T`. A `def` annotated with such a type
+is a generic function:
 
 ```staple
 def identity: <T> T -> T = value => value
@@ -1632,7 +1633,8 @@ let answer = identity.<I32> 42
 let specialized = identity.<String>
 ```
 
-Arguments follow the declaration's parameter order and must match its arity.
+Arguments follow the declaration's parameter order, or the scheme's for a
+polymorphic value, and must match its arity.
 Use `_` for an argument that should still be inferred. Explicit arguments must
 satisfy the declared bounds and agree with value arguments and expected types.
 The `.<...>` suffix binds like member access, before function application.
@@ -1645,12 +1647,14 @@ a first-class value when its context fixes a concrete function type:
 let int_identity: I32 -> I32 = identity
 ```
 
-Generic functions are rank-1: an ordinary parameter or result type cannot
-itself contain an uninstantiated generic scheme. Compile-time parameters must
-be declared explicitly; unannotated definitions are not generalized. Each
-reachable concrete use is monomorphized, unused instantiations produce no code,
-and recursive calls must retain the current specialization. A top-level
-generic `let` declarations are not supported. Generic `extern` bindings are
+Compile-time parameters must be declared explicitly; unannotated definitions
+are not generalized. A call or concrete instantiation of a named generic
+function is monomorphized: each reachable concrete use produces its own code,
+unused instantiations produce none, and recursive calls must retain the current
+specialization. A function that is used as a polymorphic
+value, described below, instead keeps its parameters at run time.
+A `let` cannot declare compile-time parameters itself; to bind a
+polymorphic value, annotate it with a quantified type. Generic `extern` bindings are
 allowed only for the reserved `"staple-intrinsic"` ABI; ordinary external ABIs
 cannot declare compile-time parameters. Intrinsic calls infer concrete type and
 effect arguments at the call site. An `extern` block may appear inside a
@@ -1682,6 +1686,80 @@ relaxation, not a trait bound: `where Sized T` remains the ordinary
 bounded-generic spelling. A relaxed parameter cannot itself be passed or
 returned by value. `Sized` is compiler-derived, so explicit `impl Sized`
 declarations are rejected.
+
+**Polymorphic function values.** A quantified type is an ordinary type: it
+describes a value that can be called at any `T`, so it may appear in a binding
+annotation, a parameter, a result, a product or `wrap`
+field, or as a type argument:
+
+```staple
+def identity: <T> move T -> T = move value => value
+
+def consume: (<T> move T -> T) -> (I32, String) =
+    f => (f 42, f "hello")
+
+type Functions = wrap (identity: <T> move T -> T,)
+
+let mut selected: <T> move T -> T = identity
+let fs = Functions (identity: selected)
+let pair = consume fs.identity
+```
+
+A generic `def`, a generic constructor, or a lambda checked against a scheme
+becomes a polymorphic value when its context expects a scheme; a binding
+without an annotation takes the scheme of its initializer (`let id = identity`).
+The type parameters of a scheme are scoped to it: they are not visible outside
+the scheme, and two schemes that differ only in the names of their parameters
+are the same type.
+
+**Calls.** Each call of a polymorphic value infers its own instantiation from
+the arguments and the expected result, so one value may be called at several
+types. `.<...>` supplies type arguments explicitly, in the scheme's parameter
+order, with `_` for an argument that is still inferred: `id.<I32> 42`.
+
+**Instantiation.** Used where an ordinary function type is expected, a
+polymorphic value is instantiated: `let increment: I32 -> I32 = id`. The result
+is an ordinary function value of the instantiated type. `id.<I32>` without an
+argument does the same.
+
+**Subsumption.** A polymorphic value may be used where another scheme is
+expected when the value's scheme can be instantiated to the expected body with
+the expected scheme's parameters held abstract. Reordering the parameters or
+instantiating one of them to a compound type is allowed:
+
+```staple
+def first: <A, B> (move A, move B) -> A = (move a, move b) => a
+let swapped: <Y, X> (move X, move Y) -> X = first
+let pairs: <T> move (T, T) -> (T, T) = identity
+```
+
+Inference is shallow. Only the outermost quantifier of a value is solved, so a
+scheme nested in an argument is never instantiated implicitly; an explicit
+argument such as `f.<(<U> move U -> U)>` may name one.
+
+**Storage.** A polymorphic value is a closure and is `Copy`. A `let mut`
+binding keeps the scheme it was declared with, and an assignment must supply a
+value of that scheme.
+
+**Restrictions.** A function can be used as a polymorphic value only when its
+implementation can run without knowing its type arguments at compile time.
+The compiler reports the following at the place the value is built, and the
+same function still works when it is called directly:
+
+* a trait bound other than `Copy` or `Sized`, in the scheme or in anything the
+  implementation reaches (trait bounds on values are planned for a later
+  release);
+* an effect parameter in the scheme;
+* a coroutine, async, or reactive body;
+* `__buffer_clone` in the implementation;
+* an array length that depends on a type parameter of the scheme;
+* a function value behind `Ref`, `Slice`, `Buffer`, or a shared cell that
+  crosses into the implementation;
+* a trait member used as a polymorphic value.
+
+The checker separately rejects signals, ordinary `extern` declarations,
+parameter-product-capable type parameters, and polymorphic recursion in
+polymorphic values.
 
 ### Typed resources
 
@@ -2529,6 +2607,12 @@ A parameter product is a type, but not a value type. It may appear:
 4. as a spread inside another parameter product;
 5. as the inferred binding of a capable type parameter of a generic function or
    of a `companion<…>` / `impl<…>` block.
+
+A function whose signature leaves a type parameter capable cannot be used as a
+polymorphic value (see [Generic functions](#generic-functions)): a polymorphic value is called
+through a single run-time calling convention, and the arity of a capable
+parameter is only known per call. A nested scheme therefore never introduces a
+capable parameter.
 
 ```staple
 type Inputs = alias [I32, I32]

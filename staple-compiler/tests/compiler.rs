@@ -13457,6 +13457,92 @@ fn diagnostic_line(diagnostic: &staple_syntax::Diagnostic) -> usize {
 }
 
 #[test]
+fn stage4b_reports_each_polymorphic_value_restriction_at_its_construction() {
+    for (source, message) in [
+        (
+            concat!(
+                "trait Named T { name: T -> String }\n",
+                "impl Named I32 { name = value => \"int\" }\n",
+                "def label: <T where Named T> T -> String = value => Named.name value\n",
+                "let stored = label\n",
+            ),
+            "polymorphic values with trait bounds are not supported yet",
+        ),
+        (
+            concat!(
+                "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\n",
+                "let stored = apply\n",
+            ),
+            "effect-polymorphic functions cannot be used as values yet",
+        ),
+        (
+            concat!(
+                "use std.coroutine.*\n",
+                "def launch: <T> move T -> Coroutine{} I32 = move value => coro { 1 }\n",
+                "let stored = launch\n",
+            ),
+            "functions with coroutine bodies cannot be used as polymorphic values yet",
+        ),
+        (
+            concat!(
+                "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+                "let stored = repeat\n",
+            ),
+            "array lengths cannot depend on a polymorphic value's type parameters yet",
+        ),
+        (
+            concat!(
+                "def read: <T> Ref (T -> T) -> I32 = r => 1\n",
+                "let stored = read\n",
+            ),
+            "function values inside references cannot be passed to a polymorphic value's implementation",
+        ),
+    ] {
+        let module = type_check(source);
+        let diagnostics = Lowerer::new()
+            .lower(&module)
+            .expect_err_diagnostics("a restricted function cannot become a polymorphic value");
+        let line = source.lines().count();
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.message == message)
+            .unwrap_or_else(|| panic!("{message}: {diagnostics:?}"));
+        assert_eq!(
+            diagnostic_line(diagnostic),
+            line,
+            "{message} must point at the construction site"
+        );
+    }
+}
+
+#[test]
+fn stage4b_restricted_functions_work_when_called_directly() {
+    for source in [
+        concat!(
+            "trait Named T { name: T -> String }\n",
+            "impl Named I32 { name = value => \"int\" }\n",
+            "def label: <T where Named T> T -> String = value => Named.name value\n",
+            "let direct = label 3\n",
+        ),
+        concat!(
+            "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\n",
+            "let direct = apply (() => 42)\n",
+        ),
+        concat!(
+            "use std.coroutine.*\n",
+            "def launch: <T> move T -> Coroutine{} I32 = move value => coro { 1 }\n",
+            "let direct = launch 3\n",
+        ),
+        concat!(
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+            "let direct: (I32; 3) = repeat 7 3\n",
+        ),
+    ] {
+        lower(&type_check(source));
+    }
+}
+
+#[test]
 fn stage3_schemes_are_visible_on_bindings_and_lambdas() {
     let module = type_check(
         "def id: <T> move T -> T = move x => x\nlet alias = id\nlet annotated: <U> move U -> U = move x => x\n",

@@ -57,7 +57,7 @@ documented 4a fixes (`local_recursive_generic`, `local_generic_cells`, and
 
 ## Current state
 
-Stage 4b is in progress. B1–B5 are implemented.
+Stage 4b is in progress. B1–B6 are implemented.
 
 - **Representation, construction, calls (B1–B3).** A polymorphic value is a
   closure with a static descriptor. Generic `def`s, generic constructors, and
@@ -67,26 +67,17 @@ Stage 4b is in progress. B1–B5 are implemented.
   parameter, and converts function-typed arguments and results (R5).
 - **Instantiation and subsumption (B4, B5).** Using a polymorphic value at a
   function type, or at a scheme that is not an alpha-renaming of its own, is an
-  explicit coercion with one `instantiation-adapter` artifact, keyed by the
-  canonical source scheme and target.
-  - An instantiation adapter's environment holds the quantified closure and
-    the instantiation's descriptors (deep-copied in dynamic owners). Its entry
-    uses the target's concrete or dynamic ABI.
-  - A scheme adapter takes the target's descriptors and rebuilds the source's,
-    including compound ones, at entry.
-  - An alpha-renaming reuses the closure. A function binding read at an
-    instantiated type builds its quantified closure first. Declared generic
-    `def`s, constructors, and intrinsics still monomorphize.
-- **Gate.** Stage 3's blanket diagnostic is gone. Construction sites report
-  restrictions; instantiating at a concrete function type that has
-  function-typed parameters or results is reported until adapters convert
-  them.
+  explicit coercion with one `instantiation-adapter` artifact. An alpha-renaming
+  reuses the closure, and declared generic `def`s, constructors, and intrinsics
+  still monomorphize. Instantiating at a concrete function type that has
+  function-typed parameters or results is reported until adapters convert them.
+- **Restrictions and docs (B6).** Construction sites report each restriction
+  with its own message; every message has a negative test and a positive test
+  of the same function called directly. `Staple.md` describes polymorphic
+  values, scheme-ordered `.<…>` arguments, and the restrictions.
 
-Remaining: B6 restriction tests and `Staple.md`, and the B7 audits (workspace
-tests, full differential run, IR comparison, reachability).
-
-Verified: the Goal program, one program per value position, and one program
-per instantiation and subsumption form run from concrete and generic bodies.
+Remaining: the B7 audits (workspace tests, full differential run, IR
+comparison, reachability).
 
 ## Starting shape at the boundary (before Stage 4b)
 
