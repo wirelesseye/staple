@@ -68,21 +68,23 @@ and receive the scheme's descriptors from callers. Captured lambdas use descript
 layout environments and dynamic finalizers, including captures with no bound
 descriptors. Generic wrapper constructors now have distinct scheme keys and accept
 caller descriptors directly. Constructor discovery, both binding paths, declaration,
-and emission preserve this ABI. Construction support checks reject unsupported
+and emission preserve this ABI. Storage coverage now includes mutable assignment,
+product/wrapper fields, function arguments/results, and top-level bindings in
+both modes. Construction support checks reject unsupported
 trait/effect schemes; direct functions also check transitive implementation bodies.
 
-Focused canonicalization, inference, graph, partial-entry, captured-lambda, and
-constructor execution regressions pass. Constructor and returned-lambda tests run
+Focused canonicalization, inference, graph, partial-entry, captured-lambda,
+constructor execution, and storage regressions pass. Constructor and returned-lambda tests run
 in default and differential modes with two layouts. Existing dynamic-capture tests
 also pass. The earlier full workspace run passed; a current full rerun, final IR
 comparison, and reachability audit remain pending.
 
-The public Stage 3 gate remains. B2 still needs ownership/shared-cell and storage
-coverage, remaining construction restrictions, and trait-member handling. B3–B7
+The public Stage 3 gate remains. B2 still needs ownership/shared-cell coverage,
+remaining construction restrictions, and trait-member handling. B3–B7
 (calls, adapters, restriction/documentation completion, and final validation) remain
 pending. No Stage 4b completion is claimed.
 
-## Current shape at the boundary
+## Starting shape at the boundary (before Stage 4b)
 
 - `TypedModule::polymorphic_value_diagnostics` (`typecheck.rs`) is Stage 3's
   gate. `Lowerer::lower` (`lower.rs`) calls it first and stops on any

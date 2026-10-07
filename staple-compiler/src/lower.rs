@@ -22412,6 +22412,52 @@ mod tests {
     }
 
     #[test]
+    fn polymorphic_values_survive_storage_positions() {
+        for dictionary in [false, true] {
+            let module = checked_program(concat!(
+                "type Holder = wrap (<T> move T -> T)\n",
+                "def identity: <T> move T -> T = move value => value\n",
+                "def forward: (<T> move T -> T) -> (<U> move U -> U) = value => value\n",
+                "def store: <A where Copy A> A -> (<T> move T -> T) = ignored => {\n",
+                "  let mut value: <T> move T -> T = identity\n",
+                "  value = identity\n",
+                "  let product = (callable: value, extra: 42)\n",
+                "  let wrapped = Holder product.callable\n",
+                "  match wrapped { Holder recovered => forward recovered }\n",
+                "}\n",
+                "let stored = store 42\n",
+            ));
+            let mut program = LoweredProgram::default();
+            program.dictionary_pass_generic_calls = dictionary;
+            assert!(program.snapshot(&module).is_empty());
+            if dictionary {
+                program.compute_dynamic_support();
+            }
+            let diagnostics = program.build_specialization_worklist();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let diagnostics = program.materialize_instance_bodies();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            program.record_reabstractions();
+            let diagnostics = program.close_artifact_catalog(&artifact_closure::ProductionHooks);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            program.assign_initializer_names();
+            let context = inkwell::context::Context::create();
+            let text = crate::CodeGenerator::new(&context)
+                .compile_module(&LoweredModule { program })
+                .unwrap();
+            let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+                text.as_bytes(),
+                "polymorphic-storage",
+            );
+            context
+                .create_module_from_ir(buffer)
+                .unwrap()
+                .verify()
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn polymorphic_constructors_accept_callers_descriptors() {
         for dictionary in [false, true] {
             let module = checked_program(concat!(
