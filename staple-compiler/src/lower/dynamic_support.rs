@@ -1181,12 +1181,9 @@ mod tests {
         let CorpusSource::Inline(source) = program.source else {
             panic!("audit regression is inline");
         };
-        let source = format!(
-            "{source}\ndef phantom_argument: <T where Copy T> T -> I32 = value => {{ def phantom: <U where Copy U> () -> I32 = () => 4; phantom.<T> () }}\nlet phantom_result = phantom_argument 0\n"
-        );
         let loaded = ProgramLoader::new()
             .with_standard_library_root(workspace.join("stdlib"))
-            .load_source(&source, workspace)
+            .load_source(source, workspace)
             .unwrap();
         let checked = TypeChecker::new()
             .check(NameResolver::new().resolve_program(loaded).unwrap())

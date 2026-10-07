@@ -1310,10 +1310,13 @@ static CORPUS: [CorpusProgram; 100] = [
                 "let missing_value = match missing { Found value => value, Absent text => 12 }\n",
                 "let asserted_value = asserted 13\n",
                 "println \"${found_value} ${missing_value} ${asserted_value}\"\n",
+                "def phantom_argument: <T where Copy T> T -> I32 = value => { def phantom: <U where Copy U> () -> I32 = () => 4; phantom.<T> () }\n",
+                "let phantom_result = phantom_argument 0\n",
+                "println \"${phantom_result}\"\n",
             ),
             "expressions",
         )),
-        "6 17\n3 7 8\n8 3\n1\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n",
+        "6 17\n3 7 8\n8 3\n1\n6 7 1 8\n9\n6 6 9\n1 2\n3 5 4\n11 12 13\n4\n",
     ),
     expect_stdout(
         must_run(inline(

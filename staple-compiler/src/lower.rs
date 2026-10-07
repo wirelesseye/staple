@@ -6449,11 +6449,7 @@ impl LoweredProgram {
                     .functions
                     .get(function)
                     .is_some_and(|function| function.captures.is_empty())
-                && module
-                    .type_of_function(function)
-                    .is_some_and(|function_type| {
-                        contains_type_parameter(&CheckedType::Function(function_type.clone()))
-                    })
+                && self.function_is_generic(module, function)
             {
                 return Ok(CallRoute::GenericDirect);
             }
@@ -6498,6 +6494,23 @@ impl LoweredProgram {
         Ok(CallRoute::DeclaredTraitBound)
     }
 
+    /// Whether a function is a generic template: its checked type mentions a
+    /// type parameter, or its scheme declares one. A phantom parameter (one
+    /// its signature never mentions) still makes the binding generic, so it
+    /// has no module or local storage and must route through instances, like
+    /// every binding written with `<…>`.
+    fn function_is_generic(&self, module: &TypedModule, function: FunctionId) -> bool {
+        module
+            .type_of_function(function)
+            .is_some_and(|function_type| {
+                contains_type_parameter(&CheckedType::Function(function_type.clone()))
+            })
+            || self
+                .functions
+                .get(function)
+                .is_some_and(|function| !function.scheme_type_parameters.is_empty())
+    }
+
     /// Classifies a callable construction as a trait method, constructor, intrinsic,
     /// extern, declared or generic function, anonymous function, or stored read.
     fn classify_callable_value_route(
@@ -6523,12 +6536,7 @@ impl LoweredProgram {
             return CallableValueRoute::External;
         }
         if let Some(function) = module.function_for_symbol(symbol) {
-            let generic = module
-                .type_of_function(function)
-                .is_some_and(|function_type| {
-                    contains_type_parameter(&CheckedType::Function(function_type.clone()))
-                });
-            return if generic {
+            return if self.function_is_generic(module, function) {
                 CallableValueRoute::GenericFunction
             } else {
                 CallableValueRoute::DeclaredFunction

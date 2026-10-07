@@ -191,6 +191,28 @@ fn implicitly_thunks_call_arguments_and_preserves_callback_effects() {
     assert!(llvm.contains("implicit_thunk"));
 }
 
+/// A generic `def` whose type parameter never appears in its signature has no
+/// binding storage, like every `<…>` binding, so its calls and values must
+/// route through instances rather than a stored closure.
+#[test]
+fn phantom_type_parameter_generics_route_through_instances() {
+    let module = type_check(concat!(
+        "def phantom_top: <U where Copy U> () -> I32 = () => 4\n",
+        "def captured: I32 -> I32 = value => { def phantom: <U where Copy U> I32 -> I32 = item => item + value; phantom.<Bool> 2 }\n",
+        "def generic_outer: <T where Copy T> T -> I32 = value => { def phantom: <U where Copy U> () -> I32 = () => 4; phantom.<T> () }\n",
+        "let direct = phantom_top.<I32> ()\n",
+        "let callable: () -> I32 = phantom_top.<Bool>\n",
+        "let through_value = callable ()\n",
+        "let local = captured 5\n",
+        "let nested = generic_outer 0\n",
+    ));
+
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("phantom-parameter generic calls and values should emit");
+}
+
 #[test]
 fn signals_and_scoped_reactions_type_check_and_lower() {
     let module = type_check(concat!(
