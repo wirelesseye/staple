@@ -3884,6 +3884,32 @@ mod tests {
         );
     }
 
+    /// Byte zero is a guard; the ABI value starting at byte one is aligned to 32.
+    #[repr(C, align(32))]
+    struct GuardedBytes<const N: usize> {
+        padding: [u8; 31],
+        bytes: [u8; N],
+    }
+    impl<const N: usize> GuardedBytes<N> {
+        fn new(bytes: [u8; N]) -> Self {
+            Self {
+                padding: [0; 31],
+                bytes,
+            }
+        }
+    }
+    impl<const N: usize> std::ops::Deref for GuardedBytes<N> {
+        type Target = [u8; N];
+        fn deref(&self) -> &Self::Target {
+            &self.bytes
+        }
+    }
+    impl<const N: usize> std::ops::DerefMut for GuardedBytes<N> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.bytes
+        }
+    }
+
     fn dynamic_test_module(source: &str, function_name: &str) -> (String, String) {
         dynamic_test_module_with_boundary(source, function_name, None)
     }
@@ -4426,8 +4452,9 @@ mod tests {
                     drop: 0,
                     count: 0,
                 };
-                let input = (0..128).map(|byte| byte as u8).collect::<Vec<_>>();
-                let mut output = [0xff; 128];
+                let input =
+                    GuardedBytes::new(std::array::from_fn::<_, 128, _>(|index| index as u8));
+                let mut output = GuardedBytes::new([0xff; 128]);
                 unsafe {
                     forward.call(
                         std::ptr::null(),
@@ -4485,7 +4512,7 @@ mod tests {
                 let input = (0..size)
                     .map(|index| (index + 21) as u8)
                     .collect::<Vec<_>>();
-                let mut output = [0xff; 128];
+                let mut output = GuardedBytes::new([0xff; 128]);
                 unsafe {
                     repeat.call(
                         std::ptr::null(),
@@ -4635,7 +4662,7 @@ mod tests {
         };
         let first = [21; 3];
         let second = [42; 17];
-        let mut output = [0xff; 34];
+        let mut output = GuardedBytes::new([0xff; 34]);
         unsafe {
             swap.call(
                 std::ptr::null(),
@@ -4701,7 +4728,7 @@ mod tests {
             let payload_size = size.max(4).div_ceil(carrier_size) * carrier_stride;
             let total = (offset + payload_size).div_ceil(carrier_align) * carrier_align;
             let mut input = [42; 64];
-            let mut output = [0xff; 128];
+            let mut output = GuardedBytes::new([0xff; 128]);
             unsafe {
                 inject.call(
                     std::ptr::null(),
@@ -4762,10 +4789,10 @@ mod tests {
             count: 0,
         };
         for (source_tag, target_tag, payload_size) in [(0_i32, 1_i32, 4), (1, 2, 17)] {
-            let mut input = [0; 49];
+            let mut input = GuardedBytes::new([0; 49]);
             input[1..5].copy_from_slice(&source_tag.to_ne_bytes());
             input[17..17 + payload_size].fill(42);
-            let mut output = [0xff; 50];
+            let mut output = GuardedBytes::new([0xff; 50]);
             unsafe {
                 widen.call(
                     std::ptr::null(),
@@ -5353,8 +5380,9 @@ mod tests {
                     drop: 0,
                     count: 0,
                 };
-                let input = (0..128).map(|byte| byte as u8).collect::<Vec<_>>();
-                let mut output = [0xff; 128];
+                let input =
+                    GuardedBytes::new(std::array::from_fn::<_, 128, _>(|index| index as u8));
+                let mut output = GuardedBytes::new([0xff; 128]);
                 unsafe {
                     forward.call(
                         std::ptr::null(),

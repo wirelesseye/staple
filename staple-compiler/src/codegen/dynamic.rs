@@ -63,7 +63,15 @@ impl<'program, 'context> Backend<'program, 'context> {
                     .unwrap_basic()
                     .into_pointer_value();
                 builder
-                    .build_memcpy(copy, 1, source, 1, size)
+                    .build_memcpy(
+                        copy,
+                        self.target_data
+                            .get_abi_alignment(&self.type_descriptor_type(0)),
+                        source,
+                        self.target_data
+                            .get_abi_alignment(&self.type_descriptor_type(0)),
+                        size,
+                    )
                     .map_err(compiler_diagnostic)?;
                 builder
                     .build_unconditional_branch(loop_)
@@ -232,8 +240,9 @@ impl<'program, 'context> Backend<'program, 'context> {
             .into_pointer_value())
     }
 
-    /// Copy exactly the descriptor's store size. Packed products permit only
-    /// byte alignment, even when a component's standalone alignment is larger.
+    /// Copy exactly the descriptor's store size. LLVM memcpy alignment must be
+    /// a compile-time constant; the descriptor's runtime alignment cannot be used.
+    /// Byte alignment also supports callers copying arbitrary byte regions.
     pub(crate) fn copy_dynamic_value(
         &self,
         descriptor: PointerValue<'context>,

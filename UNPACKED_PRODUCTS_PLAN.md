@@ -38,15 +38,15 @@ of scope.
 
 ## Current state
 
-U0–U3 are complete; U4–U5 remain pending. Products and GC payload pointer
-words are naturally aligned, buffers own their descriptors, and the collector
-scans complete aligned words. Known loads/stores still await U4's annotations.
+U0–U4 are complete; U5 documentation and the final release baseline remain
+pending. Products, GC payload pointer words, and known accesses use
+natural alignment; the collector scans complete aligned words.
 
 - Padding: **3,410 / 8,858** product-containing type occurrences grow;
   total store size rises **128,137 → 158,544 bytes (+23.73%)**.
-- GC benchmark: **0.395 s packed → 0.184 s aligned/word scan (53.4% faster)**;
+- U3 GC benchmark: **0.395 s packed → 0.184 s word scan (53.4% faster)**;
   aligned/byte scan is **0.420 s** (five alternating execution-only runs,
-  arm64 macOS). The original U0 median under concurrent validation was 0.524 s.
+  arm64 macOS).
 - Workspace, layout sweep, and full differential gates pass. Behavior matches
   **119 / 119** pre-U1 outputs (`scripts/unpacked-products-reference.json`).
 
@@ -130,7 +130,7 @@ word-aligned.
   shorter than one aligned word.
 - Re-time the U0 benchmark and record the result.
 
-### U4 — Natural alignment for known accesses
+### U4 — Natural alignment for known accesses (complete)
 
 - Replace alignment-1 loads and stores with the type's alignment wherever the
   address is known to be aligned: concrete storage, and dynamic storage

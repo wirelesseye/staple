@@ -97,19 +97,23 @@ impl<'context> DynamicEnvironment<'context> {
 }
 
 impl<'program, 'context> LoweredEmitter<'program, 'context> {
-    /// Dynamic ABI pointers can refer to fields in alignment-one products.
+    /// Dynamic ABI storage and field offsets preserve each value's natural alignment.
     fn load_dynamic_storage<T: inkwell::types::BasicType<'context>>(
         &self,
         ty: T,
         pointer: PointerValue<'context>,
         name: &str,
     ) -> Result<inkwell::values::BasicValueEnum<'context>, inkwell::builder::BuilderError> {
+        let alignment = self
+            .backend
+            .target_data
+            .get_abi_alignment(&ty.as_basic_type_enum());
         let value = self.backend.builder.build_load(ty, pointer, name)?;
         value
             .as_instruction_value()
             .expect("load is an instruction")
-            .set_alignment(1)
-            .expect("one is a valid load alignment");
+            .set_alignment(alignment)
+            .expect("type ABI alignment is valid");
         Ok(value)
     }
 
@@ -120,7 +124,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
         use crate::specialization::CompoundDescriptorShape;
-        use inkwell::values::BasicValue;
         let function = self
             .artifacts
             .get(&ordinal)
@@ -166,10 +169,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let tag = self
                     .load_dynamic_storage(self.backend.context.i32_type(), value, "sum.drop.tag")
                     .map_err(compiler_diagnostic)?;
-                tag.as_instruction_value()
-                    .expect("tag load")
-                    .set_alignment(1)
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                 let done = self
                     .backend
                     .context
@@ -1253,11 +1252,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let value = self
                     .load_dynamic_storage(self.backend.compile_type(ty)?, source, "index.argument")
                     .map_err(compiler_diagnostic)?;
-                value
-                    .as_instruction_value()
-                    .unwrap()
-                    .set_alignment(1)
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                 values.push(value.into());
             }
         }
@@ -1313,7 +1307,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_store(result, value)
             .map_err(compiler_diagnostic)?
-            .set_alignment(1)
+            .set_alignment(
+                self.backend
+                    .target_data
+                    .get_abi_alignment(&value.get_type()),
+            )
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         for (descriptor, source, destination) in writebacks {
             self.backend
@@ -1604,11 +1602,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             "closure.capture",
                         )
                         .map_err(compiler_diagnostic)?;
-                    stored
-                        .as_instruction_value()
-                        .unwrap()
-                        .set_alignment(1)
-                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                     stored
                 } else {
                     pointer.into()
@@ -2286,11 +2279,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let descriptor = self
             .load_dynamic_storage(pointer, word, "cell.value.descriptor")
             .map_err(compiler_diagnostic)?;
-        if let Some(instruction) = descriptor.as_instruction_value() {
-            instruction
-                .set_alignment(1)
-                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-        }
         let descriptor = descriptor.into_pointer_value();
         self.backend.drop_dynamic_value(descriptor, cell)?;
         Ok(())
@@ -2370,7 +2358,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_store(word, descriptor)
             .map_err(compiler_diagnostic)?
-            .set_alignment(1)
+            .set_alignment(
+                self.backend
+                    .target_data
+                    .get_abi_alignment(&descriptor.get_type()),
+            )
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         let finalizer = self.dynamic_cell_finalizer_code(span)?;
         self.backend.set_gc_finalizer(cell, finalizer)?;
@@ -2850,7 +2842,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         intrinsic: crate::IntrinsicFunction,
         environment: &mut DynamicEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
-        use inkwell::values::BasicValue;
         let span = &call.origin.span;
         let storage = *environment
             .temporaries
@@ -3216,6 +3207,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let length = self.load_buffer_metadata(buffer, 0)?;
                 let descriptor = self.dynamic_descriptor(&call.result_type, environment, span)?;
                 let result_layout = self.backend.load_descriptor_layout(descriptor)?;
+                // Descriptor alignment is runtime-only; use the conservative constant bound.
                 self.backend
                     .builder
                     .build_memset(
@@ -3350,6 +3342,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_int_mul(source_length, layout.stride, "buffer.transfer.bytes")
                     .map_err(compiler_diagnostic)?;
+                // Element alignment is runtime-only; LLVM memcpy needs constant alignment.
                 self.backend
                     .builder
                     .build_memcpy(destination_field, 1, source_data, 1, bytes)
@@ -4793,7 +4786,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment: &DynamicEnvironment<'context>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
-        use inkwell::values::BasicValue;
         let descriptor = self.dynamic_descriptor(target, environment, span)?;
         match plan {
             LoweredCoercionPlan::Identity => {
@@ -4817,6 +4809,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     ));
                 };
                 let layout = self.backend.load_descriptor_layout(descriptor)?;
+                // Descriptor alignment is runtime-only; use the conservative constant bound.
                 self.backend
                     .builder
                     .build_memset(
@@ -4837,8 +4830,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .const_int(*alternative as u64, false),
                     )
                     .map_err(compiler_diagnostic)?;
-                tag.set_alignment(1)
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                tag.set_alignment(
+                    self.backend
+                        .target_data
+                        .get_abi_alignment(&self.backend.context.i32_type()),
+                )
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                 let storage =
                     self.dynamic_sum_payload(descriptor, destination, sum.alternatives.len())?;
                 self.coerce_dynamic_value(
@@ -4888,6 +4885,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     target_sum.alternatives.len(),
                 )?;
                 let layout = self.backend.load_descriptor_layout(descriptor)?;
+                // Descriptor alignment is runtime-only; use the conservative constant bound.
                 self.backend
                     .builder
                     .build_memset(
@@ -4900,10 +4898,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let tag = self
                     .load_dynamic_storage(self.backend.context.i32_type(), value, "sum.coerce.tag")
                     .map_err(compiler_diagnostic)?;
-                tag.as_instruction_value()
-                    .expect("sum tag load")
-                    .set_alignment(1)
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                 let function = self
                     .backend
                     .builder
@@ -4971,8 +4965,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                 .const_int(arm.target as u64, false),
                         )
                         .map_err(compiler_diagnostic)?;
-                    tag.set_alignment(1)
-                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                    tag.set_alignment(
+                        self.backend
+                            .target_data
+                            .get_abi_alignment(&self.backend.context.i32_type()),
+                    )
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                     self.backend
                         .builder
                         .build_unconditional_branch(done)
@@ -4994,7 +4992,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         logical: &crate::LoweredLogical,
         environment: &mut DynamicEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
-        use inkwell::values::BasicValue;
         let left = self.emit_dynamic_expression(owner, logical.left, environment)?;
         if environment.returned {
             return Ok(left);
@@ -5002,10 +4999,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let tag = self
             .load_dynamic_storage(self.backend.context.i32_type(), left, "logical.tag")
             .map_err(compiler_diagnostic)?;
-        tag.as_instruction_value()
-            .expect("logical tag load")
-            .set_alignment(1)
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         let is_true = self
             .backend
             .builder
@@ -5530,11 +5523,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         "match.string",
                     )
                     .map_err(compiler_diagnostic)?;
-                string
-                    .as_instruction_value()
-                    .unwrap()
-                    .set_alignment(1)
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                 self.backend.build_string_literal_pattern_compare(
                     string.into_struct_value(),
                     literal,
@@ -5571,16 +5559,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     fn dynamic_sum_tag(
         &self,
         pointer: PointerValue<'context>,
-        span: &staple_syntax::Span,
+        _span: &staple_syntax::Span,
     ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
-        use inkwell::values::BasicValue;
         let tag = self
             .load_dynamic_storage(self.backend.context.i32_type(), pointer, "match.tag")
             .map_err(compiler_diagnostic)?;
-        tag.as_instruction_value()
-            .expect("sum tag load")
-            .set_alignment(1)
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
         Ok(tag.into_int_value())
     }
 

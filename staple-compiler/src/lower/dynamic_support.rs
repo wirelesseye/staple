@@ -1332,8 +1332,8 @@ mod tests {
             }
             if dynamic && line.contains("buffer.pointer") && line.contains(" = load ") {
                 assert!(
-                    line.ends_with("align 1"),
-                    "packed dynamic pointer load: {line}"
+                    line.ends_with(&format!("align {}", std::mem::align_of::<usize>())),
+                    "naturally aligned dynamic pointer load: {line}"
                 );
                 loads += 1;
             }

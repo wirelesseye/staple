@@ -87,9 +87,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_memcpy(
                 destination,
-                1,
+                layout.align,
                 source,
-                1,
+                layout.align,
                 self.backend.size_type.const_int(layout.store_size, false),
             )
             .map_err(compiler_diagnostic)?;
@@ -106,9 +106,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_memcpy(
                         environment,
-                        1,
+                        layout.align,
                         source,
-                        1,
+                        layout.align,
                         self.backend.size_type.const_int(2 * pointer_bytes, false),
                     )
                     .map_err(compiler_diagnostic)?;
@@ -117,7 +117,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_store(destination, closure)
                     .map_err(compiler_diagnostic)?
-                    .set_alignment(1)
+                    .set_alignment(layout.align)
                     .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
             }
             (CheckedType::Product(left), CheckedType::Product(right)) => {
@@ -183,7 +183,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 tag.as_instruction_value()
                     .unwrap()
-                    .set_alignment(1)
+                    .set_alignment(self.backend.target_data.get_abi_alignment(&tag.get_type()))
                     .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                 let merge = self
                     .backend
@@ -310,14 +310,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         source: PointerValue<'context>,
         destination: PointerValue<'context>,
     ) -> CodeGenerationResult<()> {
-        let size = self.backend.descriptor_layout(ty)?.store_size;
+        let layout = self.backend.descriptor_layout(ty)?;
+        let size = layout.store_size;
         self.backend
             .builder
             .build_memcpy(
                 destination,
-                1,
+                layout.align,
                 source,
-                1,
+                layout.align,
                 self.backend.size_type.const_int(size, false),
             )
             .map_err(compiler_diagnostic)?;
@@ -341,7 +342,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         value
             .as_instruction_value()
             .unwrap()
-            .set_alignment(1)
+            .set_alignment(
+                self.backend
+                    .target_data
+                    .get_abi_alignment(&value.get_type()),
+            )
             .map_err(|error| Diagnostic::new(staple_syntax::Span::Compiler, error.to_string()))?;
         Ok(value)
     }
@@ -444,7 +449,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .builder
                         .build_store(field, parameter)
                         .map_err(compiler_diagnostic)?
-                        .set_alignment(1)
+                        .set_alignment(
+                            self.backend
+                                .target_data
+                                .get_abi_alignment(&parameter.get_type()),
+                        )
                         .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                     caller_slots.push(field);
                 }
