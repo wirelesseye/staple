@@ -36,45 +36,19 @@ the aligned formula.
 from 9 to 16 bytes. U0 measures it. Reordering fields to reduce padding is out
 of scope.
 
-## Current shape
+## Current state
 
-- **Concrete products.** `LayoutContext::compile_product_type`
-  (`codegen/layout.rs`) builds `struct_type(&fields, true)`. The product
-  builders in `codegen/ir.rs` (the empty product and the constant product
-  builder) and the coroutine runtime conversion
-  (`codegen/lowered/coroutines.rs`, two sites) also build packed structs.
-- **Descriptor layout.** `DescriptorLayout::packed_product` gives a product
-  alignment 1 and a size equal to the sum of its fields' store sizes.
-  `DescriptorLayout::sum` mirrors `compile_sum_type`'s carrier choice, which
-  depends on alternatives' alignments, so products currently never raise a
-  sum's alignment.
-- **Run-time layout.** `Backend::runtime_product_layout` (`codegen/layout.rs`)
-  and `dynamic_product_field` (`codegen/lowered/dynamic.rs`) compute offsets
-  as running sums of store sizes. The converters' field offsets
-  (`conversion_field_pointer`, `codegen/lowered/conversions.rs`) do the same.
-- **GC payloads built by dynamic code.**
-  - Captured cells put the initialization byte at `store_size` and the
-    trailing descriptor word at `store_size + 1` (`allocate_dynamic_cell`),
-    which is unaligned.
-  - Buffers align their header offset to the element's alignment
-    (`dynamic_buffer_layout`); with products at alignment 1, product elements
-    are unaligned.
-  - Closure environments already align each capture to its descriptor's
-    alignment (`dynamic_capture_offsets`), so they become aligned as soon as
-    product descriptors report real alignment.
-- **GC.** `__staple_gc_scan_region` loads a pointer-sized window at every byte
-  offset.
-- **Guards that already exist.**
-  - `descriptor_layouts_match_target_data_for_the_corpus` compares every
-    corpus type's descriptor layout with LLVM's `TargetData`.
-  - `runtime_layout_calculations_match_concrete_layouts` compares run-time
-    calculations with concrete layouts.
-  - The full differential run compares concrete and dynamic code on the
-    whole corpus, so any disagreement between the two layouts shows up as a
-    behavior difference.
-- **Docs that state the packed layout:** `HYBRID_POLYMORPHISM_PLAN.md`
-  ("Current State", Layout) and `STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md`
-  (Decision 5).
+U0 is complete. Workspace tests, the full differential run, and the behavior
+gate (119 programs) pass. U1–U5 remain pending; products still use the packed
+layout.
+
+- Packed baseline: **8,858** distinct product-containing type occurrences
+  (deduplicated within each corpus program), **128,137** total store bytes.
+- GC product benchmark: **0.524 s** median of five execution-only runs on
+  this arm64 macOS host (`scripts/bench-gc-products.py`).
+- Behavior reference: release compiler from `8cb6da7`; comparison and corpus
+  export tooling are in place; outputs are captured in
+  `scripts/unpacked-products-reference.json`. Padding cost follows U1.
 
 ## The IR baseline
 
@@ -96,7 +70,7 @@ product, so that comparison cannot gate this work. Instead:
 Each step ends with `cargo test --workspace --quiet` passing, the full
 differential run passing, and the behavior gate matching.
 
-### U0 — Measure
+### U0 — Measure (complete)
 
 - Record, across the corpus, the total store size of every concrete type
   that is a product or contains one, and the number of types whose size

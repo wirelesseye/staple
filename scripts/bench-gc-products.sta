@@ -1,0 +1,9 @@
+// Retain pointer-holding products while allocating enough strings to collect.
+use std.io.println
+let mut values: List (I8, String) = List.new ()
+let mut i: I32 = 0
+while (i < 100000) {
+    List.push values (1, "value=$i")
+    i = i + 1
+}
+println (ToString.to_string (List.length values))

@@ -1386,6 +1386,16 @@ mod tests {
         let context = inkwell::context::Context::create();
         let target = create_target_machine(None).unwrap();
         let mut checked = 0;
+        let measurement_path = std::env::var("STAPLE_LAYOUT_MEASUREMENTS").ok();
+        let mut measurements = std::collections::BTreeMap::new();
+        fn contains_product(ty: &CheckedType) -> bool {
+            match ty {
+                CheckedType::Product(_) => true,
+                CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_product),
+                CheckedType::Wrapper { representation, .. } => contains_product(representation),
+                _ => false,
+            }
+        }
         for fixture in codegen_corpus() {
             let (source, root) = match fixture.source {
                 CorpusSource::Inline(source) => (source.to_owned(), workspace.to_path_buf()),
@@ -1415,10 +1425,33 @@ mod tests {
             }
             for value_type in types {
                 verify(&backend, &value_type);
+                if measurement_path.is_some()
+                    && contains_product(&value_type)
+                    && !crate::contains_type_parameter(&value_type)
+                {
+                    if let Ok(ty) = backend.compile_type(&value_type) {
+                        measurements.insert(
+                            format!("{}:{value_type:?}", fixture.name),
+                            backend.target_data.get_store_size(&ty),
+                        );
+                    }
+                }
                 checked += 1;
             }
         }
         assert!(checked > 1000, "the test must sweep the full corpus");
+        if let Some(path) = measurement_path {
+            let mut output = String::new();
+            for (ty, size) in &measurements {
+                output.push_str(&format!("{size}\t{ty}\n"));
+            }
+            std::fs::write(path, output).unwrap();
+            eprintln!(
+                "product-containing corpus types: {}, total store bytes: {}",
+                measurements.len(),
+                measurements.values().sum::<u64>()
+            );
+        }
     }
 
     /// The emission `LayoutContext` must select exactly the representations
