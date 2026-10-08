@@ -489,3 +489,70 @@ mod payload_alignment_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gc_scanner_visits_only_complete_aligned_words() {
+        use inkwell::{OptimizationLevel, context::Context, memory_buffer::MemoryBuffer};
+        static SEEN: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+        unsafe extern "C" fn record(value: usize) {
+            SEEN.lock().unwrap().push(value);
+        }
+        // Execute the scanner from the shipped runtime, replacing only its marking callback.
+        let runtime = include_str!("../gc.ll");
+        let start = runtime
+            .find("define internal void @__staple_gc_scan_region(")
+            .unwrap();
+        let length = runtime[start..].find("\n}\n").unwrap() + 3;
+        let word = std::mem::size_of::<usize>();
+        let integer = format!("i{}", word * 8);
+        let scanner = runtime[start..start + length]
+            .replace(
+                "define internal void @__staple_gc_scan_region",
+                "define void @scan",
+            )
+            .replace("@__staple_gc_mark_candidate", "@record")
+            .replace("{{SIZE}}", &integer)
+            .replace("{{PTR_BYTES}}", &word.to_string());
+        let context = Context::create();
+        let ir = format!("declare void @record({integer})\n{scanner}");
+        let module = context
+            .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+                ir.as_bytes(),
+                "gc-scanner",
+            ))
+            .unwrap();
+        module.verify().unwrap();
+        let callback = module.get_function("record").unwrap();
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        engine.add_global_mapping(&callback, record as *const () as usize);
+        type Scan = unsafe extern "C" fn(*const u8, usize);
+        let scan = unsafe { engine.get_function::<Scan>("scan") }.unwrap();
+        let words = [11usize, 22, 33, 44];
+        for (offset, size, expected) in [
+            (0, 0, vec![]),
+            (0, 1, vec![]),
+            (0, word - 1, vec![]),
+            (0, word, vec![11]),
+            (0, 4 * word, vec![11, 22, 33, 44]),
+            (1, word - 2, vec![]),
+            (1, word - 1, vec![]),
+            (1, 2 * word - 1, vec![22]),
+            (1, 3 * word - 1, vec![22, 33]),
+            (word - 1, word + 1, vec![22]),
+        ] {
+            SEEN.lock().unwrap().clear();
+            unsafe {
+                scan.call(words.as_ptr().cast::<u8>().add(offset), size);
+            }
+            assert_eq!(
+                *SEEN.lock().unwrap(),
+                expected,
+                "offset={offset}, size={size}"
+            );
+        }
+    }
+}

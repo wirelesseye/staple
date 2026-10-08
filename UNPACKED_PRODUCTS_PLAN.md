@@ -38,14 +38,15 @@ of scope.
 
 ## Current state
 
-U0–U2 are complete; U3–U5 remain pending. Concrete and dynamic products use
-natural alignment. GC payload pointer words are aligned, buffers own their
-descriptors, and headers preserve scalar alignment. Scanning remains byte-by-byte.
+U0–U3 are complete; U4–U5 remain pending. Products and GC payload pointer
+words are naturally aligned, buffers own their descriptors, and the collector
+scans complete aligned words. Known loads/stores still await U4's annotations.
 
 - Padding: **3,410 / 8,858** product-containing type occurrences grow;
   total store size rises **128,137 → 158,544 bytes (+23.73%)**.
-- Packed GC benchmark: **0.524 s** median of five execution-only runs on
-  this arm64 macOS host; U3 will repeat it.
+- GC benchmark: **0.395 s packed → 0.184 s aligned/word scan (53.4% faster)**;
+  aligned/byte scan is **0.420 s** (five alternating execution-only runs,
+  arm64 macOS). The original U0 median under concurrent validation was 0.524 s.
 - Workspace, layout sweep, and full differential gates pass. Behavior matches
   **119 / 119** pre-U1 outputs (`scripts/unpacked-products-reference.json`).
 
@@ -120,7 +121,7 @@ word-aligned.
 - Add a test per payload kind that asserts its pointer-holding words are
   pointer-aligned.
 
-### U3 — Word-by-word GC scanning
+### U3 — Word-by-word GC scanning (complete)
 
 - `__staple_gc_scan_region` rounds the region's start up to pointer
   alignment and advances by the pointer size.
