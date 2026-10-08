@@ -91,9 +91,9 @@ Stage 4b is complete.
   - "a polymorphic value's type parameter cannot be inferred from its use" is
     an internal invariant: the checker already rejects scheme parameters
     the body doesn't determine.
-  - The one remaining limit, a single argument or result mixing the
-    surrounding run-time parameters with a concrete function type, is a
-    documented [restriction](#restrictions) with a test.
+  - A single argument or result mixing the surrounding run-time parameters
+    with a concrete function type was documented as a restriction here; the
+    follow-up below lifts it.
 
 Verified at the review fixes:
 - `cargo test --workspace --quiet`: 1,496 passed, 2 ignored.
@@ -104,6 +104,47 @@ Verified at the review fixes:
   `same` (109); `local_recursive_generic` and `local_generic_cells` differ as
   documented 4a fixes; and 21 programs (the 20 polymorphic-value programs and
   `dynamic_audit_forms`) cannot compile on `50565d8`, as expected.
+
+- **Mixed layouts (follow-up to the review).** A value that mixes run-time
+  parameters with a concrete function needing conversion, such as
+  `(callback: I32 -> I32, state: A)` passed where a scheme expects
+  `(callback: T -> T, state: U)`, now converts in every position. It was a
+  documented restriction for instantiation and a silent miscompile for calls
+  through polymorphic values from dynamic bodies (`reabstraction_across`
+  skipped such arguments and results).
+  - `value-conversion` artifacts whose concrete side mentions run-time
+    parameters key by that side's symbolic shape and take the value's
+    descriptor as a third argument (`value_conversions::takes_descriptor`).
+    They copy the descriptor's store size, then find each product field
+    (aligned offsets), sum payload and wrapper representation from the
+    descriptor's components, as dynamic code reads them, and convert only
+    the function parts. Erased parts are copied unchanged.
+  - `needs_conversion` now matches `needs_concrete_function_conversion`: a
+    function that mentions run-time parameters on both sides already shares
+    the dynamic-shape ABI and is not converted.
+  - Calls from dynamic bodies reserve each mixed conversion's storage in the
+    prologue and pass the caller's descriptor; results and `mut` writebacks
+    convert back the same way.
+  - Instantiation adapters build a layout-only descriptor from the body's
+    side of the conversion and the scheme descriptors they hold. Scheme
+    targets (`AdaptScheme`) now plan their conversions too; before, a
+    concrete callback reaching a scheme target failed at codegen with
+    "missing instantiation adapter conversion".
+  - Corpus programs `polymorphic_mixed_layout_calls` (also in the quick
+    differential subset) and `polymorphic_mixed_layout_instantiation` cover
+    callback-first and state-first records, an aligned field after an erased
+    one, nested products, sums of wrappers, `mut` writeback, results, and a
+    scheme target, with `A` at `F64` and `(I8, F64)`.
+
+Verified at the mixed-layout follow-up:
+- `cargo test --workspace --quiet`: 1,500 passed, 2 ignored.
+- Full differential run: 121 programs identical in both modes; 120 use
+  dynamic calls (13,958 call sites).
+- IR against a release build of `unpacked-products-ir-baseline`, 4
+  compilations per binary, over 134 inputs (123 corpus programs and 11
+  examples): 132 `same`; `polymorphic_mixed_layout_calls` differs because
+  the baseline miscompiles it (no output, exit status 1); and
+  `polymorphic_mixed_layout_instantiation` cannot compile on the baseline.
 
 ## Starting shape at the boundary (before Stage 4b)
 
@@ -187,7 +228,10 @@ Verified at the review fixes:
   function type and the scheme body's side is a dynamic-shape one; a mutated
   slot is written back after the call. The plan records those conversions as
   children, chosen by `value_conversions::adapter_conversions`, which both
-  lowering and codegen use. New artifact family `instantiation-adapter`,
+  lowering and codegen use. A scheme target converts at its own body. A
+  converted value whose type also mentions run-time parameters, such as
+  `(callback: I32 -> I32, state: A)`, converts through its descriptor (see
+  "Mixed layouts" under Current state). New artifact family `instantiation-adapter`,
   keyed by `(canonical scheme, canonical target type)`. A generic `def`
   instantiated this way is still monomorphized, as today; only `Forall`
   *values* use the adapter.
@@ -337,7 +381,6 @@ Reported at the construction site (B-I), each with a test.
 | Run-time `Natural` count, including `__slice_from_ref` | "array lengths cannot depend on a polymorphic value's type parameters yet" | Not planned |
 | Function value behind `Ref`, `Slice`, `Buffer`, or a shared cell crossing into a polymorphic implementation | "function values inside references cannot be passed to a polymorphic value's implementation" | Not planned |
 | Trait member used as a polymorphic value | "trait members cannot be used as polymorphic values yet" | Stage 7 |
-| Inside a polymorphic implementation, an instantiation where one argument or the result mixes that implementation's run-time parameters with a concrete function type needing conversion, such as `(I32 -> I32, A)` for `(T -> T, U)` | "instantiating a polymorphic value at a type that combines the surrounding type parameters with a concrete function type is not supported yet" | Not planned: R5 conversions work on concrete layouts, and this needs a conversion over a run-time layout. Separate slots, such as `(I32 -> I32, A)` matched against `(T -> T, U)` as two parameters, convert normally. |
 
 Restrictions enforced by the checker since Stage 3 (signals, ordinary
 externs, capable parameters, polymorphic recursion) are unchanged.

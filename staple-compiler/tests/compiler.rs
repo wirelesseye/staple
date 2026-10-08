@@ -13441,10 +13441,11 @@ fn stage4b_instantiation_converts_function_typed_arguments() {
 }
 
 #[test]
-fn stage4b_reports_instantiation_mixing_type_parameters_with_function_conversion() {
-    // One argument whose instantiated type mixes the surrounding run-time
-    // parameter `A` with a concrete callback would need a conversion over a
-    // run-time layout.
+fn stage4b_instantiation_converts_values_mixing_type_parameters_with_functions() {
+    // One argument's instantiated type mixes the surrounding run-time
+    // parameter `A` with a concrete callback; its conversion reads the layout
+    // from a descriptor. The corpus program
+    // `polymorphic_mixed_layout_instantiation` runs this shape.
     let module = type_check(concat!(
         "let outer: <A where Copy A> A -> A = a => {\n",
         "    let poly: <T, U where Copy T, Copy U> ((T -> T, U), I32) -> U = (pair, n) => { let (f, u) = pair; u }\n",
@@ -13452,15 +13453,7 @@ fn stage4b_reports_instantiation_mixing_type_parameters_with_function_conversion
         "    mixed ((x => x, a), 1)\n",
         "}\n",
     ));
-    let diagnostics = Lowerer::new()
-        .lower(&module)
-        .expect_err_diagnostics("a run-time layout cannot be converted");
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-    assert_eq!(
-        diagnostics[0].message,
-        "instantiating a polymorphic value at a type that combines the surrounding type parameters with a concrete function type is not supported yet"
-    );
-    assert_eq!(diagnostic_line(&diagnostics[0]), 3);
+    lower(&module);
 }
 
 /// The 1-based line of a diagnostic's span.

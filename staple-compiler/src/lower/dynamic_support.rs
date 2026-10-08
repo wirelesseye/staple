@@ -1410,6 +1410,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mixed_layout_conversions_take_descriptors() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let program = codegen_corpus()
+            .iter()
+            .find(|program| program.name == "polymorphic_mixed_layout_calls")
+            .unwrap();
+        let CorpusSource::Inline(source) = program.source else {
+            panic!("mixed-layout regression is inline");
+        };
+        let loaded = ProgramLoader::new()
+            .with_standard_library_root(workspace.join("stdlib"))
+            .load_source(source, workspace)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(loaded).unwrap();
+        let checked = TypeChecker::new().check(resolved).unwrap();
+        let lowered = Lowerer::new().lower(&checked).unwrap();
+        // Arguments convert into the body's shape, and results and `mut`
+        // writebacks back out, each through the value's descriptor.
+        for direction in [
+            crate::specialization::ReabstractionDirection::ConcreteToDynamic,
+            crate::specialization::ReabstractionDirection::DynamicToConcrete,
+        ] {
+            assert!(
+                lowered.program.artifacts.iter().any(|(_, artifact)| {
+                    matches!(&artifact.plan, Some(crate::LoweredArtifactPlan::ValueConversion(plan))
+                        if plan.direction == direction
+                            && super::super::value_conversions::takes_descriptor(&plan.concrete))
+                }),
+                "a descriptor-taking conversion must be planned in each direction"
+            );
+        }
+    }
+
     /// The tracked coverage report (R0.2). Every generic template in the
     /// corpus is counted once per program; a template is in scope when any of
     /// its reasons is. Baseline increases require new corpus programs or

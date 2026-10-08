@@ -322,7 +322,8 @@ impl LoweredArtifactPlan {
                 LoweredArtifactPlan::ValueConversion(plan),
                 ArtifactRequestKey::ValueConversion(key),
             ) => {
-                same_type(&plan.concrete, &key.concrete)
+                super::value_conversions::concrete_key(&plan.concrete, origin)
+                    .is_ok_and(|shape| shape == key.concrete)
                     && CanonicalType::dynamic(&plan.dynamic, origin)
                         .is_ok_and(|shape| shape == key.dynamic)
                     && plan.direction == key.direction

@@ -1721,8 +1721,9 @@ order, with `_` for an argument that is still inferred: `id.<I32> 42`.
 polymorphic value is instantiated: `let increment: I32 -> I32 = id`. The result
 is an ordinary function value of the instantiated type. `id.<I32>` without an
 argument does the same. The instantiated type may take and return functions,
-including `mut` function parameters, and the instantiated value may be stored
-directly into a `from` wrapper or a sum:
+including `mut` function parameters and values that combine a function with
+a surrounding type parameter, such as `(callback: I32 -> I32, state: A)`. The
+instantiated value may be stored directly into a `from` wrapper or a sum:
 
 ```staple
 def apply: <T> (T -> T) -> T -> T = f => x => f x
@@ -1762,11 +1763,7 @@ same function still works when it is called directly:
 * an array length that depends on a type parameter of the scheme;
 * a function value behind `Ref`, `Slice`, `Buffer`, or a shared cell that
   crosses into the implementation;
-* a trait member used as a polymorphic value;
-* inside another polymorphic value's implementation, an instantiation at a
-  type where one argument or the result combines that implementation's type
-  parameters with a concrete function type, such as `(I32 -> I32, A)` used
-  where the scheme expects `(T -> T, U)`.
+* a trait member used as a polymorphic value.
 
 The checker separately rejects signals, ordinary `extern` declarations,
 parameter-product-capable type parameters, and polymorphic recursion in

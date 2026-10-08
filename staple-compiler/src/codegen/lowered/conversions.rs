@@ -19,7 +19,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             span: span.clone(),
             syntax: staple_syntax::SyntaxId::COMPILER,
         };
-        let concrete = CanonicalType::concrete(concrete, &origin)?;
+        let concrete = crate::lower::conversion_concrete_key(concrete, &origin)?;
         let dynamic = CanonicalType::dynamic(dynamic, &origin)?;
         let child = plan.children.iter().find(|child| matches!(&child.key, ArtifactRequestKey::ValueConversion(key) if key.concrete == concrete && key.dynamic == dynamic));
         child
@@ -82,6 +82,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.builder.position_at_end(entry);
         let destination = function.get_nth_param(0).unwrap().into_pointer_value();
         let source = function.get_nth_param(1).unwrap().into_pointer_value();
+        if crate::lower::conversion_takes_descriptor(&plan.concrete) {
+            let descriptor = function.get_nth_param(2).unwrap().into_pointer_value();
+            return self.emit_descriptor_value_conversion(
+                function,
+                plan,
+                destination,
+                source,
+                descriptor,
+                span,
+            );
+        }
         let layout = self.backend.descriptor_layout(&plan.concrete)?;
         self.backend
             .builder
@@ -241,6 +252,173 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             // Fixed repeated types normalize to products during materialization;
             // symbolic array counts are the runtime-Natural restriction.
+            _ => {}
+        }
+        self.backend
+            .builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// Calls one planned conversion, passing `descriptor` when the
+    /// conversion's layout depends on run-time parameters.
+    pub(super) fn call_value_conversion(
+        &self,
+        conversion: FunctionValue<'context>,
+        concrete: &CheckedType,
+        destination: PointerValue<'context>,
+        source: PointerValue<'context>,
+        descriptor: Option<PointerValue<'context>>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let mut arguments: Vec<BasicMetadataValueEnum<'context>> =
+            vec![destination.into(), source.into()];
+        if crate::lower::conversion_takes_descriptor(concrete) {
+            let descriptor = descriptor.ok_or_else(|| {
+                Diagnostic::new(span.clone(), "missing value conversion descriptor")
+            })?;
+            arguments.push(descriptor.into());
+        }
+        self.backend
+            .builder
+            .build_direct_call(conversion, &arguments, "")
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// A conversion whose concrete side mixes run-time parameters with the
+    /// concrete functions it converts. Sizes and offsets come from the value's
+    /// descriptor, whose components follow the type's fields or alternatives,
+    /// exactly as dynamic code reads products and sums. Erased parts are
+    /// copied unchanged; only function fields are rewrapped.
+    fn emit_descriptor_value_conversion(
+        &mut self,
+        function: FunctionValue<'context>,
+        plan: &ValueConversionPlan,
+        destination: PointerValue<'context>,
+        source: PointerValue<'context>,
+        descriptor: PointerValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        self.backend
+            .copy_dynamic_value(descriptor, source, destination)?;
+        match (&plan.concrete, &plan.dynamic) {
+            (CheckedType::Product(left), CheckedType::Product(right)) => {
+                for (index, (left, right)) in left.elements.iter().zip(&right.elements).enumerate()
+                {
+                    let Some(child) = self.planned_conversion_child(
+                        plan,
+                        &left.value_type,
+                        &right.value_type,
+                        span,
+                    )?
+                    else {
+                        continue;
+                    };
+                    let (field_destination, component) =
+                        self.dynamic_product_field(descriptor, destination, index as u32)?;
+                    let (field_source, _) =
+                        self.dynamic_product_field(descriptor, source, index as u32)?;
+                    self.call_value_conversion(
+                        child,
+                        &left.value_type,
+                        field_destination,
+                        field_source,
+                        Some(component),
+                        span,
+                    )?;
+                }
+            }
+            (
+                CheckedType::Wrapper {
+                    representation: left,
+                    ..
+                },
+                CheckedType::Wrapper {
+                    representation: right,
+                    ..
+                },
+            ) => {
+                // A wrapper's descriptor is its representation's.
+                if let Some(child) = self.planned_conversion_child(plan, left, right, span)? {
+                    self.call_value_conversion(
+                        child,
+                        left,
+                        destination,
+                        source,
+                        Some(descriptor),
+                        span,
+                    )?;
+                }
+            }
+            (CheckedType::Sum(left), CheckedType::Sum(right)) => {
+                let count = left.alternatives.len();
+                let payload_destination =
+                    self.dynamic_sum_payload(descriptor, destination, count)?;
+                let payload_source = self.dynamic_sum_payload(descriptor, source, count)?;
+                let tag = self.dynamic_sum_tag(source, span)?;
+                let merge = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "conversion.done");
+                let mut cases = Vec::new();
+                for (index, (left, right)) in left
+                    .alternatives
+                    .iter()
+                    .zip(&right.alternatives)
+                    .enumerate()
+                {
+                    if let Some(child) = self.planned_conversion_child(plan, left, right, span)? {
+                        let block = self
+                            .backend
+                            .context
+                            .append_basic_block(function, "conversion.alternative");
+                        cases.push((index, block, child, left));
+                    }
+                }
+                self.backend
+                    .builder
+                    .build_switch(
+                        tag,
+                        merge,
+                        &cases
+                            .iter()
+                            .map(|(index, block, _, _)| {
+                                (
+                                    self.backend
+                                        .context
+                                        .i32_type()
+                                        .const_int(*index as u64, false),
+                                    *block,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(compiler_diagnostic)?;
+                for (index, block, child, alternative) in cases {
+                    self.backend.builder.position_at_end(block);
+                    let component = self
+                        .backend
+                        .load_descriptor_component(descriptor, index as u32)?;
+                    self.call_value_conversion(
+                        child,
+                        alternative,
+                        payload_destination,
+                        payload_source,
+                        Some(component),
+                        span,
+                    )?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(merge)
+                        .map_err(compiler_diagnostic)?;
+                }
+                self.backend.builder.position_at_end(merge);
+            }
+            // A function that mentions run-time parameters already has the
+            // dynamic-shape ABI, and symbolic array counts are the
+            // runtime-Natural restriction.
             _ => {}
         }
         self.backend

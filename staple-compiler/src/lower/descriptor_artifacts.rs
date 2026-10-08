@@ -848,11 +848,16 @@ pub(super) fn expand(
         Plan::CompoundDescriptorDrop(plan) => Plan::CompoundDescriptorDrop(plan),
         Plan::DescriptorBoundEntry(plan) => Plan::DescriptorBoundEntry(plan),
         Plan::InstantiationAdapter(mut plan) => {
-            // A function-target adapter converts function-typed arguments and
-            // results between the target's ABI and the scheme body's (R5).
+            // An adapter converts function-typed arguments and results
+            // between the target's ABI and the scheme body's (R5). A scheme
+            // target converts at its own body.
             plan.children.clear();
+            let target = match &plan.target {
+                CheckedType::Forall(scheme) => scheme.body.as_ref(),
+                target => target,
+            };
             if let (CheckedType::Function(target), CheckedType::Function(body)) =
-                (&plan.target, plan.scheme.body.as_ref())
+                (target, plan.scheme.body.as_ref())
             {
                 use crate::specialization::ReabstractionDirection as Direction;
                 let conversions = super::value_conversions::adapter_conversions(target, body)

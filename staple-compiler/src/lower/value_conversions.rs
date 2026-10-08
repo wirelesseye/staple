@@ -29,27 +29,18 @@ pub(crate) struct AdapterConversions {
 }
 
 /// The adapter conversions for instantiating `body` (a scheme's body) at
-/// `target`. A value whose target type mixes the caller's run-time
-/// parameters with a concrete function that needs converting is not
-/// supported: conversions work on concrete layouts.
+/// `target`. A target type may mix the caller's run-time parameters with
+/// concrete functions; its conversion then reads the layout from a
+/// descriptor (see [`takes_descriptor`]).
 pub(crate) fn adapter_conversions(
     target: &crate::CheckedFunctionType,
     body: &crate::CheckedFunctionType,
 ) -> Result<AdapterConversions, String> {
     let pair = |concrete: &CheckedType, dynamic: &CheckedType| {
-        if !super::needs_concrete_function_conversion(concrete, dynamic) {
-            return Ok(None);
-        }
-        if crate::contains_type_parameter(concrete) {
-            return Err("instantiating a polymorphic value at a type that combines \
-                 the surrounding type parameters with a concrete function type is not \
-                 supported yet"
-                .to_owned());
-        }
-        Ok(Some(AdapterConversion {
+        needs_conversion(concrete, dynamic).then(|| AdapterConversion {
             concrete: concrete.clone(),
             dynamic: dynamic.clone(),
-        }))
+        })
     };
     let whole = target.mutations.contains(&crate::CheckedMutation::Whole);
     let target_slots = super::flattened_parameter_types(&target.parameter);
@@ -57,7 +48,7 @@ pub(crate) fn adapter_conversions(
         && !matches!(body.parameter.as_ref(), CheckedType::Product(_))
         && matches!(target.parameter.as_ref(), CheckedType::Product(_));
     let arguments = if whole {
-        vec![pair(&target.parameter, &body.parameter)?]
+        vec![pair(&target.parameter, &body.parameter)]
     } else if pack {
         vec![None; target_slots.len()]
     } else {
@@ -69,43 +60,40 @@ pub(crate) fn adapter_conversions(
             .iter()
             .zip(&body_slots)
             .map(|(concrete, dynamic)| pair(concrete, dynamic))
-            .collect::<Result<Vec<_>, _>>()?
+            .collect()
     };
     Ok(AdapterConversions {
         arguments,
-        result: pair(&target.result, &body.result)?,
+        result: pair(&target.result, &body.result),
     })
 }
 
-pub(super) fn needs_conversion(concrete: &CheckedType, dynamic: &CheckedType) -> bool {
-    match (concrete, dynamic) {
-        (CheckedType::Function(_), CheckedType::Function(function)) => {
-            crate::contains_type_parameter(&CheckedType::Function(function.clone()))
-        }
-        (CheckedType::Product(left), CheckedType::Product(right)) => left
-            .elements
-            .iter()
-            .zip(&right.elements)
-            .any(|(left, right)| needs_conversion(&left.value_type, &right.value_type)),
-        (CheckedType::Sum(left), CheckedType::Sum(right)) => left
-            .alternatives
-            .iter()
-            .zip(&right.alternatives)
-            .any(|(left, right)| needs_conversion(left, right)),
-        (
-            CheckedType::Wrapper {
-                representation: left,
-                ..
-            },
-            CheckedType::Wrapper {
-                representation: right,
-                ..
-            },
-        ) => needs_conversion(left, right),
-        (CheckedType::Array { element: left, .. }, CheckedType::Array { element: right, .. }) => {
-            needs_conversion(left, right)
-        }
-        _ => false,
+/// Whether a value converts between the two shapes: some function inside it
+/// is concrete on one side and mentions run-time parameters on the other. A
+/// function that mentions run-time parameters on both sides already has the
+/// dynamic-shape ABI.
+pub(crate) fn needs_conversion(concrete: &CheckedType, dynamic: &CheckedType) -> bool {
+    super::needs_concrete_function_conversion(concrete, dynamic)
+}
+
+/// Whether a conversion of `concrete` reads its layout from a run-time
+/// descriptor: its concrete side mixes the surrounding run-time parameters
+/// with the concrete functions it converts. Such a conversion takes the
+/// descriptor of its value as a third argument.
+pub(crate) fn takes_descriptor(concrete: &CheckedType) -> bool {
+    crate::contains_type_parameter(concrete)
+}
+
+/// The key of a conversion's concrete side. A side that mentions run-time
+/// parameters keys by its symbolic shape.
+pub(crate) fn concrete_key(
+    concrete: &CheckedType,
+    origin: &Origin,
+) -> Result<CanonicalType, Diagnostic> {
+    if takes_descriptor(concrete) {
+        CanonicalType::dynamic(concrete, origin)
+    } else {
+        CanonicalType::concrete(concrete, origin)
     }
 }
 
@@ -117,7 +105,7 @@ pub(super) fn request(
 ) -> Result<ClosureRequest, Diagnostic> {
     Ok(ClosureRequest::Artifact {
         key: ArtifactRequestKey::ValueConversion(ValueConversionKey {
-            concrete: CanonicalType::concrete(concrete, origin)?,
+            concrete: concrete_key(concrete, origin)?,
             dynamic: CanonicalType::dynamic(dynamic, origin)?,
             direction,
         }),

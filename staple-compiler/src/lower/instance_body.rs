@@ -3615,9 +3615,6 @@ impl LoweredProgram {
             let Some(actual) = actual else {
                 continue;
             };
-            if dynamic_caller_of_scheme && crate::contains_type_parameter(&actual) {
-                continue;
-            }
             let (concrete, dynamic) = if concrete_to_dynamic {
                 (actual, parameter.clone())
             } else {
@@ -3641,9 +3638,6 @@ impl LoweredProgram {
                     },
                 );
             }
-        }
-        if dynamic_caller_of_scheme && crate::contains_type_parameter(&call.result_type) {
-            return;
         }
         let (concrete, dynamic) = if concrete_to_dynamic {
             (call.result_type.clone(), signature.result.as_ref().clone())

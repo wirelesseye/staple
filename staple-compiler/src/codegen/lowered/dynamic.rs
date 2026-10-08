@@ -68,6 +68,9 @@ struct DynamicEnvironment<'context> {
     binding_order: Vec<SymbolId>,
     temporaries: HashMap<ExpressionId, PointerValue<'context>>,
     packed_arguments: HashMap<ExpressionId, PointerValue<'context>>,
+    /// Storage for call-boundary conversions whose layout depends on
+    /// run-time parameters, reserved in the prologue.
+    converted_values: HashMap<(crate::LoweredCallId, Option<usize>), PointerValue<'context>>,
     coercions: HashMap<ExpressionId, PointerValue<'context>>,
     loop_results: HashMap<ExpressionId, PointerValue<'context>>,
     cells: HashMap<SymbolId, PointerValue<'context>>,
@@ -1134,6 +1137,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             binding_order: Vec::new(),
             temporaries: HashMap::new(),
             packed_arguments: HashMap::new(),
+            converted_values: HashMap::new(),
             coercions: HashMap::new(),
             loop_results: HashMap::new(),
             cells: HashMap::new(),
@@ -1655,6 +1659,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             binding_order: Vec::new(),
             temporaries: HashMap::new(),
             packed_arguments: HashMap::new(),
+            converted_values: HashMap::new(),
             coercions: HashMap::new(),
             loop_results: HashMap::new(),
             cells: HashMap::new(),
@@ -2655,22 +2660,48 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .and_then(|conversions| conversions.get(&(call_id, Some(index))))
             {
                 let writeback = conversion.writeback;
-                let destination = self
-                    .backend
-                    .entry_builder()
-                    .build_alloca(
-                        self.backend.compile_type(&conversion.concrete)?,
-                        "conversion.argument",
-                    )
-                    .map_err(compiler_diagnostic)?;
+                // A value that mixes this body's run-time parameters with
+                // concrete functions converts through its descriptor.
+                let (destination, descriptor) =
+                    if crate::lower::conversion_takes_descriptor(&conversion.concrete) {
+                        let destination = *environment
+                            .converted_values
+                            .get(&(call_id, Some(index)))
+                            .ok_or_else(|| {
+                                Diagnostic::new(span.clone(), "missing converted argument storage")
+                            })?;
+                        let descriptor =
+                            self.dynamic_descriptor(&conversion.concrete, environment, span)?;
+                        (destination, Some(descriptor))
+                    } else {
+                        let destination = self
+                            .backend
+                            .entry_builder()
+                            .build_alloca(
+                                self.backend.compile_type(&conversion.concrete)?,
+                                "conversion.argument",
+                            )
+                            .map_err(compiler_diagnostic)?;
+                        (destination, None)
+                    };
                 let thunk = self.reabstraction_thunk_code(owner, call_id, Some(index), span)?;
-                self.backend
-                    .builder
-                    .build_direct_call(thunk, &[destination.into(), pointer.into()], "")
-                    .map_err(compiler_diagnostic)?;
+                self.call_value_conversion(
+                    thunk,
+                    &conversion.concrete,
+                    destination,
+                    pointer,
+                    descriptor,
+                    span,
+                )?;
                 if writeback {
                     let function = self.reabstraction_writeback_code(owner, call_id, index, span)?;
-                    writebacks.push((function, pointer, destination));
+                    writebacks.push((
+                        function,
+                        &conversion.concrete,
+                        pointer,
+                        destination,
+                        descriptor,
+                    ));
                 }
                 pointer = destination;
             }
@@ -2707,18 +2738,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .build_store(storage, value)
                 .map_err(compiler_diagnostic)?;
         }
-        for (function, original, converted) in writebacks {
-            self.backend
-                .builder
-                .build_direct_call(function, &[original.into(), converted.into()], "")
-                .map_err(compiler_diagnostic)?;
+        for (function, concrete, original, converted, descriptor) in writebacks {
+            self.call_value_conversion(function, concrete, original, converted, descriptor, span)?;
         }
+        let result_conversion = self
+            .view
+            .conversions(owner)
+            .and_then(|conversions| conversions.get(&(call_id, None)));
         if polymorphic_types.is_some()
-            && self
-                .view
-                .conversions(owner)
-                .is_some_and(|conversions| conversions.contains_key(&(call_id, None)))
+            && let Some(conversion) = result_conversion
+            && crate::lower::conversion_takes_descriptor(&conversion.concrete)
         {
+            let converted = *environment
+                .converted_values
+                .get(&(call_id, None))
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing converted result storage"))?;
+            let descriptor = self.dynamic_descriptor(&conversion.concrete, environment, span)?;
+            let function = self.reabstraction_thunk_code(owner, call_id, None, span)?;
+            self.call_value_conversion(
+                function,
+                &conversion.concrete,
+                converted,
+                storage,
+                Some(descriptor),
+                span,
+            )?;
+            self.backend
+                .copy_dynamic_value(descriptor, converted, storage)?;
+        } else if polymorphic_types.is_some() && result_conversion.is_some() {
             let result_type = self.backend.compile_type(&call.result_type)?;
             let value = self
                 .load_dynamic_storage(result_type, storage, "closure.result")
@@ -3655,7 +3702,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             span: span.clone(),
             syntax: staple_syntax::SyntaxId::COMPILER,
         };
-        let concrete = CanonicalType::concrete(&conversion.concrete, &origin)?;
+        let concrete = crate::lower::conversion_concrete_key(&conversion.concrete, &origin)?;
         let dynamic = CanonicalType::dynamic(&conversion.dynamic, &origin)?;
         let child = plan
             .children
@@ -3670,6 +3717,66 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Diagnostic::new(span.clone(), "missing instantiation adapter conversion")
             })?;
         self.planned_conversion_function(child, span)
+    }
+
+    /// A descriptor that carries only the layout of `ty` and, for products
+    /// and sums, its components: enough for a value conversion to find each
+    /// field, but with no cleanup entry. Type parameters resolve through
+    /// `descriptors`. It lives in this frame.
+    fn conversion_layout_descriptor(
+        &self,
+        ty: &CheckedType,
+        descriptors: &HashMap<TypeParameterId, PointerValue<'context>>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let null = self
+            .backend
+            .context
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        match ty {
+            CheckedType::Parameter { id, .. } => descriptors
+                .get(id)
+                .copied()
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing runtime type descriptor")),
+            CheckedType::Wrapper { representation, .. } => {
+                self.conversion_layout_descriptor(representation, descriptors, span)
+            }
+            ty if !crate::contains_type_parameter(ty) || is_static_layout_type(ty) => {
+                let layout = self.backend.descriptor_layout(ty)?;
+                let runtime = self.backend.static_runtime_layout(layout);
+                self.backend.build_runtime_descriptor(runtime, &[], null)
+            }
+            CheckedType::Product(_) | CheckedType::Sum(_) => {
+                let children: Vec<&CheckedType> = match ty {
+                    CheckedType::Product(product) => product
+                        .elements
+                        .iter()
+                        .map(|field| &field.value_type)
+                        .collect(),
+                    CheckedType::Sum(sum) => sum.alternatives.iter().collect(),
+                    _ => unreachable!(),
+                };
+                let components = children
+                    .into_iter()
+                    .map(|child| self.conversion_layout_descriptor(child, descriptors, span))
+                    .collect::<CodeGenerationResult<Vec<_>>>()?;
+                let layouts = components
+                    .iter()
+                    .map(|component| self.backend.load_descriptor_layout(*component))
+                    .collect::<CodeGenerationResult<Vec<_>>>()?;
+                let layout = match ty {
+                    CheckedType::Product(_) => self.backend.runtime_product_layout(&layouts)?,
+                    _ => self.backend.runtime_sum_layout(&layouts)?.0,
+                };
+                self.backend
+                    .build_runtime_descriptor(layout, &components, null)
+            }
+            _ => Err(Diagnostic::new(
+                span.clone(),
+                "this converted value's layout cannot be described at run time",
+            )),
+        }
     }
 
     pub(super) fn emit_instantiation_adapter(
@@ -3756,6 +3863,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     binding_order: Vec::new(),
                     temporaries: HashMap::new(),
                     packed_arguments: HashMap::new(),
+                    converted_values: HashMap::new(),
                     coercions: HashMap::new(),
                     loop_results: HashMap::new(),
                     cells: HashMap::new(),
@@ -3848,6 +3956,41 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // dynamic shape (R5); a mutated slot converts back after the call.
         let conversions = crate::lower::adapter_conversions(target, signature)
             .map_err(|message| Diagnostic::new(span.clone(), message))?;
+        // A converted value whose type mentions the caller's run-time
+        // parameters is laid out by a descriptor. The body's side of the
+        // conversion has the same layout and mentions only the scheme's
+        // parameters, whose descriptors this adapter holds.
+        let scheme_descriptors = plan
+            .scheme
+            .type_parameter_ids()
+            .into_iter()
+            .zip(source_descriptors.iter().copied())
+            .collect::<HashMap<_, _>>();
+        let conversion_storage = |emitter: &Self,
+                                  conversion: &crate::lower::AdapterConversion,
+                                  name: &str|
+         -> CodeGenerationResult<_> {
+            if crate::lower::conversion_takes_descriptor(&conversion.concrete) {
+                let descriptor = emitter.conversion_layout_descriptor(
+                    &conversion.dynamic,
+                    &scheme_descriptors,
+                    span,
+                )?;
+                Ok((
+                    emitter.backend.allocate_dynamic_value(descriptor)?,
+                    Some(descriptor),
+                ))
+            } else {
+                Ok((
+                    emitter
+                        .backend
+                        .entry_builder()
+                        .build_alloca(emitter.backend.compile_type(&conversion.concrete)?, name)
+                        .map_err(compiler_diagnostic)?,
+                    None,
+                ))
+            }
+        };
         let mut writebacks = Vec::new();
         for (index, conversion) in conversions.arguments.iter().enumerate() {
             let Some(conversion) = conversion else {
@@ -3859,18 +4002,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 crate::specialization::ReabstractionDirection::ConcreteToDynamic,
                 span,
             )?;
-            let converted = self
-                .backend
-                .entry_builder()
-                .build_alloca(
-                    self.backend.compile_type(&conversion.concrete)?,
-                    "instantiation.converted",
-                )
-                .map_err(compiler_diagnostic)?;
-            self.backend
-                .builder
-                .build_direct_call(into_dynamic, &[converted.into(), slots[index].into()], "")
-                .map_err(compiler_diagnostic)?;
+            let (converted, descriptor) =
+                conversion_storage(self, conversion, "instantiation.converted")?;
+            self.call_value_conversion(
+                into_dynamic,
+                &conversion.concrete,
+                converted,
+                slots[index],
+                descriptor,
+                span,
+            )?;
             if whole
                 || target
                     .mutations
@@ -3882,10 +4023,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     crate::specialization::ReabstractionDirection::DynamicToConcrete,
                     span,
                 )?;
-                writebacks.push((into_concrete, slots[index], converted));
+                writebacks.push((
+                    into_concrete,
+                    &conversion.concrete,
+                    slots[index],
+                    converted,
+                    descriptor,
+                ));
             }
             slots[index] = converted;
         }
+        // Reserve the result's storage before the call: dynamic storage
+        // belongs to the entry block.
+        let converted_result = conversions
+            .result
+            .as_ref()
+            .map(|conversion| {
+                conversion_storage(self, conversion, "instantiation.converted_result")
+            })
+            .transpose()?;
         if pack && dynamic_shape {
             let CheckedType::Parameter { id, .. } = signature.parameter.as_ref() else {
                 return Err(Diagnostic::new(
@@ -3944,42 +4100,41 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .builder
             .build_indirect_call(function_type, code, &arguments, "instantiation.call")
             .map_err(compiler_diagnostic)?;
-        for (writeback, original, converted) in writebacks {
-            self.backend
-                .builder
-                .build_direct_call(writeback, &[original.into(), converted.into()], "")
-                .map_err(compiler_diagnostic)?;
+        for (writeback, concrete, original, converted, descriptor) in writebacks {
+            self.call_value_conversion(writeback, concrete, original, converted, descriptor, span)?;
         }
         // A function-typed result comes back in the body's dynamic shape and
         // converts into the target's (R5).
-        let result_source = match &conversions.result {
-            Some(conversion) => {
+        let result_source = match (&conversions.result, converted_result) {
+            (Some(conversion), Some((converted, descriptor))) => {
                 let into_concrete = self.adapter_conversion_function(
                     plan,
                     conversion,
                     crate::specialization::ReabstractionDirection::DynamicToConcrete,
                     span,
                 )?;
-                let converted = self
-                    .backend
-                    .entry_builder()
-                    .build_alloca(
-                        self.backend.compile_type(&conversion.concrete)?,
-                        "instantiation.converted_result",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                self.backend
-                    .builder
-                    .build_direct_call(into_concrete, &[converted.into(), result.into()], "")
-                    .map_err(compiler_diagnostic)?;
-                if dynamic_shape {
-                    self.conversion_copy(&conversion.concrete, converted, result)?;
-                    result
-                } else {
-                    converted
+                self.call_value_conversion(
+                    into_concrete,
+                    &conversion.concrete,
+                    converted,
+                    result,
+                    descriptor,
+                    span,
+                )?;
+                match descriptor {
+                    Some(descriptor) => {
+                        self.backend
+                            .copy_dynamic_value(descriptor, converted, result)?;
+                        result
+                    }
+                    None if dynamic_shape => {
+                        self.conversion_copy(&conversion.concrete, converted, result)?;
+                        result
+                    }
+                    None => converted,
                 }
             }
-            None => result,
+            _ => result,
         };
         if dynamic_shape {
             self.backend
@@ -4109,6 +4264,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             binding_order: Vec::new(),
             temporaries: HashMap::new(),
             packed_arguments: HashMap::new(),
+            converted_values: HashMap::new(),
             coercions: HashMap::new(),
             loop_results: HashMap::new(),
             cells: HashMap::new(),
@@ -4449,6 +4605,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .insert(expression, self.backend.allocate_dynamic_value(descriptor)?);
             }
         }
+        if let Some(conversions) = self.view.conversions(EmissionOwner::Instance(id)) {
+            for (site, conversion) in conversions {
+                if !crate::lower::conversion_takes_descriptor(&conversion.concrete) {
+                    continue;
+                }
+                let descriptor = self.prepare_dynamic_descriptor(
+                    &conversion.concrete,
+                    &mut environment,
+                    &body.origin.span,
+                )?;
+                environment
+                    .converted_values
+                    .insert(*site, self.backend.allocate_dynamic_value(descriptor)?);
+            }
+        }
         let owner = EmissionOwner::Instance(id);
         let raw = &parameters[2 + runtime.len() + resource_count..];
         let whole = body
@@ -4758,7 +4929,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(self.descriptor_global(ordinal, span)?.as_pointer_value())
     }
 
-    fn dynamic_sum_payload(
+    pub(super) fn dynamic_sum_payload(
         &self,
         descriptor: PointerValue<'context>,
         value: PointerValue<'context>,
@@ -5556,7 +5727,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(pointer)
     }
 
-    fn dynamic_sum_tag(
+    pub(super) fn dynamic_sum_tag(
         &self,
         pointer: PointerValue<'context>,
         _span: &staple_syntax::Span,
@@ -5887,7 +6058,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
-    fn dynamic_product_field(
+    pub(super) fn dynamic_product_field(
         &self,
         descriptor: PointerValue<'context>,
         value: PointerValue<'context>,

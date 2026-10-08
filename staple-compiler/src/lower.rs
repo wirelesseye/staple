@@ -60,7 +60,10 @@ mod value_conversions;
 mod worklist;
 
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
-pub(crate) use value_conversions::{AdapterConversion, adapter_conversions};
+pub(crate) use value_conversions::{
+    AdapterConversion, adapter_conversions, concrete_key as conversion_concrete_key,
+    takes_descriptor as conversion_takes_descriptor,
+};
 
 // Read-only emission view. `LoweredModule::program` returns this
 // type; `codegen::layout::LayoutContext` stores it so the shared
@@ -698,8 +701,7 @@ impl LoweredCoercionPlan {
             &mut inferred,
         );
         // The adapter converts concrete function values reaching the quantified
-        // body (R5). Only a value that mixes run-time parameters with such a
-        // function has no conversion.
+        // body (R5); the two signatures must pair up slot by slot.
         value_conversions::adapter_conversions(target, body)?;
         let types = scheme
             .type_parameter_ids()

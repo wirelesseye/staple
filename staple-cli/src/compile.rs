@@ -4695,9 +4695,10 @@ mod tests {
         let standard_library = workspace_root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")])
             .expect("corpus link options should parse");
-        const SUBSET: [&str; 18] = [
+        const SUBSET: [&str; 19] = [
             "local_recursive_generic",
             "polymorphic_function_typed_instantiation",
+            "polymorphic_mixed_layout_calls",
             "calls_generic",
             "parameter_products",
             "from_types",

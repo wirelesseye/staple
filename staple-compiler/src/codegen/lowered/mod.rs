@@ -531,13 +531,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .add_function(name, ty, Some(Linkage::Internal)),
                     ]
                 }
-                LoweredArtifactPlan::ValueConversion(_) => {
+                LoweredArtifactPlan::ValueConversion(plan) => {
                     let pointer = self.backend.context.ptr_type(AddressSpace::default());
+                    // `(destination, source)`, then the value's descriptor
+                    // when its layout depends on run-time parameters.
+                    let count = if crate::lower::conversion_takes_descriptor(&plan.concrete) {
+                        3
+                    } else {
+                        2
+                    };
                     let ty = self
                         .backend
                         .context
                         .void_type()
-                        .fn_type(&[pointer.into(), pointer.into()], false);
+                        .fn_type(&vec![pointer.into(); count], false);
                     vec![
                         self.backend
                             .llvm_module
