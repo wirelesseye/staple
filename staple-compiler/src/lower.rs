@@ -13628,6 +13628,16 @@ fn collect_pattern_facts(
 /// Whether one checked type contains a garbage-collector-managed reference.
 /// Records `checked_type_contains_ref` so
 /// `LoweredSymbol::global_root` records the decision lowering-side.
+///
+/// FIXME(gc-roots): this misses GC pointers other than `Ref` and `Buffer`,
+/// so a module global holding one is never registered as a root and its data
+/// can be freed while still live. Known cases: `String` and `Slice` values,
+/// and function values, whose closure environment is a GC allocation whatever
+/// their parameter and result types. For example, a top-level
+/// `let mut cell = "a"` assigned through a closure, or
+/// `let reader = make_reader "text"` where `make_reader` returns a capturing
+/// closure, reads freed memory after a collection. Root every global whose
+/// layout can hold a GC pointer, runtime handle types included.
 fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Ref(_) | CheckedType::Buffer(_) => true,

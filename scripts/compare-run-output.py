@@ -7,6 +7,7 @@ and the current release binary. --capture writes reference results as JSON;
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -29,22 +30,23 @@ def compare(args, temporary):
         subprocess.run(["tar", "-x", "-C", str(checkout)], input=archive.stdout, check=True)
         old = build(checkout)
     new = Path(args.new).resolve() if args.new else build(ROOT)
-    corpus = subprocess.run(["cargo", "run", "--release", "--quiet", "-p", "staple-compiler", "--example", "export_corpus"],
-                            cwd=ROOT, check=True, capture_output=True, text=True)
-    programs = [json.loads(line) for line in corpus.stdout.splitlines()]
-    files = {p["source"] for p in programs if p["kind"] == "file"}
+    # The corpus dump writes each program to <dump>/<name>/main.sta (with a
+    # file entry's sibling modules) and lists them in manifest.jsonl.
+    dump = temporary / "corpus"
+    subprocess.run(["cargo", "test", "--quiet", "-p", "staple-compiler", "--lib", "dump_corpus_sources",
+                    "--", "--ignored"], cwd=ROOT, check=True, capture_output=True,
+                   env={**os.environ, "STAPLE_CORPUS_DUMP": str(dump)})
+    manifest = [json.loads(line) for line in (dump / "manifest.jsonl").read_text().splitlines()]
+    programs = [dict(name=entry["name"], source=dump / entry["name"] / "main.sta")
+                for entry in manifest if entry["runnable"]]
+    files = {entry["file"] for entry in manifest if entry["file"] is not None}
     for path in sorted((ROOT / "staple-compiler/examples").glob("*.sta")):
-        relative = str(path.relative_to(ROOT))
-        if relative not in files:
-            programs.append(dict(name=path.stem, kind="file", source=relative))
+        if str(path.relative_to(ROOT)) not in files:
+            programs.append(dict(name=path.stem, source=path))
     results = {}
     failures = []
     for index, program in enumerate(programs, 1):
-        if program["kind"] == "file":
-            source = ROOT / program["source"]
-        else:
-            source = temporary / (program["name"] + ".sta")
-            source.write_text(program["source"])
+        source = program["source"]
         outputs = [reference[program["name"]]] if reference is not None else []
         for binary in ((new,) if reference is not None else (old, new)):
             result = subprocess.run([str(binary), "run", "--stdlib", str(ROOT / "stdlib"), str(source)],

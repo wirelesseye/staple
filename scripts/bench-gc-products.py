@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Compile the GC product benchmark, then report five execution-only timings."""
+"""Compile the GC product benchmark, then report execution-only timings.
+
+The program retains 100,000 products holding strings through collections and
+verifies every string, so a run only counts if no live data was freed.
+"""
 import argparse
 from pathlib import Path
 import statistics
@@ -21,5 +25,5 @@ with tempfile.TemporaryDirectory(prefix="staple-gc-bench-") as directory:
         start = time.perf_counter()
         result = subprocess.run([str(executable)], capture_output=True, check=True)
         timings.append(time.perf_counter() - start)
-        assert result.stdout == b"100000\n", result.stdout
+        assert result.stdout == b"100000 100000\n", result.stdout
     print(f"seconds: {timings}; median: {statistics.median(timings):.6f}")

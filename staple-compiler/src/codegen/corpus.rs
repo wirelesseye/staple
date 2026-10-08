@@ -3248,20 +3248,31 @@ mod tests {
             }
         }
 
+        // One JSON line per program: its directory name, whether it must run,
+        // and the workspace path of a file entry (`null` for inline sources).
+        let mut manifest = String::new();
         for program in codegen_corpus() {
             let directory = destination.join(program.name);
             std::fs::create_dir_all(&directory).unwrap();
-            match program.source {
+            let file = match program.source {
                 CorpusSource::Inline(source) => {
                     std::fs::write(directory.join("main.sta"), source).unwrap();
+                    "null".to_owned()
                 }
                 CorpusSource::File(path) => {
                     let source = workspace_root().join(path);
                     copy_sources(source.parent().unwrap(), &directory);
                     std::fs::copy(source, directory.join("main.sta")).unwrap();
+                    format!("{path:?}")
                 }
-            }
+            };
+            manifest.push_str(&format!(
+                "{{\"name\":{:?},\"runnable\":{},\"file\":{file}}}\n",
+                program.name,
+                program.expectation == super::CorpusExpectation::MustRun,
+            ));
         }
+        std::fs::write(destination.join("manifest.jsonl"), manifest).unwrap();
         eprintln!("dumped {} corpus programs", codegen_corpus().len());
     }
 

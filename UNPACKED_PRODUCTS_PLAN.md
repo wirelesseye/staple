@@ -46,9 +46,14 @@ IR reference is tagged `unpacked-products-ir-baseline`.
   type occurrences grow; store size rises **128,137 → 158,544 bytes (+23.73%)**.
 - U3 GC benchmark: **0.395 s packed → 0.184 s word scan (53.4% faster)**;
   aligned/byte scan is **0.420 s** (five alternating execution-only runs,
-  arm64 macOS).
+  arm64 macOS). These timings used the benchmark as of `4578f6d`, which only
+  checked the list's length. `scripts/bench-gc-products.sta` now also verifies
+  every retained string, so its timings include that pass and are not
+  comparable with these figures.
 - Workspace, layout sweep, and full differential gates pass. Behavior matches
-  **119 / 119** pre-U1 outputs (`scripts/unpacked-products-reference.json`).
+  **119 / 119** pre-U1 outputs. The captured reference outputs were a one-off
+  snapshot and are not kept; `scripts/compare-run-output.py --old-ref <commit>`
+  rebuilds any earlier compiler to compare against.
 
 ## The IR baseline
 
@@ -58,16 +63,31 @@ and layout gates, followed by a new reference:
 
 - **Behavior gate.** Every runnable corpus program and example must print the
   same stdout and exit with the same status as the release build of the
-  commit before U1. A small script (`scripts/compare-run-output.py`) builds
-  both and compares them.
+  commit before U1. `scripts/compare-run-output.py` builds or takes both
+  compilers and compares them. It takes the runnable corpus from the corpus
+  dump (`dump_corpus_sources`, which also writes `manifest.jsonl`), the same
+  export the IR comparison uses, plus any standalone example that is not a
+  corpus entry.
 - **Layout gate.** The descriptor/TargetData corpus sweep and layout-context
   agreement tests pass against the aligned layout.
 - **Re-baseline (complete).** The final U5 commit is tagged
-  `unpacked-products-ir-baseline`. Its release binary is preserved at
-  `target/ir-baselines/unpacked-products/staple`; `commit.txt` beside it records
-  the exact commit. Use the saved binary as `--old` in
-  `scripts/compare-llvm-ir.py` for later stages. U5 changes documentation only
-  and retains the validated U4 compiler.
+  `unpacked-products-ir-baseline`; the tag, not a saved binary, is the
+  reference. U5 changes documentation only and retains the validated U4
+  compiler. Use a release build of the tag as `--old` in
+  `scripts/compare-llvm-ir.py` for later stages.
+
+  A copy may exist at `target/ir-baselines/unpacked-products/staple`, with
+  `commit.txt` beside it naming the commit, but `target/` is not tracked and
+  `cargo clean` deletes it. Rebuild the binary from the tag when it is missing,
+  or when `commit.txt` names a different commit:
+
+  ```bash
+  mkdir -p target/ir-baselines/unpacked-products/src
+  git archive unpacked-products-ir-baseline | tar -x -C target/ir-baselines/unpacked-products/src
+  cargo build --release -p staple --manifest-path target/ir-baselines/unpacked-products/src/Cargo.toml
+  cp target/ir-baselines/unpacked-products/src/target/release/staple target/ir-baselines/unpacked-products/staple
+  git rev-parse unpacked-products-ir-baseline > target/ir-baselines/unpacked-products/commit.txt
+  ```
 
 ## Steps
 
@@ -81,7 +101,8 @@ differential run passing, and the behavior gate matching.
   changes. Repeat after U1 to report the padding cost.
 - Time a GC-heavy corpus program, or a small dedicated benchmark that
   allocates many products holding pointers, as the baseline for U3.
-- Write `scripts/compare-run-output.py` and capture the reference outputs.
+- Write `scripts/compare-run-output.py` and capture the reference outputs
+  (the captured snapshot was later dropped; see Current state).
 
 ### U1 — Aligned products (complete)
 

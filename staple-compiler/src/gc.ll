@@ -12,6 +12,11 @@
 @__staple_gc_head = internal global ptr null
 @__staple_gc_roots = internal global ptr null
 @__staple_gc_bytes = internal global {{SIZE}} 0
+; FIXME(gc-stress): collection starts only after 1 MiB of allocation, so most
+; corpus programs and tests never collect and cannot detect a missed root or
+; pointer (see FIXME(gc-roots) in lower.rs). Add a test-only stress setting
+; that lowers this threshold so the corpus runs with frequent collections, and
+; a corpus program that checks retained values' contents after collections.
 @__staple_gc_threshold = internal global {{SIZE}} 1048576
 @__staple_gc_stack_bottom = internal global ptr null
 @__staple_gc_table = internal global ptr null
