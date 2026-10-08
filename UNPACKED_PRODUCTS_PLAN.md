@@ -38,12 +38,12 @@ of scope.
 
 ## Current state
 
-U0–U4 are complete; U5 documentation and the final release baseline remain
-pending. Products, GC payload pointer words, and known accesses use
-natural alignment; the collector scans complete aligned words.
+U0–U5 are complete. Products, GC payload pointer words, and known accesses
+use natural alignment; the collector scans complete aligned words. The final
+IR reference is tagged `unpacked-products-ir-baseline`.
 
-- Padding: **3,410 / 8,858** product-containing type occurrences grow;
-  total store size rises **128,137 → 158,544 bytes (+23.73%)**.
+- Padding (deduplicated per corpus program): **3,410 / 8,858** product-containing
+  type occurrences grow; store size rises **128,137 → 158,544 bytes (+23.73%)**.
 - U3 GC benchmark: **0.395 s packed → 0.184 s word scan (53.4% faster)**;
   aligned/byte scan is **0.420 s** (five alternating execution-only runs,
   arm64 macOS).
@@ -52,18 +52,22 @@ natural alignment; the collector scans complete aligned words.
 
 ## The IR baseline
 
-Every stage so far has been gated on default-mode IR matching a release
-build of `50565d8`. U1 changes the IR of every program that contains a
-product, so that comparison cannot gate this work. Instead:
+Before unpacking, default-mode IR was compared with a release build of
+`50565d8`. U1 intentionally changes product IR, so this work uses behavior
+and layout gates, followed by a new reference:
 
 - **Behavior gate.** Every runnable corpus program and example must print the
   same stdout and exit with the same status as the release build of the
   commit before U1. A small script (`scripts/compare-run-output.py`) builds
   both and compares them.
-- **Layout gate.** The two layout tests above, which must still pass, now
-  against the aligned layout.
-- **Re-baseline.** After U4, a release build of the final commit becomes the
-  new IR reference for later stages, recorded in the Stage 4 breakdown.
+- **Layout gate.** The descriptor/TargetData corpus sweep and layout-context
+  agreement tests pass against the aligned layout.
+- **Re-baseline (complete).** The final U5 commit is tagged
+  `unpacked-products-ir-baseline`. Its release binary is preserved at
+  `target/ir-baselines/unpacked-products/staple`; `commit.txt` beside it records
+  the exact commit. Use the saved binary as `--old` in
+  `scripts/compare-llvm-ir.py` for later stages. U5 changes documentation only
+  and retains the validated U4 compiler.
 
 ## Steps
 
@@ -137,7 +141,7 @@ word-aligned.
   addressed through aligned offsets. Keep alignment 1 where the address can
   still be unaligned, with a comment saying why.
 
-### U5 — Documentation and re-baseline
+### U5 — Documentation and re-baseline (complete)
 
 - Update `HYBRID_POLYMORPHISM_PLAN.md` ("Current State", Layout) and
   `STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md` (Decision 5) to describe the

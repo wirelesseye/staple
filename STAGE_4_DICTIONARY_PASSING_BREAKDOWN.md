@@ -35,8 +35,13 @@ passing:
 
 **Behavior for existing programs is preserved.** Polymorphic values were
 rejected before this stage, so no existing program uses the new paths.
-Every existing program compiles to the same IR, checked with
-`scripts/compare-llvm-ir.py` against a release build of `50565d8`.
+Later stages compare default IR with `scripts/compare-llvm-ir.py` against the
+release reference tagged **`unpacked-products-ir-baseline`** (the final U5
+commit). Its preserved binary is `target/ir-baselines/unpacked-products/staple`;
+`commit.txt` beside it records the exact commit. This supersedes `50565d8` after
+the intentional layout changes in [Unpacked Products](UNPACKED_PRODUCTS_PLAN.md).
+The unpacking behavior gate matches the pre-U1 release on all 119 runnable
+corpus programs and examples.
 
 ## Scope
 
@@ -83,13 +88,19 @@ site (see [Restrictions](#restrictions)):**
     or non-`Copy`), then flattened value parameters (by pointer when
     mutated or indirect). A whole-product mutation passes one pointer.
 - **Layout.**
-  - Products are packed structs: alignment 1, offsets are running sums of
-    field store sizes.
-  - A sum is `{ i32 tag, [n x carrier] }`. The carrier is the first
-    alternative with the largest ABI alignment, and
-    `n = ceil(max store size / carrier store size)`. The struct is not
-    packed, so the payload offset and total size follow the carrier's
-    alignment.
+  - Products use natural struct alignment: align each field's previous end
+    to its ABI alignment, and round total size/stride to the largest field
+    alignment. Field order is unchanged.
+  - A sum has an `i32` tag and carrier-aligned payload. The carrier starts as
+    `i8` and changes only for an alternative with strictly larger ABI alignment;
+    ties keep the first carrier. Its length is
+    `n = ceil(max(1, max store size) / max(1, carrier store size))`. Payload
+    offset rounds tag size up to carrier alignment; total size rounds up to
+    the maximum of tag and carrier alignment. Scalar carriers use
+    `[n x carrier]`; aggregate carriers use
+    `{ [0 x carrier], [n * carrier stride x i8] }` and expose every
+    payload byte explicitly, so LLVM cannot discard another alternative's data
+    in padding during SSA transport.
   - `Ref`, `Buffer`, `CPointer`, closures, and coroutine handles are
     pointers, and `Slice` is a fixed struct, whatever their type arguments.
 - **Drop glue** is expanded inline per concrete type from `DropGluePlan`
@@ -145,12 +156,16 @@ Breakdown-level decisions, in addition to the main plan's. Decisions 10 and
 5. **Dynamic layout mirrors the concrete rules exactly**, so a value built
    in dynamic code is bit-compatible with the same value built
    concretely:
-   - products: alignment 1, offsets are running sums of `store_size`;
+   - products: each offset is the previous end rounded up to the field's
+     descriptor alignment; alignment is the maximum field alignment (at least
+     1), and total store size/stride round up to it;
    - sums: carrier and payload length follow `compile_sum_type`'s rule
-     (first alternative with the largest alignment, length rounded up by
-     carrier store size, elements of carrier `stride`). The payload offset
-     is the tag size rounded up to that alignment, and the total size is
-     rounded up to it;
+     (an initial byte carrier upgraded only for strictly larger alignment,
+     length rounded up by carrier store size with a minimum divisor/size of 1,
+     elements of carrier `stride`). Aggregate carriers expose every payload
+     byte explicitly rather than losing data in padding.
+     The payload offset rounds tag size up to carrier alignment; total size
+     rounds up to the maximum of tag and carrier alignment;
    - arrays: `count * stride`;
    - wrappers: their representation.
 
@@ -236,13 +251,16 @@ and runtime captures with owned descriptor graphs. Concrete child closures
 receive native environments; shared cells retain initialization state.
 Concrete indexing, spreads, defaults, string patterns, propagating/asserting
 bindings, and nested generic declarations have dynamic emission. Both emitters
-share String/CString kernels, and dynamic storage loads accept packed alignment.
+share String/CString kernels, and known dynamic storage loads use natural
+alignment. Runtime-only generic byte copies retain a conservative alignment
+bound. GC payload pointer words, including trailing descriptors, are aligned,
+and scanning advances by one pointer word.
 The explicit later-stage restrictions and remaining rejection guards are audited.
 
 The complete workspace suite, zero-baseline coverage, and full differential
-execution pass. Default IR matches the `50565d8` release build for 109 of 112
-inputs; the three differences are intended fixes of programs `50565d8`
-miscompiles (a local recursive generic `def`, and the phantom-parameter case).
+execution pass. Before unpacking, default IR matched the `50565d8` release
+build for 109 of 112 inputs; the three differences are intended fixes of
+programs `50565d8` miscompiles (a local recursive generic `def`, and the phantom-parameter case).
 Detailed final results, and the problems the review of `89de0eb` found and
 fixed, live in the remainder plan's
 [Current state](STAGE_4A_REMAINDER_BREAKDOWN.md#current-state).
@@ -341,7 +359,7 @@ commit references must be reachable from the branch.
   through dynamic implementations; that count is non-zero for most
   programs.
 - **IR comparison** without the option: every program `same` against the
-  `50565d8` release build.
+  `unpacked-products-ir-baseline` release build for later work.
 
 ## Stage 4b — Polymorphic values
 
@@ -416,8 +434,8 @@ As listed in the main plan's Stage 4:
     no dynamic instance, descriptor, or adapter;
   - `let concrete: I32 -> I32 = identity` monomorphizes and builds no
     adapter.
-- **IR comparison**: every existing program `same` against the `50565d8`
-  release build.
+- **IR comparison**: every existing program `same` against the
+  `unpacked-products-ir-baseline` release build.
 
 ## Restrictions
 

@@ -107,9 +107,13 @@ actually does.
   them reabstraction thunks) and run-time type descriptors. This is the main
   cost driver.
 - **Layout.**
-  - Products compile as packed structs (`compile_product_type`), so field
-    offsets are running sums of field sizes.
-  - Sums use a carrier sized to the largest alternative.
+  - Products compile as natural LLVM structs (`compile_product_type`). Each
+    field starts at the previous end rounded up to its alignment; total size
+    rounds up to the largest field alignment. Field order is unchanged.
+  - Sums retain the byte carrier, upgraded to the first alternative with a
+    strictly larger ABI alignment. Aggregate carriers expose their payload
+    bytes explicitly, so SSA transport
+    preserves bytes that fall in the carrier type's padding.
   - Every stack slot is allocated in the function's entry block (commit
     944cb3f).
 
@@ -243,8 +247,9 @@ scope in the binding's value. This matches today's behavior for a generic
   - **Results:** returned through an out-pointer.
   - **State effects:** erased.
 - **Dynamic layout.**
-  - Product offsets are running sums of field sizes, because products are
-    packed.
+  - Product offsets align each field's previous end to its descriptor's
+    alignment. Product size/stride round up to the largest field alignment,
+    matching ordinary LLVM structs.
   - Sums and arrays compute their tag position and stride from descriptors.
   - **Stack slots of dynamic size** (Decision 6). Each slot is still one
     `alloca` in the entry block, sized at run time from descriptors. All
