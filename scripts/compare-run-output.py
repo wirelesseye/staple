@@ -29,7 +29,7 @@ def compare(args, temporary):
         subprocess.run(["tar", "-x", "-C", str(checkout)], input=archive.stdout, check=True)
         old = build(checkout)
     new = Path(args.new).resolve() if args.new else build(ROOT)
-    corpus = subprocess.run(["cargo", "run", "--quiet", "-p", "staple-compiler", "--example", "export_corpus"],
+    corpus = subprocess.run(["cargo", "run", "--release", "--quiet", "-p", "staple-compiler", "--example", "export_corpus"],
                             cwd=ROOT, check=True, capture_output=True, text=True)
     programs = [json.loads(line) for line in corpus.stdout.splitlines()]
     files = {p["source"] for p in programs if p["kind"] == "file"}

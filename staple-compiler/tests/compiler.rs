@@ -4361,8 +4361,8 @@ fn destructures_nested_product_patterns() {
         .compile_module(&lower(&module))
         .expect("nested product pattern should compile");
 
-    assert!(llvm.contains("define i32 @add_nested(ptr %0, i32 %x, <{ i32, i32 }>"));
-    assert!(llvm.contains("extractvalue <{ i32, i32 }>"));
+    assert!(llvm.contains("define i32 @add_nested(ptr %0, i32 %x, { i32, i32 }"));
+    assert!(llvm.contains("extractvalue { i32, i32 }"));
 }
 
 #[test]
@@ -4377,7 +4377,7 @@ fn binds_a_product_without_destructuring_it() {
         .expect("a product binding pattern should compile");
 
     assert!(llvm.contains("define i32 @sum(ptr %0, i32 %1, i32 %2)"));
-    assert!(llvm.contains("extractvalue <{ i32, i32 }>"));
+    assert!(llvm.contains("extractvalue { i32, i32 }"));
 }
 
 #[test]
@@ -4398,7 +4398,7 @@ fn binds_whole_copy_values_while_destructuring_them() {
         .expect("at-patterns over Copy products should compile");
 
     assert!(llvm.contains("define i32 @parameter(ptr %0, i32 %1, i32 %2)"));
-    assert!(!llvm.contains("define i32 @parameter(ptr %0, <{ i32, i32 }>"));
+    assert!(!llvm.contains("define i32 @parameter(ptr %0, { i32, i32 }"));
     assert!(llvm.contains("%args"));
 }
 
@@ -8323,7 +8323,7 @@ fn applies_excess_arguments_to_a_bare_quote_invoked_as_a_top_level_item() {
         .compile_module(&lower(&module))
         .expect("excess arguments after a top-level `quote` expansion should still apply");
     assert!(
-        llvm.contains("call <{}> %closure.code"),
+        llvm.contains("call {} %closure.code"),
         "expected the expanded `println` call to survive expansion:\n{llvm}",
     );
 }

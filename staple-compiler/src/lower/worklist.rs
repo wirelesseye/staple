@@ -4259,7 +4259,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_products_preserve_packed_layout_through_calls() {
+    fn dynamic_products_preserve_aligned_layout_through_calls() {
         let (text, name) = dynamic_test_module(
             concat!(
                 "def pair: <A, B where Copy A, Copy B> (A, B) -> (A, B) = value => value\n",
@@ -4309,15 +4309,17 @@ mod tests {
                     );
                 }
                 assert_eq!(&output[1..1 + size], &input[1..1 + size]);
-                assert_eq!(&output[1 + size..5 + size], &1_i32.to_ne_bytes());
+                let offset = size.div_ceil(4) * 4;
+                let total = (offset + 4).div_ceil(align.max(4)) * align.max(4);
+                assert_eq!(&output[1 + offset..5 + offset], &1_i32.to_ne_bytes());
                 assert_eq!(output[0], 0xff);
-                assert!(output[5 + size..].iter().all(|byte| *byte == 0xff));
+                assert!(output[1 + total..].iter().all(|byte| *byte == 0xff));
             }
         }
     }
 
     #[test]
-    fn dynamic_repeated_products_use_packed_component_sizes() {
+    fn dynamic_repeated_products_align_components() {
         for count in [0_usize, 1, 3] {
             let source = format!(
                 "def repeat: <T where Copy T> T -> (T; {count}) = value => (value; {count})\nlet result = repeat 42\n"
@@ -4355,7 +4357,7 @@ mod tests {
                 let input = (0..size)
                     .map(|index| (index + 21) as u8)
                     .collect::<Vec<_>>();
-                let mut output = [0xff; 64];
+                let mut output = [0xff; 128];
                 unsafe {
                     repeat.call(
                         std::ptr::null(),
@@ -4365,10 +4367,15 @@ mod tests {
                     );
                 }
                 for index in 0..count {
-                    assert_eq!(&output[1 + index * size..1 + (index + 1) * size], &input);
+                    let offset = index * size.div_ceil(16) * 16;
+                    assert_eq!(&output[1 + offset..1 + offset + size], &input);
                 }
                 assert_eq!(output[0], 0xff);
-                assert!(output[1 + count * size..].iter().all(|byte| *byte == 0xff));
+                assert!(
+                    output[1 + count * size.div_ceil(16) * 16..]
+                        .iter()
+                        .all(|byte| *byte == 0xff)
+                );
             }
         }
     }
@@ -4500,7 +4507,7 @@ mod tests {
         };
         let first = [21; 3];
         let second = [42; 17];
-        let mut output = [0xff; 22];
+        let mut output = [0xff; 34];
         unsafe {
             swap.call(
                 std::ptr::null(),
@@ -4512,9 +4519,9 @@ mod tests {
             );
         }
         assert_eq!(&output[1..18], &second);
-        assert_eq!(&output[18..21], &first);
+        assert_eq!(&output[21..24], &first);
         assert_eq!(output[0], 0xff);
-        assert_eq!(output[21], 0xff);
+        assert_eq!(output[33], 0xff);
     }
 
     #[test]

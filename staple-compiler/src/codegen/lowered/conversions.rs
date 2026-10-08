@@ -121,8 +121,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
             }
             (CheckedType::Product(left), CheckedType::Product(right)) => {
-                let mut offset = 0;
+                let mut offset = 0u64;
                 for (left, right) in left.elements.iter().zip(&right.elements) {
+                    let layout = self.backend.descriptor_layout(&left.value_type)?;
+                    offset = offset.div_ceil(layout.align as u64) * layout.align as u64;
                     if let Some(child) = self.planned_conversion_child(
                         plan,
                         &left.value_type,
@@ -137,7 +139,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .build_direct_call(child, &[destination.into(), source.into()], "")
                             .map_err(compiler_diagnostic)?;
                     }
-                    offset += self.backend.descriptor_layout(&left.value_type)?.store_size;
+                    offset += layout.store_size;
                 }
             }
             (
@@ -290,19 +292,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         index: usize,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let offset = if let CheckedType::Product(product) = parameter {
-            product
-                .elements
-                .iter()
-                .take(index)
-                .try_fold(0u64, |offset, field| {
-                    Ok::<_, Diagnostic>(
-                        offset
-                            + self
-                                .backend
-                                .descriptor_layout(&field.value_type)?
-                                .store_size,
-                    )
-                })?
+            let llvm = self.backend.compile_product_type(product)?;
+            self.backend
+                .target_data
+                .offset_of_element(&llvm, index as u32)
+                .expect("conversion product field exists")
         } else {
             0
         };

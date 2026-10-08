@@ -147,6 +147,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let mut offset = self.backend.size_type.const_zero();
                 let mut fields = Vec::with_capacity(components.len());
                 for (component, layout) in components.into_iter().zip(layouts) {
+                    offset = self.runtime_align_up(offset, layout.align)?;
                     let field = self.backend.dynamic_byte_offset(value, offset)?;
                     fields.push((component, field));
                     offset = self
@@ -1988,27 +1989,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         value: inkwell::values::IntValue<'context>,
         alignment: inkwell::values::IntValue<'context>,
     ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
-        let one = self.backend.size_type.const_int(1, false);
-        let padding = self
-            .backend
-            .builder
-            .build_int_sub(alignment, one, "environment.padding")
-            .map_err(compiler_diagnostic)?;
-        let padded = self
-            .backend
-            .builder
-            .build_int_add(value, padding, "environment.padded")
-            .map_err(compiler_diagnostic)?;
-        let units = self
-            .backend
-            .builder
-            .build_int_unsigned_div(padded, alignment, "environment.units")
-            .map_err(compiler_diagnostic)?;
-        Ok(self
-            .backend
-            .builder
-            .build_int_mul(units, alignment, "environment.aligned")
-            .map_err(compiler_diagnostic)?)
+        self.backend.runtime_align_up(value, alignment)
     }
 
     /// The element descriptor of a buffer intrinsic, from its `T` argument.
@@ -5919,19 +5900,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         index: u32,
     ) -> CodeGenerationResult<(PointerValue<'context>, PointerValue<'context>)> {
         let mut offset = self.backend.size_type.const_zero();
-        for field in 0..index {
+        for field in 0..=index {
             let component = self.backend.load_descriptor_component(descriptor, field)?;
             let layout = self.backend.load_descriptor_layout(component)?;
+            offset = self.runtime_align_up(offset, layout.align)?;
+            if field == index {
+                return Ok((self.backend.dynamic_byte_offset(value, offset)?, component));
+            }
             offset = self
                 .backend
                 .builder
                 .build_int_add(offset, layout.store_size, "product.field.offset")
                 .map_err(compiler_diagnostic)?;
         }
-        Ok((
-            self.backend.dynamic_byte_offset(value, offset)?,
-            self.backend.load_descriptor_component(descriptor, index)?,
-        ))
+        unreachable!("field index loop is nonempty")
     }
 
     fn bind_dynamic_pattern(

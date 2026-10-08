@@ -38,17 +38,17 @@ of scope.
 
 ## Current state
 
-U0 is complete. Workspace tests, the full differential run, and the behavior
-gate (119 programs) pass. U1–U5 remain pending; products still use the packed
-layout.
+U0–U1 are complete; U2–U5 remain pending. Products use natural alignment in
+LLVM structs and dynamic descriptors, including field access, cleanup, and
+conversions. Sum payloads preserve every byte across SSA transport. GC still
+scans byte-by-byte.
 
-- Packed baseline: **8,858** distinct product-containing type occurrences
-  (deduplicated within each corpus program), **128,137** total store bytes.
-- GC product benchmark: **0.524 s** median of five execution-only runs on
-  this arm64 macOS host (`scripts/bench-gc-products.py`).
-- Behavior reference: release compiler from `8cb6da7`; comparison and corpus
-  export tooling are in place; outputs are captured in
-  `scripts/unpacked-products-reference.json`. Padding cost follows U1.
+- Padding: **3,410 / 8,858** product-containing type occurrences grow;
+  total store size rises **128,137 → 158,544 bytes (+23.73%)**.
+- Packed GC benchmark: **0.524 s** median of five execution-only runs on
+  this arm64 macOS host; U3 will repeat it.
+- Workspace, layout sweep, and full differential gates pass. Behavior matches
+  **119 / 119** pre-U1 outputs (`scripts/unpacked-products-reference.json`).
 
 ## The IR baseline
 
@@ -79,7 +79,7 @@ differential run passing, and the behavior gate matching.
   allocates many products holding pointers, as the baseline for U3.
 - Write `scripts/compare-run-output.py` and capture the reference outputs.
 
-### U1 — Aligned products
+### U1 — Aligned products (complete)
 
 Concrete and dynamic layouts must change together: the bit-compatibility of
 values passing between concrete and dynamic code depends on their agreement.

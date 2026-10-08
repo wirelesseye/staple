@@ -191,7 +191,7 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     pub(crate) fn unit_value(&self) -> inkwell::values::AnyValueEnum<'context> {
         self.context
-            .struct_type(&[], true)
+            .struct_type(&[], false)
             .const_zero()
             .as_any_value_enum()
     }
@@ -742,7 +742,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .iter()
             .map(inkwell::values::BasicValueEnum::get_type)
             .collect::<Vec<_>>();
-        let mut product = self.context.struct_type(&types, true).const_zero();
+        let mut product = self.context.struct_type(&types, false).const_zero();
         for (index, value) in values.iter().copied().enumerate() {
             product = self
                 .builder

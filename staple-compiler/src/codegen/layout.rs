@@ -100,7 +100,7 @@ pub(crate) struct SumStorage<'context> {
 }
 
 /// The descriptor's layout words. Store size and array stride are distinct:
-/// packed aggregates can contain values whose ABI allocation size is padded.
+/// a target ABI can pad an allocation beyond the bytes copied for a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DescriptorLayout {
     pub store_size: u64,
@@ -109,12 +109,18 @@ pub(crate) struct DescriptorLayout {
 }
 
 impl DescriptorLayout {
-    fn packed_product(fields: &[Self]) -> Self {
-        let store_size = fields.iter().map(|field| field.store_size).sum();
+    fn product(fields: &[Self]) -> Self {
+        let align = fields.iter().map(|field| field.align).max().unwrap_or(1);
+        let mut end = 0u64;
+        for field in fields {
+            end = end.div_ceil(field.align as u64) * field.align as u64;
+            end += field.store_size;
+        }
+        let store_size = end.div_ceil(align as u64) * align as u64;
         Self {
             store_size,
             stride: store_size,
-            align: 1,
+            align,
         }
     }
 
@@ -315,7 +321,7 @@ impl<'program, 'context> Backend<'program, 'context> {
                     .iter()
                     .map(|field| self.descriptor_layout(&field.value_type))
                     .collect::<CodeGenerationResult<Vec<_>>>()?;
-                DescriptorLayout::packed_product(&fields)
+                DescriptorLayout::product(&fields)
             }
             CheckedType::Sum(sum) => {
                 let alternatives = sum
@@ -396,17 +402,61 @@ impl<'program, 'context> Backend<'program, 'context> {
         fields: &[RuntimeDescriptorLayout<'context>],
     ) -> CodeGenerationResult<RuntimeDescriptorLayout<'context>> {
         let mut size = self.size_type.const_zero();
+        let mut align = self.size_type.const_int(1, false);
         for field in fields {
+            size = self.runtime_align_up(size, field.align)?;
             size = self
                 .builder
                 .build_int_add(size, field.store_size, "product.size")
                 .map_err(super::compiler_diagnostic)?;
+            let larger = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::UGT,
+                    field.align,
+                    align,
+                    "product.wider",
+                )
+                .map_err(super::compiler_diagnostic)?;
+            align = self
+                .builder
+                .build_select(larger, field.align, align, "product.align")
+                .map_err(super::compiler_diagnostic)?
+                .into_int_value();
         }
+        size = self.runtime_align_up(size, align)?;
         Ok(RuntimeDescriptorLayout {
             store_size: size,
             stride: size,
-            align: self.size_type.const_int(1, false),
+            align,
         })
+    }
+
+    pub(crate) fn runtime_align_up(
+        &self,
+        value: inkwell::values::IntValue<'context>,
+        alignment: inkwell::values::IntValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        let fail = super::compiler_diagnostic;
+        let padding = self
+            .builder
+            .build_int_sub(
+                alignment,
+                self.size_type.const_int(1, false),
+                "layout.padding",
+            )
+            .map_err(fail)?;
+        let padded = self
+            .builder
+            .build_int_add(value, padding, "layout.padded")
+            .map_err(fail)?;
+        let units = self
+            .builder
+            .build_int_unsigned_div(padded, alignment, "layout.units")
+            .map_err(fail)?;
+        self.builder
+            .build_int_mul(units, alignment, "layout.aligned")
+            .map_err(fail)
     }
 
     /// Preserve the concrete sum's first-widest carrier selection. Its store
@@ -671,7 +721,7 @@ impl<'program, 'context> Backend<'program, 'context> {
             .iter()
             .map(|element| self.compile_type(&element.value_type))
             .collect::<CodeGenerationResult<Vec<_>>>()?;
-        Ok(self.context.struct_type(&fields, true))
+        Ok(self.context.struct_type(&fields, false))
     }
 
     pub(crate) fn compile_sum_type(
@@ -693,7 +743,30 @@ impl<'program, 'context> Backend<'program, 'context> {
         }
         let carrier_size = self.target_data.get_store_size(&carrier).max(1);
         let length = maximum_size.max(1).div_ceil(carrier_size) as u32;
-        let payload = carrier.array_type(length);
+        // An aggregate carrier can contain padding. LLVM does not preserve
+        // those bytes when loading/returning an SSA aggregate, but another
+        // alternative may put real data there. Keep the existing carrier's
+        // size/alignment rule while making every payload byte an SSA field.
+        let payload: BasicTypeEnum<'context> = if carrier.is_struct_type() {
+            let bytes = u32::try_from(u64::from(length) * self.target_data.get_abi_size(&carrier))
+                .map_err(|_| {
+                    Diagnostic::new(
+                        Span::Compiler,
+                        "sum payload exceeds LLVM's array length limit",
+                    )
+                })?;
+            self.context
+                .struct_type(
+                    &[
+                        carrier.array_type(0).into(),
+                        self.context.i8_type().array_type(bytes).into(),
+                    ],
+                    false,
+                )
+                .into()
+        } else {
+            carrier.array_type(length).into()
+        };
         Ok(self
             .context
             .struct_type(&[self.context.i32_type().into(), payload.into()], false))
@@ -1286,7 +1359,7 @@ mod tests {
                         output.as_mut_ptr(),
                     );
                 }
-                let product = DescriptorLayout::packed_product(&[left, right]);
+                let product = DescriptorLayout::product(&[left, right]);
                 let (sum, offset) = DescriptorLayout::sum(&[left, right], tag);
                 assert_eq!(
                     output,
@@ -1345,17 +1418,17 @@ mod tests {
             );
             match value_type {
                 CheckedType::Product(product) => {
-                    let mut offset = 0;
+                    let mut offset = 0u64;
                     let llvm = ty.into_struct_type();
                     for (index, field) in product.elements.iter().enumerate() {
+                        let field_layout = backend.descriptor_layout(&field.value_type).unwrap();
+                        offset =
+                            offset.div_ceil(field_layout.align as u64) * field_layout.align as u64;
                         assert_eq!(
                             backend.target_data.offset_of_element(&llvm, index as u32),
                             Some(offset)
                         );
-                        offset += backend
-                            .descriptor_layout(&field.value_type)
-                            .unwrap()
-                            .store_size;
+                        offset += field_layout.store_size;
                         verify(backend, &field.value_type);
                     }
                 }
