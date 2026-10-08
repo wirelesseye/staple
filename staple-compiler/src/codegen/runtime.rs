@@ -47,6 +47,7 @@ impl<'program, 'context> Backend<'program, 'context> {
 
     pub(crate) fn install_gc_runtime(&self) -> CodeGenerationResult<()> {
         let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
+        let header_bytes = gc_header_bytes(self.context, &self.target_data);
         let pointer_shift = pointer_bytes.trailing_zeros();
         let bits = pointer_bytes * 8;
         let size = format!("i{bits}");
@@ -61,15 +62,15 @@ impl<'program, 'context> Backend<'program, 'context> {
             (((1_u64 << bits) - 1) / 2).to_string()
         };
         let maximum_allocation = if bits == 64 {
-            (u64::MAX - pointer_bytes * 5).to_string()
+            (u64::MAX - header_bytes).to_string()
         } else {
-            (((1_u64 << bits) - 1) - pointer_bytes * 5).to_string()
+            (((1_u64 << bits) - 1) - header_bytes).to_string()
         };
         let runtime = include_str!("../gc.ll")
             .replace("{{SIZE}}", &size)
             .replace("{{PTR_BYTES}}", &pointer_bytes.to_string())
             .replace("{{PTR_SHIFT}}", &pointer_shift.to_string())
-            .replace("{{HEADER_BYTES}}", &(pointer_bytes * 5).to_string())
+            .replace("{{HEADER_BYTES}}", &header_bytes.to_string())
             .replace("{{ROOT_BYTES}}", &(pointer_bytes * 3).to_string())
             .replace("{{REGISTER_BYTES}}", &(pointer_bytes * 64).to_string())
             .replace("{{MAX_HALF}}", &maximum_half)
@@ -459,5 +460,32 @@ impl<'program, 'context> Backend<'program, 'context> {
             .build_return(Some(&self.context.bool_type().const_zero()))
             .map_err(compiler_diagnostic)?;
         Ok(function)
+    }
+}
+
+/// Keep the payload aligned for every scalar from which supported layouts compose.
+fn gc_header_bytes(
+    context: &inkwell::context::Context,
+    target: &inkwell::targets::TargetData,
+) -> u64 {
+    let pointer_bytes = target.get_pointer_byte_size(None) as u64;
+    let alignment = pointer_bytes
+        .max(target.get_abi_alignment(&context.i64_type()) as u64)
+        .max(target.get_abi_alignment(&context.f64_type()) as u64);
+    (pointer_bytes * 5).div_ceil(alignment) * alignment
+}
+
+#[cfg(test)]
+mod payload_alignment_tests {
+    #[test]
+    fn gc_header_preserves_scalar_alignment_on_32_and_64_bit_targets() {
+        let context = inkwell::context::Context::create();
+        for (layout, expected) in [
+            ("e-p:32:32-i64:64-f64:64", 24),
+            ("e-p:64:64-i64:64-f64:64", 40),
+        ] {
+            let target = inkwell::targets::TargetData::create(layout);
+            assert_eq!(super::gc_header_bytes(&context, &target), expected);
+        }
     }
 }

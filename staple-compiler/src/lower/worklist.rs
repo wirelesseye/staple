@@ -4147,6 +4147,14 @@ mod tests {
                 make.call(std::ptr::null(), &descriptor, &mut payload, input.as_ptr());
             }
             assert!(!payload.is_null());
+            let pointer_alignment = std::mem::align_of::<usize>();
+            assert_eq!(payload as usize % pointer_alignment, 0);
+            let descriptor_offset = (size + 1).div_ceil(pointer_alignment) * pointer_alignment;
+            let word = unsafe { payload.add(descriptor_offset) };
+            assert_eq!(word as usize % pointer_alignment, 0);
+            let saved = unsafe { word.cast::<*const Descriptor>().read() };
+            assert!(!saved.is_null());
+            assert_eq!(unsafe { (*saved).size }, size);
             assert_eq!(unsafe { std::slice::from_raw_parts(payload, size) }, input);
             // The allocation must not retain the caller's descriptor pointer.
             descriptor.flags = 1;
@@ -4197,9 +4205,12 @@ mod tests {
         unsafe {
             make.call(std::ptr::null(), &root.header, &mut payload, input.as_ptr());
         }
-        // The owned descriptor follows the three-byte payload and initialization byte.
+        // The owned descriptor follows the payload/state and padding to pointer alignment.
         assert_eq!(unsafe { payload.add(3).read() }, 0);
-        let saved = unsafe { payload.add(4).cast::<*const Compound>().read_unaligned() };
+        let offset = 4usize.div_ceil(std::mem::align_of::<usize>()) * std::mem::align_of::<usize>();
+        let word = unsafe { payload.add(offset) };
+        assert_eq!(word as usize % std::mem::align_of::<usize>(), 0);
+        let saved = unsafe { word.cast::<*const Compound>().read() };
         assert_ne!(saved, &root as *const Compound);
         let saved_child = unsafe { (*saved).component };
         assert_ne!(saved_child, &child.header as *const Descriptor);
@@ -4211,6 +4222,123 @@ mod tests {
             finalize.call(payload);
         }
         assert_eq!(DROPS.load(std::sync::atomic::Ordering::SeqCst), before + 1);
+    }
+
+    #[test]
+    fn dynamic_gc_payload_descriptor_words_are_aligned() {
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        #[repr(C)]
+        struct Closure {
+            code: *const u8,
+            environment: *const u8,
+        }
+        let word = std::mem::size_of::<usize>();
+        for captured in [false, true] {
+            let source = if captured {
+                "def make: <T where Copy T> T -> (() -> T) = value => { let mut held = value; () => held }\nlet result = make 42\n"
+            } else {
+                "use std.buffer.Buffer\ndef make: <T where Copy T> USize -> Buffer T = capacity => Buffer.with_capacity.<T> capacity\nlet result: Buffer I32 = make 3\n"
+            };
+            let (text, name) = dynamic_test_module(source, "make");
+            let context = inkwell::context::Context::create();
+            let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+                text.as_bytes(),
+                "aligned-gc-payloads",
+            );
+            let llvm = context.create_module_from_ir(buffer).unwrap();
+            let engine = llvm
+                .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+                .unwrap();
+            type Make = unsafe extern "C" fn(*const u8, *const Descriptor, *mut u8, *const u8);
+            type End = unsafe extern "C" fn(*const u8) -> usize;
+            let make = unsafe { engine.get_function::<Make>(&name) }.unwrap();
+            let end = unsafe { engine.get_function::<End>("__staple_gc_payload_end") }.unwrap();
+            for (size, align) in [
+                (0usize, 1usize),
+                (1, 1),
+                (3, 1),
+                (word, word),
+                (2 * word, word),
+            ] {
+                let descriptor = Descriptor {
+                    size,
+                    stride: size.div_ceil(align) * align,
+                    align,
+                    flags: 1,
+                    drop: 0,
+                    count: 0,
+                };
+                for capacity in [0usize, 1, 3] {
+                    let mut closure = Closure {
+                        code: std::ptr::null(),
+                        environment: std::ptr::null(),
+                    };
+                    let input = [42u8; 32];
+                    let mut allocation: *const u8 = std::ptr::null();
+                    unsafe {
+                        if captured {
+                            make.call(
+                                std::ptr::null(),
+                                &descriptor,
+                                (&mut closure as *mut Closure).cast(),
+                                input.as_ptr(),
+                            );
+                            // One runtime descriptor and one capture descriptor precede the shared-cell pointer.
+                            allocation =
+                                closure.environment.add(2 * word).cast::<*const u8>().read();
+                        } else {
+                            make.call(
+                                std::ptr::null(),
+                                &descriptor,
+                                (&mut allocation as *mut *const u8).cast(),
+                                (&capacity as *const usize).cast(),
+                            );
+                        }
+                    }
+                    assert!(!allocation.is_null());
+                    assert_eq!(allocation as usize % word, 0);
+                    let descriptor_address = unsafe { end.call(allocation) } - word;
+                    assert_eq!(descriptor_address % word, 0);
+                    let stored = unsafe { (descriptor_address as *const *const Descriptor).read() };
+                    assert!(!stored.is_null());
+                    assert_ne!(
+                        stored, &descriptor as *const Descriptor,
+                        "GC payloads must own their descriptors"
+                    );
+                    assert_eq!(unsafe { (*stored).size }, size);
+                    if captured {
+                        assert_eq!(
+                            descriptor_address - allocation as usize,
+                            (size + 1).div_ceil(word) * word
+                        );
+                    } else {
+                        let header = (2 * word + 1).div_ceil(align) * align;
+                        assert_eq!((allocation as usize + header) % align, 0);
+                        if align == word {
+                            for index in 0..capacity {
+                                assert_eq!(
+                                    (allocation as usize + header + index * descriptor.stride)
+                                        % word,
+                                    0
+                                );
+                            }
+                        }
+                        assert_eq!(
+                            descriptor_address - allocation as usize,
+                            (header + capacity * descriptor.stride).div_ceil(word) * word
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

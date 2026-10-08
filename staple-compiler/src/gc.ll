@@ -1,4 +1,7 @@
-; Every allocation is stored as [GcHeader | payload]. The header fields are:
+; Every allocation is stored as [GcHeader | payload]. malloc supplies fundamental
+; alignment and HEADER_BYTES is rounded to the target scalar alignment, at least
+; PTR_BYTES, so every GC payload preserves natural alignment. Pointer-holding fields must preserve that alignment.
+; The header fields are:
 ; next allocation, requested payload size, mark bit, finalizer, finalized bit.
 %GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, ptr, {{SIZE}} }
 ; Explicit roots form a linked list of byte ranges: start, size, next root.

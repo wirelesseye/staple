@@ -2335,12 +2335,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
         let layout = self.backend.load_descriptor_layout(descriptor)?;
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
-        let total = self
+        let state_end = self
             .backend
             .builder
             .build_int_add(
                 layout.store_size,
-                self.backend.size_type.const_int(pointer_bytes + 1, false),
+                self.backend.size_type.const_int(1, false),
+                "cell.state.end",
+            )
+            .map_err(compiler_diagnostic)?;
+        let descriptor_offset = self.runtime_align_up(
+            state_end,
+            self.backend.size_type.const_int(pointer_bytes, false),
+        )?;
+        let total = self
+            .backend
+            .builder
+            .build_int_add(
+                descriptor_offset,
+                self.backend.size_type.const_int(pointer_bytes, false),
                 "cell.total.size",
             )
             .map_err(compiler_diagnostic)?;
@@ -2351,15 +2364,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend
             .builder
             .build_store(state, self.backend.context.i8_type().const_zero())
-            .map_err(compiler_diagnostic)?;
-        let descriptor_offset = self
-            .backend
-            .builder
-            .build_int_add(
-                layout.store_size,
-                self.backend.size_type.const_int(1, false),
-                "cell.descriptor.offset",
-            )
             .map_err(compiler_diagnostic)?;
         let word = self.backend.dynamic_byte_offset(cell, descriptor_offset)?;
         self.backend
@@ -3037,6 +3041,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
+                let element = self.copy_descriptor_to_gc(element, span)?;
                 let layout = self.dynamic_buffer_layout(element)?;
                 let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
                 let bytes = self
@@ -3049,6 +3054,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_int_add(layout.header_offset, bytes, "buffer.concrete.size")
                     .map_err(compiler_diagnostic)?;
+                // The element area can end at a byte boundary (including empty buffers).
+                // Keep the trailing descriptor word aligned for conservative GC scanning.
+                let concrete = self.runtime_align_up(
+                    concrete,
+                    self.backend.size_type.const_int(pointer_bytes, false),
+                )?;
                 let total = self
                     .backend
                     .builder

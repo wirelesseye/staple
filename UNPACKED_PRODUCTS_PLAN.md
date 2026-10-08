@@ -38,10 +38,9 @@ of scope.
 
 ## Current state
 
-U0–U1 are complete; U2–U5 remain pending. Products use natural alignment in
-LLVM structs and dynamic descriptors, including field access, cleanup, and
-conversions. Sum payloads preserve every byte across SSA transport. GC still
-scans byte-by-byte.
+U0–U2 are complete; U3–U5 remain pending. Concrete and dynamic products use
+natural alignment. GC payload pointer words are aligned, buffers own their
+descriptors, and headers preserve scalar alignment. Scanning remains byte-by-byte.
 
 - Padding: **3,410 / 8,858** product-containing type occurrences grow;
   total store size rises **128,137 → 158,544 bytes (+23.73%)**.
@@ -102,7 +101,7 @@ values passing between concrete and dynamic code depends on their agreement.
   `struct_type(…, true)`, is either changed or recorded with the reason it
   stays. The audit list goes in the commit message.
 
-### U2 — Aligned GC payloads
+### U2 — Aligned GC payloads (complete)
 
 Before the GC can scan by word, every pointer it might need to find must be
 word-aligned.
