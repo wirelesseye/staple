@@ -4234,6 +4234,21 @@ impl TypeChecker {
         }
     }
 
+    /// The type (not effect) parameters a declaration list introduces.
+    fn declared_type_only_parameters(
+        &self,
+        module: &ResolvedModule,
+        type_parameters: &[TypeParameterPattern],
+    ) -> HashSet<TypeParameterId> {
+        type_parameters
+            .iter()
+            .filter(|pattern| !matches!(pattern, TypeParameterPattern::Effect(_)))
+            .flat_map(|pattern| {
+                type_parameter_ids(&self.checked_type_parameter_pattern(module, pattern))
+            })
+            .collect()
+    }
+
     fn declared_type_parameters(
         &self,
         module: &ResolvedModule,
@@ -8013,7 +8028,15 @@ impl TypeChecker {
             let outer_suspension = std::mem::replace(&mut self.suspension_allowed, false);
             let direct = self.check_expression(module, expression);
             self.suspension_allowed = outer_suspension;
-            if merge_types(direct.clone(), CheckedType::Function(callback.clone())).is_some() {
+            let mut matched = callback.clone();
+            if let CheckedType::Function(direct_function) = &direct
+                && matched.effects.variable.is_some()
+                && direct_function.effects.variable.is_some()
+                && matched.effects.variable != direct_function.effects.variable
+            {
+                matched.effects = direct_function.effects.clone();
+            }
+            if merge_types(direct.clone(), CheckedType::Function(matched)).is_some() {
                 self.implicit_thunk_context = true;
                 return direct;
             }
@@ -9268,7 +9291,7 @@ impl TypeChecker {
                         .function_origin(module, &call.callee)
                         .and_then(|id| module.functions().iter().find(|function| function.id == id))
                         .map(|function| {
-                            self.declared_type_parameters(module, &function.type_parameters)
+                            self.declared_type_only_parameters(module, &function.type_parameters)
                         })
                         .or_else(|| match raw_callee_type.clone() {
                             // A polymorphic value solves its own scheme's parameters.
@@ -9277,7 +9300,9 @@ impl TypeChecker {
                                     .symbol_for(name.syntax.id)
                                     .and_then(|symbol| self.symbol_value_type(symbol))
                                     .and_then(|value_type| match value_type {
-                                        CheckedType::Forall(scheme) => Some(scheme.bound_ids()),
+                                        CheckedType::Forall(scheme) => {
+                                            Some(scheme.type_parameter_ids().into_iter().collect())
+                                        }
                                         _ => None,
                                     }),
                                 _ => None,
@@ -9293,7 +9318,7 @@ impl TypeChecker {
                             match function.parameter.as_ref() {
                                 CheckedType::Product(product) => {
                                     product.elements.first().map(|element| {
-                                        erase_type_parameters_in(&element.value_type, &solvable)
+                                        erase_call_parameter(&element.value_type, &solvable)
                                     })
                                 }
                                 _ => None,
@@ -9315,12 +9340,12 @@ impl TypeChecker {
                                         .skip(1)
                                         .all(|field| field.default.is_some()) =>
                             {
-                                Some(erase_type_parameters_in(
+                                Some(erase_call_parameter(
                                     &product.elements[0].value_type,
                                     &solvable,
                                 ))
                             }
-                            _ => Some(erase_type_parameters_in(&function.parameter, &solvable)),
+                            _ => Some(erase_call_parameter(&function.parameter, &solvable)),
                         },
                         _ => None,
                     };
@@ -9837,7 +9862,20 @@ impl TypeChecker {
                                 _ => Vec::new(),
                             },
                             effects: match &raw_callee_type {
-                                CheckedType::Function(function) => function.effects.clone(),
+                                // An effect variable the argument determines is
+                                // part of the expectation, so a function that
+                                // passes its own variable on still matches.
+                                CheckedType::Function(function) => {
+                                    let mut substitutions = HashMap::new();
+                                    if function.effects.variable.is_some() {
+                                        infer_type_parameters(
+                                            &function.parameter,
+                                            &argument_type,
+                                            &mut substitutions,
+                                        );
+                                    }
+                                    substitute_effect_set(function.effects.clone(), &substitutions)
+                                }
                                 _ => CheckedEffectSet::default(),
                             },
                             result: Box::new(expected_result.clone()),
@@ -11768,6 +11806,7 @@ impl TypeChecker {
             );
             expected.clone()
         } else {
+            
             self.diagnostics.push(Diagnostic::new(
                 span,
                 format!("expected `{expected}`, found `{actual}`"),
@@ -15853,6 +15892,19 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
 /// function types. A call's own quantified parameters are still being
 /// inferred, so the function-typed slots they appear in cannot constrain the
 /// argument; enclosing (rigid) parameters inside function types are kept.
+/// The expectation for a call's argument. A parameter that is itself a function
+/// type keeps its parameters: a function-valued argument then decides between
+/// the callback and the implicit-thunk reading against the declared type.
+fn erase_call_parameter(
+    value_type: &CheckedType,
+    solvable: &HashSet<TypeParameterId>,
+) -> CheckedType {
+    match value_type {
+        CheckedType::Function(_) => erase_type_parameters(value_type),
+        other => erase_type_parameters_in(other, solvable),
+    }
+}
+
 fn erase_type_parameters_in(
     value_type: &CheckedType,
     solvable: &HashSet<TypeParameterId>,

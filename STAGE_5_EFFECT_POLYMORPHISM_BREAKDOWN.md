@@ -52,6 +52,11 @@ Stage 5a is done and 5b's core works on `worktree-hybrid-polymorphism` (base `a4
     Before it, `twice (() => bump 1)` with a `mut` resource solved
     `E := {}` and crashed (`IO` is zero-sized and hid it). State effects of
     captured cells stay out of the solved row, as before.
+  - Calls keep a parameter that is itself a function type unerased, so the
+    callback-versus-thunk reading of existing programs is unchanged. A tail
+    call to an effect-generic function from another one keeps the
+    argument-determined effect variable in its expected callee type, so
+    `def four = f => twice f` checks.
 - **5a (done).** Type-and-effect generics run in dictionary-passed code;
   effect parameters are compile-time substitutions in the instance key.
 - **5b core (done).**
