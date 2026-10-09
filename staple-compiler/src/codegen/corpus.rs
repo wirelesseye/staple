@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 123] = [
+static CORPUS: [CorpusProgram; 125] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -2098,6 +2098,79 @@ let value = at (Ref (1, 2), (USize :: 5))
             "emission",
         ),
         "hello\nhello\n",
+    )),
+    // Stage 5 baseline: effect-generic functions, with and without type
+    // parameters, over IO, user and `mut` resources, an open row, an empty row,
+    // and state effects, called concretely and from generic bodies. Lambdas
+    // whose effects are inferred after the call is instantiated must still
+    // pass their resources through the instance.
+    must_run(expect_stdout(
+        inline(
+            "effect_generic_rows",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "\n",
+                "type Counter = wrap (value: I32)\n",
+                "type Label = wrap (text: String)\n",
+                "\n",
+                "def apply: <T, effect E> (T, T ->{E} ()) ->{E} () = (x, f) => f x\n",
+                "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+                "def both: <T, effect E> (T, T ->{E, IO} ()) ->{E, IO} () = (x, f) => { f x; f x }\n",
+                "\n",
+                "def show: I32 ->{IO} () = x => println \"${x}\"\n",
+                "def silent: I32 -> () = x => ()\n",
+                "def tag: I32 ->{Label, IO} () = x => println \"${(resource Label).text}${x}\"\n",
+                "def bump: I32 ->{mut Counter} () = x => {\n",
+                "    (resource Counter).value = (resource Counter).value + x\n",
+                "}\n",
+                "def hello: () ->{IO} () = () => println \"hello\"\n",
+                "\n",
+                "def forward: <A where Copy A> (A, A ->{IO} ()) ->{IO} () = (a, g) => apply (a, g)\n",
+                "def forward_twice: <A where Copy A> (A, A ->{IO} ()) ->{IO} () = (a, g) => both (a, g)\n",
+                "\n",
+                "apply (1, show)\n",
+                "apply (2, silent)\n",
+                "twice hello\n",
+                "with Label = Label (text: \"n\") {\n",
+                "    apply (3, tag)\n",
+                "    both (4, tag)\n",
+                "}\n",
+                "let mut counter = Counter (value: 10)\n",
+                "with mut Counter = counter {\n",
+                "    apply (5, bump)\n",
+                "    twice (() => bump 1)\n",
+                "}\n",
+                "println \"${counter.value}\"\n",
+                "forward (6, show)\n",
+                "forward_twice (7, show)\n",
+                "let mut hits = 0\n",
+                "apply (8, (x: I32) => { hits = hits + x })\n",
+                "println \"${hits}\"\n",
+            ),
+            "emission",
+        ),
+        "1\nhello\nhello\nn3\nn4\nn4\n17\n6\n7\n7\n8\n",
+    )),
+    // Effect-parameterized aliases as parameters of effect-generic functions.
+    must_run(expect_stdout(
+        inline(
+            "effect_generic_alias_types",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "type Task{E} = alias () ->{E} ()\n",
+                "type Handler{E} T = alias T ->{E} ()\n",
+                "def launch: <effect E> Task{E} ->{E} () = task => task ()\n",
+                "def feed: <T, effect E> (T, Handler{E} T) ->{E} () = (x, h) => h x\n",
+                "def show: I32 ->{IO} () = x => println \"${x}\"\n",
+                "launch (() => println \"task\")\n",
+                "feed (5, show)\n",
+                "let mut ticks = 0\n",
+                "launch (() => { ticks = ticks + 1 })\n",
+                "println \"${ticks}\"\n",
+            ),
+            "emission",
+        ),
+        "task\n5\n1\n",
     )),
     must_run(expect_stdout(
         inline(

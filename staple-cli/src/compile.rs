@@ -4758,6 +4758,35 @@ mod tests {
         assert!(tested > 0);
     }
 
+    /// Effect-generic programs must run in both modes. From 5a, type-and-effect
+    /// generics also go through the descriptor ABI with compile-time rows.
+    #[cfg(unix)]
+    #[test]
+    fn stage5_effect_generic_differential() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
+        let mut tested = 0;
+        for program in staple_compiler::codegen_corpus() {
+            if !program.name.starts_with("effect_generic_") {
+                continue;
+            }
+            let (source, source_root) = corpus_source(program, root);
+            let calls = differential_compare(
+                program.name,
+                &source,
+                &source_root,
+                &standard_library,
+                &options,
+            );
+            if program.name == "effect_generic_rows" {
+                assert!(calls > 0, "type-and-effect generics must run dynamically");
+            }
+            tested += 1;
+        }
+        assert!(tested > 0);
+    }
+
     /// The full Stage 4a differential exit gate: every runnable corpus program
     /// and every runnable example, both modes, identical stdout and exit
     /// status. Run explicitly with `--ignored` (R0.4).

@@ -41,35 +41,37 @@ stage's base commit for every existing input.
 
 ## Current state
 
-Work in progress on `worktree-hybrid-polymorphism`; base `a47627a`.
+Stage 5a is done on `worktree-hybrid-polymorphism` (base `a47627a`); 5b is not started.
 
-- **Done: checker fixes.**
-  - A call such as `apply (a, g)` with `apply: <T, effect E> (T, T ->{E} ()) ->{E} ()`
-    failed for any generic whose parameter also appears inside a function
-    typed tuple slot. The cause was not effects: the argument expectation
-    left `T` unerased inside function types. Calls now erase the callee's
-    own quantified parameters there (`erase_type_parameters_in`).
-  - A lambda argument whose effects are inferred after the call was
-    instantiated left `E := {}` (`twice (() => bump 1)` with a `mut`
-    resource crashed at run time; `IO` hid it because it is zero-sized).
-    `refresh_effect_generic_call` re-solves the call once effects settle.
-- **Not started: everything else.** Remaining from S0: corpus programs and
-  the effect-template coverage report (in progress). Then 5a, then 5b.
-- **Measured at base.**
-  - `dynamic_support.rs` rejects any template whose signature has an effect
-    variable, and transitively every template that calls one.
+- **Checker fixes (done).**
+  - Calls erase the callee's own quantified parameters inside function-typed
+    slots, so `apply (a, g)` with `apply: <T, effect E> (T, T ->{E} ()) ->{E} ()`
+    infers. The cause was not effects. Single-value diagnostics are kept.
+  - `refresh_effect_generic_call` re-solves a call's effect parameters once
+    lambda effects are inferred. Before it, `twice (() => bump 1)` with a
+    `mut` resource solved `E := {}` and crashed at run time (`IO` hid it).
+- **Corpus and measurement (done).** `effect_generic_rows` and
+  `effect_generic_alias_types` run in default and differential mode
+  (`stage5_effect_generic_differential`). The coverage report now counts
+  templates with effect parameters: 6 in the corpus, 0 rejected.
+- **5a (done).** `dynamic_support.rs` no longer rejects a template for its
+  own effect variable; effect parameters are compile-time substitutions in
+  the instance key. Polymorphic values that quantify an effect keep the
+  "cannot be used as values yet" message until 5b. Gate: `cargo test
+  --workspace` passes, and IR for every example is identical to the base
+  release build.
+- **Still true at base (5b's inputs).**
   - `CanonicalEffectSet::convert` resolves effect variables only through
     scheme binders, so no dynamic key can mention a run-time one.
   - Resources are the only effect component with a run-time representation:
-    concrete ABI passes by value, or by pointer when `mut` or not `Copy`;
+    the concrete ABI passes by value, or by pointer when `mut` or not `Copy`;
     the dynamic shape passes every resource by pointer. State effects never
     reach the ABI.
   - The stdlib's effect-generic functions (`block_on`, `spawn`, `reaction`,
     `batch`) are async or reactive intrinsics, restricted until Stage 8.
 - **Known limitation.** A `wrap` type with an effect parameter cannot be
-  constructed: `type Task{E} = wrap (run: () ->{E} ())` and
-  `Task (run: f)` reports the constructor's field as `() -> ()`. The corpus
-  uses `alias` types instead; fixing it is out of scope unless 5b needs it.
+  constructed: `type Task{E} = wrap (run: () ->{E} ())` and `Task (run: f)`
+  reports the field as `() -> ()`. The corpus uses `alias` types instead.
 
 ## Decisions
 

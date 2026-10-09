@@ -408,9 +408,8 @@ impl LoweredProgram {
         // Captures are supported by value, by borrow, or through a shared cell,
         // for concrete and compound run-time types and function values (R4/R5).
         // Initialization-state cells are carried as shared cells.
-        if template.signature.effects.variable.is_some() {
-            walker.reject(RejectionReason::EffectVariable);
-        }
+        // Stage 5a: effect parameters are compile-time in dynamic code, so a
+        // template's own effect variable is substituted by its instance key.
         // R7: a resource effect row is an ABI fact, not a restriction. The
         // dynamic ABI passes each resource provider as a pointer.
         if contains_parameter_product(&CheckedType::Function(template.signature.clone())) {
@@ -1455,6 +1454,9 @@ mod tests {
         let mut in_scope = 0usize;
         let mut unsupported = 0usize;
         let mut total = 0usize;
+        // Templates with effect parameters, with or without type parameters.
+        let mut effect_total = 0usize;
+        let mut effect_reason_counts: HashMap<RejectionReason, usize> = HashMap::new();
         for (source, root) in corpus_sources() {
             let loaded = ProgramLoader::new()
                 .with_standard_library_root(workspace.join("stdlib"))
@@ -1477,12 +1479,20 @@ mod tests {
             };
             let program = &lowered.program;
             for (_, _, function) in program.functions.iter() {
-                if program
-                    .relevant_parameters(function.semantic_id)
-                    .type_parameters()
-                    .next()
-                    .is_none()
-                {
+                let relevant = program.relevant_parameters(function.semantic_id);
+                let has_effect = relevant.effect_parameters().next().is_some();
+                if has_effect {
+                    effect_total += 1;
+                    for reason in program
+                        .dynamic_support_reasons
+                        .get(&function.semantic_id)
+                        .into_iter()
+                        .flatten()
+                    {
+                        *effect_reason_counts.entry(*reason).or_default() += 1;
+                    }
+                }
+                if relevant.type_parameters().next().is_none() {
                     continue;
                 }
                 total += 1;
@@ -1517,6 +1527,16 @@ mod tests {
                 if reason.in_scope() { "" } else { "  (allowed)" }
             );
         }
+        let effect_unsupported = effect_reason_counts.values().sum::<usize>();
+        eprintln!(
+            "effect-generic templates: {effect_total}, rejection reasons: {effect_unsupported}"
+        );
+        let mut effect_rows = effect_reason_counts.into_iter().collect::<Vec<_>>();
+        effect_rows.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        for (reason, count) in effect_rows {
+            eprintln!("{count:5}  {}", reason.description());
+        }
+        assert!(effect_total > 0, "the corpus must contain effect-generic templates");
         assert!(
             in_scope <= IN_SCOPE_BASELINE,
             "in-scope rejections rose to {in_scope}, above the {IN_SCOPE_BASELINE} baseline"
