@@ -2732,15 +2732,11 @@ impl<'a> BodyCloner<'a> {
                 self.program
                     .differential_call_runtime(
                         function,
-                        self.enclosing.key.runtime(),
+                        &self.enclosing.key.runtime_ids(),
                         false,
                         &call_function_type,
                         &call_substitutions,
                     )
-                    .map(|types| crate::RuntimeScope {
-                        types,
-                        effects: std::collections::BTreeSet::new(),
-                    })
             } else {
                 None
             };
@@ -3327,7 +3323,7 @@ impl LoweredProgram {
             let caller_runtime_empty = self
                 .specializations
                 .instance(self.instances.get(id).expect("instance").ordinal)
-                .is_some_and(|key| key.runtime().is_empty());
+                .is_some_and(|key| !key.is_dynamic());
             let Some(body) = self
                 .instances
                 .get(id)
@@ -3478,7 +3474,7 @@ impl LoweredProgram {
                     &record.substitutions,
                 );
                 let resolved = match runtime {
-                    Some(runtime) => self.resolve_instance_request_with_runtime(&request, &runtime),
+                    Some(runtime) => self.resolve_instance_request_in_scope(&request, &runtime),
                     None => self.resolve_instance_request(&request),
                 };
                 let Ok(resolved) = resolved else {
@@ -3552,7 +3548,7 @@ impl LoweredProgram {
         let Some(key) = self.specializations.instance(instance.ordinal) else {
             return;
         };
-        let callee_runtime_empty = key.runtime().is_empty();
+        let callee_runtime_empty = !key.is_dynamic();
         if caller_runtime_empty == callee_runtime_empty {
             return;
         }

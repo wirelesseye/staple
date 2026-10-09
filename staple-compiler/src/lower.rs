@@ -3043,6 +3043,9 @@ pub(crate) struct LoweredProgram {
     /// The hidden differential lowering option (Decision 11): route direct
     /// generic calls from concrete owners through dynamic implementations.
     dictionary_pass_generic_calls: bool,
+    /// The effect-row variant of the differential option (E-H): make every
+    /// effect parameter of a routed generic call a run-time bundle.
+    dictionary_pass_effect_rows: bool,
     /// Per-template transitive dynamic support, computed once per lowering.
     dynamic_support: std::collections::HashMap<FunctionId, dynamic_support::DynamicSupport>,
     /// Every exclusion reason per template, including the transitive reason.
@@ -14810,10 +14813,7 @@ impl LoweredModule {
         let view = self.program();
         let mut count = 0;
         for (id, _) in view.instances() {
-            if view
-                .instance_runtime_parameters(id)
-                .map_or(true, |runtime| !runtime.is_empty())
-            {
+            if view.instance_is_dynamic(id) {
                 continue;
             }
             let Some(bindings) = view.instance_bindings(id) else {
@@ -14822,12 +14822,21 @@ impl LoweredModule {
             count += bindings
                 .values()
                 .filter(|target| match target {
-                    LoweredBoundTarget::Instance(callee) => view
-                        .instance_runtime_parameters(*callee)
-                        .is_some_and(|runtime| !runtime.is_empty()),
+                    LoweredBoundTarget::Instance(callee) => view.instance_is_dynamic(*callee),
                     _ => false,
                 })
                 .count();
+        }
+        for (id, _) in view.initializers() {
+            if let Some(bindings) = view.initializer_bindings(id) {
+                count += bindings
+                    .values()
+                    .filter(|target| match target {
+                        LoweredBoundTarget::Instance(callee) => view.instance_is_dynamic(*callee),
+                        _ => false,
+                    })
+                    .count();
+            }
         }
         count
     }
@@ -14889,13 +14898,26 @@ pub struct Lowerer {
     /// calls from concrete owners through dynamic implementations. Never
     /// exposed through the CLI.
     dictionary_pass_generic_calls: bool,
+    /// The effect-row variant (E-H): route direct calls of effect-generic
+    /// functions through dynamic implementations whose effect parameters
+    /// arrive as run-time bundles. Never exposed through the CLI.
+    dictionary_pass_effect_rows: bool,
 }
 
 impl Lowerer {
     pub fn new() -> Self {
         Self {
             dictionary_pass_generic_calls: false,
+            dictionary_pass_effect_rows: false,
         }
+    }
+
+    /// Enables the effect-row differential option used by the Stage 5 exit
+    /// gate.
+    #[doc(hidden)]
+    pub fn with_dictionary_pass_effect_rows(mut self, enabled: bool) -> Self {
+        self.dictionary_pass_effect_rows = enabled;
+        self
     }
 
     /// Enables the hidden differential lowering option used by the Stage 4a
@@ -14909,11 +14931,14 @@ impl Lowerer {
     pub fn lower(&self, module: &TypedModule) -> Result<LoweredModule, Vec<Diagnostic>> {
         let mut program = LoweredProgram::default();
         program.dictionary_pass_generic_calls = self.dictionary_pass_generic_calls;
+        program.dictionary_pass_effect_rows = self.dictionary_pass_effect_rows;
         let mut diagnostics = validate_checked_module(module);
         if diagnostics.is_empty() {
             diagnostics.extend(program.snapshot(module));
         }
-        if diagnostics.is_empty() && program.dictionary_pass_generic_calls {
+        if diagnostics.is_empty()
+            && (program.dictionary_pass_generic_calls || program.dictionary_pass_effect_rows)
+        {
             program.compute_dynamic_support();
         }
         diagnostics.extend(program.validate());

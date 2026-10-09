@@ -214,8 +214,11 @@ impl LoweredProgram {
         current: bool,
         function_type: &CheckedFunctionType,
         substitutions: &crate::CallSubstitutions,
-    ) -> Option<BTreeSet<TypeParameterId>> {
-        if !self.dictionary_pass_generic_calls || current || !caller_runtime.is_empty() {
+    ) -> Option<crate::RuntimeScope> {
+        if !(self.dictionary_pass_generic_calls || self.dictionary_pass_effect_rows)
+            || current
+            || !caller_runtime.is_empty()
+        {
             return None;
         }
         // A call site whose types name a parameter product cannot lower through
@@ -232,13 +235,19 @@ impl LoweredProgram {
             return None;
         }
         let relevant = self.relevant_parameters(function);
-        let runtime = relevant
-            .type_parameters()
-            .collect::<BTreeSet<TypeParameterId>>();
-        if runtime.is_empty() {
-            return None;
-        }
-        Some(runtime)
+        let scope = crate::RuntimeScope {
+            types: if self.dictionary_pass_generic_calls {
+                relevant.type_parameters().collect()
+            } else {
+                BTreeSet::new()
+            },
+            effects: if self.dictionary_pass_effect_rows {
+                relevant.effect_parameters().collect()
+            } else {
+                BTreeSet::new()
+            },
+        };
+        (!scope.is_empty()).then_some(scope)
     }
 
     /// The cached per-template support decision. Computed once after the
@@ -943,12 +952,9 @@ impl SupportWalker<'_> {
         match &call.target {
             LoweredCallableTarget::DirectFunction { function, .. } => {
                 if mentions_parameters {
-                    let generic = self
-                        .program
-                        .relevant_parameters(*function)
-                        .type_parameters()
-                        .next()
-                        .is_some();
+                    let relevant = self.program.relevant_parameters(*function);
+                    let generic = relevant.type_parameters().next().is_some()
+                        || relevant.effect_parameters().next().is_some();
                     if generic {
                         self.dependencies.insert(*function);
                     } else if contains_type_parameter(&CheckedType::Function(

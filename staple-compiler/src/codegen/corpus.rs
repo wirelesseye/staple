@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 128] = [
+static CORPUS: [CorpusProgram; 131] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -2265,6 +2265,86 @@ let value = at (Ref (1, 2), (USize :: 5))
             "emission",
         ),
         "1\n3\n3\nn5\nn6\nn6\n7\n",
+    )),
+    // Effect-generic functions that call one another with their own effect variable, plain and as an open row.
+    must_run(expect_stdout(
+        inline(
+            "effect_generic_nested",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "\n",
+                "type Label = wrap (text: String)\n",
+                "\n",
+                "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+                "def four: <effect E> (() ->{E} ()) ->{E} () = f => { twice f; twice f }\n",
+                "def with_io: <effect E> (() ->{E, IO} ()) ->{E, IO} () = f => { println \"before\"; f (); println \"after\" }\n",
+                "def nested: <effect E> (() ->{E, IO} ()) ->{E, IO} () = f => with_io f\n",
+                "\n",
+                "def hello: () ->{IO} () = () => println \"hello\"\n",
+                "def tag: () ->{Label, IO} () = () => println (resource Label).text\n",
+                "\n",
+                "four hello\n",
+                "nested hello\n",
+                "with Label = Label (text: \"L\") {\n",
+                "    four tag\n",
+                "    nested tag\n",
+                "}\n",
+            ),
+            "emission",
+        ),
+        "hello\nhello\nhello\nhello\nbefore\nhello\nafter\nL\nL\nL\nL\nbefore\nL\nafter\n",
+    )),
+    // A polymorphic value whose implementation calls an effect-generic function.
+    must_run(expect_stdout(
+        inline(
+            "effect_polymorphic_nested",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "type Label = wrap (text: String)\n",
+                "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+                "def two: <effect E> (() ->{E} ()) ->{E} () = f => { twice f; twice f; () }\n",
+                "def hello: () ->{IO} () = () => println \"hello\"\n",
+                "def tag: () ->{Label, IO} () = () => println (resource Label).text\n",
+                "two hello\n",
+                "with Label = Label (text: \"L\") { two tag }\n",
+                "let stored: <effect E> (() ->{E} ()) ->{E} () = two\n",
+                "def run: (<effect E> (() ->{E} ()) ->{E} ()) ->{IO} () = repeat => { repeat (() => println \"x\") }\n",
+                "run stored\n",
+            ),
+            "emission",
+        ),
+        "hello\nhello\nhello\nhello\nL\nL\nL\nL\nx\nx\nx\nx\n",
+    )),
+    // An effect-generic function that passes its own row to a polymorphic value, with and without fixed effects beside the variable.
+    must_run(expect_stdout(
+        inline(
+            "effect_polymorphic_forwarding",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "\n",
+                "type Label = wrap (text: String)\n",
+                "\n",
+                "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+                "def outer: <effect E> ((<effect F> (() ->{F} ()) ->{F} ()), () ->{E} ()) ->{E} () = (rep, g) => rep g\n",
+                "def outer_io: <effect E> ((<effect F> (() ->{F} ()) ->{F} ()), () ->{E, IO} ()) ->{E, IO} () = (rep, g) => {\n",
+                "    println \"go\"\n",
+                "    rep g\n",
+                "}\n",
+                "\n",
+                "def hello: () ->{IO} () = () => println \"hello\"\n",
+                "def tag: () ->{Label, IO} () = () => println (resource Label).text\n",
+                "let stored: <effect F> (() ->{F} ()) ->{F} () = twice\n",
+                "\n",
+                "outer (stored, hello)\n",
+                "outer_io (stored, hello)\n",
+                "with Label = Label (text: \"L\") {\n",
+                "    outer (stored, tag)\n",
+                "    outer_io (stored, tag)\n",
+                "}\n",
+            ),
+            "emission",
+        ),
+        "hello\nhello\ngo\nhello\nhello\nL\nL\ngo\nL\nL\n",
     )),
     must_run(expect_stdout(
         inline(

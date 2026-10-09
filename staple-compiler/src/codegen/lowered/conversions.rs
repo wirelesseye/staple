@@ -462,13 +462,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 }
 
-/// Where a resource of a reabstracted row is found on the dynamic side.
-#[derive(Debug, Clone, Copy)]
-enum RowSource {
-    Fixed(usize),
-    Bundle(usize),
-}
-
 impl<'program, 'context> LoweredEmitter<'program, 'context> {
     fn conversion_field_pointer(
         &self,
@@ -534,50 +527,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             )
             .map_err(|error| Diagnostic::new(staple_syntax::Span::Compiler, error.to_string()))?;
         Ok(value)
-    }
-
-    /// Where each of the concrete row's resources comes from on the dynamic
-    /// side: a fixed resource of the dynamic row, or the next slot of the
-    /// bundle that stands for its variable.
-    fn row_sources(
-        &self,
-        concrete: &crate::CheckedEffectSet,
-        dynamic: &crate::CheckedEffectSet,
-        span: &staple_syntax::Span,
-    ) -> CodeGenerationResult<Vec<RowSource>> {
-        let mut used = vec![false; dynamic.resources.len()];
-        let mut bundled = 0usize;
-        let mut sources = Vec::with_capacity(concrete.resources.len());
-        for resource in &concrete.resources {
-            let fixed = dynamic.resources.iter().enumerate().position(|(index, fixed)| {
-                !used[index]
-                    && fixed.value_type == resource.value_type
-                    && fixed.mutable == resource.mutable
-            });
-            match fixed {
-                Some(index) => {
-                    used[index] = true;
-                    sources.push(RowSource::Fixed(index));
-                }
-                None if dynamic.variable.is_some() => {
-                    sources.push(RowSource::Bundle(bundled));
-                    bundled += 1;
-                }
-                None => {
-                    return Err(Diagnostic::new(
-                        span.clone(),
-                        "a reabstracted row has a resource its dynamic side lacks",
-                    ));
-                }
-            }
-        }
-        if used.iter().any(|used| !*used) {
-            return Err(Diagnostic::new(
-                span.clone(),
-                "a reabstracted row lacks a resource of its dynamic side",
-            ));
-        }
-        Ok(sources)
     }
 
     pub(super) fn emit_reabstraction_thunk(
@@ -648,16 +597,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             !dynamic_whole && matches!(plan.dynamic.parameter.as_ref(), CheckedType::Product(_));
         let concrete_caller = plan.direction == Direction::DynamicToConcrete;
         let resource_count = plan.concrete.effects.resources.len();
-        // The dynamic side passes its row's fixed resources by pointer and, for
-        // a row with a variable, one bundle pointer holding the rest.
+        // The dynamic side passes its row's resources by pointer, or one bundle
+        // when the row names a variable (see `rows`).
         let dynamic_fixed = plan.dynamic.effects.resources.len();
-        let bundle_slots = usize::from(plan.dynamic.effects.variable.is_some());
-        let row_sources =
-            self.row_sources(&plan.concrete.effects, &plan.dynamic.effects, span)?;
+        let dynamic_slots = if plan.dynamic.effects.variable.is_some() {
+            1
+        } else {
+            dynamic_fixed
+        };
+        let row_layout = super::rows::row_layout(&plan.dynamic.effects, &plan.concrete.effects, span)?;
         let value_start = if concrete_caller {
             1 + resource_count
         } else {
-            2 + dynamic_fixed + bundle_slots
+            2 + dynamic_slots
         };
         let mut caller_slots = Vec::new();
         if (!concrete_caller && !dynamic_product) || (concrete_caller && concrete_whole) {
@@ -724,23 +676,25 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 continue;
             }
-            let incoming = match row_sources[index] {
-                RowSource::Fixed(position) => parameters[2 + position].into_pointer_value(),
-                RowSource::Bundle(position) => {
-                    let bundle = parameters[2 + dynamic_fixed].into_pointer_value();
-                    let slot = self.backend.dynamic_byte_offset(
-                        bundle,
-                        self.backend.size_type.const_int(
-                            position as u64
-                                * self.backend.target_data.get_pointer_byte_size(None) as u64,
-                            false,
-                        ),
-                    )?;
-                    self.backend
-                        .builder
-                        .build_load(pointer, slot, "reabstraction.bundle.resource")
-                        .map_err(compiler_diagnostic)?
-                        .into_pointer_value()
+            let incoming = if plan.dynamic.effects.variable.is_none() {
+                parameters[2 + row_layout.fixed.iter().position(|position| *position == index).ok_or_else(
+                    || Diagnostic::new(span.clone(), "a reabstracted row lacks a resource"),
+                )?]
+                .into_pointer_value()
+            } else {
+                let bundle = parameters[2].into_pointer_value();
+                match row_layout.fixed.iter().position(|position| *position == index) {
+                    Some(position) => self.load_bundle_slot(bundle, position)?,
+                    None => {
+                        let rest = row_layout
+                            .rest
+                            .iter()
+                            .position(|position| *position == index)
+                            .ok_or_else(|| {
+                                Diagnostic::new(span.clone(), "a reabstracted row lacks a resource")
+                            })?;
+                        self.row_rest_resource(bundle, dynamic_fixed, rest)?
+                    }
                 }
             };
             if indirect {
@@ -759,7 +713,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 &plan.concrete.effects,
                 resource_pointers,
                 None,
-                false,
                 &mut arguments,
             )?;
         }

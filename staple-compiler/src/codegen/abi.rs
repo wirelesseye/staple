@@ -115,13 +115,14 @@ impl<'program, 'context> Backend<'program, 'context> {
                 parameter => flattened_parameter_types(parameter).len(),
             }
         };
-        // Environment, descriptors, result storage, resources, the bundle of a
-        // row's variable, value arguments.
-        let count = 2
-            + runtime_parameter_count
-            + function_type.effects.resources.len()
-            + usize::from(function_type.effects.variable.is_some())
-            + arguments;
+        // Environment, descriptors, result storage, resources (one bundle for
+        // a row that names a variable), value arguments.
+        let resource_slots = if function_type.effects.variable.is_some() {
+            1
+        } else {
+            function_type.effects.resources.len()
+        };
+        let count = 2 + runtime_parameter_count + resource_slots + arguments;
         let pointer = self.context.ptr_type(AddressSpace::default()).into();
         Ok(self
             .context

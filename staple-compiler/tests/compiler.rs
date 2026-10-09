@@ -433,6 +433,47 @@ fn infers_type_parameters_through_function_typed_tuple_slots() {
         .expect("type-and-effect generic calls should compile");
 }
 
+/// Reachability: effect parameters that only ever receive concrete rows build
+/// no bundles, and a polymorphic effect value that is never used builds no
+/// dynamic code.
+#[test]
+fn effect_bundles_exist_only_for_run_time_rows() {
+    let emit = |source: &str| {
+        let module = type_check(source);
+        let context = Context::create();
+        CodeGenerator::new(&context)
+            .compile_module(&lower(&module))
+            .expect("effect programs should compile")
+    };
+    let direct = emit(concat!(
+        "use std.io.(IO, println)\n",
+        "def apply: <T, effect E> (T, T ->{E} ()) ->{E} () = (x, f) => f x\n",
+        "def show: I32 ->{IO} () = x => println \"${x}\"\n",
+        "apply (1, show)\n",
+    ));
+    assert!(!direct.contains("effect.bundle"), "concrete rows need no bundle");
+    assert!(!direct.contains("_dynamic"), "no dynamic instance is built");
+
+    let unused = emit(concat!(
+        "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+        "def never: <T> [T] -> () = x => {\n",
+        "    let stored: <effect E> (() ->{E} ()) ->{E} () = twice\n",
+        "    ()\n",
+        "}\n",
+    ));
+    assert!(!unused.contains("_dynamic"), "an unused value builds no entry");
+    assert!(!unused.contains("effect.bundle"));
+
+    let used = emit(concat!(
+        "use std.io.(IO, println)\n",
+        "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+        "let stored: <effect E> (() ->{E} ()) ->{E} () = twice\n",
+        "def hello: () ->{IO} () = () => println \"hello\"\n",
+        "stored hello\n",
+    ));
+    assert!(used.contains("_dynamic"), "a used value runs its dynamic entry");
+}
+
 #[test]
 fn checks_effect_parameterized_type_declarations() {
     type_check(concat!(

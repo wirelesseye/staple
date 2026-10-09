@@ -445,7 +445,6 @@ directly) and a negative test (the polymorphic-value use is rejected).
 | Restriction | Message at the polymorphic-value site | Lifted in |
 |---|---|---|
 | Trait bound other than `Copy`/`Sized` | "polymorphic values with trait bounds are not supported yet" | Stage 6 |
-| Effect variable | "effect-polymorphic functions cannot be used as values yet" | Stage 5 |
 | Coroutine, async, or reactive body, transitively | "functions with coroutine bodies cannot be used as polymorphic values yet" (and the reactive form) | Stage 8 |
 | Unsupported intrinsic (Decision 9), transitively | "`{intrinsic}` cannot be used in a polymorphic value's implementation yet" | Stage 6 / 8 |
 | Run-time `Natural` count | "array lengths cannot depend on a polymorphic value's type parameters yet" | Not planned |

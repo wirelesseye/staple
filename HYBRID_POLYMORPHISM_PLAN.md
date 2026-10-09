@@ -240,9 +240,10 @@ scope in the binding's value. This matches today's behavior for a generic
 - **Abstract ABI** for dictionary-passed implementations.
   - **Hidden arguments:** the environment, then one descriptor per type
     parameter and one dictionary per trait bound. An effect variable has no
-    hidden argument: a row that contains one passes a *resource bundle*
-    pointer after its fixed resources (Stage 5, decision E-D). The coroutine
-    `CORO_RESOURCES` bundle is the precedent for the bundle.
+    hidden argument: a row that names one passes a single *resource bundle*
+    pointer in place of its resources (Stage 5, decision E-D), so a function
+    type's ABI depends only on the type. The coroutine `CORO_RESOURCES`
+    bundle is the precedent for the bundle.
   - **Values:** values typed by a run-time parameter, or containing one, pass
     by pointer.
   - **Results:** returned through an out-pointer.
@@ -265,7 +266,8 @@ scope in the binding's value. This matches today's behavior for a generic
   - a concrete `I32 -> I32` closure passed where generic code expects
     `T -> T` at `T := I32`;
   - nested function types;
-  - packing and unpacking effect bundles.
+  - packing and unpacking effect bundles (concrete rows only: dynamic-shape
+    function types that are equal after substitution share one ABI).
 - **Trait dictionaries.**
   - **Contents:** one slot per trait method (abstract ABI), dictionaries for
     prerequisite traits (including bounds declared on associated types), and
@@ -408,9 +410,9 @@ through `Forall` values, and instantiation and scheme adapters.
 **Breakdown plan: required.** See
 [STAGE_5_EFFECT_POLYMORPHISM_BREAKDOWN.md](STAGE_5_EFFECT_POLYMORPHISM_BREAKDOWN.md).
 Originally judged small, but templates with both type and effect parameters
-are excluded from dictionary passing even when every row is concrete, keys
-have no form for run-time effect variables, and rows need their own
-reabstraction. It has two substages: 5a, compile-time rows in dynamic code;
+were excluded from dictionary passing even when every row was concrete, keys
+had no form for run-time effect variables, and rows needed their own
+reabstraction. It had two substages: 5a, compile-time rows in dynamic code;
 5b, run-time effect variables and effect-polymorphic values.
 
 ### Stage 6 — Trait bounds via dictionaries

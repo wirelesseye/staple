@@ -4,6 +4,7 @@ mod conversions;
 mod coroutines;
 mod dynamic;
 mod reactive;
+mod rows;
 mod structural;
 
 use crate::lower::internal_invariant;

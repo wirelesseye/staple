@@ -239,10 +239,6 @@ impl<'a> InitializerBinder<'a> {
                     &call_function_type,
                     &call_substitutions,
                 )
-                .map(|types| crate::RuntimeScope {
-                    types,
-                    effects: std::collections::BTreeSet::new(),
-                })
         } else {
             None
         };

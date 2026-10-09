@@ -4789,6 +4789,66 @@ mod tests {
         assert!(tested > 0);
     }
 
+    /// The effect-row differential mode (E-H): every effect parameter of a
+    /// routed call arrives as a run-time bundle.
+    #[cfg(unix)]
+    #[test]
+    fn stage5_effect_row_differential() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
+        let mut tested = 0;
+        for program in staple_compiler::codegen_corpus() {
+            if !program.name.starts_with("effect_") {
+                continue;
+            }
+            let (source, source_root) = corpus_source(program, root);
+            let calls = differential_compare_with(
+                program.name,
+                &source,
+                &source_root,
+                &standard_library,
+                &options,
+                false,
+                true,
+            );
+            assert!(calls > 0, "{} must route calls through bundles", program.name);
+            tested += 1;
+        }
+        assert!(tested > 0);
+    }
+
+    /// The Stage 5 exit gate: every runnable corpus program with both type
+    /// descriptors and effect bundles at run time (E-H). Run explicitly with
+    /// `--ignored`.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "full differential run: run explicitly for the Stage 5 exit gate"]
+    fn codegen_corpus_effect_row_differential_run_matches_default() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let standard_library = workspace_root.join("stdlib");
+        let options = parse_options([std::ffi::OsString::from("corpus.sta")])
+            .expect("corpus link options should parse");
+        let mut runnable = 0usize;
+        for program in staple_compiler::codegen_corpus() {
+            if program.expectation == staple_compiler::CorpusExpectation::CompileOnly {
+                continue;
+            }
+            let (source, root) = corpus_source(program, workspace_root);
+            differential_compare_with(
+                program.name,
+                &source,
+                &root,
+                &standard_library,
+                &options,
+                true,
+                true,
+            );
+            runnable += 1;
+        }
+        eprintln!("effect-row differential run: {runnable} programs");
+    }
+
     /// The full Stage 4a differential exit gate: every runnable corpus program
     /// and every runnable example, both modes, identical stdout and exit
     /// status. Run explicitly with `--ignored` (R0.4).
@@ -4870,6 +4930,22 @@ mod tests {
         standard_library: &Path,
         options: &Options,
     ) -> usize {
+        differential_compare_with(name, source, root, standard_library, options, true, false)
+    }
+
+    /// Compares the default lowering with a differential one: `types` routes
+    /// generic calls through run-time type descriptors, `effects` makes every
+    /// effect parameter of a routed call a run-time bundle (E-H).
+    #[allow(clippy::too_many_arguments)]
+    fn differential_compare_with(
+        name: &str,
+        source: &str,
+        root: &Path,
+        standard_library: &Path,
+        options: &Options,
+        types: bool,
+        effects: bool,
+    ) -> usize {
         use staple_compiler::{LoweredModule, Lowerer, NameResolver, ProgramLoader, TypeChecker};
         let lower = |differential: bool| -> LoweredModule {
             let loaded = ProgramLoader::new()
@@ -4883,7 +4959,8 @@ mod tests {
                 .check(resolved)
                 .unwrap_or_else(|diagnostics| panic!("`{name}` should check: {diagnostics:?}"));
             Lowerer::new()
-                .with_dictionary_pass_generic_calls(differential)
+                .with_dictionary_pass_generic_calls(differential && types)
+                .with_dictionary_pass_effect_rows(differential && effects)
                 .lower(&checked)
                 .unwrap_or_else(|diagnostics| panic!("`{name}` should lower: {diagnostics:?}"))
         };

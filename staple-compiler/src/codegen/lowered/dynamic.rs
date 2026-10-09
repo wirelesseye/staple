@@ -298,120 +298,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    /// Pushes the resource arguments of a dynamic call: the callee's fixed
-    /// resources in its own order, then, when its row names a variable, one
-    /// bundle pointer. `pointers` follow `call_row.resources`.
-    ///
-    /// With `forward`, the callee's row is the caller's own row and its
-    /// variable is the caller's: `own_bundle` passes through unchanged.
-    /// Otherwise the bundle holds the call row's remaining resources in
-    /// canonical order, then `own_bundle` as a nested bundle when the call
-    /// row keeps a variable of the caller's; an empty bundle is null.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn push_dynamic_row_arguments(
-        &self,
-        span: &staple_syntax::Span,
-        callee_row: &crate::CheckedEffectSet,
-        call_row: &crate::CheckedEffectSet,
-        pointers: Vec<PointerValue<'context>>,
-        own_bundle: Option<PointerValue<'context>>,
-        forward: bool,
-        arguments: &mut Vec<inkwell::values::BasicMetadataValueEnum<'context>>,
-    ) -> CodeGenerationResult<()> {
-        let mut taken = vec![false; pointers.len()];
-        for fixed in &callee_row.resources {
-            let position = call_row
-                .resources
-                .iter()
-                .enumerate()
-                .position(|(index, resource)| {
-                    !taken[index]
-                        && resource.value_type == fixed.value_type
-                        && resource.mutable == fixed.mutable
-                })
-                .ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "dynamic call row lacks a fixed resource")
-                })?;
-            taken[position] = true;
-            arguments.push(pointers[position].into());
-        }
-        if callee_row.variable.is_none() {
-            if taken.iter().any(|taken| !*taken) || call_row.variable.is_some() {
-                return Err(Diagnostic::new(
-                    span.clone(),
-                    "dynamic call row has effects its callee does not take",
-                ));
-            }
-            return Ok(());
-        }
-        if forward {
-            let bundle = own_bundle.ok_or_else(|| {
-                Diagnostic::new(
-                    span.clone(),
-                    "a call through an effect variable needs the caller's bundle",
-                )
-            })?;
-            arguments.push(bundle.into());
-            return Ok(());
-        }
-        let mut bundle = pointers
-            .iter()
-            .zip(&taken)
-            .filter(|(_, taken)| !**taken)
-            .map(|(pointer, _)| *pointer)
-            .collect::<Vec<_>>();
-        if call_row.variable.is_some() {
-            bundle.push(own_bundle.ok_or_else(|| {
-                Diagnostic::new(
-                    span.clone(),
-                    "a call row with an effect variable needs the caller's bundle",
-                )
-            })?);
-        }
-        arguments.push(self.build_bundle(&bundle)?.into());
-        Ok(())
-    }
-
-    /// An effect-row bundle: an array of resource pointers in the entry
-    /// block, or null for the empty row.
-    fn build_bundle(
-        &self,
-        pointers: &[PointerValue<'context>],
-    ) -> CodeGenerationResult<PointerValue<'context>> {
-        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
-        if pointers.is_empty() {
-            return Ok(pointer_type.const_null());
-        }
-        let array_type = pointer_type.array_type(pointers.len() as u32);
-        let storage = self
-            .backend
-            .entry_builder()
-            .build_alloca(array_type, "effect.bundle")
-            .map_err(compiler_diagnostic)?;
-        for (index, pointer) in pointers.iter().enumerate() {
-            let slot = unsafe {
-                self.backend
-                    .builder
-                    .build_in_bounds_gep(
-                        array_type,
-                        storage,
-                        &[
-                            self.backend.context.i32_type().const_zero(),
-                            self.backend.context.i32_type().const_int(index as u64, false),
-                        ],
-                        "effect.bundle.slot",
-                    )
-                    .map_err(compiler_diagnostic)?
-            };
-            self.backend
-                .builder
-                .build_store(slot, *pointer)
-                .map_err(compiler_diagnostic)?;
-        }
-        Ok(storage)
-    }
-
     fn emit_concrete_dynamic_call_with(
         &self,
         owner: EmissionOwner,
@@ -487,7 +373,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             &call.function_type.effects,
             resource_pointers,
             None,
-            false,
             &mut arguments,
         )?;
         let parameter_types = super::flattened_parameter_types(&call.function_type.parameter);
@@ -2790,7 +2675,6 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 &call.function_type.effects,
                 pointers,
                 environment.bundle,
-                call.scheme.is_none(),
                 &mut arguments,
             )?;
         } else {
@@ -4390,11 +4274,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 "resource providers disagree with the effect row",
             ));
         }
+        // A row that names a variable arrives as one bundle (see `rows`); its
+        // fixed resources are read from the bundle once the entry block exists.
+        let row_bundle = body
+            .signature
+            .effects
+            .variable
+            .as_ref()
+            .map(|_| parameters[2 + runtime.len()].into_pointer_value());
+        let mut bundled_providers = Vec::new();
         for (position, provider_id) in body.function_providers.iter().enumerate() {
             let provider = self
                 .view
                 .resource_provider(EmissionOwner::Instance(id), *provider_id)
                 .ok_or_else(|| unsupported("missing function resource provider"))?;
+            if row_bundle.is_some() {
+                bundled_providers.push((*provider_id, position, provider.resource.value_type.clone()));
+                continue;
+            }
             let pointer = parameters
                 .get(1 + runtime.len() + 1 + position)
                 .ok_or_else(|| unsupported("missing function resource parameter"))?
@@ -4428,13 +4325,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .context
                 .ptr_type(AddressSpace::default())
                 .const_null(),
-            bundle: body.signature.effects.variable.as_ref().map(|_| {
-                parameters[2 + runtime.len() + resource_count].into_pointer_value()
-            }),
+            bundle: None,
             returned: false,
         };
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
+        if let Some(row_bundle) = row_bundle {
+            for (provider_id, position, value_type) in bundled_providers {
+                let pointer = self.load_bundle_slot(row_bundle, position)?;
+                environment
+                    .resources
+                    .insert(provider_id, DynamicResource { value_type, pointer });
+            }
+            environment.bundle =
+                Some(self.row_variable_bundle(row_bundle, body.function_providers.len())?);
+        }
         // Seed capture bindings from the closure environment (R-D). The
         // descriptor region holds one descriptor per run-time parameter in
         // R-A order; captures follow at descriptor-computed offsets.
@@ -4774,8 +4679,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let owner = EmissionOwner::Instance(id);
-        let bundle_slots = usize::from(body.signature.effects.variable.is_some());
-        let raw = &parameters[2 + runtime.len() + resource_count + bundle_slots..];
+        let resource_slots = if body.signature.effects.variable.is_some() {
+            1
+        } else {
+            resource_count
+        };
+        let raw = &parameters[2 + runtime.len() + resource_slots..];
         let whole = body
             .signature
             .mutations
@@ -7370,6 +7279,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             ));
                         }
                     };
+                let callee_dynamic =
+                    callee.is_some_and(|callee| self.view.instance_is_dynamic(callee));
                 let closure = match route {
                     LoweredCallEnvironment::None => self
                         .backend
@@ -7400,7 +7311,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let result = *environment.temporaries.get(&id).ok_or_else(|| {
                     Diagnostic::new(call.origin.span.clone(), "missing dynamic result storage")
                 })?;
-                if !runtime.is_empty() {
+                if callee_dynamic {
                     arguments.push(result.into());
                 }
                 let mut slots = vec![
@@ -7516,7 +7427,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                 owner,
                                 call,
                                 *resource,
-                                !runtime.is_empty(),
+                                callee_dynamic,
                                 environment,
                             )?);
                         }
@@ -7529,7 +7440,36 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         }
                     }
                 }
-                arguments.extend(hidden);
+                if callee_dynamic {
+                    let callee_row = callee
+                        .and_then(|callee| self.view.instance_signature(callee))
+                        .map(|signature| signature.effects.clone())
+                        .ok_or_else(|| {
+                            Diagnostic::new(call.origin.span.clone(), "missing dynamic callee row")
+                        })?;
+                    let pointers = hidden
+                        .iter()
+                        .map(|value| match value {
+                            inkwell::values::BasicMetadataValueEnum::PointerValue(pointer) => {
+                                Ok(*pointer)
+                            }
+                            _ => Err(Diagnostic::new(
+                                call.origin.span.clone(),
+                                "dynamic callee resource is not a pointer",
+                            )),
+                        })
+                        .collect::<CodeGenerationResult<Vec<_>>>()?;
+                    self.push_dynamic_row_arguments(
+                        &call.origin.span,
+                        &callee_row,
+                        &call.function_type.effects,
+                        pointers,
+                        environment.bundle,
+                        &mut arguments,
+                    )?;
+                } else {
+                    arguments.extend(hidden);
+                }
                 if slots.iter().all(Option::is_none) && unplaced.len() == 1 {
                     if slots.len() == 1
                         && !matches!(
@@ -7553,7 +7493,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     }
                 }
                 let mut writebacks = Vec::new();
-                if runtime.is_empty() {
+                if !callee_dynamic {
                     if let Some(conversions) = self.view.conversions(owner) {
                         for ((site, argument), conversion) in conversions {
                             let Some(slot) = argument else {
@@ -7641,7 +7581,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let pointer = slot.ok_or_else(|| {
                         Diagnostic::new(call.origin.span.clone(), "missing dynamic argument")
                     })?;
-                    if !runtime.is_empty() || indirect[index] {
+                    if callee_dynamic || indirect[index] {
                         arguments.push(pointer.into());
                     } else {
                         let ty = self.backend.compile_type(parameter_types[index])?;
@@ -7662,7 +7602,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .build_direct_call(
                         function,
                         &arguments,
-                        if runtime.is_empty() {
+                        if !callee_dynamic {
                             "concrete.call"
                         } else {
                             ""
@@ -7675,7 +7615,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .build_direct_call(function, &[destination.into(), source.into()], "")
                         .map_err(compiler_diagnostic)?;
                 }
-                if runtime.is_empty() {
+                if !callee_dynamic {
                     let value = call_value.try_as_basic_value().basic().ok_or_else(|| {
                         Diagnostic::new(
                             call.origin.span.clone(),

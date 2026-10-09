@@ -972,7 +972,7 @@ impl<'a> WorklistBuilder<'a> {
         let caller_runtime = match &target {
             InstanceResolutionTarget::Root => BTreeSet::new(),
             InstanceResolutionTarget::Nested(enclosing)
-            | InstanceResolutionTarget::Current(enclosing) => enclosing.key.runtime().clone(),
+            | InstanceResolutionTarget::Current(enclosing) => enclosing.key.runtime_ids(),
         };
         let call_function_type = function_type.clone();
         let call_substitutions = substitutions.clone();
@@ -997,7 +997,7 @@ impl<'a> WorklistBuilder<'a> {
             ) {
                 Some(runtime) => self
                     .program
-                    .resolve_instance_request_with_runtime(&request, &runtime),
+                    .resolve_instance_request_in_scope(&request, &runtime),
                 None => self.program.resolve_instance_request(&request),
             }
         } else {

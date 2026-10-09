@@ -370,12 +370,13 @@ generic body, so the differential run executes it in both modes.
 
 ## Restrictions
 
+The effect-variable restriction was lifted in Stage 5.
+
 Reported at the construction site (B-I), each with a test.
 
 | Restriction | Message | Lifted in |
 |---|---|---|
 | Trait bound other than `Copy`/`Sized` in the scheme, or reached transitively | "polymorphic values with trait bounds are not supported yet" | Stage 6 |
-| Effect variable in the scheme | "effect-polymorphic functions cannot be used as values yet" | Stage 5 |
 | Coroutine, async, or reactive body, transitively | "functions with coroutine bodies cannot be used as polymorphic values yet" (and the async and reactive forms) | Stage 8 |
 | `__buffer_clone`, transitively | "`__buffer_clone` cannot be used in a polymorphic value's implementation yet" | Stage 6. Unreachable from user code: `__buffer_clone` is private and its public callers need a `Clone` bound, so the trait-bound restriction applies first. Kept as an internal reason and left out of `Staple.md`. |
 | Run-time `Natural` count, including `__slice_from_ref` | "array lengths cannot depend on a polymorphic value's type parameters yet" | Not planned |

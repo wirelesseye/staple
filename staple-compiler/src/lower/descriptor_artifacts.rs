@@ -302,13 +302,13 @@ pub(super) fn scan_instance(
     let dynamic = program
         .specializations
         .instance(instance.ordinal)
-        .is_some_and(|key| !key.runtime().is_empty());
+        .is_some_and(|key| key.is_dynamic());
     let dynamic_call = body.bindings.values().any(|target| match target {
         super::LoweredBoundTarget::Instance(id) => program
             .instances
             .get(*id)
             .and_then(|callee| program.specializations.instance(callee.ordinal))
-            .is_some_and(|key| !key.runtime().is_empty()),
+            .is_some_and(|key| key.is_dynamic()),
         _ => false,
     });
     let polymorphic_call = body.calls.iter().any(|(_, call)| call.scheme.is_some())
