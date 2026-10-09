@@ -683,6 +683,18 @@ fn format_diagnostics(diagnostics: Vec<Diagnostic>) -> String {
 }
 
 pub(crate) fn exit_code(status: ExitStatus) -> ExitCode {
+    // A program killed by a signal has no exit code. Say so, and exit as a
+    // shell would (128 + the signal), instead of a silent failure.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            eprintln!("staple: program terminated by signal {signal}");
+            return u8::try_from(128 + signal)
+                .map(ExitCode::from)
+                .unwrap_or(ExitCode::FAILURE);
+        }
+    }
     status
         .code()
         .and_then(|code| u8::try_from(code).ok())
@@ -1320,6 +1332,38 @@ mod tests {
             panic!("run mode should return a process status");
         };
         assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_program_killed_by_a_signal_exits_like_a_shell() {
+        use std::os::unix::process::ExitStatusExt;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-signal-{nonce}.sta"));
+        std::fs::write(&source, "extern \"c\" { abort: () -> () }\nabort ()\n")
+            .expect("temporary run source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        let outcome = run([
+            "run".into(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("source should run directly");
+        let _ = std::fs::remove_file(source);
+
+        let Outcome::Executed(status) = outcome else {
+            panic!("run mode should return a process status");
+        };
+        assert_eq!(status.signal(), Some(6));
+        // SIGABRT is reported as 128 + 6, not a silent 1.
+        assert_eq!(super::exit_code(status), std::process::ExitCode::from(134));
     }
 
     #[test]

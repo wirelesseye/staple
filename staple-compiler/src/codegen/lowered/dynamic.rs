@@ -899,7 +899,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .view
             .instance_runtime_order(instance)
             .unwrap_or_default();
-        let (code, captures) = if runtime.is_empty() {
+        let (code, captures) = if !self.view.instance_is_dynamic(instance) {
             let types = body
                 .captures
                 .iter()
@@ -1001,7 +1001,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 environment,
                 span,
             )?;
-            (self.descriptor_bound_entry_code(instance, span)?, captures)
+            // With no descriptors to bind, the instance is its own entry.
+            let code = if runtime.is_empty() {
+                *self
+                    .instances
+                    .get(&instance)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "missing thunk declaration"))?
+            } else {
+                self.descriptor_bound_entry_code(instance, span)?
+            };
+            (code, captures)
         };
         let closure = self.backend.build_closure_value(code, captures)?;
         let storage = self
@@ -1457,7 +1466,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let runtime = self.view.instance_runtime_order(*instance).ok_or_else(|| {
                     Diagnostic::new(span.clone(), "missing callable instance key")
                 })?;
-                if !runtime.is_empty() {
+                // An instance that is dynamic only through its effects has no
+                // descriptors but still reads a dynamic environment (R-D).
+                if self.view.instance_is_dynamic(*instance) {
                     // A dynamic-shape closure (R-C): the environment stores the
                     // instance's descriptors and the entry forwards the call.
                     let captures = callable
@@ -3943,15 +3954,33 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         } else {
             1
         };
+        // The target's row arrives in the target's ABI: one bundle when it
+        // names a variable, otherwise each resource. The scheme body takes it
+        // in the dynamic ABI (see `rows`).
+        let target_bundle = (dynamic_shape && target.effects.variable.is_some())
+            .then(|| parameters[first_resource].into_pointer_value());
+        let resource_slots = if target_bundle.is_some() {
+            1
+        } else {
+            resources
+        };
+        let mut resource_pointers = Vec::with_capacity(resources);
         for index in 0..resources {
-            let parameter = parameters[first_resource + index];
-            if dynamic_shape {
-                arguments.push(parameter.into());
+            let resource = &target.effects.resources[index];
+            if let Some(bundle) = target_bundle {
+                resource_pointers.push(self.lookup_row_resource(
+                    bundle,
+                    &resource.value_type,
+                    span,
+                )?);
                 continue;
             }
-            let resource = &target.effects.resources[index];
-            if resource.mutable || !self.backend.layout.is_copy(&resource.value_type) {
-                arguments.push(parameter.into());
+            let parameter = parameters[first_resource + index];
+            if dynamic_shape
+                || resource.mutable
+                || !self.backend.layout.is_copy(&resource.value_type)
+            {
+                resource_pointers.push(parameter.into_pointer_value());
             } else {
                 let storage = self
                     .backend
@@ -3962,10 +3991,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .builder
                     .build_store(storage, parameter)
                     .map_err(compiler_diagnostic)?;
-                arguments.push(storage.into());
+                resource_pointers.push(storage);
             }
         }
-        let first_argument = first_resource + resources;
+        self.push_dynamic_row_arguments(
+            span,
+            &signature.effects,
+            &target.effects,
+            resource_pointers,
+            target_bundle,
+            &mut arguments,
+        )?;
+        let first_argument = first_resource + resource_slots;
         let indirect = self.backend.indirect_parameter_mask(target);
         // One pointer to each argument value.
         let mut slots = Vec::new();
@@ -4331,14 +4368,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
         if let Some(row_bundle) = row_bundle {
-            for (provider_id, position, value_type) in bundled_providers {
-                let pointer = self.load_bundle_slot(row_bundle, position)?;
-                environment
-                    .resources
-                    .insert(provider_id, DynamicResource { value_type, pointer });
+            for (provider_id, _, value_type) in bundled_providers {
+                let pointer =
+                    self.lookup_row_resource(row_bundle, &value_type, &body.origin.span)?;
+                environment.resources.insert(
+                    provider_id,
+                    DynamicResource {
+                        value_type,
+                        pointer,
+                    },
+                );
             }
-            environment.bundle =
-                Some(self.row_variable_bundle(row_bundle, body.function_providers.len())?);
+            environment.bundle = Some(row_bundle);
         }
         // Seed capture bindings from the closure environment (R-D). The
         // descriptor region holds one descriptor per run-time parameter in
@@ -5990,10 +6031,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         match &place.kind {
             crate::LoweredPlaceKind::Symbol { symbol }
             | crate::LoweredPlaceKind::CapturedCell { symbol } => {
-                let binding = environment.bindings.get(symbol).ok_or_else(|| {
-                    Diagnostic::new(place.origin.span.clone(), "missing place root")
-                })?;
-                Ok((binding.pointer, binding.descriptor))
+                if let Some(binding) = environment.bindings.get(symbol) {
+                    return Ok((binding.pointer, binding.descriptor));
+                }
+                // A module-level binding is written in place, as the concrete
+                // emitter does.
+                let global = match &place.kind {
+                    crate::LoweredPlaceKind::Symbol { .. } => self.storage.get(symbol).copied(),
+                    _ => None,
+                }
+                .ok_or_else(|| Diagnostic::new(place.origin.span.clone(), "missing place root"))?;
+                let descriptor =
+                    self.dynamic_descriptor(&place.value_type, environment, &place.origin.span)?;
+                Ok((global.as_pointer_value(), descriptor))
             }
             crate::LoweredPlaceKind::Temporary { expression } => {
                 let pointer = self.emit_dynamic_expression(owner, *expression, environment)?;
@@ -7149,17 +7199,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     Diagnostic::new(expression.origin.span.clone(), "missing singleton storage")
                 })?
             }
-            LoweredExpressionKind::Name(name) if name.reactive.is_none() => environment
-                .bindings
-                .get(&name.symbol)
-                .filter(|binding| binding.live)
-                .map(|binding| binding.pointer)
-                .ok_or_else(|| {
-                    Diagnostic::new(
-                        expression.origin.span.clone(),
-                        "missing or moved dynamic binding",
-                    )
-                })?,
+            LoweredExpressionKind::Name(name) if name.reactive.is_none() => {
+                match environment
+                    .bindings
+                    .get(&name.symbol)
+                    .filter(|binding| binding.live)
+                {
+                    Some(binding) => binding.pointer,
+                    // A module-level binding is read in place from its global,
+                    // as the concrete emitter does.
+                    None => {
+                        let global = self.storage.get(&name.symbol).copied().ok_or_else(|| {
+                            Diagnostic::new(
+                                expression.origin.span.clone(),
+                                "missing or moved dynamic binding",
+                            )
+                        })?;
+                        if name.requires_initialization_check || name.mutable {
+                            if let Some(state) = self.initialization_states.get(&name.symbol) {
+                                self.backend.build_initialization_check(
+                                    state.as_pointer_value(),
+                                    expression.origin.span.clone(),
+                                )?;
+                            }
+                        }
+                        global.as_pointer_value()
+                    }
+                }
+            }
             LoweredExpressionKind::Block(block) => {
                 match self.emit_dynamic_block(owner, block, environment)? {
                     Some(value) => value,

@@ -605,7 +605,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         } else {
             dynamic_fixed
         };
-        let row_layout = super::rows::row_layout(&plan.dynamic.effects, &plan.concrete.effects, span)?;
+        let row_positions = if plan.dynamic.effects.variable.is_none() {
+            super::rows::row_positions(&plan.dynamic.effects, &plan.concrete.effects, span)?
+        } else {
+            Vec::new()
+        };
         let value_start = if concrete_caller {
             1 + resource_count
         } else {
@@ -677,25 +681,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 continue;
             }
             let incoming = if plan.dynamic.effects.variable.is_none() {
-                parameters[2 + row_layout.fixed.iter().position(|position| *position == index).ok_or_else(
-                    || Diagnostic::new(span.clone(), "a reabstracted row lacks a resource"),
-                )?]
+                parameters[2 + row_positions
+                    .iter()
+                    .position(|position| *position == index)
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "a reabstracted row lacks a resource")
+                    })?]
                 .into_pointer_value()
             } else {
-                let bundle = parameters[2].into_pointer_value();
-                match row_layout.fixed.iter().position(|position| *position == index) {
-                    Some(position) => self.load_bundle_slot(bundle, position)?,
-                    None => {
-                        let rest = row_layout
-                            .rest
-                            .iter()
-                            .position(|position| *position == index)
-                            .ok_or_else(|| {
-                                Diagnostic::new(span.clone(), "a reabstracted row lacks a resource")
-                            })?;
-                        self.row_rest_resource(bundle, dynamic_fixed, rest)?
-                    }
-                }
+                self.lookup_row_resource(
+                    parameters[2].into_pointer_value(),
+                    &resource.value_type,
+                    span,
+                )?
             };
             if indirect {
                 arguments.push(incoming.into());

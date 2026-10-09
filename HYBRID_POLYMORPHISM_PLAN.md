@@ -241,9 +241,10 @@ scope in the binding's value. This matches today's behavior for a generic
   - **Hidden arguments:** the environment, then one descriptor per type
     parameter and one dictionary per trait bound. An effect variable has no
     hidden argument: a row that names one passes a single *resource bundle*
-    pointer in place of its resources (Stage 5, decision E-D), so a function
-    type's ABI depends only on the type. The coroutine `CORO_RESOURCES`
-    bundle is the precedent for the bundle.
+    pointer in place of its resources (Stage 5, decision E-D). Code finds
+    each resource in the bundle by key, so a function type's ABI depends only
+    on the set of resources it names after substitution. The coroutine
+    `CORO_RESOURCES` bundle is the precedent for the bundle.
   - **Values:** values typed by a run-time parameter, or containing one, pass
     by pointer.
   - **Results:** returned through an out-pointer.

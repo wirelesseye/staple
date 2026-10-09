@@ -14618,7 +14618,13 @@ impl<'a> SourceCoverage<'a> {
     /// operands are the lowered occurrences in the decomposed case; implicit
     /// thunks are skipped by `visit_expression`.
     fn visit_call_argument(&mut self, owner: ExpressionOwner, argument: &Expression) {
-        if let Expression::Product(product) = argument {
+        // A parenthesized argument such as `(g ())` may itself be the thunk.
+        if let Expression::Product(product) = argument
+            && self
+                .module
+                .implicit_thunk_for(argument.syntax().id)
+                .is_none()
+        {
             for element in &product.elements {
                 self.visit_expression(owner, &element.value);
             }

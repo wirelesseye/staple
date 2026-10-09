@@ -499,7 +499,10 @@ pub(super) fn scan_instance(
         let Some(runtime) = program.instance_runtime_order(*callee) else {
             continue;
         };
-        if runtime.is_empty() {
+        // A thunk that is dynamic only through its effects has no
+        // descriptors to bind: it is its own entry, but its captures still
+        // need the dynamic finalizer.
+        if !program.instance_is_dynamic(*callee) {
             continue;
         }
         let Some(record) = program.instances.get(*callee) else {
@@ -508,28 +511,30 @@ pub(super) fn scan_instance(
         let Some(thunk) = &record.body else {
             continue;
         };
-        requests.push(ClosureRequest::Artifact {
-            key: ArtifactRequestKey::DescriptorBoundEntry(
-                crate::specialization::DescriptorBoundEntryKey {
-                    instance: record.ordinal,
+        if !runtime.is_empty() {
+            requests.push(ClosureRequest::Artifact {
+                key: ArtifactRequestKey::DescriptorBoundEntry(
+                    crate::specialization::DescriptorBoundEntryKey {
+                        instance: record.ordinal,
+                        bound: runtime.len(),
+                    },
+                ),
+                plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
                     bound: runtime.len(),
-                },
-            ),
-            plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
-                bound: runtime.len(),
-                instance: *callee,
-                runtime: runtime.clone(),
-                function_type: thunk.signature.clone(),
-            }),
-            kind: Kind::DescriptorBoundEntry,
-            origin: thunk.origin.clone(),
-            use_site: Some(
-                super::artifact_closure::ArtifactUseSite::DescriptorBoundThunk {
-                    call: *call,
-                    argument: *argument,
-                },
-            ),
-        });
+                    instance: *callee,
+                    runtime: runtime.clone(),
+                    function_type: thunk.signature.clone(),
+                }),
+                kind: Kind::DescriptorBoundEntry,
+                origin: thunk.origin.clone(),
+                use_site: Some(
+                    super::artifact_closure::ArtifactUseSite::DescriptorBoundThunk {
+                        call: *call,
+                        argument: *argument,
+                    },
+                ),
+            });
+        }
         if !thunk.captures.is_empty() {
             requests.push(ClosureRequest::Artifact {
                 key: ArtifactRequestKey::GcFinalizer(

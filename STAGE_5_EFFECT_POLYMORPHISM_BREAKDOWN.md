@@ -41,7 +41,8 @@ stage's base commit for every existing input.
 
 ## Current state
 
-**Stage 5 is complete** on `worktree-hybrid-polymorphism` (base `a47627a`).
+**Stage 5 is complete** on `worktree-hybrid-polymorphism` (base `a47627a`),
+including the fixes from the review of `c823212` below.
 Effect-polymorphic functions run as stored and passed values, in the Goal
 program and with user, `mut`, open-row, empty-row, and state instantiations.
 
@@ -62,10 +63,11 @@ program and with user, `mut`, open-row, empty-row, and state instantiations.
   (E-C); requests resolve in a `RuntimeScope` of both. Templates with effect
   parameters run in dictionary-passed code; polymorphic effect schemes
   build entries. The support analysis no longer rejects effect variables.
-- **ABI.** A row naming a variable passes one bundle (E-D, `rows.rs`),
-  so equal function types share one ABI. Concrete callers, dynamic callers,
-  direct dynamic calls, and the two concrete↔dynamic reabstraction thunks
-  build or read bundles with the same layout.
+- **ABI.** A row naming a variable passes one bundle whose resources are
+  found by key (E-D, `rows.rs`), so equal function types share one ABI.
+  Concrete callers, dynamic callers, direct dynamic calls, instantiation and
+  scheme adapters, instance prologues, and the two concrete↔dynamic
+  reabstraction thunks build or read bundles the same way.
 - **Tests.** Corpus programs `effect_generic_*` and `effect_polymorphic_*`;
   `stage5_effect_generic_differential`, `stage5_effect_row_differential`
   (effect rows at run time, E-H), a reachability test, and the ignored
@@ -75,9 +77,63 @@ program and with user, `mut`, open-row, empty-row, and state instantiations.
 - **Exit gate.** `cargo test --workspace`, the full effect-row differential
   run, and IR against the `a47627a` release build (all 11 examples and 121
   existing corpus programs identical).
-- **Known limitation.** A `wrap` type with an effect parameter cannot be
-  constructed: `type Task{E} = wrap (run: () ->{E} ())` and `Task (run: f)`
-  reports the field as `() -> ()`. The corpus uses `alias` types instead.
+- **Review of `c823212`.** The review found three defects that the corpus
+  and both differential modes missed, all of which compiled into crashes or
+  invalid modules. All are fixed:
+  - **Captures in effect-only dynamic closures.** A closure or implicit
+    thunk whose row names a run-time effect variable, but which has no
+    run-time type parameter, was built with a concrete environment while its
+    body read a dynamic one (R-D), so any capture crashed. Construction now
+    follows `instance_is_dynamic`, and lowering plans the thunk's dynamic
+    finalizer the same way.
+  - **Instantiation and scheme adapters.** `emit_instantiation_adapter`
+    still forwarded the target's resources one by one. With the empty row or
+    two or more resources the module was invalid; with one real resource it
+    crashed. A scheme adapter that reorders an effect parameter
+    (`<effect G, U>` from `<T, effect E>`) failed the same way. The adapter
+    now passes the row through `push_dynamic_row_arguments`, reading a
+    dynamic target's own bundle when it has one.
+  - **Nested rows.** The positional bundle of the first E-D did not give
+    equal function types one ABI. A callee row `{F, Label}` at
+    `F := {E, IO}` was nested, `[&Label, [&IO, E]]`, while the closure of
+    type `{E, IO, Label}` expected the flat `[&IO, &Label, E]`; the closure
+    crashed. No positional layout can work, because a callee must find its
+    fixed resources at known positions while canonical order interleaves
+    them with the variable's. Bundles now hold `(key, address)` entries and
+    code finds resources by key (E-D).
+
+  The review also fixed three problems outside the new ABI:
+  - **Implicit thunks.** The source-coverage validator decomposed a
+    parenthesized argument such as `(g ())` before checking whether the
+    whole argument was an implicit thunk. Thunked arguments to
+    effect-generic functions were rejected ("has no lowered counterpart").
+    This predates Stage 5; the checker fixes above first let such calls
+    check.
+  - **Module bindings.** Dynamic bodies resolved names only through local
+    and captured bindings, so a polymorphic value that read or assigned a
+    module-level `let` failed with "missing or moved dynamic binding". This
+    predates Stage 5 (4b). Reads and writes now use the module global, as
+    the concrete emitter does.
+  - **Crashes under `staple run`.** A program killed by a signal exited
+    with a silent status 1. It now reports the signal and exits with
+    128 + the signal, as a shell does.
+
+  New corpus programs `effect_polymorphic_captures`,
+  `effect_polymorphic_instantiation`, `effect_polymorphic_nested_rows`,
+  `effect_generic_thunk_argument`, and `polymorphic_module_bindings` cover
+  each case, so both differential modes now reach them.
+
+  Verified after the review fixes: `cargo test --workspace` (1,505 passed,
+  3 ignored); the full type differential run (134 programs, 133 with
+  dynamic calls, 15,619 call sites); the full effect-row differential run
+  (133 programs); and IR against the `c823212` release build over 147
+  inputs: 137 identical, the 6 earlier effect-polymorphic programs differ
+  only in how bundles are built and read, and the 4 new programs that
+  `c823212` rejected do not compile there (`effect_polymorphic_nested_rows`
+  compiled there and crashed).
+- **Known limitation (withdrawn).** An earlier version listed `wrap` types
+  with an effect parameter as unconstructible (`Task (run: f)`). It does not
+  reproduce, annotated or not, inside or outside a generic function.
 
 ## Decisions
 
@@ -103,24 +159,28 @@ program and with user, `mut`, open-row, empty-row, and state instantiations.
   means "has a descriptor". `CanonicalEffectSet` gains `runtime_variable`.
   Effect parameters get no descriptor and no hidden argument. `is_dynamic()`
   (either set non-empty) selects the dynamic ABI.
-- **E-D. A row's run-time representation.** The representation depends only
-  on the row's type, so function types that are equal after substitution
-  share one ABI. A row without a variable passes each resource by pointer in
-  canonical order. A row that names a variable passes one *bundle* pointer
-  instead, defined recursively:
-  - with fixed resources `r0..rn`, an array of their addresses followed by
-    the representation of the variable;
-  - with none, the representation of the variable itself;
-  - a variable instantiated at resources `s0..sk` (and possibly a variable of
-    the caller's) is an array of their addresses, then the caller's
-    representation; it is null when empty, and the caller's own
-    representation when that is all there is.
+- **E-D. A row's run-time representation.** A row without a variable
+  passes each resource by address, in canonical order. A row that names a
+  variable passes one *bundle* pointer instead. A bundle is a chain of nodes
+  `{ next, count, [(key, address)] }`, where a key is the address of a
+  per-resource-type global, and code finds a resource by walking the chain
+  for its key (`rows.rs`). An empty row's bundle is null.
+  - **Equal function types share one ABI.** A bundle stands for the set of
+    resources it holds, not for the way the row was written, so
+    `() ->{F, Label} ()` at `F := {E, IO}` and `() ->{E, IO, Label} ()`
+    receive the same bundle.
+  - **Extra resources are harmless.** A caller passes its own bundle on
+    unchanged when the call row adds nothing, and otherwise adds one node in
+    front holding the call row's fixed resources.
+  - **A missed lookup traps.** The checker guarantees it never happens.
 
   This replaces the main plan's "one resource bundle pointer per effect
-  variable" among the hidden arguments, and the earlier draft of this
-  decision (fixed resources beside a bundle), whose representation differed
-  between `() ->{F} ()` at `F := {E, IO}` and `() ->{E, IO} ()` and so needed
-  a dynamic-to-dynamic repacking thunk.
+  variable" among the hidden arguments, and two earlier drafts of this
+  decision. The first passed fixed resources beside a bundle. The second
+  was a positional bundle, in which a row with fixed resources nested its
+  variable's bundle. Neither gave equal types one ABI, because a callee must
+  find its fixed resources at known positions while canonical order
+  interleaves them with the variable's (see the review above).
 - **E-E. Bundles are stack data.** A caller builds a bundle in a fixed-size
   entry-block slot: the instantiated row's shape is known at the call. A
   bundle lives for one call. No closure retains one, because a function's
@@ -128,10 +188,9 @@ program and with user, `mut`, open-row, empty-row, and state instantiations.
   which captures resources and stays restricted until Stage 8.
 - **E-F. Row reabstraction.** A concrete function type reaching a dynamic
   type with a run-time variable converts through the existing reabstraction
-  thunks, in both directions. The thunk reads each concrete resource from a
-  fixed slot of the bundle or from the variable's representation, or builds
-  the bundle from the concrete resources (`rows.rs`). Dynamic function types
-  never need a thunk for their rows (E-D).
+  thunks, in both directions. The thunk looks each concrete resource up in
+  the bundle by key, or builds a one-node bundle from the concrete
+  resources. Dynamic function types never need a thunk for their rows (E-D).
 - **E-G. Effects never affect layout.** A function value is `{fn*, env*}`
   whatever its row. A type that mentions run-time effect variables but no
   run-time type parameters has the descriptor of the same type with each
@@ -182,13 +241,22 @@ intrinsic.
 - Effect-polymorphic values compile and run (5b).
 - No existing program changes behavior or IR (verified at the exit gate).
 
-## Risks (resolved)
+## Risks
 
-- **Thin corpus.** The new corpus programs and the effect-row differential
-  mode carry the coverage, and were written before the code they test.
-- **Resource order.** Bundles and thunks use the instantiated row's canonical
-  order on both sides (`row_layout`). A resource type cannot mention a type
-  parameter (resources must be fully concrete nominal types), so its sort
-  position never changes on instantiation.
+- **Thin corpus.** The corpus programs and the effect-row differential mode
+  carry the coverage. They missed three defects at `c823212` because no
+  program captured in an effect-only dynamic body, instantiated an
+  effect-polymorphic value at a function type, reordered an effect
+  parameter, or nested fixed resources; the differential modes only reroute
+  generic calls, so they cannot reach shapes the corpus lacks. Each of those
+  shapes now has a program. New shapes need a program, not just a probe.
+- **Resource order.** Bundles no longer depend on order (E-D). Rows without
+  a variable still pass resources in the instantiated row's canonical order
+  on both sides. A resource type cannot mention a type parameter (resources
+  must be fully concrete nominal types), so its sort position never changes
+  on instantiation.
 - **Two kinds of run-time parameter.** `runtime_effects` is a separate set,
-  so no use of `runtime()` sees an effect id.
+  so no use of `runtime()` sees an effect id. The converse is the trap:
+  code that decides "dynamic" from `runtime()` alone misses effect-only
+  dynamic instances. Closure construction and thunk planning did, and are
+  fixed; decide dynamism with `is_dynamic()` / `instance_is_dynamic`.
