@@ -239,9 +239,10 @@ scope in the binding's value. This matches today's behavior for a generic
     sums, arrays, wrappers) get descriptors built at run time.
 - **Abstract ABI** for dictionary-passed implementations.
   - **Hidden arguments:** the environment, then one descriptor per type
-    parameter, one dictionary per trait bound, and one *resource bundle*
-    pointer per effect variable. The coroutine `CORO_RESOURCES` bundle is the
-    precedent for the bundle.
+    parameter and one dictionary per trait bound. An effect variable has no
+    hidden argument: a row that contains one passes a *resource bundle*
+    pointer after its fixed resources (Stage 5, decision E-D). The coroutine
+    `CORO_RESOURCES` bundle is the precedent for the bundle.
   - **Values:** values typed by a run-time parameter, or containing one, pass
     by pointer.
   - **Results:** returned through an out-pointer.
@@ -404,9 +405,13 @@ through `Forall` values, and instantiation and scheme adapters.
 - **Exit:** `<effect E> (() ->{E} ()) ->{E} ()` works as a stored value and
   as a parameter, with resource and empty instantiations.
 
-**Breakdown plan: not required.** Small and self-contained once Stage 4's
-ABI and adapter machinery exists; it reuses the coroutine resource-bundle
-pattern.
+**Breakdown plan: required.** See
+[STAGE_5_EFFECT_POLYMORPHISM_BREAKDOWN.md](STAGE_5_EFFECT_POLYMORPHISM_BREAKDOWN.md).
+Originally judged small, but templates with both type and effect parameters
+are excluded from dictionary passing even when every row is concrete, keys
+have no form for run-time effect variables, and rows need their own
+reabstraction. It has two substages: 5a, compile-time rows in dynamic code;
+5b, run-time effect variables and effect-polymorphic values.
 
 ### Stage 6 — Trait bounds via dictionaries
 
@@ -472,7 +477,7 @@ small plan, and they can be scheduled separately or dropped.
 | 2 — Explicit checked schemes | **Required** — [written](STAGE_2_CHECKED_SCHEMES_BREAKDOWN.md) |
 | 3 — First-class polymorphism in the checker | **Required** — [written](STAGE_3_FIRST_CLASS_POLYMORPHISM_BREAKDOWN.md) |
 | 4 — Core dictionary passing | **Required** (split 4a/4b) — [written](STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md); 4a [remainder](STAGE_4A_REMAINDER_BREAKDOWN.md), 4b [written, complete](STAGE_4B_POLYMORPHIC_VALUES_BREAKDOWN.md) |
-| 5 — Effect polymorphism at run time | Not required |
+| 5 — Effect polymorphism at run time | **Required** (split 5a/5b) — [written](STAGE_5_EFFECT_POLYMORPHISM_BREAKDOWN.md) |
 | 6 — Trait bounds via dictionaries | **Required** |
 | 7 — Independently generic trait methods | **Required** |
 | 8 — Extensions | **Required** (one per item) |
