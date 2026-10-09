@@ -431,9 +431,13 @@ reabstraction. It had two substages: 5a, compile-time rows in dynamic code;
 - **Exit:** bounded schemes such as `<T where Debug T> T ->{IO} ()` work as
   values, including through generic `impl`s.
 
-**Breakdown plan: required.** It intersects implementation selection,
-generic `impl` resolution, associated-type normalization, structural traits,
-and the special `Copy`/`Drop` rules.
+**Breakdown plan: required.** See
+[STAGE_6_TRAIT_DICTIONARIES_BREAKDOWN.md](STAGE_6_TRAIT_DICTIONARIES_BREAKDOWN.md).
+It intersects implementation selection, generic `impl` resolution,
+associated-type normalization, structural traits, and the special
+`Copy`/`Drop` rules. It has two substages: 6a, dictionaries and their
+compile-time recipes for bounded templates in dictionary-passed code; 6b,
+bounded schemes as values.
 
 ### Stage 7 — Independently generic trait methods
 
@@ -481,7 +485,7 @@ small plan, and they can be scheduled separately or dropped.
 | 3 — First-class polymorphism in the checker | **Required** — [written](STAGE_3_FIRST_CLASS_POLYMORPHISM_BREAKDOWN.md) |
 | 4 — Core dictionary passing | **Required** (split 4a/4b) — [written](STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md); 4a [remainder](STAGE_4A_REMAINDER_BREAKDOWN.md), 4b [written, complete](STAGE_4B_POLYMORPHIC_VALUES_BREAKDOWN.md) |
 | 5 — Effect polymorphism at run time | **Required** (split 5a/5b) — [written](STAGE_5_EFFECT_POLYMORPHISM_BREAKDOWN.md) |
-| 6 — Trait bounds via dictionaries | **Required** |
+| 6 — Trait bounds via dictionaries | **Required** (split 6a/6b) — [written](STAGE_6_TRAIT_DICTIONARIES_BREAKDOWN.md) |
 | 7 — Independently generic trait methods | **Required** |
 | 8 — Extensions | **Required** (one per item) |
 
