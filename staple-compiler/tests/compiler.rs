@@ -412,6 +412,27 @@ fn specializes_generic_effect_parameters() {
         .expect("effect-polymorphic calls should monomorphize");
 }
 
+/// A generic parameter used in a tuple argument beside a function over the
+/// same parameter infers from both slots, with and without an effect
+/// parameter, from concrete and generic bodies.
+#[test]
+fn infers_type_parameters_through_function_typed_tuple_slots() {
+    let module = type_check(concat!(
+        "use std.io.(IO, println)\n",
+        "def show: I32 ->{IO} () = x => println \"${x}\"\n",
+        "def apply: <T, effect E> (T, T ->{E} ()) ->{E} () = (x, f) => f x\n",
+        "def run: <A where Copy A> (A, A ->{IO} ()) ->{IO} () =\n",
+        "    (a, g) => apply (a, g)\n",
+        "def explicit: <A where Copy A> (A, A ->{IO} ()) ->{IO} () =\n",
+        "    (a, g) => apply.<A, _> (a, g)\n",
+        "apply (1, show)\nrun (2, show)\nexplicit (3, show)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("type-and-effect generic calls should compile");
+}
+
 #[test]
 fn checks_effect_parameterized_type_declarations() {
     type_check(concat!(
@@ -13137,6 +13158,7 @@ fn forall_preserves_companion_parameter_order_and_function_annotations() {
         "type Box T = wrap T\ncompanion<T> Box T { pub def choose: <U> (move Box T, move U) -> U = (move Box x, move y) => y }\nlet result: String = Box.choose.<I32, String> (Box 1, \"yes\")\n",
     );
     let function = resolved
+
         .functions()
         .iter()
         .find(|f| f.name.contains("choose"))
@@ -13154,10 +13176,10 @@ fn forall_preserves_companion_parameter_order_and_function_annotations() {
         Some(Type::Function(_))
     ));
     TypeChecker::new()
+
         .check(resolved)
         .expect("explicit arguments keep merged order");
 }
-
 
 #[test]
 fn forall_generic_binding_macro_expansion_remains_parseable_and_hygienic() {
@@ -13175,7 +13197,6 @@ fn forall_generic_binding_macro_expansion_remains_parseable_and_hygienic() {
     assert!(reparsed.items.iter().any(|item| matches!(item, Item::Binding(binding) if binding.generics().is_some())));
     TypeChecker::new().check(resolved).expect("fresh generic annotation must type-check");
 }
-
 
 #[test]
 fn forall_preserves_generic_compile_time_helpers() {

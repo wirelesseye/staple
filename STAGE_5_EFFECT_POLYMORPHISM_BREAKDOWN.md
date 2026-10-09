@@ -41,46 +41,35 @@ stage's base commit for every existing input.
 
 ## Current state
 
-Not started. Measured at `a47627a`:
+Work in progress on `worktree-hybrid-polymorphism`; base `a47627a`.
 
-- **What works already.** An effect-generic `def` with no type parameters,
-  called from a dynamic body, is instantiated with a concrete row and
-  monomorphized as usual. `twice` called inside a polymorphic value's body
-  runs.
-- **What is rejected.** `dynamic_support.rs` rejects any template whose
-  signature has an effect variable (`EffectVariable`), and transitively
-  every template that calls one. So, even when every row is concrete:
-  - a `<T, effect E>` function called from a dynamic body is rejected, and so
-    is any polymorphic value whose implementation reaches it;
-  - an effect-generic `def` used at a scheme that fixes its effect,
-    `let poly: <A> (A, A ->{IO} ()) ->{IO} () = run` where `run` is
-    `<A, effect F>`, is rejected.
-- **Keys.** `CanonicalEffectSet::convert` resolves an effect variable only
-  through scheme binders. A run-time effect variable has no canonical form
-  (types have `CanonicalType::RuntimeParameter`), so no dynamic key can
-  mention one.
-- **ABI.** Resources are the only effect component with a run-time
-  representation. The concrete ABI passes each resource by value, or by
-  pointer when it is `mut` or not `Copy`; the dynamic shape passes every
-  resource by pointer (Decision 6). State effects never reach the ABI.
-- **Corpus.** One effect-generic template exists (`twice` in
-  `effect_closure_resources`), and the coverage report counts only
-  templates with type parameters, so it does not count it. Of 7,920
-  generic templates, 2,000
-  are unsupported, none for effect reasons. The stdlib's effect-generic
-  functions (`block_on`, `spawn`, `reaction`, `batch`) are async or
-  reactive intrinsics, which stay restricted until Stage 8.
-- **Checker limitation.** A call to a `<T, effect E>` function from a
-  generic body fails to infer unless its type arguments are explicit:
-
-  ```staple
-  def apply: <T, effect E> (T, T ->{E} ()) ->{E} () = (x, f) => f x
-  def run: <A where Copy A> (A, A ->{IO} ()) ->{IO} () =
-      (a, g) => apply (a, g)        // error; `apply.<A, _> (a, g)` works
-  ```
-
-  The same call with concrete arguments checks. This is not a lowering
-  problem, but it blocks the natural form of every 5a program.
+- **Done: checker fixes.**
+  - A call such as `apply (a, g)` with `apply: <T, effect E> (T, T ->{E} ()) ->{E} ()`
+    failed for any generic whose parameter also appears inside a function
+    typed tuple slot. The cause was not effects: the argument expectation
+    left `T` unerased inside function types. Calls now erase the callee's
+    own quantified parameters there (`erase_type_parameters_in`).
+  - A lambda argument whose effects are inferred after the call was
+    instantiated left `E := {}` (`twice (() => bump 1)` with a `mut`
+    resource crashed at run time; `IO` hid it because it is zero-sized).
+    `refresh_effect_generic_call` re-solves the call once effects settle.
+- **Not started: everything else.** Remaining from S0: corpus programs and
+  the effect-template coverage report (in progress). Then 5a, then 5b.
+- **Measured at base.**
+  - `dynamic_support.rs` rejects any template whose signature has an effect
+    variable, and transitively every template that calls one.
+  - `CanonicalEffectSet::convert` resolves effect variables only through
+    scheme binders, so no dynamic key can mention a run-time one.
+  - Resources are the only effect component with a run-time representation:
+    concrete ABI passes by value, or by pointer when `mut` or not `Copy`;
+    the dynamic shape passes every resource by pointer. State effects never
+    reach the ABI.
+  - The stdlib's effect-generic functions (`block_on`, `spawn`, `reaction`,
+    `batch`) are async or reactive intrinsics, restricted until Stage 8.
+- **Known limitation.** A `wrap` type with an effect parameter cannot be
+  constructed: `type Task{E} = wrap (run: () ->{E} ())` and
+  `Task (run: f)` reports the constructor's field as `() -> ()`. The corpus
+  uses `alias` types instead; fixing it is out of scope unless 5b needs it.
 
 ## Decisions
 

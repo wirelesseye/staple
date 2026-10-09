@@ -6166,6 +6166,7 @@ impl TypeChecker {
                 let mut changed = self.refresh_expression_function_types(module, &value.callee)
                     | self.refresh_expression_function_types(module, &value.argument);
                 changed |= self.refresh_implicit_thunk_call(module, value);
+                changed |= self.refresh_effect_generic_call(module, value);
                 changed
             }
             Expression::Access(value) => {
@@ -6208,6 +6209,114 @@ impl TypeChecker {
             changed = true;
         }
         changed
+    }
+
+    /// Re-solves a call's effect parameters once the effects of its function
+    /// arguments are known. A lambda's effects are inferred after the call
+    /// was instantiated, so the first instantiation sees an empty row and
+    /// would otherwise stay stale.
+    fn refresh_effect_generic_call(
+        &mut self,
+        module: &ResolvedModule,
+        call: &staple_syntax::CallExpression,
+    ) -> bool {
+        if self
+            .implicit_thunks
+            .contains_key(&call.argument.syntax().id)
+        {
+            return false;
+        }
+        let Some(CheckedType::Function(template)) = self
+            .function_origin(module, &call.callee)
+            .and_then(|id| self.function_types.get(&id).cloned())
+            .map(CheckedType::Function)
+        else {
+            return false;
+        };
+        let template_type = CheckedType::Function(template.clone());
+        if !contains_effect_parameter(&template_type) {
+            return false;
+        }
+        let Some(CheckedType::Function(existing)) =
+            self.expression_types.get(&call.callee.syntax().id).cloned()
+        else {
+            return false;
+        };
+        let Some(actual) = self.refreshed_argument_type(module, &call.argument) else {
+            return false;
+        };
+        let mut substitutions = HashMap::new();
+        let mut inference_template = template_type.clone();
+        let mut inference_existing = CheckedType::Function(existing);
+        clear_function_effects(&mut inference_template);
+        clear_function_effects(&mut inference_existing);
+        if !infer_type_parameters(&inference_template, &inference_existing, &mut substitutions) {
+            return false;
+        }
+        // Effect parameters come from the refreshed argument alone.
+        substitutions.retain(|_, replacement| effect_substitution_value(replacement).is_none());
+        if !infer_type_parameters(&template.parameter, &actual, &mut substitutions) {
+            return false;
+        }
+        let instantiated = substitute_type(template_type, &substitutions);
+        let CheckedType::Function(instantiated_function) = &instantiated else {
+            return false;
+        };
+        let result = instantiated_function.result.as_ref().clone();
+        let mut changed =
+            self.expression_types.get(&call.callee.syntax().id) != Some(&instantiated);
+        if changed {
+            self.expression_types
+                .insert(call.callee.syntax().id, instantiated);
+        }
+        if self.expression_types.get(&call.syntax.id) != Some(&result) {
+            self.expression_types.insert(call.syntax.id, result);
+            changed = true;
+        }
+        changed
+    }
+
+    /// The argument's type with every function-valued part taken from the
+    /// latest inferred function types.
+    fn refreshed_argument_type(
+        &self,
+        module: &ResolvedModule,
+        argument: &Expression,
+    ) -> Option<CheckedType> {
+        if let Expression::Product(product) = argument
+            && let Some(CheckedType::Product(existing)) =
+                self.expression_types.get(&argument.syntax().id).cloned()
+        {
+            if existing.elements.len() != product.elements.len() {
+                return None;
+            }
+            let elements = existing
+                .elements
+                .into_iter()
+                .zip(&product.elements)
+                .map(|(mut element, syntax)| {
+                    if matches!(element.value_type, CheckedType::Function(_))
+                        && let Some(refreshed) = self.refreshed_argument_type(module, &syntax.value)
+                    {
+                        element.value_type = refreshed;
+                    }
+                    element
+                })
+                .collect();
+            return Some(CheckedType::Product(CheckedProductType {
+                elements,
+                variadic: existing.variadic,
+            }));
+        }
+        if let Expression::Product(product) = argument
+            && let [element] = product.elements.as_slice()
+        {
+            return self.refreshed_argument_type(module, &element.value);
+        }
+        match self.refreshed_expression_type(module, argument)? {
+            value @ CheckedType::Function(_) => Some(value),
+            _ => self.expression_types.get(&argument.syntax().id).cloned(),
+        }
     }
 
     fn refresh_implicit_thunk_call(
@@ -9135,16 +9244,24 @@ impl TypeChecker {
                         }
                         return CheckedType::Error;
                     }
+                    let solvable = self
+                        .function_origin(module, &call.callee)
+                        .and_then(|id| module.functions().iter().find(|function| function.id == id))
+                        .map(|function| {
+                            self.declared_type_parameters(module, &function.type_parameters)
+                        })
+                        .unwrap_or_default();
                     let argument_expected_owned = match &raw_callee_type {
                         CheckedType::Function(function)
                             if function.parameter_style
                                 == staple_syntax::FunctionParameterStyle::Juxtaposed =>
                         {
                             match function.parameter.as_ref() {
-                                CheckedType::Product(product) => product
-                                    .elements
-                                    .first()
-                                    .map(|element| erase_type_parameters(&element.value_type)),
+                                CheckedType::Product(product) => {
+                                    product.elements.first().map(|element| {
+                                        erase_type_parameters_in(&element.value_type, &solvable)
+                                    })
+                                }
                                 _ => None,
                             }
                         }
@@ -9164,9 +9281,12 @@ impl TypeChecker {
                                         .skip(1)
                                         .all(|field| field.default.is_some()) =>
                             {
-                                Some(erase_type_parameters(&product.elements[0].value_type))
+                                Some(erase_type_parameters_in(
+                                    &product.elements[0].value_type,
+                                    &solvable,
+                                ))
                             }
-                            _ => Some(erase_type_parameters(&function.parameter)),
+                            _ => Some(erase_type_parameters_in(&function.parameter, &solvable)),
                         },
                         _ => None,
                     };
@@ -9277,6 +9397,25 @@ impl TypeChecker {
                     };
                     if self.did_return {
                         return CheckedType::empty_product();
+                    }
+                    // Erasing the callee's own parameters inside function-typed
+                    // slots hides a single-value requirement from the argument
+                    // check, so report it against the declared parameter.
+                    if !solvable.is_empty()
+                        && let CheckedType::Function(function) = &raw_callee_type
+                        && let Some(CheckedType::Parameter { id, name, .. }) =
+                            parameter_products::single_value_conflict(
+                                &function.parameter,
+                                &argument_type,
+                            )
+                    {
+                        let owner = self
+                            .parameter_product_owners
+                            .get(id)
+                            .map(String::as_str)
+                            .unwrap_or("this function");
+                        self.diagnostics.push(Diagnostic::new(call.argument.syntax().span.clone(), format!("`{name}` of `{owner}` requires a single value, but the argument takes `{argument_type}`")));
+                        return CheckedType::Error;
                     }
                     if let CheckedType::Function(function) = &raw_callee_type
                         && let CheckedType::Parameter { id, name, .. } = function.parameter.as_ref()
@@ -15673,15 +15812,39 @@ fn normalize_substituted_sum(alternatives: Vec<CheckedType>) -> CheckedType {
 /// one risks a false mismatch); a still-generic function-typed field is left
 /// as-is, matching prior behavior for that narrow case.
 fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
+    erase_type_parameters_in(value_type, &HashSet::new())
+}
+
+/// `erase_type_parameters`, also erasing the `solvable` parameters inside
+/// function types. A call's own quantified parameters are still being
+/// inferred, so the function-typed slots they appear in cannot constrain the
+/// argument; enclosing (rigid) parameters inside function types are kept.
+fn erase_type_parameters_in(
+    value_type: &CheckedType,
+    solvable: &HashSet<TypeParameterId>,
+) -> CheckedType {
     match value_type {
         CheckedType::Parameter { .. } => CheckedType::Inferred,
         CheckedType::CPointer { pointee } => CheckedType::CPointer {
-            pointee: Box::new(erase_type_parameters(pointee)),
+            pointee: Box::new(erase_type_parameters_in(pointee, solvable)),
         },
-        CheckedType::Ref(value) => CheckedType::Ref(Box::new(erase_type_parameters(value))),
-        CheckedType::Slice(value) => CheckedType::Slice(Box::new(erase_type_parameters(value))),
-        CheckedType::Buffer(value) => CheckedType::Buffer(Box::new(erase_type_parameters(value))),
+        CheckedType::Ref(value) => {
+            CheckedType::Ref(Box::new(erase_type_parameters_in(value, solvable)))
+        }
+        CheckedType::Slice(value) => {
+            CheckedType::Slice(Box::new(erase_type_parameters_in(value, solvable)))
+        }
+        CheckedType::Buffer(value) => {
+            CheckedType::Buffer(Box::new(erase_type_parameters_in(value, solvable)))
+        }
         CheckedType::Array { .. } => CheckedType::Inferred,
+        CheckedType::Function(_) if !solvable.is_empty() => {
+            let erased = solvable
+                .iter()
+                .map(|id| (*id, CheckedType::Inferred))
+                .collect::<HashMap<_, _>>();
+            substitute_type(value_type.clone(), &erased)
+        }
         CheckedType::Opaque {
             sized,
             id,
@@ -15691,7 +15854,10 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
             sized: *sized,
             id: *id,
             name: name.clone(),
-            arguments: arguments.iter().map(erase_type_parameters).collect(),
+            arguments: arguments
+                .iter()
+                .map(|value| erase_type_parameters_in(value, solvable))
+                .collect(),
         },
         CheckedType::Product(product) => CheckedType::Product(CheckedProductType {
             elements: product
@@ -15699,14 +15865,18 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
                 .iter()
                 .map(|element| CheckedTypeElement {
                     name: element.name.clone(),
-                    value_type: erase_type_parameters(&element.value_type),
+                    value_type: erase_type_parameters_in(&element.value_type, solvable),
                     default: element.default.clone(),
                 })
                 .collect(),
             variadic: product.variadic,
         }),
         CheckedType::Sum(sum) => CheckedType::Sum(CheckedSumType {
-            alternatives: sum.alternatives.iter().map(erase_type_parameters).collect(),
+            alternatives: sum
+                .alternatives
+                .iter()
+                .map(|value| erase_type_parameters_in(value, solvable))
+                .collect(),
         }),
         CheckedType::Wrapper {
             id,
@@ -15718,8 +15888,11 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
             id: *id,
             name: name.clone(),
             introduction: *introduction,
-            arguments: arguments.iter().map(erase_type_parameters).collect(),
-            representation: Box::new(erase_type_parameters(representation)),
+            arguments: arguments
+                .iter()
+                .map(|value| erase_type_parameters_in(value, solvable))
+                .collect(),
+            representation: Box::new(erase_type_parameters_in(representation, solvable)),
         },
         CheckedType::TypeConstructor {
             id,
@@ -15728,7 +15901,10 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
         } => CheckedType::TypeConstructor {
             id: *id,
             name: name.clone(),
-            arguments: arguments.iter().map(erase_type_parameters).collect(),
+            arguments: arguments
+                .iter()
+                .map(|value| erase_type_parameters_in(value, solvable))
+                .collect(),
         },
         other => other.clone(),
     }
