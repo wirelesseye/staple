@@ -60,8 +60,6 @@ pub(crate) enum RejectionReason {
     TraitBound,
     /// A trait call with run-time arguments (Stage 6).
     TraitCallRuntime,
-    /// An effect variable in the signature (Stage 5).
-    EffectVariable,
     /// An async intrinsic: completion, task, resolver (Stage 8).
     AsyncIntrinsic,
     /// A reactive intrinsic (Stage 8).
@@ -99,7 +97,6 @@ impl RejectionReason {
             self,
             RejectionReason::TraitBound
                 | RejectionReason::TraitCallRuntime
-                | RejectionReason::EffectVariable
                 | RejectionReason::AsyncIntrinsic
                 | RejectionReason::ReactiveIntrinsic
                 | RejectionReason::CoroutineExpression
@@ -129,7 +126,6 @@ impl RejectionReason {
             RejectionReason::CallsExcludedTemplate => "calls an excluded template",
             RejectionReason::TraitBound => "trait bound other than Copy/Sized",
             RejectionReason::TraitCallRuntime => "trait call with run-time arguments",
-            RejectionReason::EffectVariable => "effect variable",
             RejectionReason::AsyncIntrinsic => "async intrinsic",
             RejectionReason::ReactiveIntrinsic => "reactive intrinsic",
             RejectionReason::CoroutineExpression => "coroutine or await expression",
@@ -340,17 +336,7 @@ impl LoweredProgram {
         origin: &crate::Origin,
     ) -> Vec<staple_syntax::Diagnostic> {
         use RejectionReason::*;
-        fn has_effect(parameters: &[crate::CheckedSchemeParameter]) -> bool {
-            parameters.iter().any(|parameter| match parameter {
-                crate::CheckedSchemeParameter::Effect { .. } => true,
-                crate::CheckedSchemeParameter::Product(parameters) => has_effect(parameters),
-                _ => false,
-            })
-        }
         let mut reasons = BTreeSet::new();
-        if has_effect(&scheme.parameters) {
-            reasons.insert(EffectVariable);
-        }
         if scheme.trait_bounds.iter().any(|bound| {
             Some(bound.trait_id) != self.semantic_ids.copy_trait
                 && Some(bound.trait_id) != self.semantic_ids.sized_trait
@@ -369,7 +355,6 @@ impl LoweredProgram {
         }
         let messages = reasons.into_iter().map(|reason| match reason {
             TraitBound | TraitCallRuntime => "polymorphic values with trait bounds are not supported yet".to_owned(),
-            EffectVariable => "effect-polymorphic functions cannot be used as values yet".to_owned(),
             CoroutineExpression => "functions with coroutine bodies cannot be used as polymorphic values yet".to_owned(),
             AsyncIntrinsic => "functions with async bodies cannot be used as polymorphic values yet".to_owned(),
             ReactiveIntrinsic | ReactiveNameRead | ReactiveCall | SignalBinding | ReactiveBinding | SignalAssignment => "functions with reactive bodies cannot be used as polymorphic values yet".to_owned(),

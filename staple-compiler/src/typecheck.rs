@@ -6226,11 +6226,22 @@ impl TypeChecker {
         {
             return false;
         }
-        let Some(CheckedType::Function(template)) = self
+        let template = self
             .function_origin(module, &call.callee)
             .and_then(|id| self.function_types.get(&id).cloned())
             .map(CheckedType::Function)
-        else {
+            .or_else(|| match call.callee.as_ref() {
+                // A polymorphic value in a local: its scheme is the template.
+                Expression::Name(name) => module
+                    .symbol_for(name.syntax.id)
+                    .and_then(|symbol| self.symbol_value_type(symbol))
+                    .and_then(|value_type| match value_type {
+                        CheckedType::Forall(scheme) => Some(scheme.body.as_ref().clone()),
+                        _ => None,
+                    }),
+                _ => None,
+            });
+        let Some(CheckedType::Function(template)) = template else {
             return false;
         };
         let template_type = CheckedType::Function(template.clone());
@@ -6257,6 +6268,15 @@ impl TypeChecker {
         substitutions.retain(|_, replacement| effect_substitution_value(replacement).is_none());
         if !infer_type_parameters(&template.parameter, &actual, &mut substitutions) {
             return false;
+        }
+        // State effects of captured cells stay out of the solved row, as they
+        // did when the row was first solved before lambda effects settled.
+        for replacement in substitutions.values_mut() {
+            if let Some(effects) = effect_substitution_value(replacement)
+                && effects.state.is_some()
+            {
+                *replacement = effect_substitution_type(effects.clone().with_state(None));
+            }
         }
         let instantiated = substitute_type(template_type, &substitutions);
         let CheckedType::Function(instantiated_function) = &instantiated else {
@@ -9249,6 +9269,20 @@ impl TypeChecker {
                         .and_then(|id| module.functions().iter().find(|function| function.id == id))
                         .map(|function| {
                             self.declared_type_parameters(module, &function.type_parameters)
+                        })
+                        .or_else(|| match raw_callee_type.clone() {
+                            // A polymorphic value solves its own scheme's parameters.
+                            CheckedType::Function(_) => match call.callee.as_ref() {
+                                Expression::Name(name) => module
+                                    .symbol_for(name.syntax.id)
+                                    .and_then(|symbol| self.symbol_value_type(symbol))
+                                    .and_then(|value_type| match value_type {
+                                        CheckedType::Forall(scheme) => Some(scheme.bound_ids()),
+                                        _ => None,
+                                    }),
+                                _ => None,
+                            },
+                            _ => None,
                         })
                         .unwrap_or_default();
                     let argument_expected_owned = match &raw_callee_type {

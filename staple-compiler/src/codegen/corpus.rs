@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 125] = [
+static CORPUS: [CorpusProgram; 128] = [
     expect_stdout(
         must_run(inline(
             "from_types",
@@ -2171,6 +2171,100 @@ let value = at (Ref (1, 2), (USize :: 5))
             "emission",
         ),
         "task\n5\n1\n",
+    )),
+    // The Stage 5 goal: an effect-polymorphic value stored and passed as a parameter, with resource and empty instantiations.
+    must_run(expect_stdout(
+        inline(
+            "effect_polymorphic_goal",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "\n",
+                "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+                "\n",
+                "let stored: <effect E> (() ->{E} ()) ->{E} () = twice\n",
+                "def run: (<effect E> (() ->{E} ()) ->{E} ()) ->{IO} () = repeat => {\n",
+                "    let mut count = 0\n",
+                "    repeat (() => println \"hi\")          // E := {IO}\n",
+                "    repeat (() => { count = count + 1 })  // E := {} (state effects are erased)\n",
+                "    println \"${count}\"\n",
+                "}\n",
+                "run stored\n",
+            ),
+            "emission",
+        ),
+        "hi\nhi\n2\n",
+    )),
+    // Effect-polymorphic values with user and `mut` resources.
+    must_run(expect_stdout(
+        inline(
+            "effect_polymorphic_resources",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "\n",
+                "type Counter = wrap (value: I32)\n",
+                "type Label = wrap (text: String)\n",
+                "\n",
+                "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+                "def bump: () ->{mut Counter} () = () => {\n",
+                "    (resource Counter).value = (resource Counter).value + 1\n",
+                "}\n",
+                "def tag: () ->{Label, IO} () = () => println (resource Label).text\n",
+                "\n",
+                "let stored: <effect E> (() ->{E} ()) ->{E} () = twice\n",
+                "\n",
+                "def use_label: (<effect E> (() ->{E} ()) ->{E} ()) ->{Label, IO} () = repeat => {\n",
+                "    repeat tag\n",
+                "}\n",
+                "def use_counter: (<effect E> (() ->{E} ()) ->{E} ()) ->{mut Counter} () = repeat => {\n",
+                "    repeat bump\n",
+                "}\n",
+                "\n",
+                "with Label = Label (text: \"label\") {\n",
+                "    use_label stored\n",
+                "}\n",
+                "let mut counter = Counter (value: 10)\n",
+                "with mut Counter = counter {\n",
+                "    use_counter stored\n",
+                "}\n",
+                "println \"${counter.value}\"\n",
+            ),
+            "emission",
+        ),
+        "label\nlabel\n12\n",
+    )),
+    // Values quantifying a type and an effect, with an open row.
+    must_run(expect_stdout(
+        inline(
+            "effect_polymorphic_type_and_effect",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "\n",
+                "type Label = wrap (text: String)\n",
+                "\n",
+                "def apply: <T, effect E> (T, T ->{E} ()) ->{E} () = (x, f) => f x\n",
+                "def both: <T, effect E> (T, T ->{E, IO} ()) ->{E, IO} () = (x, f) => { f x; f x }\n",
+                "\n",
+                "let applier: <T, effect E> (T, T ->{E} ()) ->{E} () = apply\n",
+                "let bother: <T, effect E> (T, T ->{E, IO} ()) ->{E, IO} () = both\n",
+                "\n",
+                "def show: I32 ->{IO} () = x => println \"${x}\"\n",
+                "def tag: I32 ->{Label, IO} () = x => println \"${(resource Label).text}${x}\"\n",
+                "def silent: I32 -> () = x => ()\n",
+                "\n",
+                "applier (1, show)\n",
+                "applier (2, silent)\n",
+                "bother (3, show)\n",
+                "with Label = Label (text: \"n\") {\n",
+                "    applier (5, tag)\n",
+                "    bother (6, tag)\n",
+                "}\n",
+                "let mut hits = 0\n",
+                "applier (7, (x: I32) => { hits = hits + x })\n",
+                "println \"${hits}\"\n",
+            ),
+            "emission",
+        ),
+        "1\n3\n3\nn5\nn6\nn6\n7\n",
     )),
     must_run(expect_stdout(
         inline(

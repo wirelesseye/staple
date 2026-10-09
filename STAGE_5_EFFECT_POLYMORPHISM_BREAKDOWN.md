@@ -41,34 +41,44 @@ stage's base commit for every existing input.
 
 ## Current state
 
-Stage 5a is done on `worktree-hybrid-polymorphism` (base `a47627a`); 5b is not started.
+Stage 5a is done and 5b's core works on `worktree-hybrid-polymorphism` (base `a47627a`). The Goal program and its resource variants run. Left: the effect-row differential mode (E-H), dynamic-to-dynamic row repacking, and the exit gate.
 
 - **Checker fixes (done).**
   - Calls erase the callee's own quantified parameters inside function-typed
-    slots, so `apply (a, g)` with `apply: <T, effect E> (T, T ->{E} ()) ->{E} ()`
-    infers. The cause was not effects. Single-value diagnostics are kept.
+    slots, so `apply (a, g)` infers, also through a polymorphic local. The
+    cause was not effects. Single-value diagnostics are kept.
   - `refresh_effect_generic_call` re-solves a call's effect parameters once
-    lambda effects are inferred. Before it, `twice (() => bump 1)` with a
-    `mut` resource solved `E := {}` and crashed at run time (`IO` hid it).
-- **Corpus and measurement (done).** `effect_generic_rows` and
-  `effect_generic_alias_types` run in default and differential mode
-  (`stage5_effect_generic_differential`). The coverage report now counts
-  templates with effect parameters: 6 in the corpus, 0 rejected.
-- **5a (done).** `dynamic_support.rs` no longer rejects a template for its
-  own effect variable; effect parameters are compile-time substitutions in
-  the instance key. Polymorphic values that quantify an effect keep the
-  "cannot be used as values yet" message until 5b. Gate: `cargo test
-  --workspace` passes, and IR for every example is identical to the base
-  release build.
-- **Still true at base (5b's inputs).**
-  - `CanonicalEffectSet::convert` resolves effect variables only through
-    scheme binders, so no dynamic key can mention a run-time one.
-  - Resources are the only effect component with a run-time representation:
-    the concrete ABI passes by value, or by pointer when `mut` or not `Copy`;
-    the dynamic shape passes every resource by pointer. State effects never
-    reach the ABI.
-  - The stdlib's effect-generic functions (`block_on`, `spawn`, `reaction`,
-    `batch`) are async or reactive intrinsics, restricted until Stage 8.
+    lambda effects are inferred, for generic `def`s and polymorphic locals.
+    Before it, `twice (() => bump 1)` with a `mut` resource solved
+    `E := {}` and crashed (`IO` is zero-sized and hid it). State effects of
+    captured cells stay out of the solved row, as before.
+- **5a (done).** Type-and-effect generics run in dictionary-passed code;
+  effect parameters are compile-time substitutions in the instance key.
+- **5b core (done).**
+  - `InstanceKey::runtime_effects` is a separate set from `runtime`
+    (decision E-C changed: effect ids stay out of `runtime()`, so every
+    descriptor-order use is unaffected). `is_dynamic()` replaces
+    `runtime().is_empty()` where the ABI is chosen.
+  - `CanonicalEffectSet::runtime_variable` is the run-time form. Resolution
+    takes a `RuntimeScope` (types plus effects); a polymorphic entry's scope
+    is `scheme_runtime_scope`, and a callee effect parameter is run-time when
+    its row mentions a caller's run-time variable (E-B).
+  - The dynamic signature gains the bundle slot after the fixed resources
+    (E-D, flat form). `push_dynamic_row_arguments` builds it at concrete
+    callers and at dynamic callers of polymorphic values; a call whose row
+    is the caller's own variable forwards the caller's bundle.
+  - Row reabstraction thunks (`concrete`↔`dynamic`) take each concrete
+    resource from a fixed dynamic slot or the next bundle slot
+    (`row_sources`).
+  - The "effect-polymorphic functions cannot be used as values yet"
+    restriction is gone, and `Staple.md` documents the feature.
+  - Corpus: `effect_polymorphic_goal`, `_resources`, `_type_and_effect`.
+- **Not done.**
+  - Effect-row differential mode (E-H), which also exercises direct
+    dynamic-to-dynamic calls whose callee row is run-time.
+  - Rows mixing fixed resources with a nested variable, and the
+    dynamic-to-dynamic repacking thunk (E-F's third direction).
+  - Reachability tests and the exit gate.
 - **Known limitation.** A `wrap` type with an effect parameter cannot be
   constructed: `type Task{E} = wrap (run: () ->{E} ())` and `Task (run: f)`
   reports the field as `() -> ()`. The corpus uses `alias` types instead.

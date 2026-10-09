@@ -1263,7 +1263,7 @@ impl<'a> LoweredWalker<'a> {
         };
         // Dynamic thunk environments are planned with their descriptors by
         // descriptor_artifacts, rather than concrete capture drop glue.
-        if self.program.instance_runtime_order(thunk_instance).is_some_and(|runtime| !runtime.is_empty()) {
+        if self.program.instance_is_dynamic(thunk_instance) {
             return Ok(());
         }
         let gate = body.captures.iter().any(|capture| {

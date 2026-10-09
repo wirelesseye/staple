@@ -80,6 +80,8 @@ struct DynamicEnvironment<'context> {
     closure: PointerValue<'context>,
     result: PointerValue<'context>,
     result_descriptor: PointerValue<'context>,
+    /// The effect-row bundle of the instance's run-time effect variable.
+    bundle: Option<PointerValue<'context>>,
     returned: bool,
 }
 
@@ -297,6 +299,119 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Pushes the resource arguments of a dynamic call: the callee's fixed
+    /// resources in its own order, then, when its row names a variable, one
+    /// bundle pointer. `pointers` follow `call_row.resources`.
+    ///
+    /// With `forward`, the callee's row is the caller's own row and its
+    /// variable is the caller's: `own_bundle` passes through unchanged.
+    /// Otherwise the bundle holds the call row's remaining resources in
+    /// canonical order, then `own_bundle` as a nested bundle when the call
+    /// row keeps a variable of the caller's; an empty bundle is null.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn push_dynamic_row_arguments(
+        &self,
+        span: &staple_syntax::Span,
+        callee_row: &crate::CheckedEffectSet,
+        call_row: &crate::CheckedEffectSet,
+        pointers: Vec<PointerValue<'context>>,
+        own_bundle: Option<PointerValue<'context>>,
+        forward: bool,
+        arguments: &mut Vec<inkwell::values::BasicMetadataValueEnum<'context>>,
+    ) -> CodeGenerationResult<()> {
+        let mut taken = vec![false; pointers.len()];
+        for fixed in &callee_row.resources {
+            let position = call_row
+                .resources
+                .iter()
+                .enumerate()
+                .position(|(index, resource)| {
+                    !taken[index]
+                        && resource.value_type == fixed.value_type
+                        && resource.mutable == fixed.mutable
+                })
+                .ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "dynamic call row lacks a fixed resource")
+                })?;
+            taken[position] = true;
+            arguments.push(pointers[position].into());
+        }
+        if callee_row.variable.is_none() {
+            if taken.iter().any(|taken| !*taken) || call_row.variable.is_some() {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "dynamic call row has effects its callee does not take",
+                ));
+            }
+            return Ok(());
+        }
+        if forward {
+            let bundle = own_bundle.ok_or_else(|| {
+                Diagnostic::new(
+                    span.clone(),
+                    "a call through an effect variable needs the caller's bundle",
+                )
+            })?;
+            arguments.push(bundle.into());
+            return Ok(());
+        }
+        let mut bundle = pointers
+            .iter()
+            .zip(&taken)
+            .filter(|(_, taken)| !**taken)
+            .map(|(pointer, _)| *pointer)
+            .collect::<Vec<_>>();
+        if call_row.variable.is_some() {
+            bundle.push(own_bundle.ok_or_else(|| {
+                Diagnostic::new(
+                    span.clone(),
+                    "a call row with an effect variable needs the caller's bundle",
+                )
+            })?);
+        }
+        arguments.push(self.build_bundle(&bundle)?.into());
+        Ok(())
+    }
+
+    /// An effect-row bundle: an array of resource pointers in the entry
+    /// block, or null for the empty row.
+    fn build_bundle(
+        &self,
+        pointers: &[PointerValue<'context>],
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+        if pointers.is_empty() {
+            return Ok(pointer_type.const_null());
+        }
+        let array_type = pointer_type.array_type(pointers.len() as u32);
+        let storage = self
+            .backend
+            .entry_builder()
+            .build_alloca(array_type, "effect.bundle")
+            .map_err(compiler_diagnostic)?;
+        for (index, pointer) in pointers.iter().enumerate() {
+            let slot = unsafe {
+                self.backend
+                    .builder
+                    .build_in_bounds_gep(
+                        array_type,
+                        storage,
+                        &[
+                            self.backend.context.i32_type().const_zero(),
+                            self.backend.context.i32_type().const_int(index as u64, false),
+                        ],
+                        "effect.bundle.slot",
+                    )
+                    .map_err(compiler_diagnostic)?
+            };
+            self.backend
+                .builder
+                .build_store(slot, *pointer)
+                .map_err(compiler_diagnostic)?;
+        }
+        Ok(storage)
+    }
+
     fn emit_concrete_dynamic_call_with(
         &self,
         owner: EmissionOwner,
@@ -339,6 +454,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         arguments.push(result.into());
         let resource_count = call.resource_bindings.len();
         let (resources, values) = values.split_at(resource_count);
+        let mut resource_pointers = Vec::with_capacity(resource_count);
         for (index, value) in resources.iter().enumerate() {
             let use_id = *call.resource_bindings.get(index).ok_or_else(|| {
                 Diagnostic::new(span.clone(), "missing concrete resource binding")
@@ -363,8 +479,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 storage
             };
-            arguments.push(pointer.into());
+            resource_pointers.push(pointer);
         }
+        self.push_dynamic_row_arguments(
+            span,
+            &signature.effects,
+            &call.function_type.effects,
+            resource_pointers,
+            None,
+            false,
+            &mut arguments,
+        )?;
         let parameter_types = super::flattened_parameter_types(&call.function_type.parameter);
         let indirect = self.backend.indirect_parameter_mask(&call.function_type);
         let whole = call
@@ -1147,6 +1272,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             closure,
             result,
             result_descriptor: pointer.const_null(),
+            bundle: None,
             returned: false,
         };
         let (product, managed) = match &plan.construction {
@@ -1669,6 +1795,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             closure: pointer,
             result: pointer,
             result_descriptor: pointer,
+            bundle: None,
             returned: false,
         };
         let captures = callable
@@ -2646,7 +2773,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             // value by pointer.
             arguments.push(storage.into());
         }
-        arguments.extend(hidden);
+        if dynamic_shape {
+            let pointers = hidden
+                .iter()
+                .map(|value| match value {
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(pointer) => Ok(*pointer),
+                    _ => Err(Diagnostic::new(
+                        span.clone(),
+                        "dynamic callee resource is not a pointer",
+                    )),
+                })
+                .collect::<CodeGenerationResult<Vec<_>>>()?;
+            self.push_dynamic_row_arguments(
+                span,
+                &signature.effects,
+                &call.function_type.effects,
+                pointers,
+                environment.bundle,
+                call.scheme.is_none(),
+                &mut arguments,
+            )?;
+        } else {
+            arguments.extend(hidden);
+        }
         let mut writebacks = Vec::new();
         for (index, slot) in slots.iter().enumerate() {
             let mut pointer = slot
@@ -3873,6 +4022,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     closure: environment,
                     result: parameters[1 + own_descriptors].into_pointer_value(),
                     result_descriptor: pointer.const_null(),
+                    bundle: None,
                     returned: false,
                 };
                 let mut built = Vec::new();
@@ -4278,6 +4428,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .context
                 .ptr_type(AddressSpace::default())
                 .const_null(),
+            bundle: body.signature.effects.variable.as_ref().map(|_| {
+                parameters[2 + runtime.len() + resource_count].into_pointer_value()
+            }),
             returned: false,
         };
         let entry = self.backend.context.append_basic_block(function, "entry");
@@ -4621,7 +4774,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let owner = EmissionOwner::Instance(id);
-        let raw = &parameters[2 + runtime.len() + resource_count..];
+        let bundle_slots = usize::from(body.signature.effects.variable.is_some());
+        let raw = &parameters[2 + runtime.len() + resource_count + bundle_slots..];
         let whole = body
             .signature
             .mutations

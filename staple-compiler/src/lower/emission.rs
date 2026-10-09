@@ -116,6 +116,11 @@ impl<'a> EmissionView<'a> {
         )
     }
 
+    /// Whether the instance uses the dynamic ABI.
+    pub(crate) fn instance_is_dynamic(&self, id: FunctionInstanceId) -> bool {
+        self.program.instance_is_dynamic(id)
+    }
+
     /// Runtime descriptor parameters in descriptor ABI order (R-A).
     pub(crate) fn instance_runtime_order(
         &self,

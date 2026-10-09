@@ -2027,6 +2027,34 @@ pub(crate) enum InstanceResolutionTarget<'a> {
 /// One specialization resolver input: the target function, the requesting origin,
 /// the complete checked callable type at the site, the raw lowering recipe, and
 /// the enclosing-instance relationship.
+/// The run-time parameters of one scope: type parameters (which carry
+/// descriptors) and effect parameters (which carry only bundles).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeScope {
+    pub types: BTreeSet<TypeParameterId>,
+    pub effects: BTreeSet<TypeParameterId>,
+}
+
+impl RuntimeScope {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.types.is_empty() && self.effects.is_empty()
+    }
+
+    /// Replaces run-time types by `Never` and run-time effect variables by the
+    /// empty row, the way a descriptor-free check sees them.
+    fn erasure_map(&self) -> HashMap<TypeParameterId, CheckedType> {
+        let mut map = self
+            .types
+            .iter()
+            .map(|id| (*id, CheckedType::Never))
+            .collect::<HashMap<_, _>>();
+        for id in &self.effects {
+            map.insert(*id, effect_substitution_type(CheckedEffectSet::default()));
+        }
+        map
+    }
+}
+
 pub(crate) struct InstanceResolutionRequest<'a> {
     pub function: FunctionId,
     pub origin: Origin,
@@ -2037,6 +2065,27 @@ pub(crate) struct InstanceResolutionRequest<'a> {
 }
 
 impl LoweredProgram {
+    /// Whether an instance uses the dynamic ABI: it has run-time type or
+    /// effect parameters.
+    pub(crate) fn instance_is_dynamic(&self, id: FunctionInstanceId) -> bool {
+        self.instances
+            .get(id)
+            .and_then(|instance| self.specializations.instance(instance.ordinal))
+            .is_some_and(|key| key.is_dynamic())
+    }
+
+    /// The run-time scope of a polymorphic value's entry: every quantified
+    /// type parameter (with a descriptor) and effect parameter (with a bundle).
+    pub(crate) fn scheme_runtime_scope(&self, function: FunctionId) -> RuntimeScope {
+        self.functions
+            .get(function)
+            .map(|template| RuntimeScope {
+                types: template.scheme_type_parameters.iter().copied().collect(),
+                effects: template.scheme_effect_parameters.iter().copied().collect(),
+            })
+            .unwrap_or_default()
+    }
+
     /// Runtime descriptor parameters in descriptor ABI order (R-A): the
     /// template's declared scheme order, with parameters the template does
     /// not declare (an enclosing instance's) first, in id order.
@@ -2090,47 +2139,83 @@ impl LoweredProgram {
         request: &InstanceResolutionRequest<'_>,
         requested_runtime: &BTreeSet<TypeParameterId>,
     ) -> Result<ResolvedInstanceRequest, Diagnostic> {
+        self.resolve_instance_request_in_scope(
+            request,
+            &RuntimeScope {
+                types: requested_runtime.clone(),
+                effects: BTreeSet::new(),
+            },
+        )
+    }
+
+    /// Like [`Self::resolve_instance_request_with_runtime`], with run-time
+    /// effect parameters beside the run-time types.
+    pub(crate) fn resolve_instance_request_in_scope(
+        &self,
+        request: &InstanceResolutionRequest<'_>,
+        requested: &RuntimeScope,
+    ) -> Result<ResolvedInstanceRequest, Diagnostic> {
         let enclosing = match request.target {
             InstanceResolutionTarget::Root => None,
             InstanceResolutionTarget::Nested(enclosing)
             | InstanceResolutionTarget::Current(enclosing) => Some(enclosing),
         };
         let resolved = (|| {
-            let caller_runtime = enclosing
-                .map(|owner| owner.key.runtime())
-                .cloned()
+            let caller = enclosing
+                .map(|owner| RuntimeScope {
+                    types: owner.key.runtime().clone(),
+                    effects: owner.key.runtime_effects().clone(),
+                })
                 .unwrap_or_default();
-            let (mut environment, relevant) =
-                if caller_runtime.is_empty() && requested_runtime.is_empty() {
-                    self.resolve_substitutions(
-                        request.function,
-                        &request.origin,
-                        &request.function_type,
-                        &request.substitutions,
-                        enclosing.map(|owner| &owner.environment),
-                    )?
-                } else {
-                    self.resolve_substitutions_in_scope(
-                        request.function,
-                        &request.origin,
-                        &request.function_type,
-                        &request.substitutions,
-                        enclosing.map(|enclosing| &enclosing.environment),
-                        &caller_runtime,
-                        requested_runtime,
-                    )?
-                };
-            let mut runtime = requested_runtime.clone();
-            if !caller_runtime.is_empty() {
+            let (mut environment, relevant) = if caller.is_empty() && requested.is_empty() {
+                self.resolve_substitutions(
+                    request.function,
+                    &request.origin,
+                    &request.function_type,
+                    &request.substitutions,
+                    enclosing.map(|owner| &owner.environment),
+                )?
+            } else {
+                self.resolve_substitutions_in_scope(
+                    request.function,
+                    &request.origin,
+                    &request.function_type,
+                    &request.substitutions,
+                    enclosing.map(|enclosing| &enclosing.environment),
+                    &caller,
+                    requested,
+                )?
+            };
+            let mut runtime = requested.types.clone();
+            let mut runtime_effects = requested.effects.clone();
+            if !caller.is_empty() {
+                let caller_ids = caller
+                    .types
+                    .iter()
+                    .chain(&caller.effects)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
                 for parameter in relevant.type_parameters() {
                     if let Some(value) = environment.type_value(parameter) {
                         let mut referenced = BTreeSet::new();
                         collect_referenced_parameters(value, &mut referenced);
-                        if !referenced.is_disjoint(&caller_runtime) {
+                        if !referenced.is_disjoint(&caller_ids) {
                             runtime.insert(parameter);
                         }
-                    } else if caller_runtime.contains(&parameter) {
+                    } else if caller.types.contains(&parameter) {
                         runtime.insert(parameter);
+                    }
+                }
+                for parameter in relevant.effect_parameters() {
+                    if let Some(value) = environment.effect_value(parameter) {
+                        let mut referenced = BTreeSet::new();
+                        SubstitutionValue::Effects(value.clone())
+                            .referenced_parameters(&mut referenced);
+                        if !referenced.is_disjoint(&caller_ids) {
+                            runtime_effects.insert(parameter);
+                        }
+                    } else if caller.effects.contains(&parameter) {
+                        runtime_effects.insert(parameter);
                     }
                 }
             }
@@ -2159,6 +2244,33 @@ impl LoweredProgram {
                     },
                 );
             }
+            for parameter in &runtime_effects {
+                if !relevant.effects.contains(parameter) {
+                    return Err(Diagnostic::new(
+                        request.origin.span.clone(),
+                        format!(
+                            "run-time parameter {} is not a relevant effect parameter",
+                            parameter.0
+                        ),
+                    ));
+                }
+                // The body keeps the variable itself; its bundle arrives as an
+                // argument.
+                environment.entries.insert(
+                    *parameter,
+                    SubstitutionEntry {
+                        source: SubstitutionSource::Site,
+                        value: SubstitutionValue::Effects(CheckedEffectSet {
+                            variable: Some(crate::CheckedEffectVariable {
+                                id: *parameter,
+                                name: relevant.name(*parameter).unwrap_or("").to_owned(),
+                            }),
+                            resources: Vec::new(),
+                            state: None,
+                        }),
+                    },
+                );
+            }
             let evidence = self.resolve_trait_evidence(
                 &request.origin,
                 request.evidence.as_ref(),
@@ -2171,6 +2283,7 @@ impl LoweredProgram {
                 evidence.as_ref(),
                 &request.origin,
                 &runtime,
+                &runtime_effects,
             )?;
             Ok::<_, Diagnostic>((environment, relevant, evidence, key))
         })();
@@ -2236,6 +2349,7 @@ fn build_instance_key(
     evidence: Option<&TraitEvidence>,
     origin: &Origin,
     runtime: &BTreeSet<TypeParameterId>,
+    runtime_effects: &BTreeSet<TypeParameterId>,
 ) -> Result<InstanceKey, Diagnostic> {
     let mut substitutions = Vec::new();
     for parameter in relevant.type_parameters() {
@@ -2257,6 +2371,9 @@ fn build_instance_key(
         });
     }
     for parameter in relevant.effect_parameters() {
+        if runtime_effects.contains(&parameter) {
+            continue;
+        }
         let Some(effects) = environment.effect_value(parameter) else {
             return Err(Diagnostic::new(
                 origin.span.clone(),
@@ -2274,10 +2391,16 @@ fn build_instance_key(
     let evidence = evidence
         .map(|evidence| canonical_evidence(evidence, origin))
         .transpose()?;
-    let key = if runtime.is_empty() {
+    let key = if runtime.is_empty() && runtime_effects.is_empty() {
         InstanceKey::new(function, substitutions, evidence)
     } else {
-        InstanceKey::with_runtime(function, substitutions, evidence, runtime.clone())
+        InstanceKey::with_runtime_effects(
+            function,
+            substitutions,
+            evidence,
+            runtime.clone(),
+            runtime_effects.clone(),
+        )
     };
     key.map_err(|error| Diagnostic::new(origin.span.clone(), error.message()))
 }
@@ -3128,8 +3251,8 @@ impl LoweredProgram {
             function_type,
             substitutions,
             enclosing,
-            &BTreeSet::new(),
-            &BTreeSet::new(),
+            &RuntimeScope::default(),
+            &RuntimeScope::default(),
         )
     }
 
@@ -3141,9 +3264,11 @@ impl LoweredProgram {
         function_type: &CheckedFunctionType,
         substitutions: &CallSubstitutions,
         enclosing: Option<&SubstitutionEnvironment>,
-        caller_runtime: &BTreeSet<TypeParameterId>,
-        requested_runtime: &BTreeSet<TypeParameterId>,
+        caller: &RuntimeScope,
+        requested: &RuntimeScope,
     ) -> Result<(SubstitutionEnvironment, RelevantParameters), Diagnostic> {
+        let caller_runtime = &caller.types;
+        let requested_runtime = &requested.types;
         let Some(template) = self.functions.get(function) else {
             return Err(Diagnostic::new(
                 origin.span.clone(),
@@ -3157,6 +3282,11 @@ impl LoweredProgram {
         for parameter in &template.scheme_type_parameters {
             if requested_runtime.contains(parameter) {
                 relevant.notice_type(*parameter, "");
+            }
+        }
+        for parameter in &template.scheme_effect_parameters {
+            if requested.effects.contains(parameter) {
+                relevant.notice_effect(*parameter, "");
             }
         }
         let signature = template.signature.clone();
@@ -3190,8 +3320,10 @@ impl LoweredProgram {
         builder.add_inferred(inferred);
         let environment = builder.resolve()?;
         let mut concrete = environment.clone();
-        let mut scope = caller_runtime.clone();
-        scope.extend(requested_runtime);
+        let mut scope = caller.clone();
+        scope.types.extend(requested_runtime);
+        scope.effects.extend(&requested.effects);
+        let scope_map = scope.erasure_map();
         for parameter in relevant.type_parameters() {
             if requested_runtime.contains(&parameter) || caller_runtime.contains(&parameter) {
                 concrete.entries.insert(
@@ -3203,13 +3335,31 @@ impl LoweredProgram {
                 );
             } else if let Some(entry) = concrete.entries.get_mut(&parameter) {
                 if let SubstitutionValue::Type(value) = &entry.value {
-                    if let Some(problem) = unresolved_type_problem_in_scope(value, &scope) {
+                    if let Some(problem) = unresolved_type_problem_in_scope(value, &scope.types) {
                         return Err(unresolved_parameter_diagnostic(
                             origin, &relevant, parameter, "type", problem,
                         ));
                     }
-                    let map = scope.iter().map(|id| (*id, CheckedType::Never)).collect();
-                    entry.value = SubstitutionValue::Type(substitute_type(value.clone(), &map));
+                    entry.value =
+                        SubstitutionValue::Type(substitute_type(value.clone(), &scope_map));
+                }
+            }
+        }
+        for parameter in relevant.effect_parameters() {
+            if requested.effects.contains(&parameter) || caller.effects.contains(&parameter) {
+                concrete.entries.insert(
+                    parameter,
+                    SubstitutionEntry {
+                        source: SubstitutionSource::Site,
+                        value: SubstitutionValue::Effects(CheckedEffectSet::default()),
+                    },
+                );
+            } else if let Some(entry) = concrete.entries.get_mut(&parameter) {
+                if let SubstitutionValue::Effects(value) = &entry.value {
+                    entry.value = SubstitutionValue::Effects(substitute_effect_set(
+                        value.clone(),
+                        &scope_map,
+                    ));
                 }
             }
         }

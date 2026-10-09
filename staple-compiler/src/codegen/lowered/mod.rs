@@ -295,7 +295,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let runtime = self.view.instance_runtime_parameters(id).ok_or_else(|| {
                 Diagnostic::new(instance.origin.span.clone(), "missing instance key")
             })?;
-            let function_type = if runtime.is_empty() {
+            let function_type = if !self.view.instance_is_dynamic(id) {
                 self.backend.compile_closure_function_type(signature)?
             } else {
                 self.backend
@@ -990,11 +990,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let Some(root) = body.root else {
             return Ok(());
         };
-        if self
-            .view
-            .instance_runtime_parameters(id)
-            .is_some_and(|runtime| !runtime.is_empty())
-        {
+        if self.view.instance_is_dynamic(id) {
             return self.emit_dynamic_instance_body(id, function, body, root);
         }
         let entry = self.backend.context.append_basic_block(function, "entry");
@@ -5462,11 +5458,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .closure_environment
                         .ok_or_else(|| unsupported("current closure environment"))?,
                 };
-                if self
-                    .view
-                    .instance_runtime_parameters(*instance)
-                    .is_some_and(|runtime| !runtime.is_empty())
-                {
+                if self.view.instance_is_dynamic(*instance) {
                     let value = self.emit_concrete_dynamic_call(
                         owner, id, *instance, &call, pointer, &values,
                     )?;

@@ -144,6 +144,9 @@ pub(crate) enum CanonicalMutation {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CanonicalEffectSet {
     pub variable: Option<(usize, usize)>,
+    /// An effect variable that is unknown until run time: the bundle a
+    /// dynamic instance receives for its row (Stage 5b).
+    pub runtime_variable: Option<TypeParameterId>,
     pub resources: Vec<CanonicalResource>,
     pub state: Option<CanonicalStateEffect>,
 }
@@ -480,32 +483,36 @@ impl CanonicalEffectSet {
         runtime: bool,
         binders: &[Vec<TypeParameterId>],
     ) -> Result<Self, Diagnostic> {
-        let variable = effects
-            .variable
-            .as_ref()
-            .map(|variable| {
-                binders
-                    .iter()
-                    .rev()
-                    .enumerate()
-                    .find_map(|(depth, ids)| {
-                        ids.iter()
-                            .position(|id| *id == variable.id)
-                            .map(|index| (depth, index))
-                    })
-                    .ok_or_else(|| {
-                        origin_diagnostic(
+        let mut runtime_variable = None;
+        let variable = match effects.variable.as_ref() {
+            None => None,
+            Some(variable) => {
+                let bound = binders.iter().rev().enumerate().find_map(|(depth, ids)| {
+                    ids.iter()
+                        .position(|id| *id == variable.id)
+                        .map(|index| (depth, index))
+                });
+                match bound {
+                    Some(bound) => Some(bound),
+                    None if runtime => {
+                        runtime_variable = Some(variable.id);
+                        None
+                    }
+                    None => {
+                        return Err(origin_diagnostic(
                             origin,
                             format!(
                                 "effect variable `{}` is not resolved for a concrete key",
                                 variable.name
                             ),
-                        )
-                    })
-            })
-            .transpose()?;
+                        ));
+                    }
+                }
+            }
+        };
         Ok(CanonicalEffectSet {
             variable,
+            runtime_variable,
             resources: effects
                 .resources
                 .iter()
@@ -583,6 +590,10 @@ impl InstanceSubstitution {
 pub(crate) struct InstanceKey {
     function: FunctionId,
     runtime: BTreeSet<TypeParameterId>,
+    /// Effect parameters unknown until run time. Unlike `runtime`, these
+    /// have no descriptors: a row passes its resources by address and, when
+    /// it names a variable, one bundle pointer.
+    runtime_effects: BTreeSet<TypeParameterId>,
     substitutions: Vec<InstanceSubstitution>,
     evidence: Option<CanonicalEvidence>,
 }
@@ -633,12 +644,25 @@ impl InstanceKey {
     /// concrete callers can share the same dynamic implementation key.
     pub(crate) fn with_runtime(
         function: FunctionId,
-        mut substitutions: Vec<InstanceSubstitution>,
+        substitutions: Vec<InstanceSubstitution>,
         evidence: Option<CanonicalEvidence>,
         runtime: BTreeSet<TypeParameterId>,
     ) -> Result<Self, InstanceKeyError> {
+        Self::with_runtime_effects(function, substitutions, evidence, runtime, BTreeSet::new())
+    }
+
+    /// A key whose run-time set also names effect parameters.
+    pub(crate) fn with_runtime_effects(
+        function: FunctionId,
+        mut substitutions: Vec<InstanceSubstitution>,
+        evidence: Option<CanonicalEvidence>,
+        runtime: BTreeSet<TypeParameterId>,
+        runtime_effects: BTreeSet<TypeParameterId>,
+    ) -> Result<Self, InstanceKeyError> {
         for substitution in &substitutions {
-            if runtime.contains(&substitution.parameter()) {
+            if runtime.contains(&substitution.parameter())
+                || runtime_effects.contains(&substitution.parameter())
+            {
                 return Err(InstanceKeyError::RuntimeSubstitution(
                     substitution.parameter(),
                 ));
@@ -667,6 +691,7 @@ impl InstanceKey {
         Ok(InstanceKey {
             function,
             runtime,
+            runtime_effects,
             substitutions,
             evidence,
         })
@@ -674,6 +699,25 @@ impl InstanceKey {
 
     pub(crate) fn runtime(&self) -> &BTreeSet<TypeParameterId> {
         &self.runtime
+    }
+
+    /// Every run-time parameter id, types and effects together.
+    pub(crate) fn runtime_ids(&self) -> BTreeSet<TypeParameterId> {
+        self.runtime
+            .iter()
+            .chain(&self.runtime_effects)
+            .copied()
+            .collect()
+    }
+
+    pub(crate) fn runtime_effects(&self) -> &BTreeSet<TypeParameterId> {
+        &self.runtime_effects
+    }
+
+    /// Whether this instance takes run-time parameters of either kind and so
+    /// uses the dynamic ABI.
+    pub(crate) fn is_dynamic(&self) -> bool {
+        !self.runtime.is_empty() || !self.runtime_effects.is_empty()
     }
 
     pub(crate) fn function(&self) -> FunctionId {
@@ -1263,7 +1307,7 @@ impl SpecializationCatalog {
         declared: &impl Fn(&InstanceKey) -> Option<String>,
         seen: &HashSet<String>,
     ) -> String {
-        if !key.runtime().is_empty() {
+        if key.is_dynamic() {
             return format!("{}_dynamic", instance_ordinal_name(ordinal));
         }
         if key.substitutions().is_empty() && key.evidence().is_none() {

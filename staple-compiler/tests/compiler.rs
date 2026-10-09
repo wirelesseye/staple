@@ -13502,13 +13502,6 @@ fn stage4b_reports_each_polymorphic_value_restriction_at_its_construction() {
         ),
         (
             concat!(
-                "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\n",
-                "let stored = apply\n",
-            ),
-            "effect-polymorphic functions cannot be used as values yet",
-        ),
-        (
-            concat!(
                 "use std.coroutine.*\n",
                 "def launch: <T> move T -> Coroutine{} I32 = move value => coro { 1 }\n",
                 "let stored = launch\n",

@@ -513,10 +513,7 @@ impl LoweredOwnerVisitor for RequirementVisitor<'_> {
                 .and_then(|bindings| bindings.get(&LoweredBindingSite::CallableValue(id))),
         };
         if let Some(LoweredBoundTarget::Instance(callee)) = binding
-            && self
-                .program
-                .instance_runtime_order(*callee)
-                .is_some_and(|runtime| !runtime.is_empty())
+            && self.program.instance_is_dynamic(*callee)
         {
             self.gc();
         }

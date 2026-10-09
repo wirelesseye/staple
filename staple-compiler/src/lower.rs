@@ -78,6 +78,7 @@ pub(crate) use emission::EmissionView;
 #[allow(unused_imports)]
 // Re-exported handoff types are also used within the lowering subtree.
 pub(crate) use instance_resolution::{
+    RuntimeScope,
     InstanceResolutionRequest, InstanceResolutionTarget, RelevantParameters,
     ResolvedInstanceRequest, SubstitutionEntry, SubstitutionEnvironment, SubstitutionSource,
     SubstitutionValue,
@@ -2744,6 +2745,9 @@ pub(crate) struct LoweredFunction {
     /// parameters first, hidden projection parameters last). Descriptor ABI
     /// order follows this order (R-A).
     pub scheme_type_parameters: Vec<TypeParameterId>,
+    /// The template's quantified effect parameters in scheme order. They
+    /// carry no descriptors, so they stay out of the descriptor ABI order.
+    pub scheme_effect_parameters: Vec<TypeParameterId>,
     pub body_origin: Origin,
     pub body_syntax: SyntaxId,
     pub body: Option<BlockId>,
@@ -3684,6 +3688,31 @@ impl LoweredProgram {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let scheme_effect_parameters = module
+            .scheme_of_function(function.id)
+            .or_else(|| binding_symbol.and_then(|symbol| module.scheme_of_symbol(symbol)))
+            .map(|scheme| {
+                fn effects(
+                    parameters: &[crate::typecheck::CheckedSchemeParameter],
+                    out: &mut Vec<TypeParameterId>,
+                ) {
+                    for parameter in parameters {
+                        match parameter {
+                            crate::typecheck::CheckedSchemeParameter::Effect { id, .. } => {
+                                out.push(*id)
+                            }
+                            crate::typecheck::CheckedSchemeParameter::Product(parameters) => {
+                                effects(parameters, out)
+                            }
+                            crate::typecheck::CheckedSchemeParameter::Type { .. } => {}
+                        }
+                    }
+                }
+                let mut out = Vec::new();
+                effects(&scheme.parameters, &mut out);
+                out
+            })
+            .unwrap_or_default();
         let value = LoweredFunction {
             origin: origin.clone(),
             semantic_id: function.id,
@@ -3692,6 +3721,7 @@ impl LoweredProgram {
             binding_symbol,
             signature,
             scheme_type_parameters,
+            scheme_effect_parameters,
             bounds: module.bounds_of_function(function.id).to_vec(),
             parameter_style: function.parameter_style,
             parameter_pattern,
@@ -13999,9 +14029,10 @@ fn polymorphic_call_substitutions(
     // at this call.
     debug_assert!(
         {
+            // Effect rows are checked too: a template with an effect variable
+            // keeps it in the comparison otherwise.
             let map = inferred
                 .iter()
-                .filter(|(_, value)| effect_substitution_of(value).is_none())
                 .map(|(parameter, value)| (*parameter, value.clone()))
                 .collect::<HashMap<_, _>>();
             types_equivalent(

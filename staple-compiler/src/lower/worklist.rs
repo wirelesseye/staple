@@ -985,14 +985,8 @@ impl<'a> WorklistBuilder<'a> {
             target,
         };
         let resolved = if polymorphic {
-            let runtime = self
-                .program
-                .functions
-                .get(function)
-                .map(|template| template.scheme_type_parameters.iter().copied().collect())
-                .unwrap_or_default();
-            self.program
-                .resolve_instance_request_with_runtime(&request, &runtime)
+            let scope = self.program.scheme_runtime_scope(function);
+            self.program.resolve_instance_request_in_scope(&request, &scope)
         } else if differential {
             match self.program.differential_call_runtime(
                 function,

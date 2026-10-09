@@ -201,7 +201,32 @@ impl<'a> GraphValidator<'a> {
                 }
             }
         }
+        if !key
+            .runtime_effects()
+            .is_subset(&instance.relevant.effect_parameters().collect())
+        {
+            self.report(
+                &instance.origin,
+                "instance run-time set includes a non-relevant effect parameter",
+            );
+            complete = false;
+        }
         for parameter in instance.relevant.effect_parameters() {
+            if key.runtime_effects().contains(&parameter) {
+                let own = instance
+                    .environment
+                    .effect_value(parameter)
+                    .and_then(|effects| effects.variable.as_ref())
+                    .is_some_and(|variable| variable.id == parameter);
+                if !own {
+                    self.report(
+                        &instance.origin,
+                        "run-time effect parameter does not retain its own identity",
+                    );
+                    complete = false;
+                }
+                continue;
+            }
             let Some(effects) = instance.environment.effect_value(parameter) else {
                 self.report(
                     &instance.origin,
@@ -249,11 +274,12 @@ impl<'a> GraphValidator<'a> {
         if !complete {
             return;
         }
-        match InstanceKey::with_runtime(
+        match InstanceKey::with_runtime_effects(
             instance.template,
             substitutions,
             evidence,
             key.runtime().clone(),
+            key.runtime_effects().clone(),
         ) {
             Ok(rebuilt) if &rebuilt == key => {}
             Ok(_) => self.report(
@@ -342,8 +368,7 @@ impl<'a> GraphValidator<'a> {
             .program
             .specializations
             .instance(record.ordinal)
-            .map(|key| key.runtime())
-            .cloned()
+            .map(|key| key.runtime_ids())
             .unwrap_or_default();
         for (_, call) in body.calls.iter() {
             let bound = call
@@ -376,6 +401,7 @@ impl<'a> GraphValidator<'a> {
                 };
                 if let Some(template) = function.and_then(|id| self.program.functions.get(id)) {
                     bound.extend(template.scheme_type_parameters.iter().copied());
+                    bound.extend(template.scheme_effect_parameters.iter().copied());
                 }
             }
             self.check_substitutions(
@@ -464,7 +490,9 @@ impl<'a> GraphValidator<'a> {
             }
         }
         for entry in &substitutions.effects {
-            if entry.effects.variable.is_some() {
+            if entry.effects.variable.as_ref().is_some_and(|variable| {
+                !runtime.contains(&variable.id) && !bound.contains(&entry.parameter)
+            }) {
                 self.report(
                     origin,
                     format!(

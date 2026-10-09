@@ -1758,7 +1758,6 @@ same function still works when it is called directly:
 * a trait bound other than `Copy` or `Sized`, in the scheme or in anything the
   implementation reaches (trait bounds on values are planned for a later
   release);
-* an effect parameter in the scheme;
 * a coroutine, async, or reactive body;
 * an array length that depends on a type parameter of the scheme;
 * a function value behind `Ref`, `Slice`, `Buffer`, or a shared cell that
@@ -1826,10 +1825,25 @@ An effect variable may represent the empty set, resources, state effects, or a
 combination of them. It can form an open row with fixed effects, as in
 `{E, IO}`; inference chooses the minimal substitution satisfying every
 occurrence. Each set may contain at most one variable. Effect parameters exist
-on generic function bindings and effect-parameterized type declarations, may
-appear only in effect sets, have no runtime representation, and are concrete
-before code generation. Type declarations use the declaration-site syntax
-described under [Types](#types).
+on generic function bindings and effect-parameterized type declarations and
+may appear only in effect sets. They never change a value's representation: a
+function value is the same pair whatever its effect set. Called directly, an
+effect parameter is concrete before code generation. Inside a polymorphic
+value it is not known until the value is called, and the caller passes the
+resources of the instantiated set alongside the call. Type declarations use the
+declaration-site syntax described under [Types](#types).
+
+An effect-polymorphic function can be used as a polymorphic value, stored,
+passed, and called with a different set each time:
+
+```staple
+let stored: <effect E> (() ->{E} ()) ->{E} () = twice
+def run: (<effect E> (() ->{E} ()) ->{E} ()) ->{IO} () = repeat => {
+    repeat (() => println "hi")           // E := {IO}
+    repeat (() => ())                     // E := {}
+}
+run stored
+```
 
 ### Signals and reactions
 

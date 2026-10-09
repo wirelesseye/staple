@@ -229,25 +229,27 @@ impl<'a> InitializerBinder<'a> {
             target: InstanceResolutionTarget::Root,
         };
         let runtime = if polymorphic {
-            self.program
-                .functions
-                .get(function)
-                .map(|template| template.scheme_type_parameters.iter().copied().collect())
+            Some(self.program.scheme_runtime_scope(function))
         } else if differential {
-            self.program.differential_call_runtime(
-                function,
-                &BTreeSet::new(),
-                false,
-                &call_function_type,
-                &call_substitutions,
-            )
+            self.program
+                .differential_call_runtime(
+                    function,
+                    &BTreeSet::new(),
+                    false,
+                    &call_function_type,
+                    &call_substitutions,
+                )
+                .map(|types| crate::RuntimeScope {
+                    types,
+                    effects: std::collections::BTreeSet::new(),
+                })
         } else {
             None
         };
         let resolved = match runtime {
             Some(runtime) => self
                 .program
-                .resolve_instance_request_with_runtime(&request, &runtime),
+                .resolve_instance_request_in_scope(&request, &runtime),
             None => self.program.resolve_instance_request(&request),
         };
         let resolved = match resolved {
