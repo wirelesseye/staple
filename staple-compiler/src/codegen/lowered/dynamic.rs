@@ -6038,6 +6038,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             return self.dynamic_descriptor(ty, environment, span);
         }
         if is_static_layout_type(ty) {
+            // A reference's pointee still gets its descriptor: structural
+            // dictionaries reached through the reference use it.
+            if let CheckedType::Ref(pointee) = ty {
+                self.prepare_dynamic_descriptor(pointee, environment, span)?;
+            }
             let layout = self.backend.descriptor_layout(ty)?;
             let runtime = self.backend.static_runtime_layout(layout);
             let descriptor = self.backend.build_runtime_descriptor(

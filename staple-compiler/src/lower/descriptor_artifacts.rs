@@ -187,6 +187,10 @@ pub(super) fn collect_compound_shapes(
             collect_compound_shapes(representation, shapes);
             return;
         }
+        CheckedType::Ref(pointee) => {
+            collect_compound_shapes(pointee, shapes);
+            return;
+        }
         _ => return,
     };
     let key = Key {

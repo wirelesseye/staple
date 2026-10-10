@@ -57,12 +57,13 @@ the release build of this stage's base commit for every existing input.
   after descriptors), instantiation adapters (site-evaluated dictionaries stored
   beside the descriptors) and scheme adapters (entailment through prerequisite
   routes, static dictionaries and built ones). `Staple.md` and the restriction tables are updated.
-- **Gates passed.** `cargo test --workspace` (including the corpus and Stage 6
-  differential tests with the subsumption and structural programs); the coverage
-  report no longer lists a trait-only template; reachability tests (a concretely
-  called bounded `def` and an unused bounded value build nothing). The full
-  type/effect-row differential runs and the IR comparison with `1106ba8` were
-  last run before the builder-entailment and structural-shape work.
+- **Gates passed.** `cargo test --workspace`; the full type differential run
+  and effect-row run over the corpus (including the Stage 6 programs, with
+  structural `Index`/`MutateIndex`/iteration over tuples and `Ref` tuples, and
+  subsumption through built dictionaries); IR identical to the `1106ba8`
+  release build over 136 corpus programs and 11 examples; the coverage report
+  lists no trait-only template; reachability tests (a concretely called bounded
+  `def` and an unused bounded value build nothing).
 - Checker workarounds remain: explicit `USize` indices, projected-result type
   arguments/result annotations, and callback parameter annotations.
 

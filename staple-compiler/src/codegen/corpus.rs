@@ -258,10 +258,18 @@ def total: <T where Copy T, Display T> (T, T, T) ->{IO} () = triple => {
 }
 let stored_total: <T where Copy T, Display T> (T, T, T) ->{IO} () = total
 stored_total (7, 8, 9)
+def get_ref: <T where Copy T> Ref (T, T) -> T = r => r[USize :: 0]
+let stored_get_ref: <T where Copy T> Ref (T, T) -> T = get_ref
+println "${stored_get_ref (Ref (5, 6))}"
+def put_ref: <T where Copy T> (mut Ref (T, T), T) -> () = (mut r, value) => { r[USize :: 1] = value }
+let stored_put_ref: <T where Copy T> (mut Ref (T, T), T) -> () = put_ref
+let mut cell: Ref (I32, I32) = Ref (1, 2)
+stored_put_ref (cell, 11)
+println "${cell[USize :: 1]}"
 "#,
             "trait-dictionaries",
         )),
-        "3 4\n9\n7\n8\n9\n",
+        "3 4\n9\n7\n8\n9\n5\n11\n",
     ),
     expect_stdout(
         must_run(inline(
