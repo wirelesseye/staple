@@ -167,6 +167,10 @@ pub(crate) struct LoweredInstanceBody {
     pub signature: CheckedFunctionType,
     /// Substituted bounds used by the body.
     pub bounds: Vec<CheckedTraitBound>,
+    /// Runtime dictionary obligations after substitution, in checked bound
+    /// order, including prerequisites. Concrete and descriptor marker bounds
+    /// are absent. Recipe planning consumes these; they are not an ABI count.
+    pub dictionary_obligations: Vec<CheckedTraitBound>,
     pub parameter_style: FunctionParameterStyle,
     /// The instance-local parameter pattern.
     pub parameter_pattern: PatternId,
@@ -245,6 +249,7 @@ impl LoweredInstanceBody {
                 result: Box::new(CheckedType::Never),
             },
             bounds: Vec::new(),
+            dictionary_obligations: Vec::new(),
             parameter_style: FunctionParameterStyle::Single,
             parameter_pattern: PatternId::from_index(0),
             parameters: Vec::new(),
@@ -624,6 +629,12 @@ impl<'a> BodyCloner<'a> {
         };
         self.body.origin = function.origin.clone();
         self.body.signature = self.function_type(&function.signature);
+        self.body.dictionary_obligations = super::trait_dictionaries::runtime_obligations(
+            &self.program.semantic_ids,
+            &function.bounds,
+            &self.substitution,
+            self.enclosing.key.runtime(),
+        );
         self.body.bounds = function
             .bounds
             .iter()
@@ -3782,6 +3793,20 @@ impl<'a> BodyValidator<'a> {
                     "instance body capture order disagrees with its template",
                 );
             }
+            if let Some(key) = self.program.specializations.instance(self.instance.ordinal) {
+                let expected = super::trait_dictionaries::runtime_obligations(
+                    &self.program.semantic_ids,
+                    &template.bounds,
+                    &self.instance.environment.substitution_map(),
+                    key.runtime(),
+                );
+                if self.body.dictionary_obligations != expected {
+                    self.report(
+                        self.body.origin.span.clone(),
+                        "instance dictionary obligations disagree with its runtime substitution",
+                    );
+                }
+            }
             if template.body.is_some() != self.body.root.is_some() {
                 self.report(
                     self.body.origin.span.clone(),
@@ -5404,6 +5429,43 @@ mod tests {
                 "{diagnostics:?}"
             );
         }
+    }
+
+    #[test]
+    fn runtime_dictionary_obligations_are_revalidated_against_the_instance() {
+        let module = checked_program(concat!(
+            "def pick: <T where Copy T> T -> T = value => value\n",
+            "let stored = pick\n",
+            "let answer = stored 42\n",
+        ));
+        let mut lowered = crate::Lowerer::new()
+            .lower(&module)
+            .expect("marker-bound value lowers");
+        let pick = function_id(&lowered.program, "pick");
+        let body = lowered
+            .program
+            .instances
+            .iter_mut()
+            .find_map(|(_, instance)| {
+                (instance.template == pick)
+                    .then_some(instance.body.as_mut())
+                    .flatten()
+            })
+            .expect("dynamic pick body");
+        assert!(
+            body.dictionary_obligations.is_empty(),
+            "Copy uses its descriptor"
+        );
+        body.dictionary_obligations.push(CheckedTraitBound {
+            trait_id: crate::TraitId(usize::MAX),
+            arguments: vec![CheckedType::I32],
+        });
+        let diagnostics = lowered.program.validate_instance_bodies();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.message
+                == "instance dictionary obligations disagree with its runtime substitution"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

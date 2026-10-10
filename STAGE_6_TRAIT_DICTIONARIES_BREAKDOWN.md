@@ -43,27 +43,22 @@ the release build of this stage's base commit for every existing input.
 
 ## Current state
 
-- **S0 in progress.** Two runnable baseline programs cover concrete, generic,
-  and blanket implementations; prerequisites and default overrides;
-  associated-type results; structural product/sum formatting; list indexing,
-  mutation, iteration and cloning; method values; escaping captures; and
-  callback fields. Both pass in default mode with pinned output.
-- Coverage now reports trait-bound occurrences by trait, trait-only
-  occurrences, and distinct rejected source templates. The quick differential
-  subset includes both trait fixtures and passes (21 programs, 2,464 dynamic
-  call sites). The first coverage run passes with zero in-scope rejections;
-  generated symbol names inflated its distinct count, so identity now uses
-  body source origins. A refreshed report is pending.
-- Checker workarounds: spell the index as `USize :: 0`, instantiate the
-  projected-result call explicitly and annotate its result, and annotate the
-  callback parameter. Bounded-value and abstract-selection restriction probes
-  remain to be added as the supporting paths land.
-- **6a.1 in progress.** Trait metadata records the dictionary prefix ranges
-  and associated descriptors in declaration order, validated at the lowering
-  boundary. Tests cover default slots and associated-type prerequisites.
-  Static dictionary artifacts and slot thunks remain.
-- **6a.2–6b.3 pending.** Runtime bounds and trait operations still reject;
-  hidden arguments, recipes, builders, bounded values, and exit gates remain.
+- **S0 in progress.** Two trait-heavy runnable fixtures pass with pinned
+  output; the quick differential suite passes 21 programs (2,464 dynamic
+  call sites). Coverage passed with zero in-scope rejections; the refreshed
+  report using stable body origins is running. Restriction probes remain.
+- **Checker workarounds:** explicit `USize` indices, explicit projected-result
+  instantiation/result annotation, and an annotated callback parameter.
+- **6a.1 in progress.** Dictionary prefix ranges and associated descriptors
+  are recorded and validated in declaration order. Layout tests cover defaults
+  and associated prerequisites; static artifacts and slot thunks remain.
+- **6a.2/6a.3 groundwork.** Instance bodies now retain and validate substituted
+  runtime dictionary obligations, excluding concrete and marker bounds. Tests
+  cover compounds, projections, substitution and corrupted metadata. Checked
+  bounds include prerequisites; declared bounds must still be separated for
+  hidden ABI order. No dictionary signatures or recipes are enabled yet.
+- **Remaining:** static dictionaries, hidden arguments, recipes/selection,
+  builders, trait operations, bounded values, documentation and all exit gates.
 
 ## Decisions
 
