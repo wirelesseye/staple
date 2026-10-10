@@ -106,6 +106,7 @@ pub(crate) struct InstantiationAdapterPlan {
 /// ABI; the dynamic side uses the dynamic shape without descriptor parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReabstractionThunkPlan {
+    pub dictionary_slot: Option<crate::specialization::StaticDictionarySlot>,
     pub concrete: CheckedFunctionType,
     pub dynamic: CheckedFunctionType,
     pub direction: crate::specialization::ReabstractionDirection,
@@ -317,6 +318,10 @@ impl LoweredArtifactPlan {
                     && CanonicalFunctionType::dynamic(&plan.dynamic, origin)
                         .is_ok_and(|shape| shape == key.dynamic)
                     && plan.direction == key.direction
+                    && plan.dictionary_slot == key.dictionary_slot
+                    && (plan.dictionary_slot.is_none()
+                        || plan.direction
+                            == crate::specialization::ReabstractionDirection::ConcreteToDynamic)
             }
             (
                 LoweredArtifactPlan::ValueConversion(plan),
@@ -807,6 +812,7 @@ impl LoweredArtifactPlan {
                 children: _,
             }) => {}
             LoweredArtifactPlan::ReabstractionThunk(ReabstractionThunkPlan {
+                dictionary_slot: _,
                 concrete: _,
                 dynamic: _,
                 direction: _,

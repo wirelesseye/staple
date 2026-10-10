@@ -546,7 +546,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.builder.position_at_end(entry);
         let parameters = function.get_params();
         let pointer = self.backend.context.ptr_type(AddressSpace::default());
-        let environment = parameters[0].into_pointer_value();
+        let mut environment = parameters[0].into_pointer_value();
+        if let Some(slot) = &plan.dictionary_slot {
+            environment = self.backend.dynamic_byte_offset(
+                environment,
+                self.backend.size_type.const_int(
+                    (slot.closure_offset as u64)
+                        * u64::from(self.backend.target_data.get_pointer_byte_size(None)),
+                    false,
+                ),
+            )?;
+        }
         let code = self
             .backend
             .builder

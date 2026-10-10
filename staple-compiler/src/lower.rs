@@ -23482,6 +23482,90 @@ mod tests {
     }
 
     #[test]
+    fn static_dictionary_slot_calls_a_concrete_method_from_the_dictionary_tail() {
+        use crate::specialization::{ReabstractionDirection, StaticDictionarySlot};
+        let module = checked_program(concat!(
+            "def apply: <T where Copy T> (T -> T, T) -> T = (f, x) => f x\n",
+            "def increment: I32 -> I32 = x => x + 1\n",
+            "let stored = apply\n",
+            "let answer = stored (increment, 40)\n",
+        ));
+        let mut lowered = Lowerer::new().lower(&module).unwrap();
+        let method_name = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "increment")
+                    .then(|| instance.name.clone())
+            })
+            .expect("concrete method instance");
+        let catalog = &lowered.program.specializations;
+        let slot_name = lowered
+            .program
+            .artifacts
+            .iter_mut()
+            .find_map(|(_, artifact)| {
+                let Some(LoweredArtifactPlan::ReabstractionThunk(plan)) = &mut artifact.plan else {
+                    return None;
+                };
+                if plan.direction != ReabstractionDirection::ConcreteToDynamic {
+                    return None;
+                }
+                plan.dictionary_slot = Some(StaticDictionarySlot {
+                    implementation: LoweredTraitImplementationId::from_index(0),
+                    method: TraitMethodId(0),
+                    closure_offset: 3,
+                });
+                let mut key = catalog.artifact(artifact.ordinal).unwrap().clone();
+                assert!(
+                    !LoweredArtifactPlan::ReabstractionThunk(plan.clone())
+                        .matches_key(&key, &artifact.origin)
+                );
+                let crate::specialization::ArtifactRequestKey::ReabstractionThunk(key_plan) =
+                    &mut key
+                else {
+                    panic!("slot has a reabstraction key");
+                };
+                key_plan.dictionary_slot = plan.dictionary_slot.clone();
+                assert!(
+                    LoweredArtifactPlan::ReabstractionThunk(plan.clone())
+                        .matches_key(&key, &artifact.origin)
+                );
+                Some(artifact.name.clone())
+            })
+            .expect("concrete-to-dynamic slot entry");
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "static-dictionary-slot",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        let code = engine.get_function_address(&method_name).unwrap();
+        // Three prefix slots precede the concrete closure pair. A slot receives
+        // the dictionary start, never a pointer to that pair.
+        let dictionary = [0usize, 0, 0, code, 0];
+        type Slot = unsafe extern "C" fn(*const usize, *mut i32, *const i32);
+        let slot = unsafe { engine.get_function::<Slot>(&slot_name).unwrap() };
+        let mut result = 0;
+        unsafe { slot.call(dictionary.as_ptr(), &mut result, &41) };
+        assert_eq!(result, 42);
+    }
+
+    #[test]
     fn polymorphic_support_checks_reject_at_the_construction_site() {
         let module = checked_program(concat!(
             "use std.clone.Clone\n",

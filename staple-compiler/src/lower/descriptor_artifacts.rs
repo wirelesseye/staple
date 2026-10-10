@@ -438,12 +438,14 @@ pub(super) fn scan_instance(
             requests.push(ClosureRequest::Artifact {
                 key: ArtifactRequestKey::ReabstractionThunk(
                     crate::specialization::ReabstractionThunkKey {
+                        dictionary_slot: None,
                         concrete,
                         dynamic,
                         direction: ReabstractionDirection::DynamicToConcrete,
                     },
                 ),
                 plan: Plan::ReabstractionThunk(crate::ReabstractionThunkPlan {
+                    dictionary_slot: None,
                     concrete: callable.function_type.clone(),
                     dynamic: callable.function_type.clone(),
                     direction: ReabstractionDirection::DynamicToConcrete,

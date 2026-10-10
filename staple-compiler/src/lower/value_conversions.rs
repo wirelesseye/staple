@@ -143,6 +143,7 @@ pub(super) fn expand(plan: Plan, origin: &Origin) -> ExpansionResult {
                 {
                     requests.push(ClosureRequest::Artifact {
                         key: ArtifactRequestKey::ReabstractionThunk(ReabstractionThunkKey {
+                            dictionary_slot: None,
                             concrete: CanonicalFunctionType::concrete(concrete, origin)
                                 .map_err(|error| vec![error])?,
                             dynamic: CanonicalFunctionType::dynamic(dynamic, origin)
@@ -150,6 +151,7 @@ pub(super) fn expand(plan: Plan, origin: &Origin) -> ExpansionResult {
                             direction: plan.direction,
                         }),
                         plan: Plan::ReabstractionThunk(ReabstractionThunkPlan {
+                            dictionary_slot: None,
                             concrete: concrete.clone(),
                             dynamic: dynamic.clone(),
                             direction: plan.direction,

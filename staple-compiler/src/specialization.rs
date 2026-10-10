@@ -1064,8 +1064,19 @@ pub(crate) enum ReabstractionDirection {
 
 /// The identity of one reabstraction thunk (R5), keyed by the concrete
 /// function type and the conversion direction.
+/// A static dictionary slot reuses the concrete-to-dynamic reabstraction
+/// machinery, loading its concrete closure from the dictionary's tail.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct StaticDictionarySlot {
+    pub implementation: crate::LoweredTraitImplementationId,
+    pub method: TraitMethodId,
+    /// Pointer-slot offset of this method's `{code, environment}` pair.
+    pub closure_offset: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ReabstractionThunkKey {
+    pub dictionary_slot: Option<StaticDictionarySlot>,
     pub concrete: CanonicalFunctionType,
     pub dynamic: CanonicalFunctionType,
     pub direction: ReabstractionDirection,

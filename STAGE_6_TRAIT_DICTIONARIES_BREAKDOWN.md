@@ -45,13 +45,16 @@ the release build of this stage's base commit for every existing input.
 
 - **S0 in progress.** Two trait-heavy runnable fixtures pass with pinned
   output; the quick differential suite passes 21 programs (2,464 dynamic
-  call sites). Coverage passed with zero in-scope rejections; the refreshed
-  report using stable body origins is running. Restriction probes remain.
+  call sites). Refreshed coverage passes: 1,819 trait-only occurrences,
+  46 distinct trait-rejected templates, zero in-scope rejections. Restriction
+  probes remain.
 - **Checker workarounds:** explicit `USize` indices, explicit projected-result
   instantiation/result annotation, and an annotated callback parameter.
 - **6a.1 in progress.** Dictionary prefix ranges and associated descriptors
   are recorded and validated in declaration order. Layout tests cover defaults
-  and associated prerequisites; static artifacts and slot thunks remain.
+  and associated prerequisites. Static slot entries now reabstract concrete
+  methods from a dictionary tail; key-validation and JIT tests pass. Static
+  dictionary artifacts and their construction remain.
 - **6a.2/6a.3 groundwork.** Instance bodies now retain and validate substituted
   runtime dictionary obligations, excluding concrete and marker bounds. Tests
   cover compounds, projections, substitution and corrupted metadata. Checked
