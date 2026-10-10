@@ -96,6 +96,20 @@ impl<'program, 'context> Backend<'program, 'context> {
         function_type: &CheckedFunctionType,
         runtime_parameter_count: usize,
     ) -> CodeGenerationResult<inkwell::types::FunctionType<'context>> {
+        self.compile_dynamic_function_type_with_dictionaries(
+            function_type,
+            runtime_parameter_count,
+            0,
+        )
+    }
+
+    /// T-C: dictionaries follow descriptors, before result storage and rows.
+    pub(crate) fn compile_dynamic_function_type_with_dictionaries(
+        &self,
+        function_type: &CheckedFunctionType,
+        runtime_parameter_count: usize,
+        dictionary_count: usize,
+    ) -> CodeGenerationResult<inkwell::types::FunctionType<'context>> {
         let arguments = if function_type.mutations.contains(&CheckedMutation::Whole) {
             1
         } else {
@@ -115,14 +129,14 @@ impl<'program, 'context> Backend<'program, 'context> {
                 parameter => flattened_parameter_types(parameter).len(),
             }
         };
-        // Environment, descriptors, result storage, resources (one bundle for
+        // Environment, descriptors, dictionaries, result storage, resources (one bundle for
         // a row that names a variable), value arguments.
         let resource_slots = if function_type.effects.variable.is_some() {
             1
         } else {
             function_type.effects.resources.len()
         };
-        let count = 2 + runtime_parameter_count + resource_slots + arguments;
+        let count = 2 + runtime_parameter_count + dictionary_count + resource_slots + arguments;
         let pointer = self.context.ptr_type(AddressSpace::default()).into();
         Ok(self
             .context

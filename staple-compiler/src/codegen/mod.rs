@@ -154,6 +154,19 @@ pub(crate) fn lowered_catalog_types(
         .map_err(|diagnostic| vec![diagnostic])
 }
 
+/// Emit and verify one production instance body independently of its callers.
+#[cfg(test)]
+pub(crate) fn lowered_instance_body_ir(
+    context: &inkwell::context::Context,
+    module: &LoweredModule,
+    instance: crate::FunctionInstanceId,
+) -> Result<String, Vec<Diagnostic>> {
+    let target_machine = create_target_machine(None).map_err(|diagnostic| vec![diagnostic])?;
+    lowered::LoweredEmitter::new(context, module.program(), &target_machine)
+        .instance_body_ir(&target_machine, instance)
+        .map_err(|diagnostic| vec![diagnostic])
+}
+
 /// Declaration census input: the lowered module's function types, linkage,
 /// and defined-function set.
 #[cfg(test)]

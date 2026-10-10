@@ -116,6 +116,22 @@ impl<'a> EmissionView<'a> {
         )
     }
 
+    /// Hidden dictionaries in lexical declaration order, after descriptors.
+    pub(crate) fn instance_dictionary_bounds(
+        &self,
+        id: FunctionInstanceId,
+    ) -> Option<&'a [crate::CheckedTraitBound]> {
+        Some(
+            &self
+                .program
+                .instances
+                .get(id)?
+                .body
+                .as_ref()?
+                .dictionary_bounds,
+        )
+    }
+
     /// Whether the instance uses the dynamic ABI.
     pub(crate) fn instance_is_dynamic(&self, id: FunctionInstanceId) -> bool {
         self.program.instance_is_dynamic(id)

@@ -43,23 +43,20 @@ the release build of this stage's base commit for every existing input.
 
 ## Current state
 
-- **S0 in progress.** Both trait fixtures and the 21-program quick differential
+- **S0 partial.** Both trait fixtures and the 21-program quick differential
   suite pass. Coverage: 1,819 trait-only occurrences, 46 distinct trait-rejected
   templates, zero in-scope rejections. Restriction probes remain.
-- **6a.1 implemented for explicit implementations.** Demand-driven static
-  dictionary artifacts contain ordered slots, prerequisite pointers, associated
-  descriptors and concrete method closures. Prefix/key/dependency validation,
-  catalog census and JIT tests pass, including default methods and prerequisite
-  sharing. Concrete calls still build no dictionaries. Structural dictionaries
-  remain in 6a.4; language demand sites are wired in the subsequent steps.
-- **6a.2/6a.3 groundwork.** Instance runtime obligations are recorded and
-  validated separately from declared hidden dictionary bounds. Written scheme
-  order and lexical inheritance (including implicit thunks) are retained without
-  prerequisite arguments. Instance bodies record and validate direct/transitive
-  environment recipes, including associated prerequisites. Hidden signatures,
-  demand-site recipes and abstract selection are pending.
-- **Remaining:** hidden arguments, recipes/abstract selection, generic and
-  structural builders, trait operations, bounded values, docs and exit gates.
+- **6a.1 explicit static dictionaries implemented.** Ordered prefixes, concrete
+  method closures, default slots and shared prerequisites pass validation and
+  JIT checks. Concrete calls build no dictionaries; language demand sites await
+  recipes. Structural dictionaries remain in 6a.4.
+- **6a.2 partial.** Runtime obligations and lexical declared bound order are
+  retained and validated, including implicit thunks. Dynamic signatures and
+  entry decoding include dictionaries; LLVM checks cover result/resource/value
+  offsets. Caller, closure, bound-entry and finalizer forwarding remain.
+- **6a.3 partial.** Direct/transitive environment recipes, including associated
+  prerequisites, are recorded and validated. Demand sites and abstract selection
+  remain, followed by builders, trait operations, bounded values and exit gates.
 - Checker workarounds remain: explicit `USize` indices, projected-result type
   arguments/result annotations, and callback parameter annotations.
 

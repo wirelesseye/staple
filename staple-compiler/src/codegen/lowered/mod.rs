@@ -235,6 +235,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     #[cfg(test)]
+    pub(super) fn instance_body_ir(
+        mut self,
+        target_machine: &TargetMachine,
+        id: FunctionInstanceId,
+    ) -> CodeGenerationResult<String> {
+        self.declare_program(target_machine)?;
+        self.emit_instance_body(id)?;
+        let function = self.instances.get(&id).expect("declared test instance");
+        if !function.verify(false) {
+            return Err(internal_invariant(
+                staple_syntax::Span::Compiler,
+                "test instance failed LLVM verification",
+            ));
+        }
+        Ok(function.print_to_string().to_string())
+    }
+
+    #[cfg(test)]
     pub(super) fn declared_catalog_types(
         mut self,
         target_machine: &TargetMachine,
@@ -301,7 +319,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.backend.compile_closure_function_type(signature)?
             } else {
                 self.backend
-                    .compile_dynamic_function_type(signature, runtime.len())?
+                    .compile_dynamic_function_type_with_dictionaries(
+                        signature,
+                        runtime.len(),
+                        self.view
+                            .instance_dictionary_bounds(id)
+                            .map_or(0, <[_]>::len),
+                    )?
             };
             let linkage = instance
                 .requires_internal_linkage

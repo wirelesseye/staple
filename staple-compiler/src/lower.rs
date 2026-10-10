@@ -16364,6 +16364,74 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_entries_place_dictionaries_before_results_resources_and_values() {
+        for resources in [false, true] {
+            let source = if resources {
+                "use std.io.IO\ndef pick: <T where Copy T> T ->{IO} I32 = value => 42\nlet stored = pick\nlet answer = stored 7\n"
+            } else {
+                "def pick: <T where Copy T> T -> I32 = value => 42\nlet stored = pick\nlet answer = stored 7\n"
+            };
+            let module = checked_program(source);
+            let mut lowered = Lowerer::new().lower(&module).unwrap();
+            let id = lowered
+                .program
+                .instances
+                .iter()
+                .find_map(|(id, instance)| {
+                    (lowered
+                        .program
+                        .functions
+                        .get(instance.template)
+                        .unwrap()
+                        .name
+                        == "pick"
+                        && lowered.program.instance_is_dynamic(id))
+                    .then_some(id)
+                })
+                .expect("dynamic instance");
+            let context = inkwell::context::Context::create();
+            let baseline =
+                crate::codegen::lowered_instance_body_ir(&context, &lowered, id).unwrap();
+            assert!(
+                baseline
+                    .lines()
+                    .any(|line| line.contains("llvm.memcpy") && line.contains("%2,")),
+                "{baseline}"
+            );
+            let body = lowered
+                .program
+                .instances
+                .get_mut(id)
+                .unwrap()
+                .body
+                .as_mut()
+                .unwrap();
+            body.dictionary_bounds = vec![
+                CheckedTraitBound {
+                    trait_id: TraitId(usize::MAX - 1),
+                    arguments: Vec::new(),
+                },
+                CheckedTraitBound {
+                    trait_id: TraitId(usize::MAX),
+                    arguments: Vec::new(),
+                },
+            ];
+            let ir = crate::codegen::lowered_instance_body_ir(&context, &lowered, id).unwrap();
+            let declaration = ir.lines().find(|line| line.starts_with("define ")).unwrap();
+            assert_eq!(
+                declaration.matches("ptr ").count(),
+                6 + usize::from(resources),
+                "{ir}"
+            );
+            assert!(
+                ir.lines()
+                    .any(|line| line.contains("llvm.memcpy") && line.contains("%4,")),
+                "{ir}"
+            );
+        }
+    }
+
+    #[test]
     fn dictionary_environment_recipes_follow_transitive_and_associated_prefixes() {
         let module = checked_program(concat!(
             "trait RecipeBase T { base: T -> Bool }\n",

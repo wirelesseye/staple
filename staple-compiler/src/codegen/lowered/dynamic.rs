@@ -64,6 +64,8 @@ struct DynamicState<'context> {
 struct DynamicEnvironment<'context> {
     descriptors: HashMap<TypeParameterId, PointerValue<'context>>,
     compound_descriptors: Vec<(CheckedType, PointerValue<'context>)>,
+    /// Hidden dictionaries in the owning instance's declared bound order.
+    dictionaries: Vec<PointerValue<'context>>,
     bindings: HashMap<SymbolId, DynamicBinding<'context>>,
     binding_order: Vec<SymbolId>,
     temporaries: HashMap<ExpressionId, PointerValue<'context>>,
@@ -1152,6 +1154,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut environment = DynamicEnvironment {
             descriptors,
             compound_descriptors: Vec::new(),
+            dictionaries: Vec::new(),
             bindings: HashMap::new(),
             binding_order: Vec::new(),
             temporaries: HashMap::new(),
@@ -1677,6 +1680,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut environment = DynamicEnvironment {
             descriptors: HashMap::new(),
             compound_descriptors: Vec::new(),
+            dictionaries: Vec::new(),
             bindings: HashMap::new(),
             binding_order: Vec::new(),
             temporaries: HashMap::new(),
@@ -3903,6 +3907,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map(|(index, parameter)| (parameter, parameters[1 + index].into_pointer_value()))
                         .collect(),
                     compound_descriptors: Vec::new(),
+                    dictionaries: Vec::new(),
                     bindings: HashMap::new(),
                     binding_order: Vec::new(),
                     temporaries: HashMap::new(),
@@ -4304,6 +4309,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .enumerate()
             .map(|(index, parameter)| (*parameter, parameters[index + 1].into_pointer_value()))
             .collect::<HashMap<_, _>>();
+        let dictionary_start = 1 + runtime.len();
+        let dictionaries = parameters
+            [dictionary_start..dictionary_start + body.dictionary_bounds.len()]
+            .iter()
+            .map(|parameter| parameter.into_pointer_value())
+            .collect::<Vec<_>>();
+        let hidden_count = runtime.len() + dictionaries.len();
         let resource_count = body.signature.effects.resources.len();
         let mut resources = HashMap::new();
         if body.function_providers.len() != resource_count {
@@ -4318,7 +4330,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .effects
             .variable
             .as_ref()
-            .map(|_| parameters[2 + runtime.len()].into_pointer_value());
+            .map(|_| parameters[2 + hidden_count].into_pointer_value());
         let mut bundled_providers = Vec::new();
         for (position, provider_id) in body.function_providers.iter().enumerate() {
             let provider = self
@@ -4330,7 +4342,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 continue;
             }
             let pointer = parameters
-                .get(1 + runtime.len() + 1 + position)
+                .get(2 + hidden_count + position)
                 .ok_or_else(|| unsupported("missing function resource parameter"))?
                 .into_pointer_value();
             resources.insert(
@@ -4344,6 +4356,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut environment = DynamicEnvironment {
             descriptors,
             compound_descriptors: Vec::new(),
+            dictionaries,
             bindings: HashMap::new(),
             binding_order: Vec::new(),
             temporaries: HashMap::new(),
@@ -4356,7 +4369,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             resources,
             loops: Vec::new(),
             closure: parameters[0].into_pointer_value(),
-            result: parameters[1 + runtime.len()].into_pointer_value(),
+            result: parameters[1 + hidden_count].into_pointer_value(),
             result_descriptor: self
                 .backend
                 .context
@@ -4725,7 +4738,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         } else {
             resource_count
         };
-        let raw = &parameters[2 + runtime.len() + resource_slots..];
+        let raw =
+            &parameters[2 + runtime.len() + environment.dictionaries.len() + resource_slots..];
         let whole = body
             .signature
             .mutations
