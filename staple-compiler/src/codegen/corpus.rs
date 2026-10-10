@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 143] = [
+static CORPUS: [CorpusProgram; 144] = [
     expect_stdout(
         must_run(inline(
             "trait_dictionary_adapters",
@@ -216,6 +216,49 @@ wrapped_made 3
             "trait-dictionaries",
         )),
         "lambda 3\nTrue False\n100 7\n100 x\nlambda 55\n9 1\n10 2\n9 3\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "trait_dictionary_members",
+            r#"use std.io.(IO, println)
+use std.fmt.Display
+use std.ops.Add
+trait Speak T { speak: T ->{IO} () }
+impl Speak I32 { speak = value => println "int ${value}" }
+type Cat = wrap I32
+impl Speak Cat { speak = Cat value => println "cat ${value}" }
+def twice: <T where Speak T, Copy T> T ->{IO} () = value => { Speak.speak value; Speak.speak value }
+let speak_twice: <T where Speak T, Copy T> T ->{IO} () = twice
+speak_twice 1
+speak_twice (Cat 2)
+trait Describe T {
+    name: T -> String
+    describe: T -> String = value => "<${name value}>"
+}
+impl Describe I32 { name = value => "int" }
+type Dog = wrap I32
+impl Describe Dog { name = Dog value => "dog"
+    describe = Dog value => "DOG!" }
+def describe_value: <T where Describe T> move T ->{IO} () = move value => println (Describe.describe value)
+let describe_stored: <T where Describe T> move T ->{IO} () = describe_value
+describe_stored 1
+describe_stored (Dog 2)
+def sum: <T where Add T, Copy T> (T, T) -> T = (a, b) => a + b
+let sum_stored: <T where Add T, Copy T> (T, T) -> T = sum
+println "${sum_stored (1, 2)} ${sum_stored (1.5, 2.25)}"
+type Wrapped T = wrap T
+impl<T where Display T> Display (Wrapped T) { fmt = (Wrapped inner, mut formatter) => Display.fmt (inner, formatter) }
+let wrap_value: <T where Display T> move T -> Wrapped T = Wrapped
+let wrapped = wrap_value 5
+println "${wrapped}"
+def id: <T> move T -> T = move x => x
+let identity_bounded: <T where Display T> move T -> T = id
+let answer: I32 = identity_bounded 7
+println "${answer}"
+"#,
+            "trait-dictionaries",
+        )),
+        "int 1\nint 1\ncat 2\ncat 2\n<int>\nDOG!\n3 3.75\n5\n7\n",
     ),
     expect_stdout(
         must_run(inline(

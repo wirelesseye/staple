@@ -24331,6 +24331,71 @@ mod tests {
         ));
     }
 
+    /// Dictionary-related artifacts and dynamic instances a program builds.
+    fn dictionary_census(source: &str) -> (usize, usize, usize) {
+        let module = checked_program(source);
+        let lowered = Lowerer::new().lower(&module).expect("source should lower");
+        let dynamic = lowered
+            .program()
+            .instances()
+            .filter(|(id, _)| {
+                lowered
+                    .program()
+                    .instance_runtime_parameters(*id)
+                    .is_some_and(|runtime| !runtime.is_empty())
+            })
+            .count();
+        let (mut dictionaries, mut entries) = (0, 0);
+        for (_, artifact) in lowered.program().artifacts() {
+            match &artifact.plan {
+                Some(LoweredArtifactPlan::TraitDictionary(_))
+                | Some(LoweredArtifactPlan::DynamicStructural(_)) => dictionaries += 1,
+                Some(LoweredArtifactPlan::DescriptorBoundEntry(_)) => entries += 1,
+                _ => {}
+            }
+        }
+        (dynamic, dictionaries, entries)
+    }
+
+    #[test]
+    fn bounded_functions_build_dictionaries_only_where_needed() {
+        const SHOW: &str = concat!(
+            "use std.io.(IO, println)\n",
+            "use std.fmt.Display\n",
+            "def show: <T where Display T> move T ->{IO} () = move value => println \"${value}\"\n",
+        );
+        // A bounded `def` that is only called concretely is monomorphized: no
+        // dynamic code, dictionary, or entry.
+        assert_eq!(
+            dictionary_census(&format!("{SHOW}def run: () ->{{IO}} () = () => show 42\nrun ()\n")),
+            (0, 0, 0)
+        );
+        // A polymorphic value built only in an unreachable function yields
+        // nothing either.
+        assert_eq!(
+            dictionary_census(&format!(
+                concat!(
+                    "{}",
+                    "def unused: <A where Display A> move A ->{{IO}} () = move a => {{\n",
+                    "    let f: <U where Display U> move U ->{{IO}} () = show\n",
+                    "    f a\n",
+                    "}}\n",
+                    "def run: () ->{{IO}} () = () => show 42\n",
+                    "run ()\n",
+                ),
+                SHOW
+            )),
+            (0, 0, 0)
+        );
+        // Using the value builds its dynamic instance, a static dictionary
+        // for the instantiation, and no more.
+        let (dynamic, dictionaries, _) = dictionary_census(&format!(
+            "{SHOW}let stored: <T where Display T> move T ->{{IO}} () = show\nstored 42\n"
+        ));
+        assert!(dynamic > 0, "the stored value keeps its dynamic instance");
+        assert_eq!(dictionaries, 1, "one static dictionary for `Display I32`");
+    }
+
     #[test]
     fn polymorphic_lambdas_enforce_declared_effect_rows() {
         for row in ["", "{state.read}"] {

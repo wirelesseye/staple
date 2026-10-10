@@ -57,8 +57,12 @@ the release build of this stage's base commit for every existing input.
   beside the descriptors) and scheme adapters (entailment through prerequisite
   routes and static dictionaries; a builder-derived entailment is a
   restriction). `Staple.md` and the restriction tables are updated.
-- **Gates remaining.** Reachability tests; the IR comparison against `1106ba8`;
-  the full differential runs; the main plan's Stage 6 status.
+- **Gates passed.** `cargo test --workspace`; the full type differential run
+  (141 of 142 programs dynamic, 16,587 call sites) and effect-row run (141
+  programs); IR identical to the `1106ba8` release build over 145 programs and
+  examples; reachability tests (a concretely called bounded `def` and an unused
+  bounded value build nothing); the coverage report's remaining trait-only
+  template is a coroutine thunk (Stage 8).
 - Checker workarounds remain: explicit `USize` indices, projected-result type
   arguments/result annotations, and callback parameter annotations.
 
@@ -302,7 +306,9 @@ After Stage 6:
 
 | Restriction | Message | Lifted in |
 |---|---|---|
-| An obligation at run-time types that more than one implementation could satisfy (T-F) | new, naming the trait, the arguments, and the candidates | Not planned: it is the price of agreeing with monomorphization |
+| An obligation at run-time types that more than one implementation could satisfy (T-F) | "trait `X` for `Y` is ambiguous at run-time types: candidates …". The checker rejects overlapping implementations, so only an unknown type matching several concrete implementations reaches it | Not planned: it is the price of agreeing with monomorphization |
+| An obligation no dictionary can satisfy: no bound in scope, no unique implementation, or a structural trait other than `Debug` over products and sums (`Index`, `MutateIndex`, iteration over tuples) | "a trait obligation of this polymorphic value's implementation has no dictionary at run time …" at the construction site | Not planned |
+| A built dictionary needed to subsume a polymorphic value into another scheme | "subsuming a polymorphic value needs a dictionary built from an implementation, which is not supported yet" | Not planned |
 | `Natural` bound or run-time `Natural` count | "array lengths cannot depend on a polymorphic value's type parameters yet" | Not planned |
 | Trait member used as a polymorphic value; independently generic trait members | "trait members cannot be used as polymorphic values yet" | Stage 7 |
 | Coroutine, async, or reactive body, transitively | the existing messages | Stage 8 |
@@ -313,7 +319,8 @@ After Stage 6:
 - Bounded generic templates run in dictionary-passed code (6a).
 - Bounded schemes can be used as values (6b).
 - `__buffer_clone` no longer restricts polymorphic values.
-- No existing program changes behavior or IR.
+- No existing program changes behavior or IR: the IR of 145 corpus programs and
+  examples is identical to the `1106ba8` release build.
 
 ## Risks
 

@@ -13534,6 +13534,13 @@ fn stage4b_reports_each_polymorphic_value_restriction_at_its_construction() {
     for (source, message) in [
         (
             concat!(
+                "def first: <T where Copy T> (T, T) -> T = pair => pair[USize :: 0]\n",
+                "let stored: <T where Copy T> (T, T) -> T = first\n",
+            ),
+            "a trait obligation of this polymorphic value's implementation has no dictionary at run time (it needs a bound in scope, or exactly one matching implementation)",
+        ),
+        (
+            concat!(
                 "use std.coroutine.*\n",
                 "def launch: <T> move T -> Coroutine{} I32 = move value => coro { 1 }\n",
                 "let stored = launch\n",
@@ -13593,6 +13600,10 @@ fn stage4b_restricted_functions_work_when_called_directly() {
             "impl Named I32 { name = value => \"int\" }\n",
             "def label: <T where Named T> T -> String = value => Named.name value\n",
             "let direct = label 3\n",
+        ),
+        concat!(
+            "def first: <T where Copy T> (T, T) -> T = pair => pair[USize :: 0]\n",
+            "let direct: I32 = first (1, 2)\n",
         ),
         concat!(
             "def apply: <effect E> (() ->{E} I32) ->{E} I32 = f => f ()\n",

@@ -467,13 +467,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         self.backend
                             .compile_closure_function_type(&plan.callable_type)?
                     } else {
-                        self.backend.compile_dynamic_function_type(
+                        self.backend.compile_dynamic_function_type_with_dictionaries(
                             &plan.callable_type,
                             if plan.scheme.is_some() {
                                 plan.runtime_parameters().len()
                             } else {
                                 0
                             },
+                            plan.scheme
+                                .as_ref()
+                                .map_or(0, |scheme| self.view.scheme_dictionary_count(scheme)),
                         )?
                     };
                     vec![

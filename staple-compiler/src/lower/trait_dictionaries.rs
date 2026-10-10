@@ -83,6 +83,19 @@ pub(crate) struct EnvironmentDictionaryRecipe {
     pub prerequisites: Vec<usize>,
 }
 
+/// Two obligations name the same trait at equivalent types. Parameters are
+/// compared by identity, so a capture's or a signature's spelling of the same
+/// parameter matches a bound's.
+pub(crate) fn bounds_equivalent(left: &crate::CheckedTraitBound, right: &crate::CheckedTraitBound) -> bool {
+    left.trait_id == right.trait_id
+        && left.arguments.len() == right.arguments.len()
+        && left
+            .arguments
+            .iter()
+            .zip(&right.arguments)
+            .all(|(left, right)| crate::types_equivalent(left, right))
+}
+
 /// Search direct arguments before any prerequisite path. Visit each equal
 /// obligation once per root so cyclic prerequisite graphs terminate.
 pub(super) fn environment_recipe(
@@ -90,7 +103,10 @@ pub(super) fn environment_recipe(
     environment: &[crate::CheckedTraitBound],
     obligation: &crate::CheckedTraitBound,
 ) -> Option<EnvironmentDictionaryRecipe> {
-    if let Some(argument) = environment.iter().position(|bound| bound == obligation) {
+    if let Some(argument) = environment
+        .iter()
+        .position(|bound| bounds_equivalent(bound, obligation))
+    {
         return Some(EnvironmentDictionaryRecipe {
             argument,
             prerequisites: Vec::new(),
@@ -122,14 +138,17 @@ pub(super) fn environment_recipe(
                     .map(|argument| crate::substitute_type(argument.clone(), &substitution))
                     .collect(),
             };
-            if visited[recipe.argument].contains(&next) {
+            if visited[recipe.argument]
+                .iter()
+                .any(|seen| bounds_equivalent(seen, &next))
+            {
                 continue;
             }
             let mut route = recipe.clone();
             route
                 .prerequisites
                 .push(metadata.dictionary_layout.prerequisites.start + index);
-            if &next == obligation {
+            if bounds_equivalent(&next, obligation) {
                 return Some(route);
             }
             visited[recipe.argument].push(next.clone());
@@ -392,7 +411,7 @@ fn select_at_depth(
             if !at_caller.arguments.iter().any(contains_type_parameter) {
                 continue;
             }
-            dictionaries.push(if at_caller == built {
+            dictionaries.push(if bounds_equivalent(&at_caller, &built) {
                 MemberDictionarySelection::Itself
             } else {
                 let selection = select_at_depth(program, environment, &at_caller, origin, depth + 1)?;
@@ -907,7 +926,7 @@ pub(super) fn plan_direct_call(
 }
 
 /// The non-marker bounds of a scheme at an instantiation, in scheme order.
-fn scheme_obligations(
+pub(super) fn scheme_obligations(
     program: &super::LoweredProgram,
     scheme: &crate::CheckedScheme,
     substitution: &std::collections::HashMap<crate::TypeParameterId, crate::CheckedType>,

@@ -1475,7 +1475,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         } else {
             0
         };
-        let result = parameters[1 + explicit].into_pointer_value();
+        // A scheme's bounds arrive as dictionaries after the descriptors; a
+        // constructor needs none of them.
+        let dictionaries = plan
+            .scheme
+            .as_ref()
+            .map_or(0, |scheme| self.view.scheme_dictionary_count(scheme));
+        let explicit_end = explicit + dictionaries;
+        let result = parameters[1 + explicit_end].into_pointer_value();
         let pointer = self.backend.context.ptr_type(AddressSpace::default());
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
         let mut descriptors = HashMap::new();
@@ -1544,11 +1551,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     self.dynamic_product_field(descriptor, result, index as u32)?;
                 self.backend.copy_dynamic_value(
                     descriptor,
-                    parameters[2 + explicit + index].into_pointer_value(),
+                    parameters[2 + explicit_end + index].into_pointer_value(),
                     field,
                 )?;
             }
-        } else if let Some(value) = parameters.get(2 + explicit) {
+        } else if let Some(value) = parameters.get(2 + explicit_end) {
             self.backend
                 .copy_dynamic_value(descriptor, value.into_pointer_value(), result)?;
         }

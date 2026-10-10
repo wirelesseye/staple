@@ -132,6 +132,12 @@ impl<'a> EmissionView<'a> {
         )
     }
 
+    /// Hidden dictionaries a scheme's entry takes: its non-marker bounds.
+    pub(crate) fn scheme_dictionary_count(&self, scheme: &crate::CheckedScheme) -> usize {
+        super::trait_dictionaries::scheme_obligations(self.program, scheme, &Default::default())
+            .len()
+    }
+
     /// The fixed dictionary prefix of one trait (T-D).
     pub(crate) fn trait_dictionary_layout(
         &self,

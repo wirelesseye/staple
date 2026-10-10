@@ -4739,7 +4739,10 @@ mod tests {
         let standard_library = workspace_root.join("stdlib");
         let options = parse_options([std::ffi::OsString::from("corpus.sta")])
             .expect("corpus link options should parse");
-        const SUBSET: [&str; 21] = [
+        const SUBSET: [&str; 24] = [
+            "trait_dictionary_values",
+            "trait_dictionary_adapters",
+            "trait_dictionary_builder",
             "trait_dictionary_static_baseline",
             "trait_dictionary_compound_baseline",
             "local_recursive_generic",
