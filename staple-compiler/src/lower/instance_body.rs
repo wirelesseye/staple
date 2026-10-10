@@ -2153,8 +2153,15 @@ fn recipe_member_instances(
     origin: &Origin,
     members: &mut Vec<(FunctionInstanceId, Origin)>,
 ) {
-    let super::DictionaryRecipe::Builder(build) = recipe else {
-        return;
+    let build = match recipe {
+        super::DictionaryRecipe::Builder(build) => build,
+        super::DictionaryRecipe::Structural(structural) => {
+            for component in &structural.components {
+                recipe_member_instances(&component.recipe, origin, members);
+            }
+            return;
+        }
+        _ => return,
     };
     for member in &build.members {
         members.push((member.instance, origin.clone()));

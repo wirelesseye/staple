@@ -521,6 +521,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .add_function(name, ty, Some(Linkage::Internal)),
                     ]
                 }
+                LoweredArtifactPlan::DynamicStructural(_) => {
+                    // (dictionary, result, value, formatter): the dynamic ABI.
+                    let ty = self.backend.context.void_type().fn_type(
+                        &[pointer.into(), pointer.into(), pointer.into(), pointer.into()],
+                        false,
+                    );
+                    vec![
+                        self.backend
+                            .llvm_module
+                            .add_function(name, ty, Some(Linkage::Internal)),
+                    ]
+                }
                 LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
                     // Only descriptors bound by the environment are omitted.
                     let ty = self
@@ -1929,6 +1941,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
                 self.emit_descriptor_bound_entry(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::DynamicStructural(plan) => {
+                self.emit_dynamic_structural(ordinal, plan, &artifact.origin.span)
             }
             LoweredArtifactPlan::InstantiationAdapter(plan) => {
                 self.emit_instantiation_adapter(ordinal, plan, &artifact.origin.span)

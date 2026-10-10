@@ -1618,7 +1618,7 @@ impl LoweredProgram {
         &self,
         bound: &CheckedTraitBound,
         origin: &Origin,
-    ) -> Result<RuntimeImplementation, Diagnostic> {
+    ) -> Result<Option<RuntimeImplementation>, Diagnostic> {
         let context = TraitSelectionContext::new(self, Vec::new());
         let ids = &self.semantic_ids;
         let markers = [
@@ -1719,20 +1719,25 @@ impl LoweredProgram {
                             .collect(),
                     })
                     .collect();
-                Ok(RuntimeImplementation {
+                Ok(Some(RuntimeImplementation {
                     implementation: context.implementation_ids[index],
                     completed,
                     substitution,
                     clauses,
-                })
+                }))
             }
-            (0, 0) => Err(Diagnostic::new(
-                origin.span.clone(),
-                format!(
-                    "no implementation of trait `{trait_name}` is available for `{}` at run-time types",
-                    describe_arguments(&bound.arguments)
-                ),
-            )),
+            (0, 0) => Ok(None),
+            // A structural `Debug` shape leaves the compound's own header to
+            // its components; overlaps in the unknown ones do not matter.
+            (0, _)
+                if Some(bound.trait_id) == ids.debug_trait
+                    && matches!(
+                        bound.arguments.first(),
+                        Some(CheckedType::Product(_) | CheckedType::Sum(_))
+                    ) =>
+            {
+                Ok(None)
+            }
             _ => Err(Diagnostic::new(
                 origin.span.clone(),
                 format!(

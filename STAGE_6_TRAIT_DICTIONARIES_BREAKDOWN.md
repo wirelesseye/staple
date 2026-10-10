@@ -45,8 +45,8 @@ the release build of this stage's base commit for every existing input.
 
 - **S0 partial.** Both trait fixtures plus the environment and builder fixtures
   and the quick differential suite pass. Trait-only rejections fell from 1,819
-  occurrences / 46 templates to 3 / 4 (structural `Debug` and two with other
-  restrictions). Restriction probes remain.
+  occurrences / 46 templates to 0 outside the coroutine and reactive bodies of
+  Stage 8. Restriction probes remain.
 - **6a.1 done.** Static dictionaries (ordered prefixes, method closures,
   defaults, shared prerequisites) pass validation and JIT checks.
 - **6a.2 partial.** Dynamic signatures, entries, direct calls, bound entries and
@@ -57,13 +57,16 @@ the release build of this stage's base commit for every existing input.
   builder, selected uniquely at abstract types (T-F) and validated in bodies.
   Restriction messages are reported at lowering; the final wording and probes
   remain.
-- **6a.4 partial.** Generic and blanket implementations build dictionaries in GC
-  memory from the caller's descriptors and recipes; member slots are descriptor-
-  bound entries over the dictionary tail. Structural dictionaries remain.
+- **6a.4 done for the planned scope.** Generic and blanket implementations
+  build dictionaries in GC memory from the caller's descriptors and recipes;
+  member slots are descriptor-bound entries over the dictionary tail.
+  Structural `Debug` over products and sums builds a shape slot over component
+  dictionaries. Other structural traits (`Index`, `IntoIterator`, ...) at
+  run-time shapes report a restriction.
 - **6a.5 partial.** Method calls, operators, interpolation, `Index`,
   `MutateIndex`, `__buffer_clone` and members as values dispatch through
-  dictionary slots; support analysis admits them when a recipe exists. `for`
-  loops use these calls. Structural `Debug`/`Index`/iteration remain.
+  dictionary slots; `for` loops use these calls. The support analysis admits a
+  site when a recipe exists. Eligible-call audit remains.
 - Checker workarounds remain: explicit `USize` indices, projected-result type
   arguments/result annotations, and callback parameter annotations.
 

@@ -63,7 +63,7 @@ mod worklist;
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
 pub(crate) use trait_dictionaries::{
     BuilderRecipe, DictionaryCallArgument, DictionaryRecipe, DictionarySlotCall, MemberDictionary,
-    TraitDictionaryLayout,
+    StructuralRecipe, TraitDictionaryLayout,
 };
 pub(crate) use value_conversions::{
     AdapterConversion, adapter_conversions, concrete_key as conversion_concrete_key,
@@ -121,7 +121,7 @@ pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
     CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorBoundEntryPlan,
     DescriptorDropPlan, DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture,
-    DroppedElement, DynamicCapture, ExternAdapterPlan, ExternDeclaration, GcFinalizerPlan,
+    DroppedElement, DynamicCapture, DynamicStructuralPlan, ExternAdapterPlan, ExternDeclaration, GcFinalizerPlan,
     IndexedElement, InstantiationAdapterPlan, LoweredArtifactPlan, PlanType, PlannedArtifact, PlannedCallee,
     PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReabstractionThunkPlan,
     ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody,
@@ -24202,6 +24202,65 @@ mod tests {
     }
 
     #[test]
+    fn structural_debug_dictionaries_apply_the_shape_slot_to_component_dictionaries() {
+        let module = checked_program(concat!(
+            "use std.fmt.(Debug, Formatter)\n",
+            "def pair: <T where Debug T> move T -> String = move value => Formatter.debug (value, 1)\n",
+            "def either: <T where Debug T> move T -> String = move value => {\n",
+            "    let sum: T | String = value\n",
+            "    Formatter.debug sum\n",
+            "}\n",
+            "let first = pair 5\n",
+            "let second = either 6\n",
+        ));
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&module)
+            .unwrap();
+        let mut shapes = Vec::new();
+        for (_, instance) in lowered.program.instances.iter() {
+            let body = instance.body.as_ref().unwrap();
+            for arguments in body.dictionary_calls.values() {
+                for argument in arguments {
+                    if let DictionaryRecipe::Structural(structural) = &argument.recipe {
+                        shapes.push(structural.shape.clone());
+                    }
+                }
+            }
+        }
+        shapes.sort_by_key(|shape| format!("{shape:?}"));
+        assert_eq!(
+            shapes,
+            [
+                crate::specialization::DynamicStructuralShape::DebugProduct {
+                    names: vec![None, None]
+                },
+                crate::specialization::DynamicStructuralShape::DebugSum { alternatives: 2 },
+            ]
+        );
+        let slots = lowered
+            .program
+            .artifacts
+            .iter()
+            .filter(|(_, artifact)| {
+                matches!(artifact.plan, Some(LoweredArtifactPlan::DynamicStructural(_)))
+            })
+            .count();
+        assert_eq!(slots, 2, "one shared slot per shape");
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        assert!(text.contains("dictionary.structural"), "{text}");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "structural-dictionaries",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+    }
+
+    #[test]
     fn polymorphic_lambdas_enforce_declared_effect_rows() {
         for row in ["", "{state.read}"] {
             let source = format!(
@@ -25209,5 +25268,6 @@ mod tests {
         assert_eq!(first_snapshot, normalized_program_snapshot(&second));
     }
 }
+
 
 

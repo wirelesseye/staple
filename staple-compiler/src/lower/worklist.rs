@@ -257,6 +257,7 @@ pub(crate) enum LoweredArtifactDependencyKind {
     DescriptorDrop,
     CompoundDescriptorDrop,
     DescriptorBoundEntry,
+    DynamicStructural,
     InstantiationAdapter,
     ReabstractionThunk,
     ValueConversion,
@@ -286,6 +287,7 @@ impl LoweredArtifactDependencyKind {
             LoweredArtifactDependencyKind::DescriptorDrop => "descriptor-drop",
             LoweredArtifactDependencyKind::CompoundDescriptorDrop => "compound-descriptor-drop",
             LoweredArtifactDependencyKind::DescriptorBoundEntry => "descriptor-bound-entry",
+            LoweredArtifactDependencyKind::DynamicStructural => "dynamic-structural",
             LoweredArtifactDependencyKind::InstantiationAdapter => "instantiation-adapter",
             LoweredArtifactDependencyKind::ReabstractionThunk => "reabstraction-thunk",
             LoweredArtifactDependencyKind::ValueConversion => "value-conversion",
@@ -328,6 +330,9 @@ impl LoweredArtifactDependencyKind {
             ) | (
                 LoweredArtifactDependencyKind::DescriptorBoundEntry,
                 ArtifactRequestKey::DescriptorBoundEntry(_)
+            ) | (
+                LoweredArtifactDependencyKind::DynamicStructural,
+                ArtifactRequestKey::DynamicStructural(_)
             ) | (
                 LoweredArtifactDependencyKind::InstantiationAdapter,
                 ArtifactRequestKey::InstantiationAdapter(_)

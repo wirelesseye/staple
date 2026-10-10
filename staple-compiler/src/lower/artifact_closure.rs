@@ -353,6 +353,9 @@ impl ArtifactFamilyHooks for ProductionHooks {
             ArtifactRequestKey::TraitDictionary(_) => {
                 super::trait_dictionaries::expand(program, artifact, plan)
             }
+            ArtifactRequestKey::DynamicStructural(_) => {
+                super::trait_dictionaries::expand_dynamic_structural(program, artifact, plan)
+            }
             ArtifactRequestKey::TypeDescriptor(_)
             | ArtifactRequestKey::DescriptorDrop(_)
             | ArtifactRequestKey::CompoundDescriptorDrop(_)
@@ -452,6 +455,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::DropGlue(_)
                 | ArtifactRequestKey::TypeDescriptor(_)
                 | ArtifactRequestKey::TraitDictionary(_)
+                | ArtifactRequestKey::DynamicStructural(_)
                 | ArtifactRequestKey::DescriptorDrop(_)
                 | ArtifactRequestKey::CompoundDescriptorDrop(_)
                 | ArtifactRequestKey::DescriptorBoundEntry(_)

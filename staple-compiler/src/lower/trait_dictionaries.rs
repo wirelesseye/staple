@@ -198,6 +198,19 @@ pub(crate) enum DictionaryRecipe {
     /// caller's descriptors and recipes (T-E). The dictionary is built in GC
     /// memory so it may outlive the frame (T-G).
     Builder(Box<BuilderRecipe>),
+    /// A structural trait member for a compound shape, applied to its
+    /// components' recipes (T-E).
+    Structural(Box<StructuralRecipe>),
+}
+
+/// The run-time dictionary of a structural trait over a product or sum. Its
+/// tail holds the compound descriptor, then one component dictionary each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StructuralRecipe {
+    pub shape: crate::specialization::DynamicStructuralShape,
+    pub trait_id: crate::TraitId,
+    pub obligation: crate::CheckedTraitBound,
+    pub components: Vec<DictionaryCallArgument>,
 }
 
 /// The run-time construction of a dictionary from a generic implementation.
@@ -246,6 +259,14 @@ pub(super) enum DictionarySelection {
     Environment(EnvironmentDictionaryRecipe),
     Static(crate::specialization::ArtifactRequestKey),
     Build(Box<BuildSelection>),
+    Structural(Box<StructuralSelection>),
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct StructuralSelection {
+    pub shape: crate::specialization::DynamicStructuralShape,
+    pub obligation: crate::CheckedTraitBound,
+    pub components: Vec<(crate::CheckedTraitBound, DictionarySelection)>,
 }
 
 #[derive(Debug, Clone)]
@@ -314,7 +335,9 @@ fn select_at_depth(
     if let Some(recipe) = environment_recipe(program, environment, obligation) {
         return Ok(DictionarySelection::Environment(recipe));
     }
-    let chosen = program.select_runtime_implementation(obligation, origin)?;
+    let Some(chosen) = program.select_runtime_implementation(obligation, origin)? else {
+        return select_structural(program, environment, obligation, origin, depth);
+    };
     let metadata = program.traits.get(obligation.trait_id).ok_or_else(|| {
         staple_syntax::Diagnostic::new(origin.span.clone(), "dictionary trait is absent")
     })?;
@@ -421,6 +444,74 @@ fn select_at_depth(
     })))
 }
 
+/// A structural `Debug` over a product or sum whose components have `Debug`
+/// dictionaries. Other structural traits keep their restriction.
+fn select_structural(
+    program: &super::LoweredProgram,
+    environment: &[crate::CheckedTraitBound],
+    obligation: &crate::CheckedTraitBound,
+    origin: &crate::Origin,
+    depth: usize,
+) -> Result<DictionarySelection, staple_syntax::Diagnostic> {
+    use crate::specialization::DynamicStructuralShape;
+    let unavailable = || {
+        let name = program
+            .traits
+            .get(obligation.trait_id)
+            .map(|metadata| metadata.name.clone())
+            .unwrap_or_default();
+        staple_syntax::Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "no implementation of trait `{name}` is available at run-time types (structural dictionaries cover only `Debug` over products and sums)"
+            ),
+        )
+    };
+    if Some(obligation.trait_id) != program.semantic_ids.debug_trait {
+        return Err(unavailable());
+    }
+    let [target] = obligation.arguments.as_slice() else {
+        return Err(unavailable());
+    };
+    let (shape, elements): (_, Vec<crate::CheckedType>) = match target {
+        crate::CheckedType::Product(product) if !product.variadic => (
+            DynamicStructuralShape::DebugProduct {
+                names: product
+                    .elements
+                    .iter()
+                    .map(|element| element.name.clone())
+                    .collect(),
+            },
+            product
+                .elements
+                .iter()
+                .map(|element| element.value_type.clone())
+                .collect(),
+        ),
+        crate::CheckedType::Sum(sum) => (
+            DynamicStructuralShape::DebugSum {
+                alternatives: sum.alternatives.len(),
+            },
+            sum.alternatives.clone(),
+        ),
+        _ => return Err(unavailable()),
+    };
+    let mut components = Vec::new();
+    for element in elements {
+        let bound = crate::CheckedTraitBound {
+            trait_id: obligation.trait_id,
+            arguments: vec![element],
+        };
+        let selection = select_at_depth(program, environment, &bound, origin, depth + 1)?;
+        components.push((bound, selection));
+    }
+    Ok(DictionarySelection::Structural(Box::new(StructuralSelection {
+        shape,
+        obligation: obligation.clone(),
+        components,
+    })))
+}
+
 fn marker_traits(program: &super::LoweredProgram) -> [Option<crate::TraitId>; 4] {
     let ids = &program.semantic_ids;
     [
@@ -436,8 +527,15 @@ pub(super) fn for_each_member<'a>(
     selection: &'a DictionarySelection,
     visit: &mut dyn FnMut(&'a MemberSelection),
 ) {
-    let DictionarySelection::Build(build) = selection else {
-        return;
+    let build = match selection {
+        DictionarySelection::Build(build) => build,
+        DictionarySelection::Structural(structural) => {
+            for (_, component) in &structural.components {
+                for_each_member(component, visit);
+            }
+            return;
+        }
+        _ => return,
     };
     for member in &build.members {
         visit(member);
@@ -463,6 +561,24 @@ pub(super) fn materialize_recipe(
     match selection {
         DictionarySelection::Environment(recipe) => Ok(DictionaryRecipe::Environment(recipe.clone())),
         DictionarySelection::Static(key) => Ok(DictionaryRecipe::Static(key.clone())),
+        DictionarySelection::Structural(structural) => {
+            let components = structural
+                .components
+                .iter()
+                .map(|(obligation, nested)| {
+                    Ok(DictionaryCallArgument {
+                        obligation: obligation.clone(),
+                        recipe: materialize_recipe(program, nested, instance, origin)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, staple_syntax::Diagnostic>>()?;
+            Ok(DictionaryRecipe::Structural(Box::new(StructuralRecipe {
+                shape: structural.shape.clone(),
+                trait_id: structural.obligation.trait_id,
+                obligation: structural.obligation.clone(),
+                components,
+            })))
+        }
         DictionarySelection::Build(build) => {
             let mut members = Vec::new();
             let mut region = 0;
@@ -880,6 +996,7 @@ fn plan_instance_dictionaries(
 pub(super) enum BuilderUse {
     Entry(BuilderMember, usize),
     Static(crate::CheckedTraitBound),
+    Structural(crate::specialization::DynamicStructuralShape, crate::TraitId),
 }
 
 /// Walk a recipe's builders in a fixed order, collecting their uses.
@@ -896,6 +1013,15 @@ fn walk_recipe(
         DictionaryRecipe::Static(_) => {
             if !top_level {
                 uses.push((obligation.clone(), BuilderUse::Static(obligation.clone())));
+            }
+        }
+        DictionaryRecipe::Structural(structural) => {
+            uses.push((
+                structural.obligation.clone(),
+                BuilderUse::Structural(structural.shape.clone(), structural.trait_id),
+            ));
+            for component in &structural.components {
+                walk_recipe(program, &component.obligation, &component.recipe, false, uses);
             }
         }
         DictionaryRecipe::Builder(build) => {
@@ -955,6 +1081,29 @@ pub(super) fn body_builder_uses(
         }
     }
     found
+}
+
+/// The shared slot function of a structural dictionary shape.
+fn structural_slot_request(
+    shape: crate::specialization::DynamicStructuralShape,
+    trait_id: crate::TraitId,
+    origin: &crate::Origin,
+) -> super::artifact_closure::ClosureRequest {
+    super::artifact_closure::ClosureRequest::Artifact {
+        key: crate::specialization::ArtifactRequestKey::DynamicStructural(
+            crate::specialization::DynamicStructuralKey {
+                shape: shape.clone(),
+            },
+        ),
+        plan: super::LoweredArtifactPlan::DynamicStructural(super::DynamicStructuralPlan {
+            shape,
+            trait_id,
+            write: None,
+        }),
+        kind: super::LoweredArtifactDependencyKind::DynamicStructural,
+        origin: origin.clone(),
+        use_site: None,
+    }
 }
 
 /// The forwarding entry of one built-dictionary member.
@@ -1103,6 +1252,9 @@ pub(super) fn scan_instance(
                 member_entry_request(program, &member, environment, &origin)
             }
             BuilderUse::Static(obligation) => static_request(program, &obligation, &origin),
+            BuilderUse::Structural(shape, trait_id) => Ok(structural_slot_request(
+                shape, trait_id, &origin,
+            )),
         }
         .map_err(|error| vec![error])?;
         let super::artifact_closure::ClosureRequest::Artifact { use_site, .. } = &mut request
@@ -1276,6 +1428,74 @@ pub(super) fn static_request(
         origin: origin.clone(),
         use_site: None,
     })
+}
+
+/// Expand a structural dictionary slot: a product's literals write through
+/// the shared `Formatter.write` instance.
+pub(super) fn expand_dynamic_structural(
+    program: &super::LoweredProgram,
+    artifact: super::LoweredArtifactRequestId,
+    plan: super::LoweredArtifactPlan,
+) -> super::artifact_closure::ExpansionResult {
+    use super::artifact_closure::ClosureRequest;
+    use super::artifact_plan::PlannedInstance;
+    use super::instance_resolution::{InstanceResolutionRequest, InstanceResolutionTarget};
+    use super::{LoweredArtifactPlan as Plan, LoweredInstanceDependencyKind as InstanceKind};
+    use crate::specialization::DynamicStructuralShape;
+    use staple_syntax::Diagnostic;
+    let record = program
+        .artifacts
+        .get(artifact)
+        .expect("interned structural slot");
+    let origin = &record.origin;
+    let Plan::DynamicStructural(mut plan) = plan else {
+        return Err(vec![Diagnostic::new(
+            origin.span.clone(),
+            "structural slot has a mismatched plan",
+        )]);
+    };
+    let mut requests = Vec::new();
+    plan.write = None;
+    if matches!(plan.shape, DynamicStructuralShape::DebugProduct { .. }) {
+        let write = program.string_formatting.write.ok_or_else(|| {
+            vec![Diagnostic::new(
+                origin.span.clone(),
+                "Formatter.write is unavailable for structural Debug",
+            )]
+        })?;
+        let signature = program
+            .functions
+            .get(write)
+            .map(|function| function.signature.clone())
+            .ok_or_else(|| {
+                vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "Formatter.write has no lowered template",
+                )]
+            })?;
+        let resolved = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function: write,
+                origin: origin.clone(),
+                function_type: signature,
+                substitutions: Default::default(),
+                evidence: None,
+                target: InstanceResolutionTarget::Root,
+            })
+            .map_err(|error| vec![error])?;
+        plan.write = Some(PlannedInstance {
+            key: resolved.key.clone(),
+            instance: None,
+            kind: InstanceKind::FormattingWrite,
+        });
+        requests.push(ClosureRequest::Instance {
+            resolved,
+            kind: InstanceKind::FormattingWrite,
+            origin: origin.clone(),
+            use_site: None,
+        });
+    }
+    Ok((Plan::DynamicStructural(plan), requests))
 }
 
 pub(super) fn expand(

@@ -1101,6 +1101,22 @@ pub(crate) struct TraitDictionaryKey {
     pub implementation: crate::LoweredTraitImplementationId,
 }
 
+/// The shape of a structural dictionary slot at run-time types. The slot
+/// reads its component descriptors and dictionaries from the dictionary tail,
+/// so only the shape, not the component types, identifies it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum DynamicStructuralShape {
+    /// `Debug` for a product: one optional field name per element.
+    DebugProduct { names: Vec<Option<String>> },
+    /// `Debug` for a sum with this many alternatives.
+    DebugSum { alternatives: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DynamicStructuralKey {
+    pub shape: DynamicStructuralShape,
+}
+
 /// Generated-artifact request keys. The variant is the namespace: keys from
 /// different families can never compare or hash equal, even when their numeric
 /// IDs coincide. `RuntimeHelper` is deliberately absent: runtime symbols have
@@ -1113,6 +1129,7 @@ pub(crate) enum ArtifactRequestKey {
     DropGlue(DropGlueKey),
     TypeDescriptor(CanonicalType),
     TraitDictionary(TraitDictionaryKey),
+    DynamicStructural(DynamicStructuralKey),
     DescriptorDrop(CanonicalType),
     CompoundDescriptorDrop(CompoundDescriptorDropKey),
     DescriptorBoundEntry(DescriptorBoundEntryKey),
@@ -1137,6 +1154,7 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::DropGlue(_) => "drop-glue",
             ArtifactRequestKey::TypeDescriptor(_) => "type-descriptor",
             ArtifactRequestKey::TraitDictionary(_) => "trait-dictionary",
+            ArtifactRequestKey::DynamicStructural(_) => "dynamic-structural",
             ArtifactRequestKey::DescriptorDrop(_) => "descriptor-drop",
             ArtifactRequestKey::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             ArtifactRequestKey::DescriptorBoundEntry(_) => "descriptor-bound-entry",
@@ -1365,6 +1383,7 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
         ArtifactRequestKey::DropGlue(_) => "__staple_drop_glue".to_owned(),
         ArtifactRequestKey::TypeDescriptor(_) => "__staple_type_descriptor".to_owned(),
         ArtifactRequestKey::TraitDictionary(_) => "__staple_trait_dictionary".to_owned(),
+        ArtifactRequestKey::DynamicStructural(_) => "__staple_dynamic_structural".to_owned(),
         ArtifactRequestKey::DescriptorDrop(_) => "__staple_descriptor_drop".to_owned(),
         ArtifactRequestKey::CompoundDescriptorDrop(_) => {
             "__staple_compound_descriptor_drop".to_owned()
