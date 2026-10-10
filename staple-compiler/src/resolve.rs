@@ -4726,6 +4726,10 @@ impl NameResolver {
                 // owning module.
                 self.syntax_modules
                     .insert(coro.body.syntax.id, self.current_module);
+                // The thunk the body lowers to inherits its enclosing
+                // function's declared bounds.
+                self.expression_function_owners
+                    .insert(coro.body.syntax.id, self.function_stack.last().copied());
                 let outer_loop_depth = self.loop_depth;
                 self.loop_depth = 0;
                 self.resolve_block(&coro.body);

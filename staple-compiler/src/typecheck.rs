@@ -18123,7 +18123,7 @@ fn is_qualifying_product(
 /// The duplicate-free sum of `product`'s element types (a single type when
 /// `product` is homogeneous). Used both as `Index`'s `Output` and, for the
 /// same product, as an iterator's `Item`.
-fn product_item(product: &CheckedProductType) -> CheckedType {
+pub(crate) fn product_item(product: &CheckedProductType) -> CheckedType {
     normalize_substituted_sum(
         product
             .elements

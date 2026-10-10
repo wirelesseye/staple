@@ -13534,13 +13534,6 @@ fn stage4b_reports_each_polymorphic_value_restriction_at_its_construction() {
     for (source, message) in [
         (
             concat!(
-                "def first: <T where Copy T> (T, T) -> T = pair => pair[USize :: 0]\n",
-                "let stored: <T where Copy T> (T, T) -> T = first\n",
-            ),
-            "a trait obligation of this polymorphic value's implementation has no dictionary at run time (it needs a bound in scope, or exactly one matching implementation)",
-        ),
-        (
-            concat!(
                 "use std.coroutine.*\n",
                 "def launch: <T> move T -> Coroutine{} I32 = move value => coro { 1 }\n",
                 "let stored = launch\n",
@@ -13589,6 +13582,20 @@ fn stage6_bounded_functions_become_polymorphic_values() {
         "def label: <T where Named T> T -> String = value => Named.name value\n",
         "let stored = label\n",
         "let answer = stored 3\n",
+    )));
+}
+
+#[test]
+fn stage6_structural_dictionaries_cover_index_mutation_and_iteration() {
+    // Indexing, indexed assignment and `for` over tuple shapes of an
+    // abstract element type get structural dictionaries.
+    lower(&type_check(concat!(
+        "def first: <T where Copy T> (T, T) -> T = pair => pair[USize :: 0]\n",
+        "let stored_first: <T where Copy T> (T, T) -> T = first\n",
+        "def put: <T where Copy T> (mut (T, T), T) -> () = (mut pair, value) => { pair[USize :: 1] = value }\n",
+        "let stored_put: <T where Copy T> (mut (T, T), T) -> () = put\n",
+        "def each: <T where Copy T> (T, T, T) -> () = triple => { for item in triple { } }\n",
+        "let stored_each: <T where Copy T> (T, T, T) -> () = each\n",
     )));
 }
 

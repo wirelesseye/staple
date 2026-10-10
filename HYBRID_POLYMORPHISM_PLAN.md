@@ -439,11 +439,10 @@ associated-type normalization, structural traits, and the special
 compile-time recipes for bounded templates in dictionary-passed code; 6b,
 bounded schemes as values.
 
-Done as planned, with two changes. A built dictionary is allocated in GC
+Done as planned, with one change: a built dictionary is allocated in GC
 memory rather than a stack slot, so it needs no copy when a closure or adapter
-captures it; and structural dictionaries cover `Debug` over products and sums
-only, so `Index`, `MutateIndex` and iteration at run-time shapes report a
-restriction. Dictionary hidden arguments follow the descriptors in signatures,
+captures it. Structural dictionaries cover `Debug`, `Index`, `MutateIndex`
+and iteration over products and sums. Dictionary hidden arguments follow the descriptors in signatures,
 entries, closure environments and adapter environments; calls and coerced
 expressions carry their dictionaries in one site table.
 

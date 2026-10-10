@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 144] = [
+static CORPUS: [CorpusProgram; 146] = [
     expect_stdout(
         must_run(inline(
             "trait_dictionary_adapters",
@@ -216,6 +216,52 @@ wrapped_made 3
             "trait-dictionaries",
         )),
         "lambda 3\nTrue False\n100 7\n100 x\nlambda 55\n9 1\n10 2\n9 3\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "trait_dictionary_subsumption",
+            r#"use std.io.(IO, println)
+use std.fmt.Display
+type Wrapped T = wrap T
+impl<T where Display T> Display (Wrapped T) { fmt = (Wrapped inner, mut formatter) => Display.fmt (inner, formatter) }
+def show: <T where Display T> move T ->{IO} () = move value => println "${value}"
+let stored: <T where Display T> move T ->{IO} () = show
+let wrapped_show: <U where Display U> move Wrapped U ->{IO} () = stored
+wrapped_show (Wrapped 5)
+def local: () ->{IO} () = () => {
+    let inner: <U where Display U> move Wrapped U ->{IO} () = stored
+    inner (Wrapped 6)
+}
+local ()
+"#,
+            "trait-dictionaries",
+        )),
+        "5\n6\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "trait_dictionary_structural",
+            r#"use std.io.(IO, println)
+use std.fmt.Display
+def first: <T where Copy T> (T, T) -> T = pair => pair[USize :: 0]
+def second: <T where Copy T> (T, T) -> T = pair => pair[USize :: 1]
+let stored_first: <T where Copy T> (T, T) -> T = first
+let stored_second: <T where Copy T> (T, T) -> T = second
+println "${stored_first (3, 4)} ${stored_second (3, 4)}"
+def put: <T where Copy T> (mut (T, T), T) -> () = (mut pair, value) => { pair[USize :: 1] = value }
+let stored_put: <T where Copy T> (mut (T, T), T) -> () = put
+let mut pair = (1, 2)
+stored_put (pair, 9)
+println "${pair[USize :: 1]}"
+def total: <T where Copy T, Display T> (T, T, T) ->{IO} () = triple => {
+    for item in triple { println "${item}" }
+}
+let stored_total: <T where Copy T, Display T> (T, T, T) ->{IO} () = total
+stored_total (7, 8, 9)
+"#,
+            "trait-dictionaries",
+        )),
+        "3 4\n9\n7\n8\n9\n",
     ),
     expect_stdout(
         must_run(inline(

@@ -1110,6 +1110,29 @@ pub(crate) enum DynamicStructuralShape {
     DebugProduct { names: Vec<Option<String>> },
     /// `Debug` for a sum with this many alternatives.
     DebugSum { alternatives: usize },
+    /// `Index` of a product by a bounds-checked position. `injections` gives,
+    /// per element, its alternative in the output sum, or none when the output
+    /// is the element type itself.
+    IndexProduct {
+        injections: Vec<Option<usize>>,
+        output_alternatives: usize,
+    },
+    /// `MutateIndex` of a homogeneous product with this many elements.
+    MutateProduct { length: usize },
+    /// `Index` or `MutateIndex` through a `Ref`, delegating to the payload.
+    DerefIndex,
+    DerefMutateIndex,
+    /// `IntoIterator` of a product: the source paired with cursor zero.
+    IntoIterProduct,
+    /// `Iterator.next` over a `(product, USize)` pair. `injections` is as for
+    /// `IndexProduct`; `done` and `yield_` are the result sum's alternatives.
+    NextProduct {
+        injections: Vec<Option<usize>>,
+        item_alternatives: usize,
+        result_alternatives: usize,
+        done: usize,
+        yield_: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

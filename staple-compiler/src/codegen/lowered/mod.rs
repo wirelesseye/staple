@@ -524,12 +524,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .add_function(name, ty, Some(Linkage::Internal)),
                     ]
                 }
-                LoweredArtifactPlan::DynamicStructural(_) => {
-                    // (dictionary, result, value, formatter): the dynamic ABI.
-                    let ty = self.backend.context.void_type().fn_type(
-                        &[pointer.into(), pointer.into(), pointer.into(), pointer.into()],
-                        false,
-                    );
+                LoweredArtifactPlan::DynamicStructural(plan) => {
+                    use crate::specialization::DynamicStructuralShape as Shape;
+                    // (dictionary, result, arguments…): the dynamic ABI.
+                    let count = match &plan.shape {
+                        Shape::IntoIterProduct | Shape::NextProduct { .. } => 3,
+                        Shape::MutateProduct { .. } | Shape::DerefMutateIndex => 5,
+                        _ => 4,
+                    };
+                    let ty = self
+                        .backend
+                        .context
+                        .void_type()
+                        .fn_type(&vec![pointer.into(); count], false);
                     vec![
                         self.backend
                             .llvm_module

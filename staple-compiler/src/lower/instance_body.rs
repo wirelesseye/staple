@@ -2200,6 +2200,9 @@ fn recipe_member_instances(
             for component in &structural.components {
                 recipe_member_instances(&component.recipe, origin, members);
             }
+            for prerequisite in structural.prerequisites.iter().flatten() {
+                recipe_member_instances(&prerequisite.recipe, origin, members);
+            }
             return;
         }
         _ => return,
@@ -5395,6 +5398,14 @@ impl<'a> BodyValidator<'a> {
                 for argument in arguments {
                     recipe_member_instances(&argument.recipe, &origin, &mut members);
                 }
+            }
+        }
+        for (_, expression) in self.body.expressions() {
+            for argument in super::trait_dictionaries::adapter_entailment_recipes(
+                self.program,
+                expression,
+            ) {
+                recipe_member_instances(&argument.recipe, &expression.origin, &mut members);
             }
         }
         for (value, arguments) in &self.body.dictionary_values {

@@ -441,8 +441,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         Ok(())
     }
 
-    /// Build a structural dictionary in GC memory: its only slot is the
-    /// shared shape function, and its tail the compound descriptor followed
+    /// Build a structural dictionary in GC memory: its slot is the shared
+    /// shape function; the prefix holds prerequisite dictionaries and
+    /// associated descriptors, and the tail the shape's descriptors followed
     /// by the component dictionaries.
     fn build_structural_dictionary(
         &self,
@@ -456,11 +457,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ok_or_else(|| Diagnostic::new(span.clone(), "dictionary trait has no layout"))?
             .clone();
         let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
-        let words = layout.environment + 1 + structural.components.len();
+        let words = layout.environment + structural.descriptors.len() + structural.components.len();
         let dictionary = self.backend.build_gc_allocation(
             self.backend
                 .size_type
-                .const_int(words as u64 * width, false),
+                .const_int(words.max(1) as u64 * width, false),
             "dictionary.structural",
             span.clone(),
         )?;
@@ -492,16 +493,38 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .copied()
             .ok_or_else(|| Diagnostic::new(span.clone(), "undeclared structural slot"))?;
         store(layout.slots.start, slot.as_global_value().as_pointer_value())?;
-        let compound = structural.obligation.arguments.first().ok_or_else(|| {
-            Diagnostic::new(span.clone(), "structural dictionary has no compound type")
-        })?;
-        let descriptor = self.dynamic_descriptor(compound, environment, span)?;
-        let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
-        store(layout.environment, descriptor)?;
+        let null = self
+            .backend
+            .context
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        for (index, prerequisite) in structural.prerequisites.iter().enumerate() {
+            let value = match prerequisite {
+                Some(argument) => {
+                    self.dictionary_recipe_value(&argument.recipe, Some(environment), span)?
+                }
+                None => null,
+            };
+            store(layout.prerequisites.start + index, value)?;
+        }
+        let associated = structural.obligation.arguments.len() - layout.associated.len();
+        for (index, argument) in structural.obligation.arguments[associated..]
+            .iter()
+            .enumerate()
+        {
+            let descriptor = self.dynamic_descriptor(argument, environment, span)?;
+            let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
+            store(layout.associated.start + index, descriptor)?;
+        }
+        for (index, ty) in structural.descriptors.iter().enumerate() {
+            let descriptor = self.dynamic_descriptor(ty, environment, span)?;
+            let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
+            store(layout.environment + index, descriptor)?;
+        }
         for (index, component) in structural.components.iter().enumerate() {
             let value =
                 self.dictionary_recipe_value(&component.recipe, Some(environment), span)?;
-            store(layout.environment + 1 + index, value)?;
+            store(layout.environment + structural.descriptors.len() + index, value)?;
         }
         Ok(dictionary)
     }
@@ -4924,16 +4947,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// parameters include the unbound descriptors. It loads the leading bound
     /// descriptors from the closure environment and forwards both sets to the
     /// instance in ABI order.
-    /// A structural dictionary slot (T-D): the dictionary tail holds the
-    /// compound descriptor, then one component dictionary per element or
-    /// alternative.
+    /// A structural dictionary slot (T-D). The dictionary tail holds the
+    /// shape's descriptors, then its component dictionaries; every value
+    /// arrives by pointer.
     pub(super) fn emit_dynamic_structural(
         &mut self,
         ordinal: crate::specialization::ArtifactOrdinal,
         plan: &crate::DynamicStructuralPlan,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
-        use crate::specialization::DynamicStructuralShape;
+        use crate::specialization::DynamicStructuralShape as Shape;
         let function = self
             .artifacts
             .get(&ordinal)
@@ -4944,8 +4967,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         self.backend.builder.position_at_end(entry);
         let parameters = function.get_params();
         let dictionary = parameters[0].into_pointer_value();
-        let value = parameters[2].into_pointer_value();
-        let formatter = parameters[3].into_pointer_value();
+        let result = parameters[1].into_pointer_value();
+        let argument = |index: usize| parameters[index].into_pointer_value();
         let environment = self
             .view
             .trait_dictionary_layout(plan.trait_id)
@@ -4964,43 +4987,74 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .map_err(compiler_diagnostic)?
                 .into_pointer_value())
         };
-        let compound = word(environment)?;
-        let unit = self.backend.context.i8_type();
-        let result = self
-            .backend
-            .entry_builder()
-            .build_alloca(unit, "structural.result")
-            .map_err(compiler_diagnostic)?;
-        let member_type = self.backend.context.void_type().fn_type(
-            &[pointer.into(), pointer.into(), pointer.into(), pointer.into()],
-            false,
-        );
-        let call_member = |component: PointerValue<'context>,
-                           argument: PointerValue<'context>|
+        let size = self.backend.size_type;
+        let i32_type = self.backend.context.i32_type();
+        // Calls slot zero of a component dictionary with these arguments.
+        let call_component = |component: PointerValue<'context>,
+                              arguments: &[PointerValue<'context>]|
          -> CodeGenerationResult<()> {
-            // Slot zero of a `Debug` dictionary is its only member.
             let code = self
                 .load_dynamic_storage(pointer, component, "structural.slot")
                 .map_err(compiler_diagnostic)?
                 .into_pointer_value();
+            let mut values: Vec<inkwell::values::BasicMetadataValueEnum<'context>> =
+                vec![component.into(), result.into()];
+            for argument in arguments {
+                values.push((*argument).into());
+            }
+            let member_type = self
+                .backend
+                .context
+                .void_type()
+                .fn_type(&vec![pointer.into(); values.len()], false);
             self.backend
                 .builder
-                .build_indirect_call(
-                    member_type,
-                    code,
-                    &[
-                        component.into(),
-                        result.into(),
-                        argument.into(),
-                        formatter.into(),
-                    ],
-                    "structural.member",
-                )
+                .build_indirect_call(member_type, code, &values, "structural.member")
                 .map_err(compiler_diagnostic)?;
             Ok(())
         };
+        // A bounds-checked position, switching on it over `count` blocks.
+        let switch_on_position = |position: inkwell::values::IntValue<'context>,
+                                  count: usize,
+                                  name: &str|
+         -> CodeGenerationResult<Vec<inkwell::basic_block::BasicBlock<'context>>> {
+            let blocks = (0..count)
+                .map(|index| {
+                    self.backend
+                        .context
+                        .append_basic_block(function, &format!("{name}.{index}"))
+                })
+                .collect::<Vec<_>>();
+            let fallback = self
+                .backend
+                .context
+                .append_basic_block(function, &format!("{name}.out_of_bounds"));
+            let cases = blocks
+                .iter()
+                .enumerate()
+                .map(|(index, block)| (size.const_int(index as u64, false), *block))
+                .collect::<Vec<_>>();
+            self.backend
+                .builder
+                .build_switch(position, fallback, &cases)
+                .map_err(compiler_diagnostic)?;
+            self.backend.builder.position_at_end(fallback);
+            self.backend
+                .builder
+                .build_unreachable()
+                .map_err(compiler_diagnostic)?;
+            Ok(blocks)
+        };
+        let load_size = |slot: PointerValue<'context>| -> CodeGenerationResult<_> {
+            Ok(self
+                .load_dynamic_storage(size, slot, "structural.position")
+                .map_err(compiler_diagnostic)?
+                .into_int_value())
+        };
         match &plan.shape {
-            DynamicStructuralShape::DebugProduct { names } => {
+            Shape::DebugProduct { names } => {
+                let formatter = argument(3);
+                let compound = word(environment)?;
                 let write = plan
                     .write
                     .as_ref()
@@ -5015,6 +5069,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         span.clone(),
                     )
                 };
+                let unit = self.backend.context.i8_type();
+                let scratch = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(unit, "structural.result")
+                    .map_err(compiler_diagnostic)?;
                 literal("(")?;
                 for (index, name) in names.iter().enumerate() {
                     if index != 0 {
@@ -5024,12 +5084,44 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         literal(name)?;
                         literal(": ")?;
                     }
-                    let (field, _) = self.dynamic_product_field(compound, value, index as u32)?;
-                    call_member(word(environment + 1 + index)?, field)?;
+                    let (field, _) =
+                        self.dynamic_product_field(compound, argument(2), index as u32)?;
+                    let component = word(environment + 1 + index)?;
+                    let code = self
+                        .load_dynamic_storage(pointer, component, "structural.slot")
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value();
+                    let member_type = self.backend.context.void_type().fn_type(
+                        &[pointer.into(), pointer.into(), pointer.into(), pointer.into()],
+                        false,
+                    );
+                    self.backend
+                        .builder
+                        .build_indirect_call(
+                            member_type,
+                            code,
+                            &[
+                                component.into(),
+                                scratch.into(),
+                                field.into(),
+                                formatter.into(),
+                            ],
+                            "structural.member",
+                        )
+                        .map_err(compiler_diagnostic)?;
                 }
                 literal(")")?;
             }
-            DynamicStructuralShape::DebugSum { alternatives } => {
+            Shape::DebugSum { alternatives } => {
+                let formatter = argument(3);
+                let value = argument(2);
+                let compound = word(environment)?;
+                let unit = self.backend.context.i8_type();
+                let scratch = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(unit, "structural.result")
+                    .map_err(compiler_diagnostic)?;
                 let tag = self.dynamic_sum_tag(value, span)?;
                 let payload = self.dynamic_sum_payload(compound, value, *alternatives)?;
                 let done = self.backend.context.append_basic_block(function, "sum.done");
@@ -5043,12 +5135,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 let cases = blocks
                     .iter()
                     .enumerate()
-                    .map(|(index, block)| {
-                        (
-                            self.backend.context.i32_type().const_int(index as u64, false),
-                            *block,
-                        )
-                    })
+                    .map(|(index, block)| (i32_type.const_int(index as u64, false), *block))
                     .collect::<Vec<_>>();
                 self.backend
                     .builder
@@ -5056,7 +5143,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
                 for (index, block) in blocks.iter().enumerate() {
                     self.backend.builder.position_at_end(*block);
-                    call_member(word(environment + 1 + index)?, payload)?;
+                    let component = word(environment + 1 + index)?;
+                    let code = self
+                        .load_dynamic_storage(pointer, component, "structural.slot")
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value();
+                    let member_type = self.backend.context.void_type().fn_type(
+                        &[pointer.into(), pointer.into(), pointer.into(), pointer.into()],
+                        false,
+                    );
+                    self.backend
+                        .builder
+                        .build_indirect_call(
+                            member_type,
+                            code,
+                            &[
+                                component.into(),
+                                scratch.into(),
+                                payload.into(),
+                                formatter.into(),
+                            ],
+                            "structural.member",
+                        )
+                        .map_err(compiler_diagnostic)?;
                     self.backend
                         .builder
                         .build_unconditional_branch(done)
@@ -5064,12 +5173,217 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 self.backend.builder.position_at_end(done);
             }
+            Shape::IndexProduct {
+                injections,
+                output_alternatives,
+            } => {
+                let target = argument(2);
+                let compound = word(environment)?;
+                let output = word(environment + 1)?;
+                let position = load_size(argument(3))?;
+                let blocks = switch_on_position(position, injections.len(), "index")?;
+                let done = self.backend.context.append_basic_block(function, "index.done");
+                for (index, block) in blocks.iter().enumerate() {
+                    self.backend.builder.position_at_end(*block);
+                    let (field, descriptor) =
+                        self.dynamic_product_field(compound, target, index as u32)?;
+                    self.store_structural_element(
+                        injections[index],
+                        *output_alternatives,
+                        output,
+                        descriptor,
+                        field,
+                        result,
+                    )?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(done)
+                        .map_err(compiler_diagnostic)?;
+                }
+                self.backend.builder.position_at_end(done);
+            }
+            Shape::MutateProduct { length } => {
+                let target = argument(2);
+                let compound = word(environment)?;
+                let position = load_size(argument(3))?;
+                let blocks = switch_on_position(position, *length, "mutate")?;
+                let done = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "mutate.done");
+                for (index, block) in blocks.iter().enumerate() {
+                    self.backend.builder.position_at_end(*block);
+                    let (field, descriptor) =
+                        self.dynamic_product_field(compound, target, index as u32)?;
+                    // The replaced element is dropped, then overwritten.
+                    self.backend.drop_dynamic_value(descriptor, field)?;
+                    self.backend
+                        .copy_dynamic_value(descriptor, argument(4), field)?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(done)
+                        .map_err(compiler_diagnostic)?;
+                }
+                self.backend.builder.position_at_end(done);
+            }
+            Shape::DerefIndex | Shape::DerefMutateIndex => {
+                let payload = self
+                    .load_dynamic_storage(pointer, argument(2), "structural.payload")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let mut arguments = vec![payload, argument(3)];
+                if matches!(plan.shape, Shape::DerefMutateIndex) {
+                    arguments.push(argument(4));
+                }
+                call_component(word(environment)?, &arguments)?;
+            }
+            Shape::IntoIterProduct => {
+                let iterator = word(environment + 1)?;
+                let (source_field, source_descriptor) =
+                    self.dynamic_product_field(iterator, result, 0)?;
+                self.backend
+                    .copy_dynamic_value(source_descriptor, argument(2), source_field)?;
+                let (cursor, _) = self.dynamic_product_field(iterator, result, 1)?;
+                self.backend
+                    .builder
+                    .build_store(cursor, size.const_zero())
+                    .map_err(compiler_diagnostic)?;
+            }
+            Shape::NextProduct {
+                injections,
+                item_alternatives,
+                result_alternatives,
+                done,
+                yield_,
+            } => {
+                let iterator_value = argument(2);
+                let iterator = word(environment)?;
+                let result_descriptor = word(environment + 1)?;
+                let (source, source_descriptor) =
+                    self.dynamic_product_field(iterator, iterator_value, 0)?;
+                let (cursor_slot, _) = self.dynamic_product_field(iterator, iterator_value, 1)?;
+                let cursor = load_size(cursor_slot)?;
+                let payload =
+                    self.dynamic_sum_payload(result_descriptor, result, *result_alternatives)?;
+                let finished = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::UGE,
+                        cursor,
+                        size.const_int(injections.len() as u64, false),
+                        "structural.finished",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let done_block = self.backend.context.append_basic_block(function, "next.done");
+                let yield_block = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "next.yield");
+                let exit = self.backend.context.append_basic_block(function, "next.exit");
+                self.backend
+                    .builder
+                    .build_conditional_branch(finished, done_block, yield_block)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(done_block);
+                let done_descriptor = self
+                    .backend
+                    .load_descriptor_component(result_descriptor, *done as u32)?;
+                self.backend
+                    .copy_dynamic_value(done_descriptor, iterator_value, payload)?;
+                self.backend
+                    .builder
+                    .build_store(result, i32_type.const_int(*done as u64, false))
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_unconditional_branch(exit)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(yield_block);
+                let yield_descriptor = self
+                    .backend
+                    .load_descriptor_component(result_descriptor, *yield_ as u32)?;
+                let (item_slot, item_descriptor) =
+                    self.dynamic_product_field(yield_descriptor, payload, 0)?;
+                let (next_slot, next_descriptor) =
+                    self.dynamic_product_field(yield_descriptor, payload, 1)?;
+                let blocks = switch_on_position(cursor, injections.len(), "next")?;
+                for (index, block) in blocks.iter().enumerate() {
+                    self.backend.builder.position_at_end(*block);
+                    let (field, descriptor) =
+                        self.dynamic_product_field(source_descriptor, source, index as u32)?;
+                    self.store_structural_element(
+                        injections[index],
+                        *item_alternatives,
+                        item_descriptor,
+                        descriptor,
+                        field,
+                        item_slot,
+                    )?;
+                    self.backend
+                        .copy_dynamic_value(next_descriptor, iterator_value, next_slot)?;
+                    let (next_cursor, _) =
+                        self.dynamic_product_field(next_descriptor, next_slot, 1)?;
+                    let advanced = self
+                        .backend
+                        .builder
+                        .build_int_add(cursor, size.const_int(1, false), "structural.cursor")
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_store(next_cursor, advanced)
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_store(result, i32_type.const_int(*yield_ as u64, false))
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_unconditional_branch(exit)
+                        .map_err(compiler_diagnostic)?;
+                }
+                self.backend.builder.position_at_end(exit);
+            }
         }
         self.backend
             .builder
             .build_return(None)
             .map_err(compiler_diagnostic)?;
         Ok(())
+    }
+
+    /// Store one product element into an output slot: directly, or injected as
+    /// the given alternative of the output sum.
+    fn store_structural_element(
+        &self,
+        injection: Option<usize>,
+        alternatives: usize,
+        output_descriptor: PointerValue<'context>,
+        element_descriptor: PointerValue<'context>,
+        element: PointerValue<'context>,
+        destination: PointerValue<'context>,
+    ) -> CodeGenerationResult<()> {
+        match injection {
+            None => self
+                .backend
+                .copy_dynamic_value(element_descriptor, element, destination),
+            Some(alternative) => {
+                let payload = self.dynamic_sum_payload(output_descriptor, destination, alternatives)?;
+                self.backend
+                    .copy_dynamic_value(element_descriptor, element, payload)?;
+                self.backend
+                    .builder
+                    .build_store(
+                        destination,
+                        self.backend
+                            .context
+                            .i32_type()
+                            .const_int(alternative as u64, false),
+                    )
+                    .map_err(compiler_diagnostic)?;
+                Ok(())
+            }
+        }
     }
 
     pub(super) fn emit_descriptor_bound_entry(

@@ -1748,7 +1748,9 @@ impl LoweredProgram {
                     UseSiteOwner::Instance(body) => {
                         index < super::trait_dictionaries::body_builder_uses(self, body).len()
                     }
-                    UseSiteOwner::Initializer(_) => false,
+                    UseSiteOwner::Initializer(id) => {
+                        index < super::trait_dictionaries::initializer_builder_uses(self, id).len()
+                    }
                 };
                 if !valid {
                     report("dictionary builder", index);

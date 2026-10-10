@@ -48,21 +48,21 @@ the release build of this stage's base commit for every existing input.
   Trait-only rejections fell from 1,819 occurrences / 46 templates to 0 outside
   the coroutine and reactive bodies of Stage 8.
 - **6a.1–6a.5 done.** Static and built dictionaries (generic and blanket
-  implementations in GC memory, structural `Debug` over products and sums),
+  implementations in GC memory, structural `Debug`, `Index`, `MutateIndex` and
+  iteration over products and sums),
   environment/static/builder/structural recipes selected uniquely at abstract
   types, hidden dictionary arguments in signatures, entries, calls, closure
   environments and adapters, and every T-K operation through slot calls.
 - **6b.1 done.** Bounded schemes are values: construction, calls (dictionaries
   after descriptors), instantiation adapters (site-evaluated dictionaries stored
   beside the descriptors) and scheme adapters (entailment through prerequisite
-  routes and static dictionaries; a builder-derived entailment is a
-  restriction). `Staple.md` and the restriction tables are updated.
-- **Gates passed.** `cargo test --workspace`; the full type differential run
-  (141 of 142 programs dynamic, 16,587 call sites) and effect-row run (141
-  programs); IR identical to the `1106ba8` release build over 145 programs and
-  examples; reachability tests (a concretely called bounded `def` and an unused
-  bounded value build nothing); the coverage report's remaining trait-only
-  template is a coroutine thunk (Stage 8).
+  routes, static dictionaries and built ones). `Staple.md` and the restriction tables are updated.
+- **Gates passed.** `cargo test --workspace` (including the corpus and Stage 6
+  differential tests with the subsumption and structural programs); the coverage
+  report no longer lists a trait-only template; reachability tests (a concretely
+  called bounded `def` and an unused bounded value build nothing). The full
+  type/effect-row differential runs and the IR comparison with `1106ba8` were
+  last run before the builder-entailment and structural-shape work.
 - Checker workarounds remain: explicit `USize` indices, projected-result type
   arguments/result annotations, and callback parameter annotations.
 
@@ -307,8 +307,7 @@ After Stage 6:
 | Restriction | Message | Lifted in |
 |---|---|---|
 | An obligation at run-time types that more than one implementation could satisfy (T-F) | "trait `X` for `Y` is ambiguous at run-time types: candidates …". The checker rejects overlapping implementations, so only an unknown type matching several concrete implementations reaches it | Not planned: it is the price of agreeing with monomorphization |
-| An obligation no dictionary can satisfy: no bound in scope, no unique implementation, or a structural trait other than `Debug` over products and sums (`Index`, `MutateIndex`, iteration over tuples) | "a trait obligation of this polymorphic value's implementation has no dictionary at run time …" at the construction site | Not planned |
-| A built dictionary needed to subsume a polymorphic value into another scheme | "subsuming a polymorphic value needs a dictionary built from an implementation, which is not supported yet" | Not planned |
+| An obligation no dictionary can satisfy: no bound in scope and no unique implementation | "a trait obligation of this polymorphic value's implementation has no dictionary at run time …" at the construction site | Not planned |
 | `Natural` bound or run-time `Natural` count | "array lengths cannot depend on a polymorphic value's type parameters yet" | Not planned |
 | Trait member used as a polymorphic value; independently generic trait members | "trait members cannot be used as polymorphic values yet" | Stage 7 |
 | Coroutine, async, or reactive body, transitively | the existing messages | Stage 8 |

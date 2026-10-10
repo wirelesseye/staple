@@ -964,6 +964,38 @@ impl<'a> WorklistBuilder<'a> {
         differential: bool,
         polymorphic: bool,
     ) -> Option<FunctionInstanceId> {
+        self.request_function_in_scope(
+            function,
+            origin,
+            function_type,
+            substitutions,
+            evidence,
+            target,
+            owner,
+            kind,
+            differential,
+            polymorphic,
+            None,
+        )
+    }
+
+    /// Like `request_function`, with an explicit run-time scope for a member
+    /// instance requested without an enclosing instance.
+    #[allow(clippy::too_many_arguments)]
+    fn request_function_in_scope(
+        &mut self,
+        function: FunctionId,
+        origin: &Origin,
+        function_type: CheckedFunctionType,
+        substitutions: CallSubstitutions,
+        evidence: Option<TraitEvidence>,
+        target: InstanceResolutionTarget<'_>,
+        owner: TraversalOwner,
+        kind: LoweredInstanceDependencyKind,
+        differential: bool,
+        polymorphic: bool,
+        explicit: Option<crate::RuntimeScope>,
+    ) -> Option<FunctionInstanceId> {
         // A function with no relevant template parameters has exactly one
         // instance. The requesting site's callable type may be a coerced view
         // of the template (for example a `Never` result coerced to the
@@ -994,7 +1026,9 @@ impl<'a> WorklistBuilder<'a> {
             evidence,
             target,
         };
-        let resolved = if polymorphic {
+        let resolved = if let Some(scope) = &explicit {
+            self.program.resolve_instance_request_in_scope(&request, scope)
+        } else if polymorphic {
             let scope = self.program.scheme_runtime_scope(function);
             self.program.resolve_instance_request_in_scope(&request, &scope)
         } else if differential {
@@ -1150,6 +1184,7 @@ impl<'a> WorklistBuilder<'a> {
         let Some(expression) = program.expressions.get(expression) else {
             return;
         };
+        self.request_adapter_entailment(expression, owner, enclosing);
         match &expression.kind {
             LoweredExpressionKind::Deferred(_) => {}
             LoweredExpressionKind::Block(block) => {
@@ -1820,6 +1855,61 @@ impl<'a> WorklistBuilder<'a> {
                 );
             }
             Err(diagnostic) => self.diagnostics.push(diagnostic),
+        }
+    }
+
+    /// Requests the member instances of the dictionaries a scheme adapter
+    /// builds from its target's bounds. They have no enclosing instance, so
+    /// each is requested in terms of its own parameters.
+    fn request_adapter_entailment(
+        &mut self,
+        expression: &crate::LoweredExpression,
+        owner: TraversalOwner,
+        enclosing: Option<&ResolvedInstanceRequest>,
+    ) {
+        let program = self.program;
+        let map = enclosing
+            .map(|enclosing| enclosing.environment.substitution_map())
+            .unwrap_or_default();
+        let selections = match super::trait_dictionaries::adapter_entailment(
+            program,
+            expression,
+            &map,
+            &expression.origin,
+        ) {
+            Ok(selections) => selections,
+            Err(diagnostic) => {
+                self.diagnostics.push(diagnostic);
+                return;
+            }
+        };
+        let mut members = Vec::new();
+        for (_, selection) in &selections {
+            super::trait_dictionaries::for_each_member(selection, &mut |member| {
+                members.push(member.clone())
+            });
+        }
+        for member in members {
+            let runtime = crate::RuntimeScope {
+                types: program
+                    .relevant_parameters(member.function)
+                    .type_parameters()
+                    .collect(),
+                effects: BTreeSet::new(),
+            };
+            self.request_function_in_scope(
+                member.function,
+                &expression.origin,
+                member.generic.function_type.clone(),
+                member.generic.substitutions.clone(),
+                member.generic.evidence.clone(),
+                InstanceResolutionTarget::Root,
+                owner,
+                LoweredInstanceDependencyKind::TraitMethod,
+                false,
+                false,
+                Some(runtime),
+            );
         }
     }
 

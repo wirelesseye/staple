@@ -228,8 +228,15 @@ pub(crate) enum DictionaryRecipe {
 pub(crate) struct StructuralRecipe {
     pub shape: crate::specialization::DynamicStructuralShape,
     pub trait_id: crate::TraitId,
+    /// The obligation completed by the derivation, so its associated
+    /// arguments are the descriptors the dictionary's prefix holds.
     pub obligation: crate::CheckedTraitBound,
+    /// Types whose descriptors the tail stores first, in order.
+    pub descriptors: Vec<crate::CheckedType>,
+    /// Component dictionaries stored after the descriptors.
     pub components: Vec<DictionaryCallArgument>,
+    /// The trait's prerequisite dictionaries, in prefix order.
+    pub prerequisites: Vec<Option<DictionaryCallArgument>>,
 }
 
 /// The run-time construction of a dictionary from a generic implementation.
@@ -285,7 +292,9 @@ pub(super) enum DictionarySelection {
 pub(super) struct StructuralSelection {
     pub shape: crate::specialization::DynamicStructuralShape,
     pub obligation: crate::CheckedTraitBound,
+    pub descriptors: Vec<crate::CheckedType>,
     pub components: Vec<(crate::CheckedTraitBound, DictionarySelection)>,
+    pub prerequisites: Vec<Option<(crate::CheckedTraitBound, DictionarySelection)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -304,9 +313,21 @@ pub(super) struct MemberSelection {
     pub function_type: crate::CheckedFunctionType,
     pub evidence: crate::TraitEvidence,
     pub substitutions: crate::CallSubstitutions,
+    /// The member in terms of its own parameters, for a request that has no
+    /// enclosing instance.
+    pub generic: GenericMember,
     /// The member instance's dictionaries at the caller's types, in its
     /// declared-bound order.
     pub dictionaries: Vec<MemberDictionarySelection>,
+}
+
+/// A member instance independent of any caller: every relevant type parameter
+/// of its function is run-time.
+#[derive(Debug, Clone)]
+pub(super) struct GenericMember {
+    pub function_type: crate::CheckedFunctionType,
+    pub substitutions: crate::CallSubstitutions,
+    pub evidence: Option<crate::TraitEvidence>,
 }
 
 #[derive(Debug, Clone)]
@@ -418,7 +439,47 @@ fn select_at_depth(
                 MemberDictionarySelection::Select(at_caller, selection)
             });
         }
+        let implementation = program
+            .trait_implementations
+            .get(chosen.implementation)
+            .ok_or_else(|| {
+                staple_syntax::Diagnostic::new(
+                    origin.span.clone(),
+                    "dictionary implementation is absent",
+                )
+            })?;
+        let own_method = implementation
+            .methods
+            .iter()
+            .any(|(candidate, found)| candidate == method && *found == function);
+        let header = if own_method {
+            implementation.arguments.clone()
+        } else {
+            metadata.parameters.clone()
+        };
+        let generic = GenericMember {
+            function_type: super::worklist::instantiate_method_type(
+                program,
+                origin,
+                obligation.trait_id,
+                *method,
+                &header,
+            )?,
+            substitutions: super::worklist::trait_site_substitutions(
+                program,
+                obligation.trait_id,
+                &header,
+            ),
+            evidence: own_method.then(|| crate::TraitEvidence::ExplicitImplementation {
+                trait_id: obligation.trait_id,
+                implementation: chosen.implementation,
+                method: *method,
+                function,
+                arguments: header.clone(),
+            }),
+        };
         members.push(MemberSelection {
+            generic,
             function,
             function_type,
             evidence: crate::TraitEvidence::ExplicitImplementation {
@@ -463,8 +524,9 @@ fn select_at_depth(
     })))
 }
 
-/// A structural `Debug` over a product or sum whose components have `Debug`
-/// dictionaries. Other structural traits keep their restriction.
+/// A structural trait over a product or sum at run-time component types:
+/// `Debug`, and the `Index`, `MutateIndex` and iteration families over
+/// products. Each derives the same completed arguments the checker does.
 fn select_structural(
     program: &super::LoweredProgram,
     environment: &[crate::CheckedTraitBound],
@@ -472,7 +534,9 @@ fn select_structural(
     origin: &crate::Origin,
     depth: usize,
 ) -> Result<DictionarySelection, staple_syntax::Diagnostic> {
-    use crate::specialization::DynamicStructuralShape;
+    use crate::CheckedType;
+    use crate::specialization::DynamicStructuralShape as Shape;
+    let ids = &program.semantic_ids;
     let unavailable = || {
         let name = program
             .traits
@@ -482,53 +546,295 @@ fn select_structural(
         staple_syntax::Diagnostic::new(
             origin.span.clone(),
             format!(
-                "no implementation of trait `{name}` is available at run-time types (structural dictionaries cover only `Debug` over products and sums)"
+                "no implementation of trait `{name}` is available at run-time types for this shape"
             ),
         )
     };
-    if Some(obligation.trait_id) != program.semantic_ids.debug_trait {
-        return Err(unavailable());
-    }
-    let [target] = obligation.arguments.as_slice() else {
-        return Err(unavailable());
+    let trait_id = obligation.trait_id;
+    let select_component = |bound: crate::CheckedTraitBound| {
+        select_at_depth(program, environment, &bound, origin, depth + 1)
+            .map(|selection| (bound, selection))
     };
-    let (shape, elements): (_, Vec<crate::CheckedType>) = match target {
-        crate::CheckedType::Product(product) if !product.variadic => (
-            DynamicStructuralShape::DebugProduct {
-                names: product
-                    .elements
-                    .iter()
-                    .map(|element| element.name.clone())
-                    .collect(),
-            },
-            product
-                .elements
-                .iter()
-                .map(|element| element.value_type.clone())
-                .collect(),
-        ),
-        crate::CheckedType::Sum(sum) => (
-            DynamicStructuralShape::DebugSum {
-                alternatives: sum.alternatives.len(),
-            },
-            sum.alternatives.clone(),
-        ),
-        _ => return Err(unavailable()),
+    // Per-element injection into an output sum, or none when the output is
+    // the element type.
+    let injections = |product: &crate::CheckedProductType, output: &CheckedType| {
+        product
+            .elements
+            .iter()
+            .map(|element| match output {
+                CheckedType::Sum(sum) if !crate::types_equivalent(output, &element.value_type) => {
+                    sum.alternatives
+                        .iter()
+                        .position(|alternative| {
+                            crate::types_equivalent(alternative, &element.value_type)
+                        })
+                        .map(Some)
+                        .ok_or_else(unavailable)
+                }
+                _ => Ok(None),
+            })
+            .collect::<Result<Vec<_>, _>>()
     };
     let mut components = Vec::new();
-    for element in elements {
-        let bound = crate::CheckedTraitBound {
-            trait_id: obligation.trait_id,
-            arguments: vec![element],
+    let (shape, completed, descriptors): (Shape, Vec<CheckedType>, Vec<CheckedType>) = if Some(
+        trait_id,
+    ) == ids.debug_trait
+    {
+        let [target] = obligation.arguments.as_slice() else {
+            return Err(unavailable());
         };
-        let selection = select_at_depth(program, environment, &bound, origin, depth + 1)?;
-        components.push((bound, selection));
+        let (shape, elements): (_, Vec<CheckedType>) = match target {
+            CheckedType::Product(product) if !product.variadic => (
+                Shape::DebugProduct {
+                    names: product
+                        .elements
+                        .iter()
+                        .map(|element| element.name.clone())
+                        .collect(),
+                },
+                product
+                    .elements
+                    .iter()
+                    .map(|element| element.value_type.clone())
+                    .collect(),
+            ),
+            CheckedType::Sum(sum) => (
+                Shape::DebugSum {
+                    alternatives: sum.alternatives.len(),
+                },
+                sum.alternatives.clone(),
+            ),
+            _ => return Err(unavailable()),
+        };
+        for element in elements {
+            components.push(select_component(crate::CheckedTraitBound {
+                trait_id,
+                arguments: vec![element],
+            })?);
+        }
+        (shape, obligation.arguments.clone(), vec![target.clone()])
+    } else if Some(trait_id) == ids.index_trait || Some(trait_id) == ids.mutate_index_trait {
+        let mutate = Some(trait_id) == ids.mutate_index_trait;
+        let [target, position, dependent] = obligation.arguments.as_slice() else {
+            return Err(unavailable());
+        };
+        match target {
+            CheckedType::Ref(payload) => {
+                let delegate = select_component(crate::CheckedTraitBound {
+                    trait_id,
+                    arguments: vec![payload.as_ref().clone(), position.clone(), dependent.clone()],
+                })?;
+                let output = selection_obligation(&delegate.1)
+                    .and_then(|bound| bound.arguments.get(2).cloned())
+                    .unwrap_or_else(|| dependent.clone());
+                let position = selection_obligation(&delegate.1)
+                    .and_then(|bound| bound.arguments.get(1).cloned())
+                    .unwrap_or_else(|| position.clone());
+                components.push(delegate);
+                (
+                    if mutate {
+                        Shape::DerefMutateIndex
+                    } else {
+                        Shape::DerefIndex
+                    },
+                    vec![target.clone(), position, output],
+                    Vec::new(),
+                )
+            }
+            CheckedType::Product(product)
+                if !product.variadic
+                    && !product.elements.is_empty()
+                    && matches!(position, CheckedType::USize | CheckedType::Inferred) =>
+            {
+                if mutate {
+                    let element = product.homogeneous_element().ok_or_else(unavailable)?.clone();
+                    if !matches!(dependent, CheckedType::Inferred)
+                        && !crate::types_equivalent(dependent, &element)
+                    {
+                        return Err(unavailable());
+                    }
+                    (
+                        Shape::MutateProduct {
+                            length: product.elements.len(),
+                        },
+                        vec![target.clone(), CheckedType::USize, element],
+                        vec![target.clone()],
+                    )
+                } else {
+                    let output = crate::product_item(product);
+                    if !matches!(dependent, CheckedType::Inferred)
+                        && !crate::types_equivalent(dependent, &output)
+                    {
+                        return Err(unavailable());
+                    }
+                    (
+                        Shape::IndexProduct {
+                            injections: injections(product, &output)?,
+                            output_alternatives: sum_width(&output),
+                        },
+                        vec![target.clone(), CheckedType::USize, output.clone()],
+                        vec![target.clone(), output],
+                    )
+                }
+            }
+            _ => return Err(unavailable()),
+        }
+    } else if Some(trait_id) == ids.into_iterator_trait {
+        let [source, _] = obligation.arguments.as_slice() else {
+            return Err(unavailable());
+        };
+        let CheckedType::Product(product) = source else {
+            return Err(unavailable());
+        };
+        if product.variadic || product.elements.is_empty() {
+            return Err(unavailable());
+        }
+        let iterator = pair_with_cursor(source);
+        (
+            Shape::IntoIterProduct,
+            vec![source.clone(), iterator.clone()],
+            vec![source.clone(), iterator],
+        )
+    } else if Some(trait_id) == ids.iterator_trait {
+        let [iterator, _] = obligation.arguments.as_slice() else {
+            return Err(unavailable());
+        };
+        let CheckedType::Product(pair) = iterator else {
+            return Err(unavailable());
+        };
+        let [first, second] = pair.elements.as_slice() else {
+            return Err(unavailable());
+        };
+        let (CheckedType::Product(product), CheckedType::USize) = (&first.value_type, &second.value_type)
+        else {
+            return Err(unavailable());
+        };
+        if product.variadic || product.elements.is_empty() {
+            return Err(unavailable());
+        }
+        let item = crate::product_item(product);
+        let metadata = program.traits.get(trait_id).ok_or_else(unavailable)?;
+        let method = *metadata.methods.first().ok_or_else(unavailable)?;
+        let function_type = super::worklist::instantiate_method_type(
+            program,
+            origin,
+            trait_id,
+            method,
+            &[iterator.clone(), item.clone()],
+        )?;
+        let result = function_type.result.as_ref().clone();
+        let sum = crate::sum_through_implicit_wrapper(&result).ok_or_else(unavailable)?;
+        let yield_representation = CheckedType::Product(crate::CheckedProductType {
+            elements: vec![
+                crate::CheckedTypeElement {
+                    name: None,
+                    value_type: item.clone(),
+                    default: None,
+                },
+                crate::CheckedTypeElement {
+                    name: None,
+                    value_type: iterator.clone(),
+                    default: None,
+                },
+            ],
+            variadic: false,
+        });
+        let mut done = None;
+        let mut yield_ = None;
+        for (index, alternative) in sum.alternatives.iter().enumerate() {
+            if let CheckedType::Wrapper { representation, .. } = alternative {
+                if representation.as_ref() == iterator {
+                    done = Some(index);
+                }
+                if representation.as_ref() == &yield_representation {
+                    yield_ = Some(index);
+                }
+            }
+        }
+        let (Some(done), Some(yield_)) = (done, yield_) else {
+            return Err(unavailable());
+        };
+        (
+            Shape::NextProduct {
+                injections: injections(product, &item)?,
+                item_alternatives: sum_width(&item),
+                result_alternatives: sum.alternatives.len(),
+                done,
+                yield_,
+            },
+            vec![iterator.clone(), item.clone()],
+            vec![iterator.clone(), result],
+        )
+    } else {
+        return Err(unavailable());
+    };
+    let obligation = crate::CheckedTraitBound {
+        trait_id,
+        arguments: completed,
+    };
+    // The trait's prerequisites (an associated type's bound) need their own
+    // dictionaries.
+    let metadata = program.traits.get(trait_id).ok_or_else(unavailable)?;
+    let substitution = dictionary_substitution(metadata, &obligation.arguments).unwrap_or_default();
+    let markers = marker_traits(program);
+    let mut prerequisites = Vec::new();
+    for prerequisite in &metadata.prerequisites {
+        if markers.contains(&Some(prerequisite.trait_id)) {
+            prerequisites.push(None);
+            continue;
+        }
+        prerequisites.push(Some(select_component(crate::CheckedTraitBound {
+            trait_id: prerequisite.trait_id,
+            arguments: prerequisite
+                .arguments
+                .iter()
+                .map(|argument| crate::substitute_type(argument.clone(), &substitution))
+                .collect(),
+        })?));
     }
     Ok(DictionarySelection::Structural(Box::new(StructuralSelection {
         shape,
-        obligation: obligation.clone(),
+        obligation,
+        descriptors,
         components,
+        prerequisites,
     })))
+}
+
+/// How many alternatives a sum output has, or zero for any other type.
+fn sum_width(output: &crate::CheckedType) -> usize {
+    match output {
+        crate::CheckedType::Sum(sum) => sum.alternatives.len(),
+        _ => 0,
+    }
+}
+
+/// The `(source, USize)` iterator a product converts into.
+fn pair_with_cursor(source: &crate::CheckedType) -> crate::CheckedType {
+    crate::CheckedType::Product(crate::CheckedProductType {
+        elements: vec![
+            crate::CheckedTypeElement {
+                name: None,
+                value_type: source.clone(),
+                default: None,
+            },
+            crate::CheckedTypeElement {
+                name: None,
+                value_type: crate::CheckedType::USize,
+                default: None,
+            },
+        ],
+        variadic: false,
+    })
+}
+
+/// The obligation a selection completes, when it completes one.
+fn selection_obligation(selection: &DictionarySelection) -> Option<&crate::CheckedTraitBound> {
+    match selection {
+        DictionarySelection::Build(build) => Some(&build.obligation),
+        DictionarySelection::Structural(structural) => Some(&structural.obligation),
+        _ => None,
+    }
 }
 
 fn marker_traits(program: &super::LoweredProgram) -> [Option<crate::TraitId>; 4] {
@@ -551,6 +857,9 @@ pub(super) fn for_each_member<'a>(
         DictionarySelection::Structural(structural) => {
             for (_, component) in &structural.components {
                 for_each_member(component, visit);
+            }
+            for prerequisite in structural.prerequisites.iter().flatten() {
+                for_each_member(&prerequisite.1, visit);
             }
             return;
         }
@@ -591,11 +900,28 @@ pub(super) fn materialize_recipe(
                     })
                 })
                 .collect::<Result<Vec<_>, staple_syntax::Diagnostic>>()?;
+            let prerequisites = structural
+                .prerequisites
+                .iter()
+                .map(|prerequisite| {
+                    prerequisite
+                        .as_ref()
+                        .map(|(obligation, nested)| {
+                            Ok(DictionaryCallArgument {
+                                obligation: obligation.clone(),
+                                recipe: materialize_recipe(program, nested, instance, origin)?,
+                            })
+                        })
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, staple_syntax::Diagnostic>>()?;
             Ok(DictionaryRecipe::Structural(Box::new(StructuralRecipe {
                 shape: structural.shape.clone(),
                 trait_id: structural.obligation.trait_id,
                 obligation: structural.obligation.clone(),
+                descriptors: structural.descriptors.clone(),
                 components,
+                prerequisites,
             })))
         }
         DictionarySelection::Build(build) => {
@@ -844,6 +1170,35 @@ fn member_instance(
     program.instances.contains(id).then_some(id)
 }
 
+/// The interned instance of a member in terms of its own parameters, all of
+/// them run-time. A scheme adapter's builders use these, since the adapter has
+/// no enclosing instance.
+pub(super) fn member_instance_root(
+    program: &super::LoweredProgram,
+    origin: &crate::Origin,
+    member: &MemberSelection,
+) -> Option<super::FunctionInstanceId> {
+    use super::instance_resolution::{InstanceResolutionRequest, InstanceResolutionTarget};
+    let runtime = program
+        .relevant_parameters(member.function)
+        .type_parameters()
+        .collect::<std::collections::BTreeSet<_>>();
+    let request = InstanceResolutionRequest {
+        function: member.function,
+        origin: origin.clone(),
+        function_type: member.generic.function_type.clone(),
+        substitutions: member.generic.substitutions.clone(),
+        evidence: member.generic.evidence.clone(),
+        target: InstanceResolutionTarget::Root,
+    };
+    let resolved = program
+        .resolve_instance_request_with_runtime(&request, &runtime)
+        .ok()?;
+    let ordinal = program.specializations.instance_ordinal(&resolved.key)?;
+    let id = <super::FunctionInstanceId as super::ArenaId>::from_index(ordinal.index());
+    program.instances.contains(id).then_some(id)
+}
+
 /// Plan how a dictionary for `obligation` is obtained in the enclosing
 /// instance, as a recipe whose builders name interned member instances.
 pub(super) fn plan_recipe(
@@ -889,6 +1244,7 @@ pub(super) fn plan_slot_call(
     // A built dictionary completes the obligation's associated arguments.
     let obligation = match &recipe {
         DictionaryRecipe::Builder(build) => build.obligation.clone(),
+        DictionaryRecipe::Structural(structural) => structural.obligation.clone(),
         _ => obligation.clone(),
     };
     let function_type = super::worklist::instantiate_method_type(
@@ -992,15 +1348,149 @@ pub(super) fn adapter_dictionaries(
     let mut recipes = Vec::new();
     for obligation in source_obligations(&substitution) {
         let selection = select_dictionary(program, &target_bounds, &obligation, origin)?;
-        let recipe = materialize_recipe(program, &selection, &mut |_| None, origin).map_err(|_| {
-            staple_syntax::Diagnostic::new(
-                origin.span.clone(),
-                "subsuming a polymorphic value needs a dictionary built from an implementation, which is not supported yet",
-            )
-        })?;
+        let recipe = materialize_recipe(
+            program,
+            &selection,
+            &mut |member| member_instance_root(program, origin, member),
+            origin,
+        )?;
         recipes.push(DictionaryCallArgument { obligation, recipe });
     }
     Ok((count, target_bounds.len(), recipes))
+}
+
+/// A scheme adapter's entailment at a coerced expression: the target scheme's
+/// bounds, and the source's bounds at the instantiation with their selections.
+/// `map` substitutes the enclosing instance's parameters.
+pub(super) fn adapter_entailment(
+    program: &super::LoweredProgram,
+    expression: &super::LoweredExpression,
+    map: &std::collections::HashMap<crate::TypeParameterId, crate::CheckedType>,
+    origin: &crate::Origin,
+) -> Result<Vec<(crate::CheckedTraitBound, DictionarySelection)>, staple_syntax::Diagnostic> {
+    let (Some(coercion), Some(plan)) = (&expression.coercion, &expression.coercion_plan) else {
+        return Ok(Vec::new());
+    };
+    let Some((leaf, produced, _)) = plan.split_instantiation(&coercion.target) else {
+        return Ok(Vec::new());
+    };
+    let super::LoweredCoercionPlan::AdaptScheme { types } = leaf else {
+        return Ok(Vec::new());
+    };
+    let crate::CheckedType::Forall(source) = &coercion.source else {
+        return Ok(Vec::new());
+    };
+    let crate::CheckedType::Forall(target) = &produced else {
+        return Ok(Vec::new());
+    };
+    let identity = Default::default();
+    let target_bounds = scheme_obligations(program, target, &identity)
+        .into_iter()
+        .map(|bound| crate::CheckedTraitBound {
+            trait_id: bound.trait_id,
+            arguments: bound
+                .arguments
+                .into_iter()
+                .map(|argument| crate::substitute_type(argument, map))
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let substitution = source
+        .type_parameter_ids()
+        .into_iter()
+        .zip(
+            types
+                .iter()
+                .map(|ty| crate::substitute_type(ty.clone(), map)),
+        )
+        .collect();
+    scheme_obligations(program, source, &substitution)
+        .into_iter()
+        .map(|obligation| {
+            let obligation = crate::CheckedTraitBound {
+                trait_id: obligation.trait_id,
+                arguments: obligation
+                    .arguments
+                    .into_iter()
+                    .map(|argument| crate::substitute_type(argument, map))
+                    .collect(),
+            };
+            let selection = select_dictionary(program, &target_bounds, &obligation, origin)?;
+            Ok((obligation, selection))
+        })
+        .collect()
+}
+
+/// A scheme adapter's entailment recipes at a coerced expression, with the
+/// member instances its builders name.
+pub(super) fn adapter_entailment_recipes(
+    program: &super::LoweredProgram,
+    expression: &super::LoweredExpression,
+) -> Vec<DictionaryCallArgument> {
+    let Ok(selections) = adapter_entailment(program, expression, &Default::default(), &expression.origin)
+    else {
+        return Vec::new();
+    };
+    selections
+        .into_iter()
+        .filter_map(|(obligation, selection)| {
+            let recipe = materialize_recipe(
+                program,
+                &selection,
+                &mut |member| member_instance_root(program, &expression.origin, member),
+                &expression.origin,
+            )
+            .ok()?;
+            Some(DictionaryCallArgument { obligation, recipe })
+        })
+        .collect()
+}
+
+/// Builder uses an expression's scheme adapter adds to its owner.
+fn adapter_builder_uses(
+    program: &super::LoweredProgram,
+    expression: &super::LoweredExpression,
+    found: &mut Vec<(crate::Origin, BuilderUse)>,
+) {
+    for argument in adapter_entailment_recipes(program, expression) {
+        let mut uses = Vec::new();
+        walk_recipe(program, &argument.obligation, &argument.recipe, false, &mut uses);
+        found.extend(
+            uses.into_iter()
+                .map(|(_, use_)| (expression.origin.clone(), use_)),
+        );
+    }
+}
+
+/// Every builder use of one initializer's scheme adapters, in a fixed order.
+pub(super) fn initializer_builder_uses(
+    program: &super::LoweredProgram,
+    initializer: super::InitializerId,
+) -> Vec<(crate::Origin, BuilderUse)> {
+    struct Visitor<'a> {
+        program: &'a super::LoweredProgram,
+        found: Vec<(crate::Origin, BuilderUse)>,
+    }
+    impl super::cleanup_artifacts::LoweredOwnerVisitor for Visitor<'_> {
+        fn expression_site(
+            &mut self,
+            _id: super::ExpressionId,
+            expression: &super::LoweredExpression,
+        ) -> Result<(), Vec<staple_syntax::Diagnostic>> {
+            adapter_builder_uses(self.program, expression, &mut self.found);
+            Ok(())
+        }
+    }
+    let mut visitor = Visitor {
+        program,
+        found: Vec::new(),
+    };
+    let _ = super::cleanup_artifacts::walk_owner(
+        program,
+        super::emission::OwnerArenas::Initializer(initializer),
+        &mut visitor,
+    );
+    visitor.found
 }
 
 /// Dictionaries a call through a polymorphic value passes (T-M): the scheme's
@@ -1190,6 +1680,15 @@ fn walk_recipe(
             for component in &structural.components {
                 walk_recipe(program, &component.obligation, &component.recipe, false, uses);
             }
+            for prerequisite in structural.prerequisites.iter().flatten() {
+                walk_recipe(
+                    program,
+                    &prerequisite.obligation,
+                    &prerequisite.recipe,
+                    false,
+                    uses,
+                );
+            }
         }
         DictionaryRecipe::Builder(build) => {
             let Some(metadata) = program.traits.get(build.obligation.trait_id) else {
@@ -1252,6 +1751,9 @@ pub(super) fn body_builder_uses(
         if let super::LoweredBoundTarget::Dictionary(dispatch) = target {
             walked(&body.origin, &dispatch.obligation, &dispatch.recipe);
         }
+    }
+    for (_, expression) in body.expressions() {
+        adapter_builder_uses(program, expression, &mut found);
     }
     found
 }
@@ -1542,6 +2044,27 @@ pub(super) fn scan_initializer(
             *use_site = Some(dictionary_use_site(site, index));
             requests.push(request);
         }
+    }
+    for (index, (origin, use_)) in initializer_builder_uses(program, initializer)
+        .into_iter()
+        .enumerate()
+    {
+        let mut request = match use_ {
+            BuilderUse::Entry(member, environment) => {
+                member_entry_request(program, &member, environment, &origin)
+            }
+            BuilderUse::Static(obligation) => static_request(program, &obligation, &origin),
+            BuilderUse::Structural(shape, trait_id) => {
+                Ok(structural_slot_request(shape, trait_id, &origin))
+            }
+        }
+        .map_err(|error| vec![error])?;
+        let super::artifact_closure::ClosureRequest::Artifact { use_site, .. } = &mut request
+        else {
+            unreachable!()
+        };
+        *use_site = Some(super::artifact_closure::ArtifactUseSite::DictionaryBuilder(index));
+        requests.push(request);
     }
     Ok(requests)
 }

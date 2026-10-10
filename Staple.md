@@ -1750,9 +1750,7 @@ argument such as `f.<(<U> move U -> U)>` may name one.
 `<T where Display T> move T ->{IO} ()`. Each call or instantiation of the value
 supplies a dictionary for every bound at the types it uses, from a bound in
 scope or an implementation, and a value subsumed into another scheme obtains
-its dictionaries from the target's bounds and their prerequisites. A bound that
-needs a dictionary built from an implementation when subsuming a value is not
-supported yet.
+its dictionaries from the target's bounds and their prerequisites.
 
 **Storage.** A polymorphic value is a closure and is `Copy`. A `let mut`
 binding keeps the scheme it was declared with, and an assignment must supply a
@@ -1764,9 +1762,7 @@ The compiler reports the following at the place the value is built, and the
 same function still works when it is called directly:
 
 * a trait obligation in the implementation that no dictionary can satisfy: it
-  must come from a bound in scope or match exactly one implementation, and the
-  compiler-derived `Index`, `MutateIndex` and iteration traits at run-time
-  shapes are not covered;
+  must come from a bound in scope or match exactly one implementation;
 * a `Natural` bound or an array length that depends on a type parameter;
 * a coroutine, async, or reactive body;
 * a function value behind `Ref`, `Slice`, `Buffer`, or a shared cell that

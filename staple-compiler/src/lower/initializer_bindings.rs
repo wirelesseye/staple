@@ -1207,6 +1207,18 @@ impl<'a> InitializerBindingValidator<'a> {
     /// bound at one of its sites.
     fn check_request_root_coverage(&mut self) {
         let initializer = self.initializer;
+        // Members of dictionaries a scheme adapter builds are bound by their
+        // recipes rather than at a site.
+        let members = super::trait_dictionaries::initializer_builder_uses(
+            self.program,
+            initializer,
+        )
+        .into_iter()
+        .filter_map(|(_, use_)| match use_ {
+            super::trait_dictionaries::BuilderUse::Entry(member, _) => Some(member.instance),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
         let missing = self
             .program
             .instances
@@ -1219,10 +1231,11 @@ impl<'a> InitializerBindingValidator<'a> {
                 )
             })
             .filter(|(id, _)| {
-                !self
-                    .bindings
-                    .values()
-                    .any(|target| target.instance_id() == Some(*id))
+                !members.contains(id)
+                    && !self
+                        .bindings
+                        .values()
+                        .any(|target| target.instance_id() == Some(*id))
             })
             .map(|(id, instance)| {
                 let template = self
