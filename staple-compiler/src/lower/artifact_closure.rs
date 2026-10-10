@@ -92,6 +92,11 @@ pub(crate) enum ArtifactUseSite {
         call: LoweredCallId,
         argument: usize,
     },
+    /// A static dictionary stored in a callable value's closure environment.
+    ValueDictionary {
+        value: LoweredCallableValueId,
+        argument: usize,
+    },
     /// Index into the dynamic body's structural cleanup shape list.
     InstanceCompoundDrop(usize),
     /// A scripted test site identified by its position in the hook table.
@@ -1700,6 +1705,18 @@ impl LoweredProgram {
                 };
                 if !valid {
                     report("call dictionary", call.index());
+                }
+            }
+            ArtifactUseSite::ValueDictionary { value, argument } => {
+                let valid = match site_owner {
+                    UseSiteOwner::Instance(body) => body
+                        .dictionary_values
+                        .get(&value)
+                        .is_some_and(|arguments| argument < arguments.len()),
+                    UseSiteOwner::Initializer(_) => false,
+                };
+                if !valid {
+                    report("value dictionary", value.index());
                 }
             }
             ArtifactUseSite::InstanceTypeDescriptor(index) => {

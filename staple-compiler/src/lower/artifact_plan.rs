@@ -734,6 +734,7 @@ impl LoweredArtifactPlan {
                 GcFinalizerPlan::DynamicClosureEnvironment {
                     closure: _,
                     runtime: _,
+                    dictionaries: _,
                     captures: _,
                 } => {}
                 GcFinalizerPlan::DynamicBuffer => {}
@@ -1542,6 +1543,9 @@ pub(crate) enum GcFinalizerPlan {
         closure: FunctionInstanceId,
         /// The instance's run-time parameters in descriptor ABI order (R-A).
         runtime: Vec<crate::TypeParameterId>,
+        /// Dictionaries stored after the descriptors (T-C), before the
+        /// capture descriptors.
+        dictionaries: usize,
         /// The captures in environment order.
         captures: Vec<DynamicCapture>,
     },

@@ -61,7 +61,7 @@ mod value_conversions;
 mod worklist;
 
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
-pub(crate) use trait_dictionaries::{DictionaryRecipe, TraitDictionaryLayout};
+pub(crate) use trait_dictionaries::{DictionaryCallArgument, DictionaryRecipe, TraitDictionaryLayout};
 pub(crate) use value_conversions::{
     AdapterConversion, adapter_conversions, concrete_key as conversion_concrete_key,
     takes_descriptor as conversion_takes_descriptor,
@@ -23844,6 +23844,219 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn polymorphic_closure_environments_store_dictionaries_before_capture_descriptors() {
+        let module = checked_program(concat!(
+            "trait EnvProbe T {}\n",
+            "impl EnvProbe I32 {}\n",
+            "def make: <A where Copy A> A -> (<T> move T -> (A, T)) = captured => move value => (captured, value)\n",
+            "def build: () -> (<T> move T -> (I32, T)) = () => make 42\n",
+            "let stored = build ()\n",
+        ));
+        let mut program = LoweredProgram::default();
+        program.dictionary_pass_generic_calls = true;
+        assert!(program.snapshot(&module).is_empty());
+        program.compute_dynamic_support();
+        let probe = program
+            .traits
+            .iter()
+            .find_map(|(_, _, t)| (t.name == "EnvProbe").then_some(t.semantic_id))
+            .unwrap();
+        // The support gate opens with trait operations, so supply the bound
+        // after it has chosen the dynamic keys.
+        let functions = program
+            .functions
+            .iter()
+            .map(|(_, id, _)| id)
+            .collect::<Vec<_>>();
+        for id in functions {
+            let function = program.functions.get_mut(id).unwrap();
+            let Some(first) = function.declared_bounds.first().cloned() else {
+                continue;
+            };
+            let bound = CheckedTraitBound {
+                trait_id: probe,
+                arguments: first.arguments,
+            };
+            if function.name == "make" {
+                function.declared_bounds.push(bound.clone());
+                function.own_declared_bounds.push(bound);
+            } else if function.own_declared_bounds.is_empty() {
+                // The lambda inherits its enclosing function's bounds.
+                function.declared_bounds.push(bound);
+            }
+        }
+        let diagnostics = program.build_specialization_worklist();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.materialize_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let (make_body, stored) = program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                let function = program.functions.get(instance.template).unwrap();
+                (function.name == "make").then(|| {
+                    let body = instance.body.as_ref().unwrap();
+                    (body.dictionary_values.clone(), body.dictionary_bounds.len())
+                })
+            })
+            .unwrap();
+        assert_eq!(stored, 1);
+        assert_eq!(make_body.len(), 1, "{make_body:?}");
+        let recipes = make_body.values().next().unwrap();
+        assert!(
+            matches!(&recipes[0].recipe, DictionaryRecipe::Environment(recipe)
+                if recipe.argument == 0 && recipe.prerequisites.is_empty()),
+            "{recipes:?}"
+        );
+        program.record_reabstractions();
+        let diagnostics = program
+            .close_artifact_catalog(&artifact_closure::ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        program.assign_initializer_names();
+        let diagnostics = program.validate_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.validate_closed_catalog();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let dictionary = program
+            .artifacts
+            .iter()
+            .find_map(|(_, artifact)| {
+                matches!(artifact.plan, Some(LoweredArtifactPlan::TraitDictionary(_)))
+                    .then(|| artifact.name.clone())
+            })
+            .expect("the concrete caller demands a static dictionary");
+        let finalizer = program
+            .artifacts
+            .iter()
+            .find_map(|(id, artifact)| match &artifact.plan {
+                Some(LoweredArtifactPlan::GcFinalizer(
+                    GcFinalizerPlan::DynamicClosureEnvironment { dictionaries, .. },
+                )) => Some((id, *dictionaries)),
+                _ => None,
+            });
+        if let Some((id, dictionaries)) = finalizer {
+            assert_eq!(dictionaries, 1);
+            let GcFinalizerPlan::DynamicClosureEnvironment { dictionaries, .. } = program
+                .artifacts
+                .get_mut(id)
+                .and_then(|artifact| artifact.plan.as_mut())
+                .and_then(|plan| match plan {
+                    LoweredArtifactPlan::GcFinalizer(plan) => Some(plan),
+                    _ => None,
+                })
+                .unwrap()
+            else {
+                unreachable!()
+            };
+            *dictionaries += 1;
+            let diagnostics = program.validate_closed_catalog();
+            assert!(
+                diagnostics.iter().any(|error| error.message
+                    == "closure environment dictionary count disagrees with its instance"),
+                "{diagnostics:?}"
+            );
+            let GcFinalizerPlan::DynamicClosureEnvironment { dictionaries, .. } = program
+                .artifacts
+                .get_mut(id)
+                .and_then(|artifact| artifact.plan.as_mut())
+                .and_then(|plan| match plan {
+                    LoweredArtifactPlan::GcFinalizer(plan) => Some(plan),
+                    _ => None,
+                })
+                .unwrap()
+            else {
+                unreachable!()
+            };
+            *dictionaries -= 1;
+        }
+        let build = program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "build")
+                    .then(|| instance.name.clone())
+            })
+            .unwrap();
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&LoweredModule { program })
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "closure-environment-dictionaries",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let pointer = context.ptr_type(inkwell::AddressSpace::default());
+        let getter =
+            llvm.add_function("test_dictionary_address", pointer.fn_type(&[], false), None);
+        let builder = context.create_builder();
+        builder.position_at_end(context.append_basic_block(getter, "entry"));
+        builder
+            .build_return(Some(
+                &llvm.get_global(&dictionary).unwrap().as_pointer_value(),
+            ))
+            .unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Closure {
+            code: *const (),
+            environment: *const usize,
+        }
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        type Address = unsafe extern "C" fn() -> *const usize;
+        type Build = unsafe extern "C" fn(*const u8) -> Closure;
+        let address = unsafe {
+            engine
+                .get_function::<Address>("test_dictionary_address")
+                .unwrap()
+                .call()
+        };
+        let build = unsafe { engine.get_function::<Build>(&build) }.unwrap();
+        let closure = unsafe { build.call(std::ptr::null()) };
+        assert!(!closure.environment.is_null());
+        // Environment: [captured descriptor A, reserved descriptor T, dictionary, ...].
+        let dictionary_word = unsafe { *closure.environment.add(2) };
+        assert_eq!(dictionary_word, address as usize);
+        type Entry = unsafe extern "C" fn(*const usize, *const Descriptor, *mut u8, *mut u8);
+        let entry: Entry = unsafe { std::mem::transmute(closure.code) };
+        let descriptor = Descriptor {
+            size: 4,
+            stride: 4,
+            align: 4,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let mut result = [0u32; 2];
+        let mut value = 0x11223344u32;
+        unsafe {
+            entry(
+                closure.environment,
+                &descriptor,
+                result.as_mut_ptr().cast(),
+                (&mut value as *mut u32).cast(),
+            );
+        }
+        assert_eq!(result, [42, 0x11223344]);
     }
 
     #[test]

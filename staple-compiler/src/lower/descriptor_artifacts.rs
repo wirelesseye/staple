@@ -480,6 +480,10 @@ pub(super) fn scan_instance(
                 ),
                 plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicClosureEnvironment {
                     closure: *callee,
+                    dictionaries: super::trait_dictionaries::stored_dictionary_count(
+                        program, *callee,
+                    )
+                    .unwrap_or(0),
                     runtime,
                     captures: closure
                         .captures
@@ -570,6 +574,10 @@ pub(super) fn scan_instance(
                 ),
                 plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicClosureEnvironment {
                     closure: *callee,
+                    dictionaries: super::trait_dictionaries::stored_dictionary_count(
+                        program, *callee,
+                    )
+                    .unwrap_or(0),
                     runtime,
                     captures: thunk
                         .captures

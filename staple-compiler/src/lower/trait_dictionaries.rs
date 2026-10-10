@@ -209,15 +209,69 @@ pub(super) fn plan_direct_call(
     call: &super::LoweredCall,
     callee: super::FunctionInstanceId,
 ) -> Result<Vec<DictionaryCallArgument>, staple_syntax::Diagnostic> {
+    plan_instance_dictionaries(
+        program,
+        environment,
+        &call.origin,
+        &call.substitutions,
+        callee,
+        None,
+    )
+}
+
+/// Dictionaries a callable value stores in its closure environment: the
+/// callee's lexical prefix, which its descriptor-bound entry forwards. A
+/// scheme value's own dictionaries arrive from its caller (T-C).
+pub(super) fn plan_callable_value(
+    program: &super::LoweredProgram,
+    environment: &[crate::CheckedTraitBound],
+    value: &super::LoweredCallableValue,
+    callee: super::FunctionInstanceId,
+) -> Result<Vec<DictionaryCallArgument>, staple_syntax::Diagnostic> {
+    let stored = stored_dictionary_count(program, callee).unwrap_or(0);
+    plan_instance_dictionaries(
+        program,
+        environment,
+        &value.origin,
+        &value.substitutions,
+        callee,
+        Some(stored),
+    )
+}
+
+/// Dictionaries a dynamic closure environment stores for one instance. They
+/// follow the descriptor region and precede capture descriptors.
+pub(super) fn stored_dictionary_count(
+    program: &super::LoweredProgram,
+    instance: super::FunctionInstanceId,
+) -> Option<usize> {
+    let record = program.instances.get(instance)?;
+    let template = program.functions.get(record.template)?;
+    let key = program.specializations.instance(record.ordinal)?;
+    let substitution = record.environment.substitution_map();
+    let count = |bounds: &[crate::CheckedTraitBound]| {
+        runtime_obligations(&program.semantic_ids, bounds, &substitution, key.runtime()).len()
+    };
+    count(&template.declared_bounds).checked_sub(count(&template.own_declared_bounds))
+}
+
+fn plan_instance_dictionaries(
+    program: &super::LoweredProgram,
+    environment: &[crate::CheckedTraitBound],
+    origin: &crate::Origin,
+    substitutions: &crate::CallSubstitutions,
+    callee: super::FunctionInstanceId,
+    limit: Option<usize>,
+) -> Result<Vec<DictionaryCallArgument>, staple_syntax::Diagnostic> {
     let record = program.instances.get(callee).ok_or_else(|| {
         staple_syntax::Diagnostic::new(
-            call.origin.span.clone(),
+            origin.span.clone(),
             "dictionary call has no callee instance",
         )
     })?;
     let template = program.functions.get(record.template).ok_or_else(|| {
         staple_syntax::Diagnostic::new(
-            call.origin.span.clone(),
+            origin.span.clone(),
             "dictionary call has no callee template",
         )
     })?;
@@ -225,10 +279,7 @@ pub(super) fn plan_direct_call(
         .specializations
         .instance(record.ordinal)
         .ok_or_else(|| {
-            staple_syntax::Diagnostic::new(
-                call.origin.span.clone(),
-                "dictionary call has no callee key",
-            )
+            staple_syntax::Diagnostic::new(origin.span.clone(), "dictionary call has no callee key")
         })?;
     let bounds = runtime_obligations(
         &program.semantic_ids,
@@ -236,14 +287,14 @@ pub(super) fn plan_direct_call(
         &record.environment.substitution_map(),
         key.runtime(),
     );
-    let substitution = call
-        .substitutions
+    let substitution = substitutions
         .types
         .iter()
         .map(|entry| (entry.parameter, entry.value_type.clone()))
         .collect();
     bounds
         .into_iter()
+        .take(limit.unwrap_or(usize::MAX))
         .map(|bound| {
             let obligation = crate::CheckedTraitBound {
                 trait_id: bound.trait_id,
@@ -258,7 +309,7 @@ pub(super) fn plan_direct_call(
                 DictionaryRecipe::Environment(recipe)
             } else {
                 let super::artifact_closure::ClosureRequest::Artifact { key, .. } =
-                    static_request(program, &obligation, &call.origin)?
+                    static_request(program, &obligation, origin)?
                 else {
                     unreachable!()
                 };
@@ -312,6 +363,43 @@ pub(super) fn scan_instance(
                 }
                 *use_site = Some(super::artifact_closure::ArtifactUseSite::CallDictionary {
                     call: *call,
+                    argument: index,
+                });
+                requests.push(request);
+            }
+        }
+    }
+    for (value, arguments) in &body.dictionary_values {
+        let origin = &body
+            .callable_values
+            .get(*value)
+            .ok_or_else(|| {
+                vec![staple_syntax::Diagnostic::new(
+                    body.origin.span.clone(),
+                    "dictionary recipe names a missing callable value",
+                )]
+            })?
+            .origin;
+        for (index, argument) in arguments.iter().enumerate() {
+            if let DictionaryRecipe::Static(key) = &argument.recipe {
+                let mut request = static_request(program, &argument.obligation, origin)
+                    .map_err(|error| vec![error])?;
+                let super::artifact_closure::ClosureRequest::Artifact {
+                    key: selected,
+                    use_site,
+                    ..
+                } = &mut request
+                else {
+                    unreachable!()
+                };
+                if selected != key {
+                    return Err(vec![staple_syntax::Diagnostic::new(
+                        origin.span.clone(),
+                        "dictionary recipe selection changed",
+                    )]);
+                }
+                *use_site = Some(super::artifact_closure::ArtifactUseSite::ValueDictionary {
+                    value: *value,
                     argument: index,
                 });
                 requests.push(request);

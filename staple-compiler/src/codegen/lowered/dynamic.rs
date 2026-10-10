@@ -307,8 +307,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment: Option<&DynamicEnvironment<'context>>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<Vec<PointerValue<'context>>> {
-        self.view
-            .dictionary_call_arguments(owner, call)
+        self.dictionary_recipe_values(
+            self.view.dictionary_call_arguments(owner, call),
+            environment,
+            span,
+        )
+    }
+
+    fn dictionary_recipe_values(
+        &self,
+        arguments: &[crate::DictionaryCallArgument],
+        environment: Option<&DynamicEnvironment<'context>>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<Vec<PointerValue<'context>>> {
+        arguments
             .iter()
             .map(|argument| match &argument.recipe {
                 crate::DictionaryRecipe::Static(key) => {
@@ -1046,10 +1058,20 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .collect(),
                 ..Default::default()
             };
+            // An implicit thunk inherits its enclosing function's declared
+            // bounds, so its dictionaries are that environment's prefix.
+            let stored = self
+                .view
+                .instance_stored_dictionaries(instance)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing thunk dictionary count"))?;
+            let dictionaries = environment.dictionaries.get(..stored).ok_or_else(|| {
+                Diagnostic::new(span.clone(), "thunk dictionaries exceed its environment")
+            })?;
             let captures = self.build_descriptor_environment(
                 instance,
                 &runtime,
                 runtime.len(),
+                dictionaries,
                 &substitutions,
                 &captures,
                 environment,
@@ -1544,10 +1566,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     } else {
                         runtime.len()
                     };
+                    let dictionaries = self.dictionary_recipe_values(
+                        self.view.dictionary_value_arguments(owner, value_id),
+                        Some(environment),
+                        &span,
+                    )?;
                     let closure_environment = self.build_descriptor_environment(
                         *instance,
                         &runtime,
                         bound,
+                        &dictionaries,
                         &callable.substitutions,
                         captures,
                         environment,
@@ -1790,6 +1818,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             instance,
             &runtime,
             0,
+            &[],
             &callable.substitutions,
             captures,
             &environment,
@@ -1802,12 +1831,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         instance: FunctionInstanceId,
         runtime: &[TypeParameterId],
         bound: usize,
+        dictionaries: &[PointerValue<'context>],
         substitutions: &crate::CallSubstitutions,
         captures: &[crate::LoweredClosureCapture],
         environment: &DynamicEnvironment<'context>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let hidden = runtime.len() + dictionaries.len();
         let mut descriptors = Vec::with_capacity(runtime.len());
         if bound == 0 && captures.is_empty() {
             return Ok(self
@@ -1860,11 +1891,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .iter()
             .map(|capture| capture.access)
             .collect::<Vec<_>>();
-        let (offsets, total) = self.dynamic_capture_offsets(
-            runtime.len() + captures.len(),
-            &accesses,
-            &capture_descriptors,
-        )?;
+        let (offsets, total) =
+            self.dynamic_capture_offsets(hidden + captures.len(), &accesses, &capture_descriptors)?;
         let closure_environment =
             self.backend
                 .build_gc_allocation(total, "closure.environment", span.clone())?;
@@ -1886,13 +1914,29 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .build_store(slot, copy)
                 .map_err(compiler_diagnostic)?;
         }
-        // Capture descriptors follow the runtime descriptors so the closure
+        // Bound dictionaries follow the descriptors (T-C). Without builders
+        // they are static constants or prefix slots of those, so they are
+        // stored by pointer; built ones will need GC copies (T-G).
+        for (index, dictionary) in dictionaries.iter().enumerate() {
+            let offset = self
+                .backend
+                .size_type
+                .const_int((runtime.len() + index) as u64 * pointer_bytes, false);
+            let slot = self
+                .backend
+                .dynamic_byte_offset(closure_environment, offset)?;
+            self.backend
+                .builder
+                .build_store(slot, *dictionary)
+                .map_err(compiler_diagnostic)?;
+        }
+        // Capture descriptors follow the dictionaries so the closure
         // body and finalizer read them instead of rebuilding compound ones.
         for (index, descriptor) in capture_descriptors.iter().enumerate() {
             let offset = self
                 .backend
                 .size_type
-                .const_int((runtime.len() + index) as u64 * pointer_bytes, false);
+                .const_int((hidden + index) as u64 * pointer_bytes, false);
             let slot = self
                 .backend
                 .dynamic_byte_offset(closure_environment, offset)?;
@@ -2462,7 +2506,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
         let crate::GcFinalizerPlan::DynamicClosureEnvironment {
-            runtime, captures, ..
+            runtime,
+            dictionaries,
+            captures,
+            ..
         } = plan
         else {
             return Err(Diagnostic::new(
@@ -2476,10 +2523,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .iter()
             .enumerate()
             .map(|(index, _)| {
-                let offset = self
-                    .backend
-                    .size_type
-                    .const_int((runtime.len() + index) as u64 * pointer_bytes, false);
+                let offset = self.backend.size_type.const_int(
+                    (runtime.len() + dictionaries + index) as u64 * pointer_bytes,
+                    false,
+                );
                 let slot = self.backend.dynamic_byte_offset(environment, offset)?;
                 Ok(Some(
                     self.load_dynamic_storage(pointer, slot, "finalizer.capture.descriptor")
@@ -2493,7 +2540,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .map(|capture| capture.access)
             .collect::<Vec<_>>();
         let (offsets, _) = self.dynamic_capture_offsets(
-            runtime.len() + captures.len(),
+            runtime.len() + dictionaries + captures.len(),
             &accesses,
             &capture_descriptors,
         )?;
@@ -4484,6 +4531,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .collect::<Vec<_>>();
             let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
             let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+            // Descriptors, then the dictionaries the environment stores.
+            let hidden_prefix = runtime.len()
+                + self
+                    .view
+                    .instance_stored_dictionaries(id)
+                    .ok_or_else(|| unsupported("missing closure dictionary count"))?;
             let capture_descriptors = body
                 .captures
                 .iter()
@@ -4492,7 +4545,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let offset = self
                         .backend
                         .size_type
-                        .const_int((runtime.len() + index) as u64 * pointer_bytes, false);
+                        .const_int((hidden_prefix + index) as u64 * pointer_bytes, false);
                     let slot = self
                         .backend
                         .dynamic_byte_offset(environment.closure, offset)?;
@@ -4504,7 +4557,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 })
                 .collect::<CodeGenerationResult<Vec<_>>>()?;
             let (offsets, _) = self.dynamic_capture_offsets(
-                runtime.len() + body.captures.len(),
+                hidden_prefix + body.captures.len(),
                 &accesses,
                 &capture_descriptors,
             )?;

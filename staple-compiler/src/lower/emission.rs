@@ -132,6 +132,29 @@ impl<'a> EmissionView<'a> {
         )
     }
 
+    /// Dictionaries a closure environment of this instance stores after its
+    /// descriptors.
+    pub(crate) fn instance_stored_dictionaries(&self, id: FunctionInstanceId) -> Option<usize> {
+        super::trait_dictionaries::stored_dictionary_count(self.program, id)
+    }
+
+    pub(crate) fn dictionary_value_arguments(
+        &self,
+        owner: EmissionOwner,
+        value: super::LoweredCallableValueId,
+    ) -> &'a [super::trait_dictionaries::DictionaryCallArgument] {
+        match owner {
+            EmissionOwner::Instance(instance) => self
+                .program
+                .instances
+                .get(instance)
+                .and_then(|record| record.body.as_ref())
+                .and_then(|body| body.dictionary_values.get(&value))
+                .map_or(&[], Vec::as_slice),
+            EmissionOwner::Initializer(_) => &[],
+        }
+    }
+
     /// Whether the instance uses the dynamic ABI.
     pub(crate) fn instance_is_dynamic(&self, id: FunctionInstanceId) -> bool {
         self.program.instance_is_dynamic(id)

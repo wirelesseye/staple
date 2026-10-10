@@ -51,11 +51,12 @@ the release build of this stage's base commit for every existing input.
   JIT checks. Concrete dispatch builds no dictionaries; dynamic direct calls
   demand static ones. Structural dictionaries remain in 6a.4.
 - **6a.2 partial.** Runtime obligations and lexical declared bound order are
-  retained and validated, including implicit thunks. Dynamic signatures and
-  entry decoding include dictionaries; LLVM checks cover result/resource/value
-  offsets. Direct calls and bound entries forward dictionaries; entries validate
-  the lexical/own partition and pass JIT checks. Closure capture/storage and
-  finalizer offsets remain.
+  retained and validated, including implicit thunks. Dynamic signatures, entry
+  decoding, direct calls, bound entries and closure environments carry
+  dictionaries: environments store them after the descriptors (callable-value
+  recipes, thunk prefixes) and the finalizer and body offsets follow. A JIT test
+  covers callable values; the thunk path is untested. Instantiation adapters
+  and the audit of `runtime()` counts remain.
 - **6a.3 partial.** Direct/transitive environment recipes, including associated
   prerequisites, plus static recipes, are recorded and validated on direct calls
   in functions and initializers. A JIT test covers static demand and prerequisite

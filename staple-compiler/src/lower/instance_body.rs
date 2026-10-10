@@ -175,6 +175,11 @@ pub(crate) struct LoweredInstanceBody {
     pub dictionary_bounds: Vec<CheckedTraitBound>,
     pub dictionary_calls:
         BTreeMap<LoweredCallId, Vec<super::trait_dictionaries::DictionaryCallArgument>>,
+    /// Dictionaries a callable value stores in its closure environment.
+    pub dictionary_values: BTreeMap<
+        super::LoweredCallableValueId,
+        Vec<super::trait_dictionaries::DictionaryCallArgument>,
+    >,
     /// Available environment/prerequisite routes for expanded obligations.
     pub dictionary_environment_recipes:
         Vec<Option<super::trait_dictionaries::EnvironmentDictionaryRecipe>>,
@@ -259,6 +264,7 @@ impl LoweredInstanceBody {
             dictionary_obligations: Vec::new(),
             dictionary_bounds: Vec::new(),
             dictionary_calls: BTreeMap::new(),
+            dictionary_values: BTreeMap::new(),
             dictionary_environment_recipes: Vec::new(),
             parameter_style: FunctionParameterStyle::Single,
             parameter_pattern: PatternId::from_index(0),
@@ -766,6 +772,26 @@ impl<'a> BodyCloner<'a> {
                 ) {
                     Ok(arguments) if !arguments.is_empty() => {
                         self.body.dictionary_calls.insert(call_id, arguments);
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+        for (value_id, value) in self.body.callable_values.iter() {
+            if let Some(super::LoweredBoundTarget::Instance(callee)) = self
+                .body
+                .bindings
+                .get(&super::LoweredBindingSite::CallableValue(value_id))
+            {
+                match super::trait_dictionaries::plan_callable_value(
+                    self.program,
+                    &self.body.dictionary_bounds,
+                    value,
+                    *callee,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        self.body.dictionary_values.insert(value_id, arguments);
                     }
                     Ok(_) => {}
                     Err(error) => self.diagnostics.push(error),
@@ -4005,6 +4031,33 @@ impl<'a> BodyValidator<'a> {
                     Err(error) => self.diagnostics.push(error),
                 }
             }
+        let mut expected_dictionary_values = BTreeMap::new();
+        for (value_id, value) in self.body.callable_values.iter() {
+            if let Some(super::LoweredBoundTarget::Instance(callee)) = self
+                .body
+                .bindings
+                .get(&super::LoweredBindingSite::CallableValue(value_id))
+            {
+                match super::trait_dictionaries::plan_callable_value(
+                    self.program,
+                    &self.body.dictionary_bounds,
+                    value,
+                    *callee,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        expected_dictionary_values.insert(value_id, arguments);
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+        if self.body.dictionary_values != expected_dictionary_values {
+            self.report(
+                self.body.origin.span.clone(),
+                "instance value dictionary recipes disagree with its callee bounds",
+            );
+        }
         }
         if self.body.dictionary_calls != expected_dictionary_calls {
             self.report(
