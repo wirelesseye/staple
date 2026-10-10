@@ -462,6 +462,8 @@ pub struct ResolvedModule {
     /// but it should still read and highlight as `mut` everywhere it's
     /// named, so this set is never pruned the way `mutable_symbols` is.
     mutable_annotations: HashSet<SymbolId>,
+    function_parents: HashMap<FunctionId, Option<FunctionId>>,
+    expression_function_owners: HashMap<SyntaxId, Option<FunctionId>>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
@@ -976,6 +978,17 @@ impl ResolvedModule {
         })
     }
 
+    pub(crate) fn expression_function_owner(&self, syntax: SyntaxId) -> Option<FunctionId> {
+        self.expression_function_owners
+            .get(&syntax)
+            .copied()
+            .flatten()
+    }
+
+    pub(crate) fn function_parent(&self, function: FunctionId) -> Option<FunctionId> {
+        self.function_parents.get(&function).copied().flatten()
+    }
+
     pub(crate) fn symbol_owner(&self, symbol: SymbolId) -> Option<FunctionId> {
         self.symbol_owners.get(&symbol).copied().flatten()
     }
@@ -1204,6 +1217,7 @@ pub struct NameResolver {
     function_expressions: HashMap<SyntaxId, FunctionId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     function_parents: HashMap<FunctionId, Option<FunctionId>>,
+    expression_function_owners: HashMap<SyntaxId, Option<FunctionId>>,
     function_captures: HashMap<FunctionId, Vec<SymbolId>>,
     function_stack: Vec<FunctionId>,
     loop_depth: usize,
@@ -1626,6 +1640,8 @@ impl NameResolver {
             const_symbols: self.const_symbols,
             mutable_annotations: self.mutable_annotations,
             symbol_owners: self.symbol_owners,
+            function_parents: self.function_parents,
+            expression_function_owners: self.expression_function_owners,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
             symbol_declaration_spans: self.symbol_declaration_spans,
@@ -4585,6 +4601,8 @@ impl NameResolver {
     ) {
         self.syntax_modules
             .insert(expression.syntax().id, self.current_module);
+        self.expression_function_owners
+            .insert(expression.syntax().id, self.function_stack.last().copied());
         match expression {
             Expression::Function(function) => {
                 let function_id = FunctionId(self.next_function_id);

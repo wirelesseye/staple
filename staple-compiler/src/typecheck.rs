@@ -1573,6 +1573,8 @@ pub struct TypedModule {
     function_state_accesses: HashMap<FunctionId, StateAccesses>,
     resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
+    /// Direct declared bounds, without prerequisite expansion.
+    function_declared_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
     trait_functional_dependencies: HashMap<TraitId, Vec<CheckedFunctionalDependency>>,
@@ -1614,6 +1616,7 @@ pub struct TypedModule {
     function_result_companion_types: HashMap<FunctionId, TypeId>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
+    implicit_function_parents: HashMap<FunctionId, Option<FunctionId>>,
     derived_symbols: HashSet<SymbolId>,
     derived_evaluators: HashMap<SymbolId, SyntaxId>,
     coroutine_plans: HashMap<SyntaxId, crate::coroutine_lower::CoroutinePlan>,
@@ -2282,6 +2285,37 @@ impl TypedModule {
         self.function_types.get(&function)
     }
 
+    /// Hidden dictionary order: lexical ancestors first, then own declarations.
+    /// Prerequisites are reached through dictionary recipes, not extra arguments.
+    pub(crate) fn declared_bounds_of_function(
+        &self,
+        function: FunctionId,
+    ) -> Vec<CheckedTraitBound> {
+        let mut chain = vec![function];
+        let parent_of = |function| {
+            self.implicit_function_parents
+                .get(&function)
+                .copied()
+                .unwrap_or_else(|| self.resolved.function_parent(function))
+        };
+        let mut parent = parent_of(function);
+        while let Some(function) = parent {
+            chain.push(function);
+            parent = parent_of(function);
+        }
+        chain
+            .into_iter()
+            .rev()
+            .flat_map(|function| {
+                self.function_declared_bounds
+                    .get(&function)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+            })
+            .collect()
+    }
+
     pub fn bounds_of_function(&self, function: FunctionId) -> &[CheckedTraitBound] {
         self.function_bounds
             .get(&function)
@@ -2459,6 +2493,8 @@ pub struct TypeChecker {
     function_state_accesses: HashMap<FunctionId, StateAccesses>,
     resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
+    /// Direct declared bounds, without prerequisite expansion.
+    function_declared_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     function_subtype_bounds: HashMap<FunctionId, Vec<CheckedSubtypeBound>>,
     callable_symbol_bounds: HashMap<SymbolId, (Vec<CheckedTraitBound>, Vec<CheckedSubtypeBound>)>,
     declared_scheme_symbols: HashSet<SymbolId>,
@@ -2576,6 +2612,7 @@ pub struct TypeChecker {
     /// (may move/drop it) rather than implicitly borrowing it.
     move_parameter_symbols: HashSet<SymbolId>,
     implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
+    implicit_function_parents: HashMap<FunctionId, Option<FunctionId>>,
     /// `coro` body thunks checked against an expected `Coroutine{E} T`: the
     /// expected row is their declared effect set, an upper bound on the body,
     /// exactly as a function declaration's row bounds its body.
@@ -2772,6 +2809,7 @@ impl TypeChecker {
             function_state_accesses: self.function_state_accesses,
             resource_types: self.resource_types,
             function_bounds: self.function_bounds,
+            function_declared_bounds: self.function_declared_bounds,
             trait_method_types: self.trait_method_types,
             trait_parameter_arguments: self.trait_parameter_arguments,
             trait_functional_dependencies: self.trait_functional_dependencies,
@@ -2813,6 +2851,7 @@ impl TypeChecker {
             function_result_companion_types: self.function_result_companion_types,
             function_symbols: self.function_symbols,
             implicit_thunks: self.implicit_thunks,
+            implicit_function_parents: self.implicit_function_parents,
             derived_symbols: self.derived_symbols,
             derived_evaluators: self.derived_evaluators,
             coroutine_plans: HashMap::new(),
@@ -4112,7 +4151,7 @@ impl TypeChecker {
     ) -> (Vec<CheckedTraitBound>, Vec<CheckedSubtypeBound>) {
         if let Some(function) = self.function_symbols.get(&symbol) {
             (
-                self.function_bounds
+                self.function_declared_bounds
                     .get(function)
                     .cloned()
                     .unwrap_or_default(),
@@ -4185,7 +4224,6 @@ impl TypeChecker {
                     declaration_bounds.push(bound);
                 }
             }
-            let declaration_bounds = self.expand_trait_bounds(declaration_bounds);
             let mut declaration_subtype_bounds = Vec::new();
             for bound in &declaration.subtype_bounds {
                 if let Some(bound) = self.resolve_subtype_bound(module, bound) {
@@ -4199,7 +4237,8 @@ impl TypeChecker {
                     declaration_subtype_bounds.clone(),
                 ),
             );
-            self.active_function_bounds.push(declaration_bounds);
+            self.active_function_bounds
+                .push(self.expand_trait_bounds(declaration_bounds));
             self.active_subtype_bounds.push(declaration_subtype_bounds);
             let parameter = self.resolve_source_type(module, underlying);
             let arguments = declaration
@@ -4371,7 +4410,6 @@ impl TypeChecker {
                     .iter()
                     .filter_map(|bound| self.resolve_trait_bound(module, bound))
                     .collect::<Vec<_>>();
-                let bounds = self.expand_trait_bounds(bounds);
                 let subtype_bounds = binding
                     .all_subtype_bounds()
                     .iter()
@@ -4750,10 +4788,13 @@ impl TypeChecker {
                 }
                 self.function_types.insert(function.id, expected);
                 if let Some(trait_id) = self.default_function_traits.get(&function.id).copied() {
-                    let bounds = self.expand_trait_bounds(vec![CheckedTraitBound {
+                    let declared = vec![CheckedTraitBound {
                         trait_id,
                         arguments: self.trait_parameter_arguments[&trait_id].clone(),
-                    }]);
+                    }];
+                    self.function_declared_bounds
+                        .insert(function.id, declared.clone());
+                    let bounds = self.expand_trait_bounds(declared);
                     self.function_bounds.insert(function.id, bounds);
                 }
                 // A conditional trait implementation's own declared bounds
@@ -4771,6 +4812,10 @@ impl TypeChecker {
                     }
                 }
                 if !bounds.is_empty() {
+                    self.function_declared_bounds
+                        .entry(function.id)
+                        .or_default()
+                        .extend(bounds.clone());
                     let bounds = self.expand_trait_bounds(bounds);
                     self.function_bounds
                         .entry(function.id)
@@ -4946,6 +4991,8 @@ impl TypeChecker {
                     bounds.push(bound);
                 }
             }
+            self.function_declared_bounds
+                .insert(function.id, bounds.clone());
             let bounds = self.expand_trait_bounds(bounds);
             if self.bounds_violate_functional_dependencies(&bounds) {
                 self.diagnostics.push(Diagnostic::new(
@@ -7912,6 +7959,8 @@ impl TypeChecker {
                 .push(scheme.subtype_bounds.clone());
             let actual = if matches!(expression, Expression::Function(_)) {
                 if let Some(id) = module.function_for(expression.syntax().id) {
+                    self.function_declared_bounds
+                        .insert(id, scheme.trait_bounds.clone());
                     self.function_schemes.insert(id, scheme.as_ref().clone());
                     // A contextually checked scheme fixes the lambda's effect
                     // ABI just as a written function annotation does. Its body
@@ -12398,7 +12447,7 @@ impl TypeChecker {
         {
             debug_assert_eq!(
                 &bounds,
-                self.function_bounds
+                self.function_declared_bounds
                     .get(&function_id)
                     .unwrap_or(&Vec::new())
             );
@@ -13164,6 +13213,8 @@ impl TypeChecker {
     ) -> CheckedType {
         let id = FunctionId(self.next_implicit_function);
         self.next_implicit_function += 1;
+        self.implicit_function_parents
+            .insert(id, module.expression_function_owner(expression.syntax().id));
         let captures = implicit_thunk_captures(module, expression);
         let function = ResolvedFunction {
             id,
@@ -13535,7 +13586,6 @@ impl TypeChecker {
                     .iter()
                     .filter_map(|bound| self.resolve_trait_bound(module, bound))
                     .collect::<Vec<_>>();
-                let trait_bounds = self.expand_trait_bounds(trait_bounds);
                 let subtype_bounds = ty
                     .generics
                     .subtype_bounds

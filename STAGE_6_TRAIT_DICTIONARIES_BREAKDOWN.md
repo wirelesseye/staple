@@ -53,8 +53,9 @@ the release build of this stage's base commit for every existing input.
   sharing. Concrete calls still build no dictionaries. Structural dictionaries
   remain in 6a.4; language demand sites are wired in the subsequent steps.
 - **6a.2/6a.3 groundwork.** Instance runtime obligations are recorded and
-  validated. Checked bounds include prerequisites; declared bounds must still
-  be separated for hidden ABI order. Dictionary signatures/recipes are pending.
+  validated separately from declared hidden dictionary bounds. Written scheme
+  order and lexical inheritance (including implicit thunks) are retained without
+  prerequisite arguments. Dictionary signatures/recipes are pending.
 - **Remaining:** hidden arguments, recipes/abstract selection, generic and
   structural builders, trait operations, bounded values, docs and exit gates.
 - Checker workarounds remain: explicit `USize` indices, projected-result type

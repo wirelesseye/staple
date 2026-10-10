@@ -171,6 +171,8 @@ pub(crate) struct LoweredInstanceBody {
     /// order, including prerequisites. Concrete and descriptor marker bounds
     /// are absent. Recipe planning consumes these; they are not an ABI count.
     pub dictionary_obligations: Vec<CheckedTraitBound>,
+    /// Hidden dictionary arguments in lexical declaration order (T-C).
+    pub dictionary_bounds: Vec<CheckedTraitBound>,
     pub parameter_style: FunctionParameterStyle,
     /// The instance-local parameter pattern.
     pub parameter_pattern: PatternId,
@@ -250,6 +252,7 @@ impl LoweredInstanceBody {
             },
             bounds: Vec::new(),
             dictionary_obligations: Vec::new(),
+            dictionary_bounds: Vec::new(),
             parameter_style: FunctionParameterStyle::Single,
             parameter_pattern: PatternId::from_index(0),
             parameters: Vec::new(),
@@ -629,6 +632,12 @@ impl<'a> BodyCloner<'a> {
         };
         self.body.origin = function.origin.clone();
         self.body.signature = self.function_type(&function.signature);
+        self.body.dictionary_bounds = super::trait_dictionaries::runtime_obligations(
+            &self.program.semantic_ids,
+            &function.declared_bounds,
+            &self.substitution,
+            self.enclosing.key.runtime(),
+        );
         self.body.dictionary_obligations = super::trait_dictionaries::runtime_obligations(
             &self.program.semantic_ids,
             &function.bounds,
@@ -3800,6 +3809,18 @@ impl<'a> BodyValidator<'a> {
                     &self.instance.environment.substitution_map(),
                     key.runtime(),
                 );
+                let declared = super::trait_dictionaries::runtime_obligations(
+                    &self.program.semantic_ids,
+                    &template.declared_bounds,
+                    &self.instance.environment.substitution_map(),
+                    key.runtime(),
+                );
+                if self.body.dictionary_bounds != declared {
+                    self.report(
+                        self.body.origin.span.clone(),
+                        "instance hidden dictionary order disagrees with its declarations",
+                    );
+                }
                 if self.body.dictionary_obligations != expected {
                     self.report(
                         self.body.origin.span.clone(),

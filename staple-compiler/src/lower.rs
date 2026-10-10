@@ -2739,6 +2739,8 @@ pub(crate) struct LoweredFunction {
     pub binding_symbol: Option<SymbolId>,
     pub signature: CheckedFunctionType,
     pub bounds: Vec<CheckedTraitBound>,
+    /// Lexical ancestors' declarations followed by this function's own bounds.
+    pub declared_bounds: Vec<CheckedTraitBound>,
     pub parameter_style: staple_syntax::FunctionParameterStyle,
     /// The lowered parameter pattern, with bound symbols in source order.
     pub parameter_pattern: PatternId,
@@ -3745,6 +3747,7 @@ impl LoweredProgram {
             scheme_type_parameters,
             scheme_effect_parameters,
             bounds: module.bounds_of_function(function.id).to_vec(),
+            declared_bounds: module.declared_bounds_of_function(function.id),
             parameter_style: function.parameter_style,
             parameter_pattern,
             parameters: pattern_symbols(resolved, &function.pattern),
@@ -16283,6 +16286,105 @@ mod tests {
                 .functions
                 .get(ordered.default_methods[0].1)
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn hidden_dictionary_declarations_preserve_lexical_order_without_prerequisites() {
+        let module = checked_program(concat!(
+            "trait OuterA T {}\n",
+            "trait OuterB T where OuterA T {}\n",
+            "trait Own U {}\n",
+            "def enclosing: <T where OuterB T, Copy T> T -> (<U where Own U> move U -> U) = value => {\n",
+            "  let inner: <U where Own U> move U -> U = move item => { let ignored = value; item }\n",
+            "  inner\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let enclosing = program
+            .functions
+            .iter()
+            .find_map(|(_, _, function)| (function.name == "enclosing").then_some(function))
+            .unwrap();
+        let inner = program
+            .functions
+            .iter()
+            .find_map(|(_, _, function)| {
+                (module.resolved().function_parent(function.semantic_id)
+                    == Some(enclosing.semantic_id))
+                .then_some(function)
+            })
+            .unwrap();
+        let names = |bounds: &[CheckedTraitBound]| {
+            bounds
+                .iter()
+                .map(|bound| program.traits.get(bound.trait_id).unwrap().name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&enclosing.declared_bounds), ["OuterB", "Copy"]);
+        assert!(
+            names(&enclosing.bounds).contains(&"OuterA"),
+            "checker retains expanded prerequisites"
+        );
+        assert_eq!(names(&inner.declared_bounds), ["OuterB", "Copy", "Own"]);
+        let parameters = inner
+            .declared_bounds
+            .iter()
+            .flat_map(|bound| bound.arguments.iter())
+            .filter_map(|argument| match argument {
+                CheckedType::Parameter { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let hidden = trait_dictionaries::runtime_obligations(
+            &program.semantic_ids,
+            &inner.declared_bounds,
+            &HashMap::new(),
+            &parameters,
+        );
+        assert_eq!(
+            names(&hidden),
+            ["OuterB", "Own"],
+            "prerequisites use slots; Copy uses a descriptor"
+        );
+        let enclosing_symbol = enclosing.binding_symbol.unwrap();
+        let scheme = module
+            .scheme_of_symbol(enclosing_symbol)
+            .expect("enclosing has a scheme");
+        assert_eq!(names(&scheme.trait_bounds), ["OuterB", "Copy"]);
+        let CheckedType::Function(function) = scheme.body.as_ref() else {
+            unreachable!()
+        };
+        let CheckedType::Forall(result) = function.result.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(names(&result.trait_bounds), ["Own"]);
+    }
+
+    #[test]
+    fn implicit_thunks_inherit_declared_dictionary_bounds() {
+        let module = checked_program(concat!(
+            "def evaluate: (() -> String) -> String = callback => callback ()\n",
+            "def describe: <T where Display T> T -> String = value => evaluate \"text\"\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let thunk = module
+            .implicit_thunks_in_id_order()
+            .into_iter()
+            .next()
+            .expect("implicit callback");
+        let lowered = program.functions.get(thunk.id).unwrap();
+        assert_eq!(lowered.declared_bounds.len(), 1);
+        assert_eq!(
+            program
+                .traits
+                .get(lowered.declared_bounds[0].trait_id)
+                .unwrap()
+                .name,
+            "Display"
         );
     }
 
