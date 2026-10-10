@@ -1562,6 +1562,21 @@ impl<'a> WorklistBuilder<'a> {
                     true,
                     false,
                 );
+                if let Some(enclosing) = enclosing {
+                    for obligation in super::trait_dictionaries::callee_runtime_obligations(
+                        self.program,
+                        *function,
+                        &call.substitutions,
+                        enclosing,
+                    ) {
+                        self.request_dictionary_members(
+                            &obligation,
+                            &call.origin,
+                            enclosing,
+                            owner,
+                        );
+                    }
+                }
             }
             LoweredCallableTarget::TraitImplementation {
                 trait_id, method, ..
@@ -1586,6 +1601,28 @@ impl<'a> WorklistBuilder<'a> {
                     enclosing,
                     owner,
                 );
+            }
+            LoweredCallableTarget::Intrinsic {
+                intrinsic: crate::IntrinsicFunction::BufferClone,
+                ..
+            } => {
+                // A run-time element type clones through its dictionary.
+                if let Some(enclosing) = enclosing
+                    && let (Some(clone_trait), CheckedType::Buffer(element)) = (
+                        self.program.semantic_ids.clone_trait,
+                        substitute_type(
+                            call.result_type.clone(),
+                            &enclosing.environment.substitution_map(),
+                        ),
+                    )
+                    && contains_type_parameter(&element)
+                {
+                    let obligation = crate::CheckedTraitBound {
+                        trait_id: clone_trait,
+                        arguments: vec![*element],
+                    };
+                    self.request_dictionary_members(&obligation, &call.origin, enclosing, owner);
+                }
             }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
@@ -1644,6 +1681,21 @@ impl<'a> WorklistBuilder<'a> {
                     false,
                     value.scheme.is_some(),
                 );
+                if let Some(enclosing) = enclosing {
+                    for obligation in super::trait_dictionaries::callee_runtime_obligations(
+                        self.program,
+                        *function,
+                        &value.substitutions,
+                        enclosing,
+                    ) {
+                        self.request_dictionary_members(
+                            &obligation,
+                            &value.origin,
+                            enclosing,
+                            owner,
+                        );
+                    }
+                }
             }
             LoweredCallableTarget::TraitImplementation {
                 trait_id, method, ..
@@ -1760,6 +1812,48 @@ impl<'a> WorklistBuilder<'a> {
         }
     }
 
+    /// Requests every member instance of the dictionaries a run-time
+    /// obligation is built from (T-F), so bodies can name them.
+    fn request_dictionary_members(
+        &mut self,
+        obligation: &crate::CheckedTraitBound,
+        origin: &Origin,
+        enclosing: &ResolvedInstanceRequest,
+        owner: TraversalOwner,
+    ) {
+        let program = self.program;
+        let bounds = super::trait_dictionaries::enclosing_dictionary_bounds(program, enclosing);
+        let selection = match super::trait_dictionaries::select_dictionary(
+            program, &bounds, obligation, origin,
+        ) {
+            Ok(selection) => selection,
+            Err(diagnostic) => {
+                self.diagnostics.push(diagnostic);
+                return;
+            }
+        };
+        let mut members = Vec::new();
+        super::trait_dictionaries::for_each_member(&selection, &mut |member| {
+            members.push(member.clone())
+        });
+        for member in members {
+            let evidence = (!program.relevant_parameters(member.function).is_empty())
+                .then(|| member.evidence.clone());
+            self.request_function(
+                member.function,
+                origin,
+                member.function_type.clone(),
+                member.substitutions.clone(),
+                evidence,
+                InstanceResolutionTarget::Nested(enclosing),
+                owner,
+                LoweredInstanceDependencyKind::TraitMethod,
+                false,
+                false,
+            );
+        }
+    }
+
     /// Resolves one trait-dependent site and records either the selected
     /// method function's instance or a typed structural-method artifact. The
     /// recipe is resolved under the enclosing instance's environment first,
@@ -1792,14 +1886,14 @@ impl<'a> WorklistBuilder<'a> {
         // A run-time obligation dispatches through a dictionary and depends on
         // no implementation instance (T-K).
         if let Some(enclosing) = enclosing
-            && super::trait_dictionaries::site_runtime_obligation(
+            && let Some(obligation) = super::trait_dictionaries::site_runtime_obligation(
                 &program.semantic_ids,
                 evidence,
                 &site_environment,
                 enclosing.key.runtime(),
             )
-            .is_some()
         {
+            self.request_dictionary_members(&obligation, origin, enclosing, owner);
             return;
         }
         let resolved =
@@ -4031,6 +4125,7 @@ mod tests {
                 crate::specialization::DescriptorBoundEntryKey {
                     instance: record.ordinal,
                     bound,
+                    offset: 0,
                 },
             );
             let plan =
@@ -4047,6 +4142,7 @@ mod tests {
                         )
                         .unwrap()
                         .1,
+                    environment_offset: 0,
                     instance: dynamic,
                     runtime,
                     function_type: record.body.as_ref().unwrap().signature.clone(),

@@ -153,7 +153,29 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 139] = [
+static CORPUS: [CorpusProgram; 140] = [
+    expect_stdout(
+        must_run(inline(
+            "trait_dictionary_builder",
+            r#"use std.io.(IO, println)
+use std.fmt.Display
+use std.string.ToString
+use std.clone.Clone
+use std.core.cmp.Eq
+trait Measure T { measure: T -> I32 }
+type MeasuredBox T = wrap T
+impl Measure I32 { measure = value => value }
+impl<T where Measure T> Measure (MeasuredBox T) { measure = MeasuredBox value => Measure.measure value + 1 }
+def measured: <T where Measure T> T -> I32 = value => Measure.measure value
+def nested: <T where Measure T> move T -> I32 = move value => measured (MeasuredBox value)
+def twice: <T where Measure T> move T -> I32 = move value => measured (MeasuredBox (MeasuredBox value))
+def describe: <T where Display T> T -> String = value => ToString.to_string value
+println "${nested 4} ${twice 4} ${describe 42} ${describe 7}"
+"#,
+            "trait-dictionaries",
+        )),
+        "5 6 42 7\n",
+    ),
     expect_stdout(
         must_run(inline(
             "trait_dictionary_environment",

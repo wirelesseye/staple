@@ -132,6 +132,14 @@ impl<'a> EmissionView<'a> {
         )
     }
 
+    /// The fixed dictionary prefix of one trait (T-D).
+    pub(crate) fn trait_dictionary_layout(
+        &self,
+        id: crate::TraitId,
+    ) -> Option<&'a super::TraitDictionaryLayout> {
+        Some(&self.program.traits.get(id)?.dictionary_layout)
+    }
+
     /// Dictionaries a closure environment of this instance stores after its
     /// descriptors.
     pub(crate) fn instance_stored_dictionaries(&self, id: FunctionInstanceId) -> Option<usize> {

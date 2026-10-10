@@ -768,6 +768,7 @@ impl<'a> BodyCloner<'a> {
             {
                 match super::trait_dictionaries::plan_direct_call(
                     self.program,
+                    Some(&self.enclosing),
                     &self.body.dictionary_bounds,
                     call,
                     *callee,
@@ -788,6 +789,7 @@ impl<'a> BodyCloner<'a> {
             {
                 match super::trait_dictionaries::plan_callable_value(
                     self.program,
+                    Some(&self.enclosing),
                     &self.body.dictionary_bounds,
                     value,
                     *callee,
@@ -2145,6 +2147,28 @@ fn enclosing_request(
     }
 }
 
+/// Member instances of every builder in a recipe, with the requesting origin.
+fn recipe_member_instances(
+    recipe: &super::DictionaryRecipe,
+    origin: &Origin,
+    members: &mut Vec<(FunctionInstanceId, Origin)>,
+) {
+    let super::DictionaryRecipe::Builder(build) = recipe else {
+        return;
+    };
+    for member in &build.members {
+        members.push((member.instance, origin.clone()));
+        for dictionary in &member.dictionaries {
+            if let super::MemberDictionary::Recipe(argument) = dictionary {
+                recipe_member_instances(&argument.recipe, origin, members);
+            }
+        }
+    }
+    for argument in build.prerequisites.iter().flatten() {
+        recipe_member_instances(&argument.recipe, origin, members);
+    }
+}
+
 /// The trait a recipe selects, used by evidence-only sites.
 fn evidence_trait_id(evidence: &TraitEvidence) -> crate::TraitId {
     match evidence {
@@ -2997,6 +3021,45 @@ impl<'a> BodyCloner<'a> {
                     original.substitutions.clone(),
                 );
             }
+            LoweredCallableTarget::Intrinsic {
+                intrinsic: crate::IntrinsicFunction::BufferClone,
+                ..
+            } if self.buffer_clone_element(original).is_some() => {
+                // Elements of a run-time type clone through its dictionary.
+                let element = self.buffer_clone_element(original).expect("checked above");
+                let program = self.program;
+                let clone = program.semantic_ids.clone_trait.and_then(|trait_id| {
+                    let method = program.traits.get(trait_id)?.methods.first().copied()?;
+                    Some((trait_id, method))
+                });
+                match clone {
+                    Some((trait_id, method)) => {
+                        let obligation = CheckedTraitBound {
+                            trait_id,
+                            arguments: vec![element],
+                        };
+                        match super::trait_dictionaries::plan_slot_call(
+                            program,
+                            Some(&self.enclosing),
+                            &self.body.dictionary_bounds,
+                            &obligation,
+                            method,
+                            &original.origin,
+                        ) {
+                            Ok(dispatch) => {
+                                self.body
+                                    .bindings
+                                    .insert(site, LoweredBoundTarget::Dictionary(dispatch));
+                            }
+                            Err(diagnostic) => self.diagnostics.push(diagnostic),
+                        }
+                    }
+                    None => self.diagnostics.push(Diagnostic::new(
+                        original.origin.span.clone(),
+                        "buffer clone has no Clone trait",
+                    )),
+                }
+            }
             LoweredCallableTarget::IndirectClosure { .. }
             | LoweredCallableTarget::ExternalFunction { .. }
             | LoweredCallableTarget::Intrinsic { .. }
@@ -3005,6 +3068,15 @@ impl<'a> BodyCloner<'a> {
                     .bindings
                     .insert(site, LoweredBoundTarget::Route(original.target.category()));
             }
+        }
+    }
+
+    /// The element type of a `__buffer_clone` whose elements mention run-time
+    /// parameters of this instance.
+    fn buffer_clone_element(&self, call: &LoweredCall) -> Option<CheckedType> {
+        match self.ty(&call.result_type) {
+            CheckedType::Buffer(element) if contains_type_parameter(&element) => Some(*element),
+            _ => None,
         }
     }
 
@@ -3114,6 +3186,7 @@ impl<'a> BodyCloner<'a> {
         ) {
             match super::trait_dictionaries::plan_slot_call(
                 self.program,
+                Some(&self.enclosing),
                 &self.body.dictionary_bounds,
                 &obligation,
                 method,
@@ -4035,6 +4108,16 @@ impl<'a> BodyValidator<'a> {
             self.visit_plan(plan);
         }
         self.check_arena_density();
+        let enclosing = self
+            .program
+            .specializations
+            .instance(self.instance.ordinal)
+            .map(|key| ResolvedInstanceRequest {
+                key: key.clone(),
+                environment: self.instance.environment.clone(),
+                relevant: self.instance.relevant.clone(),
+                evidence: self.instance.evidence.clone(),
+            });
         let mut expected_dictionary_calls = BTreeMap::new();
         for (call_id, call) in self.body.calls.iter() {
             if let Some(super::LoweredBoundTarget::Instance(callee)) = self
@@ -4044,6 +4127,7 @@ impl<'a> BodyValidator<'a> {
             {
                 match super::trait_dictionaries::plan_direct_call(
                     self.program,
+                    enclosing.as_ref(),
                     &self.body.dictionary_bounds,
                     call,
                     *callee,
@@ -4064,6 +4148,7 @@ impl<'a> BodyValidator<'a> {
             {
                 match super::trait_dictionaries::plan_callable_value(
                     self.program,
+                    enclosing.as_ref(),
                     &self.body.dictionary_bounds,
                     value,
                     *callee,
@@ -4653,10 +4738,16 @@ impl<'a> BodyValidator<'a> {
         // Concrete ABI argument records must all have an evaluation step.
         // A spread evaluates its operand once and supplies every mapped slot.
         let mut supplied = std::collections::HashSet::new();
+        let dynamic_instance = self
+            .program
+            .specializations
+            .instance(self.instance.ordinal)
+            .is_some_and(|key| key.is_dynamic());
         for step in &call.steps {
             // A whole-product operand borrowed as several parameters is one
             // evaluation shared by every record that names it.
-            if let LoweredCallStep::Argument { argument } = step
+            if dynamic_instance
+                && let LoweredCallStep::Argument { argument } = step
                 && let Some(expression) = call.arguments[*argument].expression
             {
                 for (index, other) in call.arguments.iter().enumerate() {
@@ -5158,31 +5249,29 @@ impl<'a> BodyValidator<'a> {
                     }
                 }
                 LoweredBoundTarget::Dictionary(dispatch) => {
-                    let valid = super::trait_dictionaries::environment_recipe_bound(
+                    let enclosing = self
+                        .program
+                        .specializations
+                        .instance(self.instance.ordinal)
+                        .map(|key| ResolvedInstanceRequest {
+                            key: key.clone(),
+                            environment: self.instance.environment.clone(),
+                            relevant: self.instance.relevant.clone(),
+                            evidence: self.instance.evidence.clone(),
+                        });
+                    let span = origin
+                        .map(|origin| origin.span.clone())
+                        .unwrap_or(Span::Compiler);
+                    let fresh = super::trait_dictionaries::plan_recipe(
                         self.program,
+                        enclosing.as_ref(),
                         &self.body.dictionary_bounds,
-                        match &dispatch.recipe {
-                            super::DictionaryRecipe::Environment(recipe) => recipe,
-                            super::DictionaryRecipe::Static(_) => {
-                                self.report(
-                                    origin
-                                        .as_ref()
-                                        .map(|origin| origin.span.clone())
-                                        .unwrap_or(Span::Compiler),
-                                    "dictionary dispatch uses a static recipe",
-                                );
-                                continue;
-                            }
-                        },
-                    )
-                    .as_ref()
-                        == Some(&dispatch.obligation);
-                    if !valid || self.site_category(site).is_none() {
+                        &dispatch.obligation,
+                        origin.unwrap_or(&self.body.origin),
+                    );
+                    if fresh.as_ref().ok() != Some(&dispatch.recipe) {
                         self.report(
-                            origin
-                                .as_ref()
-                                .map(|origin| origin.span.clone())
-                                .unwrap_or(Span::Compiler),
+                            span,
                             "instance body dictionary dispatch disagrees with its bounds",
                         );
                     }
@@ -5200,6 +5289,50 @@ impl<'a> BodyValidator<'a> {
                         );
                     }
                 }
+            }
+        }
+        // Members of built dictionaries are requested by the site that needs
+        // the dictionary and bound inside its recipe.
+        let mut members = Vec::new();
+        for (call, arguments) in &self.body.dictionary_calls {
+            if let Some(call) = self.body.calls.get(*call) {
+                for argument in arguments {
+                    recipe_member_instances(&argument.recipe, &call.origin, &mut members);
+                }
+            }
+        }
+        for (value, arguments) in &self.body.dictionary_values {
+            if let Some(value) = self.body.callable_values.get(*value) {
+                for argument in arguments {
+                    recipe_member_instances(&argument.recipe, &value.origin, &mut members);
+                }
+            }
+        }
+        for (site, target) in &self.body.bindings {
+            if let LoweredBoundTarget::Dictionary(dispatch) = target
+                && let Some(origin) = self.site_origin(*site)
+            {
+                recipe_member_instances(&dispatch.recipe, &origin, &mut members);
+            }
+        }
+        for (instance, origin) in members {
+            // The graph may record one edge per request of the same member.
+            let mut found = false;
+            for (index, dependency) in self.instance.dependencies.iter().enumerate() {
+                if !dependency.closure_phase
+                    && dependency.instance == instance
+                    && dependency.kind == LoweredInstanceDependencyKind::TraitMethod
+                    && dependency.origin.syntax == origin.syntax
+                {
+                    matched_dependencies.insert(index);
+                    found = true;
+                }
+            }
+            if !found {
+                self.report(
+                    origin.span.clone(),
+                    "dictionary member has no specialization dependency",
+                );
             }
         }
         for (index, dependency) in self.instance.dependencies.iter().enumerate() {

@@ -91,6 +91,8 @@ pub(crate) struct DescriptorBoundEntryPlan {
     /// Dictionaries in the full instance ABI and its bound lexical prefix.
     pub dictionary_count: usize,
     pub bound_dictionaries: usize,
+    /// Pointer slots before the first bound word in the environment.
+    pub environment_offset: usize,
     /// The dynamic instance the entry forwards to.
     pub instance: FunctionInstanceId,
     /// The instance's run-time parameters in descriptor ABI order (R-A).
@@ -332,6 +334,7 @@ impl LoweredArtifactPlan {
             ) => {
                 plan.instance.index() == key.instance.index()
                     && plan.bound == key.bound
+                    && plan.environment_offset == key.offset
                     && plan.bound <= plan.runtime.len()
                     && plan.bound_dictionaries <= plan.dictionary_count
             }
@@ -839,6 +842,7 @@ impl LoweredArtifactPlan {
                 bound: _,
                 dictionary_count: _,
                 bound_dictionaries: _,
+                environment_offset: _,
                 instance: _,
                 runtime: _,
                 function_type: _,

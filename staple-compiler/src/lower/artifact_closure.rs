@@ -92,6 +92,9 @@ pub(crate) enum ArtifactUseSite {
         call: LoweredCallId,
         argument: usize,
     },
+    /// The n-th artifact a body's dictionary builders need (slot entries and
+    /// nested static dictionaries), in `body_builder_uses` order.
+    DictionaryBuilder(usize),
     /// A static dictionary stored in a callable value's closure environment.
     ValueDictionary {
         value: LoweredCallableValueId,
@@ -1705,6 +1708,17 @@ impl LoweredProgram {
                 };
                 if !valid {
                     report("call dictionary", call.index());
+                }
+            }
+            ArtifactUseSite::DictionaryBuilder(index) => {
+                let valid = match site_owner {
+                    UseSiteOwner::Instance(body) => {
+                        index < super::trait_dictionaries::body_builder_uses(self, body).len()
+                    }
+                    UseSiteOwner::Initializer(_) => false,
+                };
+                if !valid {
+                    report("dictionary builder", index);
                 }
             }
             ArtifactUseSite::ValueDictionary { value, argument } => {

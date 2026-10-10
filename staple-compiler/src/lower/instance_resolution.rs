@@ -998,6 +998,9 @@ struct TraitSelectionContext<'a> {
     cycle_hit: Cell<bool>,
     /// A matching implementation header failed its conditional bounds.
     prerequisite_failed: Cell<bool>,
+    /// Run-time parameters of the requesting scope: a bound over only these
+    /// is checked where the dictionary is built, so it holds here.
+    runtime: BTreeSet<TypeParameterId>,
 }
 
 impl<'a> TraitSelectionContext<'a> {
@@ -1024,7 +1027,13 @@ impl<'a> TraitSelectionContext<'a> {
             visited: RefCell::new(Vec::new()),
             cycle_hit: Cell::new(false),
             prerequisite_failed: Cell::new(false),
+            runtime: BTreeSet::new(),
         }
+    }
+
+    fn with_runtime(mut self, runtime: &BTreeSet<TypeParameterId>) -> Self {
+        self.runtime = runtime.clone();
+        self
     }
 
     /// Expands declared bounds through the owned trait prerequisite catalog,
@@ -1261,6 +1270,13 @@ impl<'a> TraitSelectionContext<'a> {
                 .iter()
                 .any(|argument| contains_type_parameter(argument))
             {
+                if !self.runtime.is_empty()
+                    && !bound_arguments
+                        .iter()
+                        .any(|argument| contains_parameter_outside_scope(argument, &self.runtime))
+                {
+                    return true;
+                }
                 self.prerequisite_failed.set(true);
                 return false;
             }
@@ -1593,11 +1609,188 @@ impl LoweredProgram {
         Ok(context.implementation_ids[index])
     }
 
+    /// Selects the implementation a run-time obligation names (T-F). Every
+    /// implementation whose header could unify with the obligation, taking
+    /// its run-time parameters as unknowns, is a candidate; those whose
+    /// `where` clause is definitely false are dropped, and exactly one may
+    /// remain. When it does, every instantiation selects it too.
+    pub(super) fn select_runtime_implementation(
+        &self,
+        bound: &CheckedTraitBound,
+        origin: &Origin,
+    ) -> Result<RuntimeImplementation, Diagnostic> {
+        let context = TraitSelectionContext::new(self, Vec::new());
+        let ids = &self.semantic_ids;
+        let markers = [
+            ids.copy_trait,
+            ids.sized_trait,
+            ids.drop_trait,
+            ids.natural_trait,
+        ];
+        let mut definite = Vec::new();
+        let mut possible = Vec::new();
+        for (index, implementation) in context.implementations.iter().enumerate() {
+            if implementation.trait_id != bound.trait_id
+                || implementation.negative
+                || implementation.arguments.len() != bound.arguments.len()
+            {
+                continue;
+            }
+            let mut substitution = HashMap::new();
+            let forward = implementation
+                .arguments
+                .iter()
+                .zip(&bound.arguments)
+                .all(|(template, actual)| {
+                    infer_type_parameters(template, actual, &mut substitution)
+                });
+            if forward {
+                // A `where` clause over concrete types that fails excludes the
+                // candidate; one over run-time types stays unknown.
+                let false_clause = implementation.bounds.iter().any(|clause| {
+                    let arguments = clause
+                        .arguments
+                        .iter()
+                        .map(|argument| substitute_type(argument.clone(), &substitution))
+                        .collect::<Vec<_>>();
+                    if Some(clause.trait_id) == ids.copy_trait {
+                        // Copy is false for every instantiation when it fails
+                        // with all unknowns standing for Copy types.
+                        return arguments.first().is_some_and(|argument| {
+                            let mut referenced = BTreeSet::new();
+                            collect_referenced_parameters(argument, &mut referenced);
+                            let assumed = referenced
+                                .into_iter()
+                                .map(|parameter| (parameter, CheckedType::I32))
+                                .collect();
+                            !context.is_copy(&substitute_type(argument.clone(), &assumed))
+                        });
+                    }
+                    if markers.contains(&Some(clause.trait_id)) {
+                        return false;
+                    }
+                    !arguments.iter().any(contains_type_parameter)
+                        && !context.obligation_available(clause.trait_id, &arguments)
+                });
+                if !false_clause {
+                    definite.push((index, substitution));
+                }
+                continue;
+            }
+            // The run-time side may be the more general one: an obligation on
+            // an unknown `T` overlaps an implementation for one type.
+            let mut reverse = HashMap::new();
+            let overlaps = bound
+                .arguments
+                .iter()
+                .zip(&implementation.arguments)
+                .all(|(actual, template)| infer_type_parameters(actual, template, &mut reverse));
+            if overlaps {
+                possible.push(index);
+            }
+        }
+        let describe = |index: usize| {
+            context
+                .program
+                .trait_implementations
+                .get(context.implementation_ids[index])
+                .map(|metadata| format!("{:?}", metadata.origin.span))
+                .unwrap_or_default()
+        };
+        let trait_name = context.trait_name(bound.trait_id);
+        match (definite.len(), possible.len()) {
+            (1, 0) => {
+                let (index, substitution) = definite.remove(0);
+                let implementation = &context.implementations[index];
+                let completed = implementation
+                    .arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument.clone(), &substitution))
+                    .collect::<Vec<_>>();
+                let clauses = implementation
+                    .bounds
+                    .iter()
+                    .map(|clause| CheckedTraitBound {
+                        trait_id: clause.trait_id,
+                        arguments: clause
+                            .arguments
+                            .iter()
+                            .map(|argument| substitute_type(argument.clone(), &substitution))
+                            .collect(),
+                    })
+                    .collect();
+                Ok(RuntimeImplementation {
+                    implementation: context.implementation_ids[index],
+                    completed,
+                    substitution,
+                    clauses,
+                })
+            }
+            (0, 0) => Err(Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "no implementation of trait `{trait_name}` is available for `{}` at run-time types",
+                    describe_arguments(&bound.arguments)
+                ),
+            )),
+            _ => Err(Diagnostic::new(
+                origin.span.clone(),
+                format!(
+                    "trait `{trait_name}` for `{}` is ambiguous at run-time types: candidates {}",
+                    describe_arguments(&bound.arguments),
+                    definite
+                        .iter()
+                        .map(|(index, _)| *index)
+                        .chain(possible.iter().copied())
+                        .map(describe)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )),
+        }
+    }
+
+    /// The method function an implementation (or the trait's default)
+    /// provides, for building a dictionary.
+    pub(super) fn implementation_method_function(
+        &self,
+        implementation: LoweredTraitImplementationId,
+        trait_id: TraitId,
+        method: TraitMethodId,
+    ) -> Option<FunctionId> {
+        self.trait_implementations
+            .get(implementation)?
+            .methods
+            .iter()
+            .find(|(candidate, _)| *candidate == method)
+            .map(|(_, function)| *function)
+            .or_else(|| {
+                self.traits
+                    .get(trait_id)?
+                    .default_methods
+                    .iter()
+                    .find(|(candidate, _)| *candidate == method)
+                    .map(|(_, function)| *function)
+            })
+    }
+
     pub(crate) fn resolve_trait_evidence(
         &self,
         origin: &Origin,
         evidence: Option<&TraitEvidence>,
         environment: &SubstitutionEnvironment,
+    ) -> Result<Option<TraitEvidence>, Diagnostic> {
+        self.resolve_trait_evidence_with_runtime(origin, evidence, environment, &BTreeSet::new())
+    }
+
+    /// Like [`Self::resolve_trait_evidence`] for an explicit selection whose
+    /// arguments may name the requesting instance's run-time parameters.
+    pub(crate) fn resolve_trait_evidence_with_runtime(
+        &self,
+        origin: &Origin,
+        evidence: Option<&TraitEvidence>,
+        environment: &SubstitutionEnvironment,
+        runtime: &BTreeSet<TypeParameterId>,
     ) -> Result<Option<TraitEvidence>, Diagnostic> {
         let Some(evidence) = evidence else {
             return Ok(None);
@@ -1611,8 +1804,8 @@ impl LoweredProgram {
                 function,
                 arguments,
             } => {
-                let arguments = substitute_concrete_arguments(arguments, &map, origin)?;
-                let context = TraitSelectionContext::new(self, Vec::new());
+                let arguments = substitute_concrete_arguments(arguments, &map, origin, runtime)?;
+                let context = TraitSelectionContext::new(self, Vec::new()).with_runtime(runtime);
                 let metadata = self
                     .trait_implementations
                     .get(*implementation)
@@ -2004,11 +2197,12 @@ fn substitute_concrete_arguments(
     arguments: &[CheckedType],
     map: &HashMap<TypeParameterId, CheckedType>,
     origin: &Origin,
+    runtime: &BTreeSet<TypeParameterId>,
 ) -> Result<Vec<CheckedType>, Diagnostic> {
     let mut substituted = Vec::with_capacity(arguments.len());
     for argument in arguments {
         let value = substitute_type(argument.clone(), map);
-        if let Some(problem) = unresolved_type_problem(&value) {
+        if let Some(problem) = unresolved_type_problem_in_scope(&value, runtime) {
             return Err(Diagnostic::new(
                 origin.span.clone(),
                 format!("trait evidence argument `{value}` is not concrete: {problem}"),
@@ -2029,6 +2223,18 @@ pub(crate) struct ResolvedInstanceRequest {
     pub environment: SubstitutionEnvironment,
     pub relevant: RelevantParameters,
     pub evidence: Option<TraitEvidence>,
+}
+
+/// The implementation a run-time obligation selects (T-F).
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeImplementation {
+    pub implementation: LoweredTraitImplementationId,
+    /// The implementation header at the obligation's types.
+    pub completed: Vec<CheckedType>,
+    /// Implementation parameter to the obligation's type.
+    pub substitution: HashMap<TypeParameterId, CheckedType>,
+    /// The implementation's `where` clause at the obligation's types.
+    pub clauses: Vec<CheckedTraitBound>,
 }
 
 /// How a request relates to the enclosing instance.
@@ -2290,16 +2496,29 @@ impl LoweredProgram {
                     },
                 );
             }
-            let evidence = self.resolve_trait_evidence(
+            // Evidence at the caller's types may name its run-time parameters.
+            let evidence_scope = runtime
+                .iter()
+                .chain(&caller.types)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let evidence = self.resolve_trait_evidence_with_runtime(
                 &request.origin,
                 request.evidence.as_ref(),
                 &environment,
+                &evidence_scope,
             )?;
+            // Evidence over run-time parameters adds nothing to the key: its
+            // parameters are the instance's own, and the rest are keyed.
+            let keyed_evidence = evidence.as_ref().filter(|evidence| {
+                let (_, arguments, _) = super::trait_dictionaries::evidence_obligation(evidence);
+                !arguments.iter().any(contains_type_parameter)
+            });
             let key = build_instance_key(
                 request.function,
                 &environment,
                 &relevant,
-                evidence.as_ref(),
+                keyed_evidence,
                 &request.origin,
                 &runtime,
                 &runtime_effects,

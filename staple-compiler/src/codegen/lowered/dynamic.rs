@@ -362,6 +362,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 })?;
                 Ok(self.descriptor_global(ordinal, span)?.as_pointer_value())
             }
+            crate::DictionaryRecipe::Builder(build) => {
+                let environment = environment.ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "dictionary builder has no dynamic environment")
+                })?;
+                self.build_dictionary(build, environment, span)
+            }
             crate::DictionaryRecipe::Environment(recipe) => {
                 let environment = environment.ok_or_else(|| {
                     Diagnostic::new(span.clone(), "dictionary recipe has no dynamic environment")
@@ -388,6 +394,142 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 Ok(dictionary)
             }
         }
+    }
+
+    /// Call a trait member through its dictionary slot with the dynamic ABI
+    /// (T-D): every value by pointer, the result through `result`. The member
+    /// has no resources, so only value arguments follow.
+    fn call_dictionary_slot(
+        &self,
+        dispatch: &crate::DictionarySlotCall,
+        environment: &DynamicEnvironment<'context>,
+        result: PointerValue<'context>,
+        arguments: &[PointerValue<'context>],
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let dictionary =
+            self.dictionary_recipe_value(&dispatch.recipe, Some(environment), span)?;
+        let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+        let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let offset = self
+            .backend
+            .size_type
+            .const_int(dispatch.slot as u64 * width, false);
+        let address = self.backend.dynamic_byte_offset(dictionary, offset)?;
+        let code = self
+            .load_dynamic_storage(pointer_type, address, "dictionary.slot")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let mut values: Vec<inkwell::values::BasicMetadataValueEnum<'context>> =
+            vec![dictionary.into(), result.into()];
+        for argument in arguments {
+            values.push((*argument).into());
+        }
+        let function_type = self
+            .backend
+            .compile_dynamic_function_type(&dispatch.function_type, 0)?;
+        self.backend
+            .builder
+            .build_indirect_call(function_type, code, &values, "dictionary.call")
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// Build a dictionary from a generic implementation in GC memory (T-G).
+    /// The prefix names the member slot entries, prerequisite dictionaries
+    /// and associated descriptors; the tail holds, per member, the
+    /// descriptors and dictionaries its dynamic instance receives.
+    fn build_dictionary(
+        &self,
+        build: &crate::BuilderRecipe,
+        environment: &DynamicEnvironment<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let layout = self
+            .view
+            .trait_dictionary_layout(build.obligation.trait_id)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "dictionary trait has no layout"))?
+            .clone();
+        let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let words = layout.environment
+            + build
+                .members
+                .iter()
+                .map(|member| member.descriptors.len() + member.dictionaries.len())
+                .sum::<usize>();
+        let dictionary = self.backend.build_gc_allocation(
+            self.backend
+                .size_type
+                .const_int((words.max(1)) as u64 * width, false),
+            "dictionary.built",
+            span.clone(),
+        )?;
+        let store = |index: usize, value: PointerValue<'context>| -> CodeGenerationResult<()> {
+            let offset = self
+                .backend
+                .size_type
+                .const_int(index as u64 * width, false);
+            let slot = self.backend.dynamic_byte_offset(dictionary, offset)?;
+            self.backend
+                .builder
+                .build_store(slot, value)
+                .map_err(compiler_diagnostic)?;
+            Ok(())
+        };
+        let null = self
+            .backend
+            .context
+            .ptr_type(AddressSpace::default())
+            .const_null();
+        for (index, member) in build.members.iter().enumerate() {
+            let runtime = self
+                .view
+                .instance_runtime_order(member.instance)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing member descriptor order"))?;
+            let entry = self.descriptor_bound_entry_code_at(
+                member.instance,
+                runtime.len(),
+                layout.environment + member.region,
+                span,
+            )?;
+            store(
+                layout.slots.start + index,
+                entry.as_global_value().as_pointer_value(),
+            )?;
+        }
+        for (index, prerequisite) in build.prerequisites.iter().enumerate() {
+            let value = match prerequisite {
+                Some(argument) => {
+                    self.dictionary_recipe_value(&argument.recipe, Some(environment), span)?
+                }
+                None => null,
+            };
+            store(layout.prerequisites.start + index, value)?;
+        }
+        let associated = build.obligation.arguments.len() - layout.associated.len();
+        for (index, argument) in build.obligation.arguments[associated..].iter().enumerate() {
+            let descriptor = self.dynamic_descriptor(argument, environment, span)?;
+            let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
+            store(layout.associated.start + index, descriptor)?;
+        }
+        for member in &build.members {
+            let base = layout.environment + member.region;
+            for (index, ty) in member.descriptors.iter().enumerate() {
+                let descriptor = self.dynamic_descriptor(ty, environment, span)?;
+                let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
+                store(base + index, descriptor)?;
+            }
+            for (index, source) in member.dictionaries.iter().enumerate() {
+                let value = match source {
+                    crate::MemberDictionary::Itself => dictionary,
+                    crate::MemberDictionary::Recipe(argument) => {
+                        self.dictionary_recipe_value(&argument.recipe, Some(environment), span)?
+                    }
+                };
+                store(base + member.descriptors.len() + index, value)?;
+            }
+        }
+        Ok(dictionary)
     }
 
     fn emit_concrete_dynamic_call_with(
@@ -899,6 +1041,31 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     if environment.returned {
                         return Ok(storage);
                     }
+                    if let Some(LoweredBoundTarget::Dictionary(dispatch)) = self.view.binding(
+                        owner,
+                        LoweredBindingSite::Interpolation {
+                            template: id,
+                            part: part_index,
+                        },
+                    ) {
+                        // A run-time type formats through its dictionary slot.
+                        let result = self
+                            .backend
+                            .entry_builder()
+                            .build_alloca(
+                                self.backend.compile_type(&dispatch.function_type.result)?,
+                                "template.fmt.result",
+                            )
+                            .map_err(compiler_diagnostic)?;
+                        self.call_dictionary_slot(
+                            dispatch,
+                            environment,
+                            result,
+                            &[value, formatter_storage],
+                            &span,
+                        )?;
+                        continue;
+                    }
                     let ty = self.backend.compile_type(&interpolation.value_type)?;
                     let value = self
                         .load_dynamic_storage(ty, value, "template.value")
@@ -1330,6 +1497,36 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         environment: &mut DynamicEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let span = &expression.origin.span;
+        if let Some(LoweredBoundTarget::Dictionary(dispatch)) =
+            self.view.binding(owner, LoweredBindingSite::Index(id))
+        {
+            // A run-time operand type reads through its dictionary slot; the
+            // dynamic ABI takes every operand by pointer.
+            let dispatch = dispatch.clone();
+            let mut operands = Vec::new();
+            for (slot, operand) in [index.base, index.index].into_iter().enumerate() {
+                let place = if slot == 0 {
+                    index.base_place
+                } else {
+                    index.index_place
+                };
+                let source = if let Some(place) = place {
+                    self.emit_dynamic_place(owner, place, environment)?.0
+                } else {
+                    self.emit_dynamic_expression(owner, operand, environment)?
+                };
+                if environment.returned {
+                    return Ok(source);
+                }
+                operands.push(source);
+            }
+            let result = *environment
+                .temporaries
+                .get(&id)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing Index result storage"))?;
+            self.call_dictionary_slot(&dispatch, environment, result, &operands, span)?;
+            return Ok(result);
+        }
         let signature = index
             .method_type
             .as_ref()
@@ -1482,6 +1679,32 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .temporaries
             .get(&id)
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic callable storage"))?;
+        if let Some(LoweredBoundTarget::Dictionary(dispatch)) = self
+            .view
+            .binding(owner, LoweredBindingSite::CallableValue(value_id))
+        {
+            // A trait member at a run-time type is a closure over its slot,
+            // with the dictionary as its environment (T-L).
+            let dictionary =
+                self.dictionary_recipe_value(&dispatch.recipe, Some(environment), &span)?;
+            let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
+            let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
+            let offset = self
+                .backend
+                .size_type
+                .const_int(dispatch.slot as u64 * width, false);
+            let address = self.backend.dynamic_byte_offset(dictionary, offset)?;
+            let code = self
+                .load_dynamic_storage(pointer_type, address, "dictionary.slot")
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+            let closure = self.backend.build_closure_value_at(code, dictionary)?;
+            self.backend
+                .builder
+                .build_store(storage, closure)
+                .map_err(compiler_diagnostic)?;
+            return Ok(storage);
+        }
         if let Some(symbol) = self.callable_symbol(&callable)
             && let Some(binding) = environment
                 .bindings
@@ -2142,6 +2365,75 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     }
 
     /// The element descriptor of a buffer intrinsic, from its `T` argument.
+    /// A fresh dynamic buffer with the given capacity (R6): its header, the
+    /// element area, and the element descriptor in the trailing word. The
+    /// descriptor must already be GC-stable.
+    fn allocate_dynamic_buffer(
+        &self,
+        capacity: inkwell::values::IntValue<'context>,
+        element: PointerValue<'context>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        let layout = self.dynamic_buffer_layout(element)?;
+        let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
+        let bytes = self
+            .backend
+            .builder
+            .build_int_mul(capacity, layout.stride, "buffer.bytes")
+            .map_err(compiler_diagnostic)?;
+        let concrete = self
+            .backend
+            .builder
+            .build_int_add(layout.header_offset, bytes, "buffer.concrete.size")
+            .map_err(compiler_diagnostic)?;
+        // The element area can end at a byte boundary (including empty buffers).
+        // Keep the trailing descriptor word aligned for conservative GC scanning.
+        let concrete = self.runtime_align_up(
+            concrete,
+            self.backend.size_type.const_int(pointer_bytes, false),
+        )?;
+        let total = self
+            .backend
+            .builder
+            .build_int_add(
+                concrete,
+                self.backend.size_type.const_int(pointer_bytes, false),
+                "buffer.total.size",
+            )
+            .map_err(compiler_diagnostic)?;
+        let buffer = self
+            .backend
+            .build_gc_allocation(total, "buffer", span.clone())?;
+        self.backend
+            .builder
+            .build_store(buffer, self.backend.size_type.const_zero())
+            .map_err(compiler_diagnostic)?;
+        let capacity_slot = self.backend.dynamic_byte_offset(
+            buffer,
+            self.backend.size_type.const_int(pointer_bytes, false),
+        )?;
+        self.backend
+            .builder
+            .build_store(capacity_slot, capacity)
+            .map_err(compiler_diagnostic)?;
+        let frozen_slot = self.backend.dynamic_byte_offset(
+            buffer,
+            self.backend.size_type.const_int(2 * pointer_bytes, false),
+        )?;
+        self.backend
+            .builder
+            .build_store(frozen_slot, self.backend.context.i8_type().const_zero())
+            .map_err(compiler_diagnostic)?;
+        let descriptor_slot = self.backend.dynamic_byte_offset(buffer, concrete)?;
+        self.backend
+            .builder
+            .build_store(descriptor_slot, element)
+            .map_err(compiler_diagnostic)?;
+        let finalizer = self.dynamic_buffer_finalizer_code(span)?;
+        self.backend.set_gc_finalizer(buffer, finalizer)?;
+        Ok(buffer)
+    }
+
     fn intrinsic_element_descriptor(
         &self,
         call: &crate::LoweredCall,
@@ -2617,12 +2909,24 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         bound: usize,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<FunctionValue<'context>> {
+        self.descriptor_bound_entry_code_at(instance, bound, 0, span)
+    }
+
+    fn descriptor_bound_entry_code_at(
+        &self,
+        instance: FunctionInstanceId,
+        bound: usize,
+        offset: usize,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<FunctionValue<'context>> {
         let ordinal = self
             .view
             .artifacts()
             .find_map(|(_, artifact)| match &artifact.plan {
                 Some(crate::LoweredArtifactPlan::DescriptorBoundEntry(plan))
-                    if plan.instance == instance && plan.bound == bound =>
+                    if plan.instance == instance
+                        && plan.bound == bound
+                        && plan.environment_offset == offset =>
                 {
                     Some(artifact.ordinal)
                 }
@@ -3307,66 +3611,131 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .into_int_value();
                 let element = self.intrinsic_element_descriptor(call, environment, span)?;
                 let element = self.copy_descriptor_to_gc(element, span)?;
-                let layout = self.dynamic_buffer_layout(element)?;
-                let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
-                let bytes = self
-                    .backend
-                    .builder
-                    .build_int_mul(capacity, layout.stride, "buffer.bytes")
-                    .map_err(compiler_diagnostic)?;
-                let concrete = self
-                    .backend
-                    .builder
-                    .build_int_add(layout.header_offset, bytes, "buffer.concrete.size")
-                    .map_err(compiler_diagnostic)?;
-                // The element area can end at a byte boundary (including empty buffers).
-                // Keep the trailing descriptor word aligned for conservative GC scanning.
-                let concrete = self.runtime_align_up(
-                    concrete,
-                    self.backend.size_type.const_int(pointer_bytes, false),
-                )?;
-                let total = self
-                    .backend
-                    .builder
-                    .build_int_add(
-                        concrete,
-                        self.backend.size_type.const_int(pointer_bytes, false),
-                        "buffer.total.size",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                let buffer = self
-                    .backend
-                    .build_gc_allocation(total, "buffer", span.clone())?;
-                self.backend
-                    .builder
-                    .build_store(buffer, self.backend.size_type.const_zero())
-                    .map_err(compiler_diagnostic)?;
-                let capacity_slot = self.backend.dynamic_byte_offset(
-                    buffer,
-                    self.backend.size_type.const_int(pointer_bytes, false),
-                )?;
-                self.backend
-                    .builder
-                    .build_store(capacity_slot, capacity)
-                    .map_err(compiler_diagnostic)?;
-                let frozen_slot = self.backend.dynamic_byte_offset(
-                    buffer,
-                    self.backend.size_type.const_int(2 * pointer_bytes, false),
-                )?;
-                self.backend
-                    .builder
-                    .build_store(frozen_slot, self.backend.context.i8_type().const_zero())
-                    .map_err(compiler_diagnostic)?;
-                let descriptor_slot = self.backend.dynamic_byte_offset(buffer, concrete)?;
-                self.backend
-                    .builder
-                    .build_store(descriptor_slot, element)
-                    .map_err(compiler_diagnostic)?;
-                let finalizer = self.dynamic_buffer_finalizer_code(span)?;
-                self.backend.set_gc_finalizer(buffer, finalizer)?;
+                let buffer = self.allocate_dynamic_buffer(capacity, element, span)?;
                 self.backend
                     .builder
                     .build_store(storage, buffer)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(storage);
+            }
+            crate::IntrinsicFunction::BufferClone => {
+                // Clone each element through the element type's dictionary,
+                // growing the new buffer's length as elements land so a
+                // partial clone drops what exists.
+                let Some(crate::LoweredExpressionKind::Call(call_id)) =
+                    self.view.expression(owner, id).map(|expression| &expression.kind)
+                else {
+                    return Err(Diagnostic::new(span.clone(), "buffer clone is not a call"));
+                };
+                let Some(LoweredBoundTarget::Dictionary(dispatch)) = self
+                    .view
+                    .binding(owner, LoweredBindingSite::Call(*call_id))
+                else {
+                    return Err(Diagnostic::new(
+                        span.clone(),
+                        "buffer clone has no element Clone dictionary",
+                    ));
+                };
+                let dispatch = dispatch.clone();
+                let source = self.load_buffer_pointer(slot_pointer(0)?)?;
+                let element = self.intrinsic_element_descriptor(call, environment, span)?;
+                let element_copy = self.copy_descriptor_to_gc(element, span)?;
+                let layout = self.dynamic_buffer_layout(element)?;
+                let length = self.load_buffer_metadata(source, 0)?;
+                let capacity = self.load_buffer_metadata(source, 1)?;
+                let destination = self.allocate_dynamic_buffer(capacity, element_copy, span)?;
+                let source_data = self
+                    .backend
+                    .dynamic_byte_offset(source, layout.header_offset)?;
+                let destination_data = self
+                    .backend
+                    .dynamic_byte_offset(destination, layout.header_offset)?;
+                let index_slot = self
+                    .backend
+                    .entry_builder()
+                    .build_alloca(self.backend.size_type, "buffer.clone.index.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(index_slot, self.backend.size_type.const_zero())
+                    .map_err(compiler_diagnostic)?;
+                let function = self
+                    .backend
+                    .builder
+                    .get_insert_block()
+                    .and_then(|block| block.get_parent())
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "buffer clone function"))?;
+                let condition = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.clone.condition");
+                let body = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.clone.body");
+                let done = self
+                    .backend
+                    .context
+                    .append_basic_block(function, "buffer.clone.done");
+                self.backend
+                    .builder
+                    .build_unconditional_branch(condition)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(condition);
+                let index = self
+                    .backend
+                    .builder
+                    .build_load(self.backend.size_type, index_slot, "buffer.clone.index")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let remaining = self
+                    .backend
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::ULT,
+                        index,
+                        length,
+                        "buffer.clone.remaining",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_conditional_branch(remaining, body, done)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(body);
+                let offset = self
+                    .backend
+                    .builder
+                    .build_int_mul(index, layout.stride, "buffer.clone.offset")
+                    .map_err(compiler_diagnostic)?;
+                let from = self.backend.dynamic_byte_offset(source_data, offset)?;
+                let to = self.backend.dynamic_byte_offset(destination_data, offset)?;
+                self.call_dictionary_slot(&dispatch, environment, to, &[from], span)?;
+                let next = self
+                    .backend
+                    .builder
+                    .build_int_add(
+                        index,
+                        self.backend.size_type.const_int(1, false),
+                        "buffer.clone.next",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(destination, next)
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_store(index_slot, next)
+                    .map_err(compiler_diagnostic)?;
+                self.backend
+                    .builder
+                    .build_unconditional_branch(condition)
+                    .map_err(compiler_diagnostic)?;
+                self.backend.builder.position_at_end(done);
+                self.backend
+                    .builder
+                    .build_store(storage, destination)
                     .map_err(compiler_diagnostic)?;
                 return Ok(storage);
             }
@@ -4444,7 +4813,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let offset = self
                 .backend
                 .size_type
-                .const_int(index as u64 * pointer_bytes, false);
+                .const_int((plan.environment_offset + index) as u64 * pointer_bytes, false);
             let slot = self.backend.dynamic_byte_offset(environment, offset)?;
             let descriptor = self
                 .load_dynamic_storage(pointer, slot, "entry.descriptor")
@@ -4456,10 +4825,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             arguments.push((*parameter).into());
         }
         for index in 0..plan.bound_dictionaries {
-            let offset = self
-                .backend
-                .size_type
-                .const_int((plan.runtime.len() + index) as u64 * pointer_bytes, false);
+            let offset = self.backend.size_type.const_int(
+                (plan.environment_offset + plan.runtime.len() + index) as u64 * pointer_bytes,
+                false,
+            );
             let slot = self.backend.dynamic_byte_offset(environment, offset)?;
             let dictionary = self
                 .load_dynamic_storage(pointer, slot, "entry.dictionary")
@@ -6178,8 +6547,39 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         let span = &place.origin.span;
         let (base_pointer, base_descriptor) = self.emit_dynamic_place(owner, base, environment)?;
-        let position = self.emit_dynamic_expression(owner, index, environment)?;
+        let position_pointer = self.emit_dynamic_expression(owner, index, environment)?;
         if environment.returned {
+            return Ok(());
+        }
+        if let Some(LoweredBoundTarget::Dictionary(dispatch)) =
+            self.view.binding(owner, LoweredBindingSite::IndexedAssignment(id))
+        {
+            // A run-time operand type writes through its dictionary slot; the
+            // dynamic ABI takes every operand by pointer.
+            let dispatch = dispatch.clone();
+            let replacement = self.emit_dynamic_expression(owner, assignment.value, environment)?;
+            if environment.returned {
+                return Ok(());
+            }
+            let result = self
+                .backend
+                .entry_builder()
+                .build_alloca(
+                    self.backend.compile_type(&dispatch.function_type.result)?,
+                    "mutate_index.result",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.call_dictionary_slot(
+                &dispatch,
+                environment,
+                result,
+                &[base_pointer, position_pointer, replacement],
+                span,
+            )?;
+            if assignment.drops_base_temporary {
+                self.backend
+                    .drop_dynamic_value(base_descriptor, base_pointer)?;
+            }
             return Ok(());
         }
         let position_type = self
@@ -6190,7 +6590,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let position = self
             .load_dynamic_storage(
                 self.backend.compile_type(position_type)?,
-                position,
+                position_pointer,
                 "mutation.index",
             )
             .map_err(compiler_diagnostic)?;

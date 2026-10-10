@@ -62,7 +62,8 @@ mod worklist;
 
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
 pub(crate) use trait_dictionaries::{
-    DictionaryCallArgument, DictionaryRecipe, DictionarySlotCall, TraitDictionaryLayout,
+    BuilderRecipe, DictionaryCallArgument, DictionaryRecipe, DictionarySlotCall, MemberDictionary,
+    TraitDictionaryLayout,
 };
 pub(crate) use value_conversions::{
     AdapterConversion, adapter_conversions, concrete_key as conversion_concrete_key,
@@ -24132,6 +24133,75 @@ mod tests {
     }
 
     #[test]
+    fn bounded_generics_build_dictionaries_from_generic_implementations() {
+        let module = checked_program(concat!(
+            "trait Measure T { measure: T -> I32 }\n",
+            "type MeasuredBox T = wrap T\n",
+            "impl Measure I32 { measure = value => value + 1 }\n",
+            "impl<T where Measure T> Measure (MeasuredBox T) { measure = MeasuredBox value => Measure.measure value * 2 }\n",
+            "def measured: <T where Measure T> T -> I32 = value => Measure.measure value\n",
+            "def boxed: <T where Measure T> move T -> I32 = move value => measured (MeasuredBox value)\n",
+            "def twice: <T where Measure T> move T -> I32 = move value => measured (MeasuredBox (MeasuredBox value))\n",
+            "def run: () -> I32 = () => boxed 20 + twice 1\n",
+            "let answer = run ()\n",
+        ));
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&module)
+            .unwrap();
+        let mut builders = Vec::new();
+        for (_, instance) in lowered.program.instances.iter() {
+            let function = lowered.program.functions.get(instance.template).unwrap();
+            let body = instance.body.as_ref().unwrap();
+            for arguments in body.dictionary_calls.values() {
+                for argument in arguments {
+                    if let DictionaryRecipe::Builder(build) = &argument.recipe {
+                        builders.push((function.name.clone(), build.members.len()));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            builders,
+            [("boxed".to_owned(), 1), ("twice".to_owned(), 1)],
+            "one builder per bounded call over a boxed run-time type"
+        );
+        let run = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "run")
+                    .then(|| instance.name.clone())
+            })
+            .unwrap();
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        assert!(text.contains("dictionary.built"), "{text}");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "built-dictionaries",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&run).unwrap() };
+        // boxed 20: (20 + 1) * 2; twice 1: ((1 + 1) * 2) * 2.
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 42 + 8);
+    }
+
+    #[test]
     fn polymorphic_lambdas_enforce_declared_effect_rows() {
         for row in ["", "{state.read}"] {
             let source = format!(
@@ -25139,4 +25209,5 @@ mod tests {
         assert_eq!(first_snapshot, normalized_program_snapshot(&second));
     }
 }
+
 

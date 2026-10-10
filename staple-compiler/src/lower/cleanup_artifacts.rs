@@ -1106,6 +1106,11 @@ impl<'a> LoweredWalker<'a> {
                         )?;
                     }
                 }
+                // A run-time element type clones through a dictionary and
+                // allocates its dynamic buffer itself.
+                IntrinsicFunction::BufferClone
+                    if matches!(&result_type, CheckedType::Buffer(element)
+                        if crate::contains_type_parameter(element)) => {}
                 IntrinsicFunction::BufferClone => {
                     if let CheckedType::Buffer(element) = &result_type {
                         // The per-element `Clone` call is an instance use of the

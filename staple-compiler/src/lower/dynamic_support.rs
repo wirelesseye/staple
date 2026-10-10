@@ -436,6 +436,7 @@ impl LoweredProgram {
                 .get(function)
                 .map(|template| template.declared_bounds.clone())
                 .unwrap_or_default(),
+            indexed_assignment: false,
             reasons: BTreeSet::new(),
             dependencies: HashSet::new(),
             visited_blocks: HashSet::new(),
@@ -628,6 +629,9 @@ struct SupportWalker<'program> {
     /// The scanned template's declared bounds: the dictionaries its dynamic
     /// instance receives (T-C).
     declared: Vec<crate::CheckedTraitBound>,
+    /// The `MutateIndex` assignment being walked has a dictionary, so its
+    /// indexed target place needs no further justification.
+    indexed_assignment: bool,
     reasons: BTreeSet<RejectionReason>,
     dependencies: HashSet<FunctionId>,
     visited_blocks: HashSet<BlockId>,
@@ -643,10 +647,52 @@ impl SupportWalker<'_> {
         self.reasons.insert(reason);
     }
 
-    /// Whether a trait-member call at run-time types can read a dictionary
-    /// this template receives: its obligation mentions a type parameter and an
-    /// equal declared bound, or one of its prerequisites, provides it.
-    fn trait_call_has_dictionary(&self, evidence: Option<&crate::TraitEvidence>) -> bool {
+    /// Whether a dictionary for an obligation is obtainable here (T-F): from
+    /// this template's own bounds, as a static dictionary when concrete, or
+    /// built from the one implementation it selects. Built members become
+    /// dependencies, since each must itself run dynamically.
+    fn obligation_supplied(
+        &mut self,
+        obligation: &crate::CheckedTraitBound,
+        origin: &crate::Origin,
+    ) -> bool {
+        let selection = match crate::lower::trait_dictionaries::select_dictionary(
+            self.program,
+            &self.declared,
+            obligation,
+            origin,
+        ) {
+            Ok(selection) => selection,
+            Err(_) => return false,
+        };
+        let mut supplied = true;
+        let mut members = Vec::new();
+        crate::lower::trait_dictionaries::for_each_member(&selection, &mut |member| {
+            members.push(member.function)
+        });
+        for function in members {
+            // A member with no type parameters runs concretely and would need
+            // a reabstraction slot, which built dictionaries do not have yet.
+            if self
+                .program
+                .relevant_parameters(function)
+                .type_parameters()
+                .next()
+                .is_none()
+            {
+                supplied = false;
+            }
+            self.dependencies.insert(function);
+        }
+        supplied
+    }
+
+    /// Whether a trait-member call at run-time types can read a dictionary.
+    fn trait_call_has_dictionary(
+        &mut self,
+        evidence: Option<&crate::TraitEvidence>,
+        origin: &crate::Origin,
+    ) -> bool {
         let Some(evidence) = evidence else {
             return false;
         };
@@ -658,16 +704,12 @@ impl SupportWalker<'_> {
             trait_id,
             arguments: arguments.to_vec(),
         };
-        crate::lower::trait_dictionaries::environment_recipe(
-            self.program,
-            &self.declared,
-            &obligation,
-        )
-        .is_some()
+        self.obligation_supplied(&obligation, origin)
     }
 
     /// A dynamic callee's dictionaries must be suppliable here: from this
-    /// template's own, or as static ones when the obligation is concrete.
+    /// template's own, built from implementations, or as static ones when the
+    /// obligation is concrete.
     fn callee_bounds_supplied(
         &mut self,
         function: FunctionId,
@@ -676,6 +718,7 @@ impl SupportWalker<'_> {
         let Some(callee) = self.program.functions.get(function) else {
             return;
         };
+        let origin = callee.origin.clone();
         let substitution = substitutions
             .types
             .iter()
@@ -686,52 +729,22 @@ impl SupportWalker<'_> {
             .relevant_parameters(function)
             .type_parameters()
             .collect::<BTreeSet<_>>();
-        for bound in &callee.declared_bounds {
-            let arguments = bound
-                .arguments
-                .iter()
-                .map(|argument| crate::substitute_type(argument.clone(), &substitution))
-                .collect::<Vec<_>>();
-            // Only bounds over the callee's run-time parameters become
-            // dictionaries (T-B).
-            let mut referenced = BTreeSet::new();
-            for argument in &bound.arguments {
-                crate::lower::instance_resolution::collect_referenced_parameters(
-                    argument,
-                    &mut referenced,
-                );
-            }
-            if referenced.is_disjoint(&runtime)
-                || [
-                    self.program.semantic_ids.copy_trait,
-                    self.program.semantic_ids.sized_trait,
-                    self.program.semantic_ids.drop_trait,
-                    self.program.semantic_ids.natural_trait,
-                ]
-                .contains(&Some(bound.trait_id))
-            {
-                continue;
-            }
+        let obligations = crate::lower::trait_dictionaries::runtime_obligations(
+            &self.program.semantic_ids,
+            &callee.declared_bounds,
+            &Default::default(),
+            &runtime,
+        );
+        for bound in obligations {
             let obligation = crate::CheckedTraitBound {
                 trait_id: bound.trait_id,
-                arguments,
+                arguments: bound
+                    .arguments
+                    .into_iter()
+                    .map(|argument| crate::substitute_type(argument, &substitution))
+                    .collect(),
             };
-            let supplied = if obligation.arguments.iter().any(contains_type_parameter) {
-                crate::lower::trait_dictionaries::environment_recipe(
-                    self.program,
-                    &self.declared,
-                    &obligation,
-                )
-                .is_some()
-            } else {
-                crate::lower::trait_dictionaries::static_request(
-                    self.program,
-                    &obligation,
-                    &callee.origin,
-                )
-                .is_ok()
-            };
-            if !supplied {
+            if !self.obligation_supplied(&obligation, &origin) {
                 self.reject(RejectionReason::TraitCallRuntime);
             }
         }
@@ -782,17 +795,23 @@ impl SupportWalker<'_> {
                 self.expression(binding.value);
             }
             LoweredItemKind::Assignment(assignment) => {
-                if assignment
-                    .mutate_index
-                    .as_ref()
-                    .is_some_and(|dispatch| dispatch.arguments.iter().any(contains_type_parameter))
+                let mut supplied = false;
+                if let Some(dispatch) = assignment.mutate_index.as_ref()
+                    && dispatch.arguments.iter().any(contains_type_parameter)
                 {
-                    self.reject(RejectionReason::TraitCallRuntime);
+                    let origin = item.origin.clone();
+                    supplied = self
+                        .trait_call_has_dictionary(assignment.evidence.as_ref(), &origin);
+                    if !supplied {
+                        self.reject(RejectionReason::TraitCallRuntime);
+                    }
                 }
                 if assignment.signal_notify.is_some() {
                     self.reject(RejectionReason::SignalAssignment);
                 }
+                self.indexed_assignment = supplied;
                 self.place(assignment.target);
+                self.indexed_assignment = false;
                 self.expression(assignment.value);
             }
             LoweredItemKind::Return(item) => self.expression(item.value),
@@ -831,21 +850,22 @@ impl SupportWalker<'_> {
                 // R7: concrete interpolations use the concrete formatter ABI.
                 // A run-time-typed interpolation needs `Display`/`Debug`
                 // dispatch at run time and is an allowed Stage 6 reason.
-                let mut runtime_typed = false;
+                let origin = expression.origin.clone();
                 for part in &template.parts {
                     if let crate::LoweredStringTemplatePart::Interpolation(interpolation) = part {
-                        if crate::contains_type_parameter(&interpolation.value_type) {
-                            runtime_typed = true;
+                        if crate::contains_type_parameter(&interpolation.value_type)
+                            && !self.trait_call_has_dictionary(Some(&interpolation.evidence), &origin)
+                        {
+                            self.reject(RejectionReason::TraitCallRuntime);
                         }
                         self.expression(interpolation.expression);
                     }
                 }
-                if runtime_typed {
-                    self.reject(RejectionReason::TraitCallRuntime);
-                }
             }
             LoweredExpressionKind::Index(index) => {
-                if index.arguments.iter().any(contains_type_parameter) {
+                if index.arguments.iter().any(contains_type_parameter)
+                    && !self.trait_call_has_dictionary(Some(&index.evidence), &expression.origin)
+                {
                     self.reject(RejectionReason::TraitCallRuntime);
                 }
                 self.expression(index.base);
@@ -924,6 +944,7 @@ impl SupportWalker<'_> {
                             .iter()
                             .any(contains_type_parameter)
                     }))
+                    && !self.trait_call_has_dictionary(callable.evidence.as_ref(), &callable.origin)
                 {
                     self.reject(RejectionReason::TraitCallRuntime);
                 }
@@ -1052,7 +1073,7 @@ impl SupportWalker<'_> {
                         .expressions
                         .get(*index)
                         .is_some_and(|expression| contains_type_parameter(&expression.value_type));
-                if runtime {
+                if runtime && !self.indexed_assignment {
                     self.reject(RejectionReason::TraitCallRuntime);
                 }
                 self.place(*base);
@@ -1140,7 +1161,9 @@ impl SupportWalker<'_> {
             // and needs no dictionary; a parameter-dependent one is Stage 6.
             LoweredCallableTarget::TraitImplementation { .. }
             | LoweredCallableTarget::StructuralTraitMethod { .. } => {
-                if mentions_parameters && !self.trait_call_has_dictionary(call.evidence.as_ref()) {
+                if mentions_parameters
+                    && !self.trait_call_has_dictionary(call.evidence.as_ref(), &call.origin)
+                {
                     self.reject(RejectionReason::TraitCallRuntime);
                 }
             }
@@ -1154,7 +1177,24 @@ impl SupportWalker<'_> {
                 }
             }
             LoweredCallableTarget::Intrinsic { intrinsic, .. } => {
-                if !dynamic_scalar_intrinsic(*intrinsic) {
+                if *intrinsic == crate::IntrinsicFunction::BufferClone
+                    && let CheckedType::Buffer(element) = &call.result_type
+                    && contains_type_parameter(element)
+                {
+                    // Elements clone through the element type's dictionary.
+                    let supplied = self.program.semantic_ids.clone_trait.is_some_and(|trait_id| {
+                        self.obligation_supplied(
+                            &crate::CheckedTraitBound {
+                                trait_id,
+                                arguments: vec![element.as_ref().clone()],
+                            },
+                            &call.origin,
+                        )
+                    });
+                    if !supplied {
+                        self.reject(RejectionReason::BufferClone);
+                    }
+                } else if !dynamic_scalar_intrinsic(*intrinsic) {
                     self.reject(intrinsic_rejection(*intrinsic));
                 }
             }

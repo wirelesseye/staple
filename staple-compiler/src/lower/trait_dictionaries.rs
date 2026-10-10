@@ -194,12 +194,420 @@ pub(super) fn environment_recipe_bound(
 pub(crate) enum DictionaryRecipe {
     Environment(EnvironmentDictionaryRecipe),
     Static(crate::specialization::ArtifactRequestKey),
+    /// A generic implementation selected at abstract types, applied to the
+    /// caller's descriptors and recipes (T-E). The dictionary is built in GC
+    /// memory so it may outlive the frame (T-G).
+    Builder(Box<BuilderRecipe>),
+}
+
+/// The run-time construction of a dictionary from a generic implementation.
+/// Its tail holds, per trait member, the descriptors and dictionaries the
+/// member's dynamic instance receives, so the member's slot entry forwards
+/// them like a closure environment does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BuilderRecipe {
+    pub implementation: super::LoweredTraitImplementationId,
+    /// The obligation at the caller's types, completed by the header.
+    pub obligation: crate::CheckedTraitBound,
+    pub members: Vec<BuilderMember>,
+    /// One recipe per trait prerequisite, in prefix order; markers have none.
+    pub prerequisites: Vec<Option<DictionaryCallArgument>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BuilderMember {
+    pub instance: super::FunctionInstanceId,
+    /// First pointer slot of this member's region in the dictionary tail.
+    pub region: usize,
+    /// The caller's type of each descriptor the instance takes, in its
+    /// descriptor ABI order (R-A).
+    pub descriptors: Vec<crate::CheckedType>,
+    pub dictionaries: Vec<MemberDictionary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemberDictionary {
+    /// The dictionary being built (a defaulted member's own bound).
+    Itself,
+    Recipe(DictionaryCallArgument),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DictionaryCallArgument {
     pub obligation: crate::CheckedTraitBound,
     pub recipe: DictionaryRecipe,
+}
+
+/// A dictionary choice at abstract types (T-F), made before any member
+/// instance exists. The worklist requests its members; bodies pair it with
+/// the interned instances to form a recipe.
+#[derive(Debug, Clone)]
+pub(super) enum DictionarySelection {
+    Environment(EnvironmentDictionaryRecipe),
+    Static(crate::specialization::ArtifactRequestKey),
+    Build(Box<BuildSelection>),
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct BuildSelection {
+    pub implementation: super::LoweredTraitImplementationId,
+    pub obligation: crate::CheckedTraitBound,
+    /// Implementation and trait parameters at the caller's types.
+    pub substitution: std::collections::HashMap<crate::TypeParameterId, crate::CheckedType>,
+    pub members: Vec<MemberSelection>,
+    pub prerequisites: Vec<Option<(crate::CheckedTraitBound, DictionarySelection)>>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct MemberSelection {
+    pub function: crate::FunctionId,
+    pub function_type: crate::CheckedFunctionType,
+    pub evidence: crate::TraitEvidence,
+    pub substitutions: crate::CallSubstitutions,
+    /// The member instance's dictionaries at the caller's types, in its
+    /// declared-bound order.
+    pub dictionaries: Vec<MemberDictionarySelection>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum MemberDictionarySelection {
+    Itself,
+    Select(crate::CheckedTraitBound, DictionarySelection),
+}
+
+const SELECTION_DEPTH: usize = 8;
+
+/// Choose how a run-time obligation's dictionary is obtained. An equal
+/// environment bound wins; otherwise exactly one implementation is selected
+/// and its `where` clause and prerequisites must in turn be obtainable.
+pub(super) fn select_dictionary(
+    program: &super::LoweredProgram,
+    environment: &[crate::CheckedTraitBound],
+    obligation: &crate::CheckedTraitBound,
+    origin: &crate::Origin,
+) -> Result<DictionarySelection, staple_syntax::Diagnostic> {
+    select_at_depth(program, environment, obligation, origin, 0)
+}
+
+fn select_at_depth(
+    program: &super::LoweredProgram,
+    environment: &[crate::CheckedTraitBound],
+    obligation: &crate::CheckedTraitBound,
+    origin: &crate::Origin,
+    depth: usize,
+) -> Result<DictionarySelection, staple_syntax::Diagnostic> {
+    use crate::contains_type_parameter;
+    if depth > SELECTION_DEPTH {
+        return Err(staple_syntax::Diagnostic::new(
+            origin.span.clone(),
+            "dictionary selection recurses too deeply",
+        ));
+    }
+    if !obligation.arguments.iter().any(contains_type_parameter) {
+        let super::artifact_closure::ClosureRequest::Artifact { key, .. } =
+            static_request(program, obligation, origin)?
+        else {
+            unreachable!()
+        };
+        return Ok(DictionarySelection::Static(key));
+    }
+    if let Some(recipe) = environment_recipe(program, environment, obligation) {
+        return Ok(DictionarySelection::Environment(recipe));
+    }
+    let chosen = program.select_runtime_implementation(obligation, origin)?;
+    let metadata = program.traits.get(obligation.trait_id).ok_or_else(|| {
+        staple_syntax::Diagnostic::new(origin.span.clone(), "dictionary trait is absent")
+    })?;
+    let markers = marker_traits(program);
+    // The `where` clause must be obtainable from the caller's dictionaries.
+    for clause in &chosen.clauses {
+        if markers.contains(&Some(clause.trait_id)) {
+            continue;
+        }
+        select_at_depth(program, environment, clause, origin, depth + 1)?;
+    }
+    let built = crate::CheckedTraitBound {
+        trait_id: obligation.trait_id,
+        arguments: chosen.completed.clone(),
+    };
+    let mut substitution = chosen.substitution.clone();
+    substitution.extend(dictionary_substitution(metadata, &chosen.completed).unwrap_or_default());
+    let mut members = Vec::new();
+    for method in &metadata.methods {
+        let function = program
+            .implementation_method_function(chosen.implementation, obligation.trait_id, *method)
+            .ok_or_else(|| {
+                staple_syntax::Diagnostic::new(
+                    origin.span.clone(),
+                    "dictionary member has no implementation",
+                )
+            })?;
+        let function_type = super::worklist::instantiate_method_type(
+            program,
+            origin,
+            obligation.trait_id,
+            *method,
+            &chosen.completed,
+        )?;
+        let template = program.functions.get(function).ok_or_else(|| {
+            staple_syntax::Diagnostic::new(origin.span.clone(), "dictionary member has no template")
+        })?;
+        let mut dictionaries = Vec::new();
+        for bound in &template.declared_bounds {
+            if markers.contains(&Some(bound.trait_id)) {
+                continue;
+            }
+            let at_caller = crate::CheckedTraitBound {
+                trait_id: bound.trait_id,
+                arguments: bound
+                    .arguments
+                    .iter()
+                    .map(|argument| crate::substitute_type(argument.clone(), &substitution))
+                    .collect(),
+            };
+            // Only bounds that mention run-time types become dictionaries.
+            if !at_caller.arguments.iter().any(contains_type_parameter) {
+                continue;
+            }
+            dictionaries.push(if at_caller == built {
+                MemberDictionarySelection::Itself
+            } else {
+                let selection = select_at_depth(program, environment, &at_caller, origin, depth + 1)?;
+                MemberDictionarySelection::Select(at_caller, selection)
+            });
+        }
+        members.push(MemberSelection {
+            function,
+            function_type,
+            evidence: crate::TraitEvidence::ExplicitImplementation {
+                trait_id: obligation.trait_id,
+                implementation: chosen.implementation,
+                method: *method,
+                function,
+                arguments: chosen.completed.clone(),
+            },
+            substitutions: super::worklist::trait_site_substitutions(
+                program,
+                obligation.trait_id,
+                &chosen.completed,
+            ),
+            dictionaries,
+        });
+    }
+    let mut prerequisites = Vec::new();
+    let trait_substitution = dictionary_substitution(metadata, &chosen.completed).unwrap_or_default();
+    for prerequisite in &metadata.prerequisites {
+        if markers.contains(&Some(prerequisite.trait_id)) {
+            prerequisites.push(None);
+            continue;
+        }
+        let bound = crate::CheckedTraitBound {
+            trait_id: prerequisite.trait_id,
+            arguments: prerequisite
+                .arguments
+                .iter()
+                .map(|argument| crate::substitute_type(argument.clone(), &trait_substitution))
+                .collect(),
+        };
+        let selection = select_at_depth(program, environment, &bound, origin, depth + 1)?;
+        prerequisites.push(Some((bound, selection)));
+    }
+    Ok(DictionarySelection::Build(Box::new(BuildSelection {
+        implementation: chosen.implementation,
+        obligation: built,
+        substitution,
+        members,
+        prerequisites,
+    })))
+}
+
+fn marker_traits(program: &super::LoweredProgram) -> [Option<crate::TraitId>; 4] {
+    let ids = &program.semantic_ids;
+    [
+        ids.copy_trait,
+        ids.sized_trait,
+        ids.drop_trait,
+        ids.natural_trait,
+    ]
+}
+
+/// Visit every member of every builder in a selection, nested ones included.
+pub(super) fn for_each_member<'a>(
+    selection: &'a DictionarySelection,
+    visit: &mut dyn FnMut(&'a MemberSelection),
+) {
+    let DictionarySelection::Build(build) = selection else {
+        return;
+    };
+    for member in &build.members {
+        visit(member);
+        for dictionary in &member.dictionaries {
+            if let MemberDictionarySelection::Select(_, nested) = dictionary {
+                for_each_member(nested, visit);
+            }
+        }
+    }
+    for prerequisite in build.prerequisites.iter().flatten() {
+        for_each_member(&prerequisite.1, visit);
+    }
+}
+
+/// Form the recipe for a selection once each member has an instance.
+/// `instance` pairs a member with its interned dynamic instance.
+pub(super) fn materialize_recipe(
+    program: &super::LoweredProgram,
+    selection: &DictionarySelection,
+    instance: &mut dyn FnMut(&MemberSelection) -> Option<super::FunctionInstanceId>,
+    origin: &crate::Origin,
+) -> Result<DictionaryRecipe, staple_syntax::Diagnostic> {
+    match selection {
+        DictionarySelection::Environment(recipe) => Ok(DictionaryRecipe::Environment(recipe.clone())),
+        DictionarySelection::Static(key) => Ok(DictionaryRecipe::Static(key.clone())),
+        DictionarySelection::Build(build) => {
+            let mut members = Vec::new();
+            let mut region = 0;
+            for member in &build.members {
+                let missing = || {
+                    staple_syntax::Diagnostic::new(
+                        origin.span.clone(),
+                        "dictionary member has no instance",
+                    )
+                };
+                let id = instance(member).ok_or_else(missing)?;
+                let descriptors = program
+                    .instance_runtime_order(id)
+                    .ok_or_else(missing)?
+                    .into_iter()
+                    .map(|parameter| {
+                        build.substitution.get(&parameter).cloned().ok_or_else(|| {
+                            staple_syntax::Diagnostic::new(
+                                origin.span.clone(),
+                                "dictionary member parameter has no caller type",
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut dictionaries = Vec::new();
+                for dictionary in &member.dictionaries {
+                    dictionaries.push(match dictionary {
+                        MemberDictionarySelection::Itself => MemberDictionary::Itself,
+                        MemberDictionarySelection::Select(obligation, nested) => {
+                            MemberDictionary::Recipe(DictionaryCallArgument {
+                                obligation: obligation.clone(),
+                                recipe: materialize_recipe(program, nested, instance, origin)?,
+                            })
+                        }
+                    });
+                }
+                let words = descriptors.len() + dictionaries.len();
+                members.push(BuilderMember {
+                    instance: id,
+                    region,
+                    descriptors,
+                    dictionaries,
+                });
+                region += words;
+            }
+            let prerequisites = build
+                .prerequisites
+                .iter()
+                .map(|prerequisite| {
+                    prerequisite
+                        .as_ref()
+                        .map(|(obligation, nested)| {
+                            Ok(DictionaryCallArgument {
+                                obligation: obligation.clone(),
+                                recipe: materialize_recipe(program, nested, instance, origin)?,
+                            })
+                        })
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, staple_syntax::Diagnostic>>()?;
+            Ok(DictionaryRecipe::Builder(Box::new(BuilderRecipe {
+                implementation: build.implementation,
+                obligation: build.obligation.clone(),
+                members,
+                prerequisites,
+            })))
+        }
+    }
+}
+
+/// The dictionaries an instance receives (T-C), in its declared-bound order.
+pub(super) fn enclosing_dictionary_bounds(
+    program: &super::LoweredProgram,
+    enclosing: &super::instance_resolution::ResolvedInstanceRequest,
+) -> Vec<crate::CheckedTraitBound> {
+    let Some(template) = program.functions.get(enclosing.key.function()) else {
+        return Vec::new();
+    };
+    runtime_obligations(
+        &program.semantic_ids,
+        &template.declared_bounds,
+        &enclosing.environment.substitution_map(),
+        enclosing.key.runtime(),
+    )
+}
+
+/// The obligations a call to `function` passes as dictionaries, at the
+/// caller's types, when they mention the caller's run-time parameters. This
+/// is the template-level form of the callee instance's run-time bounds.
+pub(super) fn callee_runtime_obligations(
+    program: &super::LoweredProgram,
+    function: crate::FunctionId,
+    substitutions: &crate::CallSubstitutions,
+    enclosing: &super::instance_resolution::ResolvedInstanceRequest,
+) -> Vec<crate::CheckedTraitBound> {
+    let Some(callee) = program.functions.get(function) else {
+        return Vec::new();
+    };
+    let runtime = program
+        .relevant_parameters(function)
+        .type_parameters()
+        .collect::<std::collections::BTreeSet<_>>();
+    // The caller's types as its own instance spells them, so they compare
+    // equal to its dictionary bounds.
+    let enclosing_map = enclosing.environment.substitution_map();
+    let substitution = substitutions
+        .types
+        .iter()
+        .map(|entry| {
+            (
+                entry.parameter,
+                crate::substitute_type(entry.value_type.clone(), &enclosing_map),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    runtime_obligations(
+        &program.semantic_ids,
+        &callee.declared_bounds,
+        &Default::default(),
+        &runtime,
+    )
+    .into_iter()
+    .map(|obligation| crate::CheckedTraitBound {
+        trait_id: obligation.trait_id,
+        arguments: obligation
+            .arguments
+            .into_iter()
+            .map(|argument| crate::substitute_type(argument, &substitution))
+            // A nested function shares its enclosing function's parameters.
+            .map(|argument| crate::substitute_type(argument, &enclosing_map))
+            .collect(),
+    })
+    .filter(|obligation| obligation.arguments.iter().any(crate::contains_type_parameter))
+    // A scheme value's own dictionaries come from its caller.
+    .filter(|obligation| {
+        let mut referenced = std::collections::BTreeSet::new();
+        for argument in &obligation.arguments {
+            super::instance_resolution::collect_referenced_parameters(argument, &mut referenced);
+        }
+        callee
+            .scheme_type_parameters
+            .iter()
+            .all(|parameter| !referenced.contains(parameter))
+    })
+    .collect()
 }
 
 /// A trait-member call through a dictionary at a run-time obligation (T-K).
@@ -209,6 +617,8 @@ pub(crate) struct DictionarySlotCall {
     pub recipe: DictionaryRecipe,
     /// Absolute pointer-slot offset of the member in the dictionary prefix.
     pub slot: usize,
+    /// The member's type at the obligation's types: its dynamic ABI.
+    pub function_type: crate::CheckedFunctionType,
 }
 
 /// The trait, completed arguments and member a recorded evidence names.
@@ -264,10 +674,54 @@ pub(super) fn site_runtime_obligation(
         .next()
 }
 
-/// Select the dictionary and slot a run-time trait member call reads. An
-/// environment bound wins (T-F); other recipe kinds arrive with builders.
+/// The interned dynamic instance of a dictionary member, requested from the
+/// enclosing instance exactly as the worklist did.
+fn member_instance(
+    program: &super::LoweredProgram,
+    enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
+    origin: &crate::Origin,
+    member: &MemberSelection,
+) -> Option<super::FunctionInstanceId> {
+    use super::instance_resolution::{InstanceResolutionRequest, InstanceResolutionTarget};
+    let enclosing = enclosing?;
+    let relevant_empty = program.relevant_parameters(member.function).is_empty();
+    let request = InstanceResolutionRequest {
+        function: member.function,
+        origin: origin.clone(),
+        function_type: member.function_type.clone(),
+        substitutions: member.substitutions.clone(),
+        evidence: (!relevant_empty).then(|| member.evidence.clone()),
+        target: InstanceResolutionTarget::Nested(enclosing),
+    };
+    let resolved = program.resolve_instance_request(&request).ok()?;
+    let ordinal = program.specializations.instance_ordinal(&resolved.key)?;
+    let id = <super::FunctionInstanceId as super::ArenaId>::from_index(ordinal.index());
+    program.instances.contains(id).then_some(id)
+}
+
+/// Plan how a dictionary for `obligation` is obtained in the enclosing
+/// instance, as a recipe whose builders name interned member instances.
+pub(super) fn plan_recipe(
+    program: &super::LoweredProgram,
+    enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
+    environment: &[crate::CheckedTraitBound],
+    obligation: &crate::CheckedTraitBound,
+    origin: &crate::Origin,
+) -> Result<DictionaryRecipe, staple_syntax::Diagnostic> {
+    let selection = select_dictionary(program, environment, obligation, origin)?;
+    materialize_recipe(
+        program,
+        &selection,
+        &mut |member| member_instance(program, enclosing, origin, member),
+        origin,
+    )
+}
+
+/// Select the dictionary and slot a run-time trait member call reads: an
+/// environment bound, or a dictionary built from the selected implementation.
 pub(super) fn plan_slot_call(
     program: &super::LoweredProgram,
+    enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
     environment: &[crate::CheckedTraitBound],
     obligation: &crate::CheckedTraitBound,
     method: crate::TraitMethodId,
@@ -286,31 +740,38 @@ pub(super) fn plan_slot_call(
                 "dictionary trait has no such member",
             )
         })?;
-    let recipe = environment_recipe(program, environment, obligation).ok_or_else(|| {
-        staple_syntax::Diagnostic::new(
-            origin.span.clone(),
-            format!(
-                "trait `{}` is required at a run-time type and no dictionary provides it",
-                metadata.name
-            ),
-        )
-    })?;
+    let recipe = plan_recipe(program, enclosing, environment, obligation, origin)?;
+    // A built dictionary completes the obligation's associated arguments.
+    let obligation = match &recipe {
+        DictionaryRecipe::Builder(build) => build.obligation.clone(),
+        _ => obligation.clone(),
+    };
+    let function_type = super::worklist::instantiate_method_type(
+        program,
+        origin,
+        obligation.trait_id,
+        method,
+        &obligation.arguments,
+    )?;
     Ok(DictionarySlotCall {
-        obligation: obligation.clone(),
-        recipe: DictionaryRecipe::Environment(recipe),
+        obligation,
+        recipe,
         slot: metadata.dictionary_layout.slots.start + slot,
+        function_type,
     })
 }
 
 /// Translate a dynamic callee's declared bounds into the caller's types.
 pub(super) fn plan_direct_call(
     program: &super::LoweredProgram,
+    enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
     environment: &[crate::CheckedTraitBound],
     call: &super::LoweredCall,
     callee: super::FunctionInstanceId,
 ) -> Result<Vec<DictionaryCallArgument>, staple_syntax::Diagnostic> {
     plan_instance_dictionaries(
         program,
+        enclosing,
         environment,
         &call.origin,
         &call.substitutions,
@@ -324,6 +785,7 @@ pub(super) fn plan_direct_call(
 /// scheme value's own dictionaries arrive from its caller (T-C).
 pub(super) fn plan_callable_value(
     program: &super::LoweredProgram,
+    enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
     environment: &[crate::CheckedTraitBound],
     value: &super::LoweredCallableValue,
     callee: super::FunctionInstanceId,
@@ -331,6 +793,7 @@ pub(super) fn plan_callable_value(
     let stored = stored_dictionary_count(program, callee).unwrap_or(0);
     plan_instance_dictionaries(
         program,
+        enclosing,
         environment,
         &value.origin,
         &value.substitutions,
@@ -357,6 +820,7 @@ pub(super) fn stored_dictionary_count(
 
 fn plan_instance_dictionaries(
     program: &super::LoweredProgram,
+    enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
     environment: &[crate::CheckedTraitBound],
     origin: &crate::Origin,
     substitutions: &crate::CallSubstitutions,
@@ -404,20 +868,147 @@ fn plan_instance_dictionaries(
                     .map(|argument| crate::substitute_type(argument, &substitution))
                     .collect(),
             };
-            let recipe = if let Some(recipe) = environment_recipe(program, environment, &obligation)
-            {
-                DictionaryRecipe::Environment(recipe)
-            } else {
-                let super::artifact_closure::ClosureRequest::Artifact { key, .. } =
-                    static_request(program, &obligation, origin)?
-                else {
-                    unreachable!()
-                };
-                DictionaryRecipe::Static(key)
-            };
+            let recipe = plan_recipe(program, enclosing, environment, &obligation, origin)?;
             Ok(DictionaryCallArgument { obligation, recipe })
         })
         .collect()
+}
+
+/// A request a built dictionary adds to its owner: a slot entry, or a static
+/// dictionary a nested recipe names.
+#[derive(Debug, Clone)]
+pub(super) enum BuilderUse {
+    Entry(BuilderMember, usize),
+    Static(crate::CheckedTraitBound),
+}
+
+/// Walk a recipe's builders in a fixed order, collecting their uses.
+/// `top_level` recipes keep their own use-site request elsewhere.
+fn walk_recipe(
+    program: &super::LoweredProgram,
+    obligation: &crate::CheckedTraitBound,
+    recipe: &DictionaryRecipe,
+    top_level: bool,
+    uses: &mut Vec<(crate::CheckedTraitBound, BuilderUse)>,
+) {
+    match recipe {
+        DictionaryRecipe::Environment(_) => {}
+        DictionaryRecipe::Static(_) => {
+            if !top_level {
+                uses.push((obligation.clone(), BuilderUse::Static(obligation.clone())));
+            }
+        }
+        DictionaryRecipe::Builder(build) => {
+            let Some(metadata) = program.traits.get(build.obligation.trait_id) else {
+                return;
+            };
+            let environment = metadata.dictionary_layout.environment;
+            for member in &build.members {
+                uses.push((
+                    build.obligation.clone(),
+                    BuilderUse::Entry(member.clone(), environment),
+                ));
+                for dictionary in &member.dictionaries {
+                    if let MemberDictionary::Recipe(argument) = dictionary {
+                        walk_recipe(program, &argument.obligation, &argument.recipe, false, uses);
+                    }
+                }
+            }
+            for argument in build.prerequisites.iter().flatten() {
+                walk_recipe(program, &argument.obligation, &argument.recipe, false, uses);
+            }
+        }
+    }
+}
+
+/// Every builder use of one body, in a deterministic order that use sites
+/// index into.
+pub(super) fn body_builder_uses(
+    program: &super::LoweredProgram,
+    body: &super::LoweredInstanceBody,
+) -> Vec<(crate::Origin, BuilderUse)> {
+    let mut found = Vec::new();
+    let mut walked = |origin: &crate::Origin,
+                      obligation: &crate::CheckedTraitBound,
+                      recipe: &DictionaryRecipe| {
+        let mut uses = Vec::new();
+        walk_recipe(program, obligation, recipe, true, &mut uses);
+        found.extend(uses.into_iter().map(|(_, use_)| (origin.clone(), use_)));
+    };
+    for (call, arguments) in &body.dictionary_calls {
+        if let Some(call) = body.calls.get(*call) {
+            for argument in arguments {
+                walked(&call.origin, &argument.obligation, &argument.recipe);
+            }
+        }
+    }
+    for (value, arguments) in &body.dictionary_values {
+        if let Some(value) = body.callable_values.get(*value) {
+            for argument in arguments {
+                walked(&value.origin, &argument.obligation, &argument.recipe);
+            }
+        }
+    }
+    for target in body.bindings.values() {
+        if let super::LoweredBoundTarget::Dictionary(dispatch) = target {
+            walked(&body.origin, &dispatch.obligation, &dispatch.recipe);
+        }
+    }
+    found
+}
+
+/// The forwarding entry of one built-dictionary member.
+fn member_entry_request(
+    program: &super::LoweredProgram,
+    member: &BuilderMember,
+    environment: usize,
+    origin: &crate::Origin,
+) -> Result<super::artifact_closure::ClosureRequest, staple_syntax::Diagnostic> {
+    use super::artifact_closure::ClosureRequest;
+    let missing = |what: &str| staple_syntax::Diagnostic::new(origin.span.clone(), what.to_owned());
+    let record = program
+        .instances
+        .get(member.instance)
+        .ok_or_else(|| missing("dictionary member instance is absent"))?;
+    let runtime = program
+        .instance_runtime_order(member.instance)
+        .ok_or_else(|| missing("dictionary member has no descriptor order"))?;
+    if runtime.is_empty() {
+        return Err(missing(
+            "dictionary members that need no descriptors are not supported yet",
+        ));
+    }
+    let signature = record
+        .body
+        .as_ref()
+        .ok_or_else(|| missing("dictionary member has no body"))?
+        .signature
+        .clone();
+    let (dictionary_count, bound_dictionaries) =
+        entry_dictionary_partition(program, member.instance, runtime.len())
+            .ok_or_else(|| missing("dictionary member has no dictionary partition"))?;
+    let offset = environment + member.region;
+    Ok(ClosureRequest::Artifact {
+        key: crate::specialization::ArtifactRequestKey::DescriptorBoundEntry(
+            crate::specialization::DescriptorBoundEntryKey {
+                instance: record.ordinal,
+                bound: runtime.len(),
+                offset,
+            },
+        ),
+        plan: super::LoweredArtifactPlan::DescriptorBoundEntry(super::DescriptorBoundEntryPlan {
+            bound: runtime.len(),
+            dictionary_count,
+            bound_dictionaries,
+            environment_offset: offset,
+            instance: member.instance,
+            runtime,
+            function_type: signature,
+        }),
+        kind: super::LoweredArtifactDependencyKind::DescriptorBoundEntry,
+        origin: origin.clone(),
+        use_site: None,
+    })
 }
 
 pub(super) fn scan_instance(
@@ -506,6 +1097,21 @@ pub(super) fn scan_instance(
             }
         }
     }
+    for (index, (origin, use_)) in body_builder_uses(program, body).into_iter().enumerate() {
+        let mut request = match use_ {
+            BuilderUse::Entry(member, environment) => {
+                member_entry_request(program, &member, environment, &origin)
+            }
+            BuilderUse::Static(obligation) => static_request(program, &obligation, &origin),
+        }
+        .map_err(|error| vec![error])?;
+        let super::artifact_closure::ClosureRequest::Artifact { use_site, .. } = &mut request
+        else {
+            unreachable!()
+        };
+        *use_site = Some(super::artifact_closure::ArtifactUseSite::DictionaryBuilder(index));
+        requests.push(request);
+    }
     Ok(requests)
 }
 
@@ -533,7 +1139,7 @@ pub(super) fn initializer_call_arguments(
                 id,
                 call,
             )? {
-                let arguments = plan_direct_call(self.program, &[], call, callee)
+                let arguments = plan_direct_call(self.program, None, &[], call, callee)
                     .map_err(|error| vec![error])?;
                 if !arguments.is_empty() {
                     self.arguments.insert(id, arguments);

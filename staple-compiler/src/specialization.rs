@@ -1040,6 +1040,9 @@ pub(crate) struct CompoundDescriptorDropKey {
 pub(crate) struct DescriptorBoundEntryKey {
     pub instance: InstanceOrdinal,
     pub bound: usize,
+    /// Pointer slots the bound words start after: zero for a closure
+    /// environment, a dictionary's tail offset for a built dictionary's slot.
+    pub offset: usize,
 }
 
 /// The identity of one polymorphic-value adapter: a closure forwarding to a

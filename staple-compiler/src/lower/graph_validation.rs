@@ -260,7 +260,12 @@ impl<'a> GraphValidator<'a> {
                 }
             }
         }
-        let evidence = match &instance.evidence {
+        // Evidence over run-time parameters is not part of the key.
+        let keyed = instance.evidence.as_ref().filter(|evidence| {
+            let (_, arguments, _) = super::trait_dictionaries::evidence_obligation(evidence);
+            !arguments.iter().any(contains_type_parameter)
+        });
+        let evidence = match keyed {
             Some(evidence) => match canonical_evidence(evidence, &instance.origin) {
                 Ok(evidence) => Some(evidence),
                 Err(diagnostic) => {
@@ -391,7 +396,7 @@ impl<'a> GraphValidator<'a> {
                 self.check_evidence(&call.origin, evidence);
             }
         }
-        for (_, value) in body.callable_values.iter() {
+        for (value_id, value) in body.callable_values.iter() {
             let mut bound = value
                 .scheme
                 .as_ref()
@@ -421,7 +426,9 @@ impl<'a> GraphValidator<'a> {
                 &runtime,
                 &bound,
             );
-            if let Some(evidence) = &value.evidence {
+            if let Some(evidence) = &value.evidence
+                && !dictionary_site(super::LoweredBindingSite::CallableValue(value_id))
+            {
                 self.check_evidence(&value.origin, evidence);
             }
             let Some(closure) = &value.closure else {
@@ -464,9 +471,10 @@ impl<'a> GraphValidator<'a> {
                 }
             }
         }
-        for (_, item) in body.items.iter() {
+        for (item_id, item) in body.items.iter() {
             if let LoweredItemKind::Assignment(assignment) = &item.kind
                 && let Some(evidence) = &assignment.evidence
+                && !dictionary_site(super::LoweredBindingSite::IndexedAssignment(item_id))
             {
                 self.check_evidence(&item.origin, evidence);
             }

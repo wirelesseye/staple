@@ -43,29 +43,27 @@ the release build of this stage's base commit for every existing input.
 
 ## Current state
 
-- **S0 partial.** Both trait fixtures, the environment fixture and the
-  21-program quick differential suite pass. Trait-only rejections fell from
-  1,819 occurrences / 46 templates to 290 / 16 (all `TraitCallRuntime`: builders,
-  structural traits, operations, members as values). Restriction probes remain.
-- **6a.1 explicit static dictionaries implemented.** Ordered prefixes, concrete
-  method closures, default slots and shared prerequisites pass validation and
-  JIT checks. Concrete dispatch builds no dictionaries; dynamic direct calls
-  demand static ones. Structural dictionaries remain in 6a.4.
-- **6a.2 partial.** Runtime obligations and lexical declared bound order are
-  retained and validated, including implicit thunks. Dynamic signatures, entry
-  decoding, direct calls, bound entries and closure environments carry
-  dictionaries: environments store them after the descriptors (callable-value
-  recipes, thunk prefixes) and the finalizer and body offsets follow. A JIT test
-  covers callable values; the thunk path is untested. Instantiation adapters
-  and the audit of `runtime()` counts remain.
-- **6a.3 partial.** Direct/transitive environment recipes, static recipes and
-  prerequisite routes are recorded and validated on calls and callable values.
-  Trait-member calls at run-time obligations dispatch through an environment
-  dictionary slot (`LoweredBoundTarget::Dictionary`): the support analysis, the
-  worklist, bodies, validators and the dynamic emitter agree, and routed calls
-  require static dictionaries. JIT and corpus tests cover it. Abstract selection
-  (T-F), builders, structural recipes, the other T-K operations, members as
-  values, bounded values and the exit gates remain.
+- **S0 partial.** Both trait fixtures plus the environment and builder fixtures
+  and the quick differential suite pass. Trait-only rejections fell from 1,819
+  occurrences / 46 templates to 3 / 4 (structural `Debug` and two with other
+  restrictions). Restriction probes remain.
+- **6a.1 done.** Static dictionaries (ordered prefixes, method closures,
+  defaults, shared prerequisites) pass validation and JIT checks.
+- **6a.2 partial.** Dynamic signatures, entries, direct calls, bound entries and
+  closure environments carry dictionaries (environments store them after the
+  descriptors). Instantiation adapters and the audit of `runtime()` counts
+  remain.
+- **6a.3 partial.** Recipes: environment (with prerequisite routes), static and
+  builder, selected uniquely at abstract types (T-F) and validated in bodies.
+  Restriction messages are reported at lowering; the final wording and probes
+  remain.
+- **6a.4 partial.** Generic and blanket implementations build dictionaries in GC
+  memory from the caller's descriptors and recipes; member slots are descriptor-
+  bound entries over the dictionary tail. Structural dictionaries remain.
+- **6a.5 partial.** Method calls, operators, interpolation, `Index`,
+  `MutateIndex`, `__buffer_clone` and members as values dispatch through
+  dictionary slots; support analysis admits them when a recipe exists. `for`
+  loops use these calls. Structural `Debug`/`Index`/iteration remain.
 - Checker workarounds remain: explicit `USize` indices, projected-result type
   arguments/result annotations, and callback parameter annotations.
 
@@ -133,11 +131,11 @@ the release build of this stage's base commit for every existing input.
   rather than silently resolved.
 - **T-G. Dictionary lifetime.**
   - Static dictionaries are constants.
-  - A built dictionary lives in a fixed-size entry-block slot: its shape is
-    known from the recipe.
-  - When an escaping value captures it (a closure environment, an
-    instantiation adapter, or a GC-allocated dictionary), it is deep-copied
-    to GC memory with its descriptors (R-D).
+  - A built dictionary is allocated in GC memory with its descriptors
+    deep-copied, so it may be stored in a closure environment or returned
+    without a copy step. (A fixed-size stack slot would need self-describing
+    dictionaries to copy on escape; the build cost is paid only where a
+    dictionary is built.)
 - **T-H. Associated types.**
   - **Unchanged path:** a projection parameter keeps flowing as an R-A
     descriptor.
@@ -156,12 +154,13 @@ the release build of this stage's base commit for every existing input.
 - **T-J. Slots of concrete and generic implementations.**
   - A static dictionary's slots are reabstraction thunks (R5) from the
     dynamic ABI to the concrete method, keyed by implementation and method.
-  - A built dictionary's slots are dynamic instances of the implementation's
-    methods, reading their descriptors and sub-dictionaries from the
-    dictionary's `environment`.
-  - A defaulted member's slot is the dynamic instance of the default body,
-    which receives the dictionary itself as its bound, so sibling calls
-    dispatch through the same dictionary.
+  - A built dictionary's slots are descriptor-bound entries over its tail. The
+    tail holds, per member, the descriptors and dictionaries that member's
+    dynamic instance receives, in its ABI order, so an entry forwards them as a
+    closure environment does (with a tail offset).
+  - A defaulted member's instance receives the dictionary itself as its bound.
+  - A member that needs no descriptors stays concrete and is not yet supported
+    in built dictionaries.
 - **T-K. Trait-dependent operations share one mechanism.** These all carry
   evidence today, and each becomes a slot call through a recipe:
   - method calls and operators (`==`, `<`, `+`);

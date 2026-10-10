@@ -405,6 +405,7 @@ pub(super) fn scan_instance(
                     crate::specialization::DescriptorBoundEntryKey {
                         instance: ordinal,
                         bound,
+                        offset: 0,
                     },
                 ),
                 plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
@@ -419,6 +420,7 @@ pub(super) fn scan_instance(
                     )
                     .expect("dictionary partition")
                     .1,
+                    environment_offset: 0,
                     instance: *callee,
                     runtime: runtime.clone(),
                     function_type: callable.function_type.clone(),
@@ -533,6 +535,7 @@ pub(super) fn scan_instance(
                     crate::specialization::DescriptorBoundEntryKey {
                         instance: record.ordinal,
                         bound: runtime.len(),
+                        offset: 0,
                     },
                 ),
                 plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
@@ -551,6 +554,7 @@ pub(super) fn scan_instance(
                     )
                     .expect("thunk dictionary partition")
                     .1,
+                    environment_offset: 0,
                     instance: *callee,
                     runtime: runtime.clone(),
                     function_type: thunk.signature.clone(),
