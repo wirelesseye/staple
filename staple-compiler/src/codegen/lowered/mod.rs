@@ -2,6 +2,7 @@
 
 mod conversions;
 mod coroutines;
+mod dictionaries;
 mod dynamic;
 mod reactive;
 mod rows;
@@ -462,6 +463,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .backend
                         .compile_closure_function_type(&plan.callable_type)?;
                     vec![self.backend.llvm_module.add_function(name, ty, None)]
+                }
+                LoweredArtifactPlan::TraitDictionary(plan) => {
+                    let count = plan.layout.environment + 2 * plan.methods.len();
+                    let global = self.backend.llvm_module.add_global(
+                        pointer.array_type(count as u32),
+                        None,
+                        name,
+                    );
+                    global.set_linkage(Linkage::Internal);
+                    global.set_constant(true);
+                    Vec::new()
                 }
                 LoweredArtifactPlan::TypeDescriptor(plan) => {
                     let ty = self
@@ -1878,6 +1890,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             LoweredArtifactPlan::GcFinalizer(plan) => {
                 self.emit_gc_finalizer_body(ordinal, plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::TraitDictionary(plan) => {
+                self.emit_trait_dictionary(ordinal, plan, &artifact.origin.span)
             }
             LoweredArtifactPlan::TypeDescriptor(plan) => {
                 self.emit_type_descriptor(ordinal, plan, &artifact.origin.span)

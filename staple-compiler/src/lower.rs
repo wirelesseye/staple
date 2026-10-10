@@ -61,6 +61,7 @@ mod value_conversions;
 mod worklist;
 
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
+pub(crate) use trait_dictionaries::TraitDictionaryLayout;
 pub(crate) use value_conversions::{
     AdapterConversion, adapter_conversions, concrete_key as conversion_concrete_key,
     takes_descriptor as conversion_takes_descriptor,
@@ -121,7 +122,8 @@ pub(crate) use artifact_plan::{
     IndexedElement, InstantiationAdapterPlan, LoweredArtifactPlan, PlanType, PlannedArtifact, PlannedCallee,
     PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReabstractionThunkPlan,
     ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody,
-    StructuralMethodPlan, SumAlternative, TraitDelegate, TypeDescriptorPlan, ValueConversionPlan,
+    StructuralMethodPlan, SumAlternative, TraitDelegate, TraitDictionaryPlan, TypeDescriptorPlan,
+    ValueConversionPlan,
 };
 
 // Runtime requirements. Fixed-named runtime surfaces are not an
@@ -2900,7 +2902,7 @@ pub(crate) struct LoweredTraitMetadata {
     /// Hidden associated-type arguments, in declaration order. These become
     /// the descriptors in the dictionary prefix.
     pub associated_types: Vec<CheckedType>,
-    pub dictionary_layout: trait_dictionaries::TraitDictionaryLayout,
+    pub dictionary_layout: TraitDictionaryLayout,
     /// Default implementations, in declared method order.
     pub default_methods: Vec<(TraitMethodId, FunctionId)>,
 }
@@ -23479,6 +23481,157 @@ mod tests {
             "let answer: I32 = swapped (1, \"x\")\n",
         ));
         assert_eq!(adapters, 1);
+    }
+
+    #[test]
+    fn static_dictionaries_close_emit_and_run_default_slots_with_associated_prerequisites() {
+        use artifact_closure::{ClosureRequest, ProductionHooks};
+        let module = checked_program(concat!(
+            "trait TestDictionary T where Eq T {\n",
+            "  type Item where Eq Item\n",
+            "  evaluate: (T, Item) -> I32\n",
+            "  next: (T, Item) -> I32 = pair => evaluate pair + 1\n",
+            "}\n",
+            "impl TestDictionary I32 { type Item = I32; evaluate = (a, b) => a + b }\n",
+            "let answer = TestDictionary.evaluate (20, 21)\n",
+        ));
+        let mut lowered = Lowerer::new().lower(&module).unwrap();
+        assert!(
+            !lowered
+                .program
+                .artifacts
+                .iter()
+                .any(|(_, artifact)| matches!(
+                    artifact.plan,
+                    Some(LoweredArtifactPlan::TraitDictionary(_))
+                )),
+            "concrete calls build no dictionaries"
+        );
+        let trait_id = lowered_trait(&lowered.program, "TestDictionary").semantic_id;
+        let owner = lowered.program.initializers.iter().next().unwrap().0;
+        let bound = CheckedTraitBound {
+            trait_id,
+            arguments: vec![CheckedType::I32, CheckedType::I32],
+        };
+        let origin = Origin::compiler();
+        let ClosureRequest::Artifact { key, plan, .. } =
+            trait_dictionaries::static_request(&lowered.program, &bound, &origin).unwrap()
+        else {
+            unreachable!()
+        };
+        let ordinal = lowered.program.specializations.reserve_artifact(key);
+        lowered
+            .program
+            .artifacts
+            .push(worklist::LoweredArtifactRequest {
+                ordinal,
+                name: String::new(),
+                origin,
+                request: worklist::LoweredArtifactRequestRoot::Initializer { initializer: owner },
+                plan: Some(plan),
+                artifacts: Vec::new(),
+                instances: Vec::new(),
+                expanded: false,
+            });
+        let diagnostics = lowered.program.close_artifact_catalog(&ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(lowered.program.validate_instance_bodies().is_empty());
+        assert!(lowered.program.validate_specialization_graph().is_empty());
+        let diagnostics = lowered.program.validate_artifact_closure(&ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(lowered.program.record_runtime_requirements().is_empty());
+        let dictionary = lowered
+            .program
+            .artifacts
+            .iter()
+            .find_map(|(_, artifact)| match &artifact.plan {
+                Some(LoweredArtifactPlan::TraitDictionary(plan)) if plan.trait_id == trait_id => {
+                    Some((artifact.name.clone(), plan.clone()))
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            dictionary.1.prerequisites[0], dictionary.1.prerequisites[1],
+            "equal prerequisite obligations share a dictionary"
+        );
+        assert_eq!(dictionary.1.associated.len(), 1);
+        assert_eq!(dictionary.1.slots.len(), 2);
+        let diagnostics = lowered.program.validate_closed_catalog();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let dictionary_id = lowered
+            .program
+            .artifacts
+            .iter()
+            .find_map(|(id, artifact)| (artifact.name == dictionary.0).then_some(id))
+            .unwrap();
+        if let Some(LoweredArtifactPlan::TraitDictionary(plan)) = &mut lowered
+            .program
+            .artifacts
+            .get_mut(dictionary_id)
+            .unwrap()
+            .plan
+        {
+            plan.slots.swap(0, 1);
+        }
+        assert!(lowered.program.validate_closed_catalog().iter().any(
+            |diagnostic| diagnostic.message == "dictionary slot order disagrees with its trait"
+        ));
+        if let Some(LoweredArtifactPlan::TraitDictionary(plan)) = &mut lowered
+            .program
+            .artifacts
+            .get_mut(dictionary_id)
+            .unwrap()
+            .plan
+        {
+            plan.slots.swap(0, 1);
+        }
+        let context = inkwell::context::Context::create();
+        let emitted = crate::codegen::lowered_emissions(&context, &lowered).unwrap();
+        census::assert_catalog_census("static trait dictionaries", &lowered, &emitted);
+        census::assert_entry_block_allocas("static trait dictionaries", &emitted);
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "static-dictionary",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        let pointer = context.ptr_type(inkwell::AddressSpace::default());
+        let getter =
+            llvm.add_function("test_dictionary_address", pointer.fn_type(&[], false), None);
+        let builder = context.create_builder();
+        builder.position_at_end(context.append_basic_block(getter, "entry"));
+        builder
+            .build_return(Some(
+                &llvm.get_global(&dictionary.0).unwrap().as_pointer_value(),
+            ))
+            .unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Address = unsafe extern "C" fn() -> *const usize;
+        type Slot = unsafe extern "C" fn(*const usize, *mut i32, *const i32, *const i32);
+        let address = unsafe {
+            engine
+                .get_function::<Address>("test_dictionary_address")
+                .unwrap()
+                .call()
+        };
+        unsafe {
+            let fields = std::slice::from_raw_parts(address, 9);
+            assert_ne!(fields[2], 0);
+            assert_eq!(fields[2], fields[3]);
+            assert_ne!(fields[4], 0, "associated descriptor is present");
+            for (index, expected) in [(0, 41), (1, 42)] {
+                let entry: Slot = std::mem::transmute(fields[index]);
+                let mut result = 0;
+                entry(address, &mut result, &20, &21);
+                assert_eq!(result, expected);
+            }
+        }
     }
 
     #[test]

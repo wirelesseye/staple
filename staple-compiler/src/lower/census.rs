@@ -57,7 +57,11 @@ pub(crate) fn assert_catalog_census(
         match artifact.plan.as_ref() {
             // Drop glue is inlined at its use sites; a type descriptor is a
             // constant global, not a function.
-            Some(LoweredArtifactPlan::DropGlue(_) | LoweredArtifactPlan::TypeDescriptor(_))
+            Some(
+                LoweredArtifactPlan::DropGlue(_)
+                | LoweredArtifactPlan::TypeDescriptor(_)
+                | LoweredArtifactPlan::TraitDictionary(_),
+            )
             | None => {}
             Some(LoweredArtifactPlan::CoroutineCodes(_)) => {
                 let (resume, cleanup) = program

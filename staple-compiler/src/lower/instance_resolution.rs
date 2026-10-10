@@ -1574,6 +1574,25 @@ impl LoweredProgram {
     /// unification, conditional-bound, negative-implementation, functional
     /// dependency, and structural-derivation rules. A `method: None` recipe
     /// proves an obligation but returns no target evidence.
+    /// Concrete dictionary selection follows the existing static dispatch order.
+    /// Abstract selection has the separate Stage 6 uniqueness rule.
+    pub(super) fn concrete_dictionary_implementation(
+        &self,
+        bound: &CheckedTraitBound,
+        origin: &Origin,
+    ) -> Result<LoweredTraitImplementationId, Diagnostic> {
+        let context = TraitSelectionContext::new(self, Vec::new());
+        context.prove_obligation(bound.trait_id, &bound.arguments, origin)?;
+        let index = context
+            .matching_implementations(bound.trait_id, &bound.arguments)
+            .first()
+            .copied()
+            .ok_or_else(|| {
+                no_match_diagnostic(&context, origin, bound.trait_id, &bound.arguments, false)
+            })?;
+        Ok(context.implementation_ids[index])
+    }
+
     pub(crate) fn resolve_trait_evidence(
         &self,
         origin: &Origin,

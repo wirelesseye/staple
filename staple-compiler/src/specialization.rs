@@ -1089,6 +1089,15 @@ pub(crate) struct ValueConversionKey {
     pub direction: ReabstractionDirection,
 }
 
+/// A static dictionary identifies the complete concrete obligation and the
+/// implementation chosen by lowering; codegen never performs trait selection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TraitDictionaryKey {
+    pub trait_id: TraitId,
+    pub arguments: Vec<CanonicalType>,
+    pub implementation: crate::LoweredTraitImplementationId,
+}
+
 /// Generated-artifact request keys. The variant is the namespace: keys from
 /// different families can never compare or hash equal, even when their numeric
 /// IDs coincide. `RuntimeHelper` is deliberately absent: runtime symbols have
@@ -1100,6 +1109,7 @@ pub(crate) enum ArtifactRequestKey {
     StructuralMethod(StructuralMethodKey),
     DropGlue(DropGlueKey),
     TypeDescriptor(CanonicalType),
+    TraitDictionary(TraitDictionaryKey),
     DescriptorDrop(CanonicalType),
     CompoundDescriptorDrop(CompoundDescriptorDropKey),
     DescriptorBoundEntry(DescriptorBoundEntryKey),
@@ -1123,6 +1133,7 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::StructuralMethod(_) => "structural-method",
             ArtifactRequestKey::DropGlue(_) => "drop-glue",
             ArtifactRequestKey::TypeDescriptor(_) => "type-descriptor",
+            ArtifactRequestKey::TraitDictionary(_) => "trait-dictionary",
             ArtifactRequestKey::DescriptorDrop(_) => "descriptor-drop",
             ArtifactRequestKey::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             ArtifactRequestKey::DescriptorBoundEntry(_) => "descriptor-bound-entry",
@@ -1350,6 +1361,7 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
         }
         ArtifactRequestKey::DropGlue(_) => "__staple_drop_glue".to_owned(),
         ArtifactRequestKey::TypeDescriptor(_) => "__staple_type_descriptor".to_owned(),
+        ArtifactRequestKey::TraitDictionary(_) => "__staple_trait_dictionary".to_owned(),
         ArtifactRequestKey::DescriptorDrop(_) => "__staple_descriptor_drop".to_owned(),
         ArtifactRequestKey::CompoundDescriptorDrop(_) => {
             "__staple_compound_descriptor_drop".to_owned()
@@ -2623,6 +2635,11 @@ mod tests {
                 symbol: SymbolId(1),
                 callable_type: canonical_function(&simple_callable()),
             }),
+            ArtifactRequestKey::TraitDictionary(TraitDictionaryKey {
+                trait_id: TraitId(3),
+                arguments: vec![concrete(&CheckedType::I32)],
+                implementation: crate::LoweredTraitImplementationId::for_test(0),
+            }),
         ]
     }
 
@@ -2631,7 +2648,7 @@ mod tests {
         let families = artifact_families();
         assert_eq!(
             families.len(),
-            12,
+            13,
             "every artifact family has a representative key"
         );
         let mut names = HashSet::new();
@@ -2853,6 +2870,17 @@ mod tests {
                 callable_type: simple_callable(),
                 indirect_parameters: Vec::new(),
                 declaration: None,
+            }),
+            LoweredArtifactPlan::TraitDictionary(crate::TraitDictionaryPlan {
+                trait_id: TraitId(3),
+                arguments: vec![CheckedType::I32],
+                implementation: crate::LoweredTraitImplementationId::for_test(0),
+                layout: crate::lower::TraitDictionaryLayout::new(0, 0, 0),
+                slots: Vec::new(),
+                prerequisites: Vec::new(),
+                associated: Vec::new(),
+                methods: Vec::new(),
+                expanded: false,
             }),
         ];
         assert_eq!(plans.len(), keys.len());

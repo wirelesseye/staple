@@ -74,6 +74,259 @@ pub(super) fn runtime_obligations(
         .collect()
 }
 
+/// A concrete obligation creates a dictionary only at a demand site.
+pub(super) fn static_request(
+    program: &super::LoweredProgram,
+    bound: &crate::CheckedTraitBound,
+    origin: &crate::Origin,
+) -> Result<super::artifact_closure::ClosureRequest, staple_syntax::Diagnostic> {
+    use super::artifact_closure::ClosureRequest;
+    use super::artifact_plan::{LoweredArtifactPlan, TraitDictionaryPlan};
+    use crate::specialization::{ArtifactRequestKey, CanonicalType, TraitDictionaryKey};
+    let bound = program.complete_declared_bound(origin, bound, &Default::default())?;
+    let implementation = program.concrete_dictionary_implementation(&bound, origin)?;
+    let metadata = program.traits.get(bound.trait_id).ok_or_else(|| {
+        staple_syntax::Diagnostic::new(origin.span.clone(), "dictionary trait is absent")
+    })?;
+    let arguments = bound
+        .arguments
+        .iter()
+        .map(|argument| CanonicalType::concrete(argument, origin))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ClosureRequest::Artifact {
+        key: ArtifactRequestKey::TraitDictionary(TraitDictionaryKey {
+            trait_id: bound.trait_id,
+            arguments,
+            implementation,
+        }),
+        plan: LoweredArtifactPlan::TraitDictionary(TraitDictionaryPlan {
+            trait_id: bound.trait_id,
+            arguments: bound.arguments,
+            implementation,
+            layout: metadata.dictionary_layout.clone(),
+            slots: Vec::new(),
+            prerequisites: Vec::new(),
+            associated: Vec::new(),
+            methods: Vec::new(),
+            expanded: false,
+        }),
+        kind: super::LoweredArtifactDependencyKind::TraitDictionary,
+        origin: origin.clone(),
+        use_site: None,
+    })
+}
+
+pub(super) fn expand(
+    program: &super::LoweredProgram,
+    artifact: super::LoweredArtifactRequestId,
+    plan: super::LoweredArtifactPlan,
+) -> super::artifact_closure::ExpansionResult {
+    use super::artifact_closure::ClosureRequest;
+    use super::artifact_plan::{PlannedArtifact, PlannedInstance, ReabstractionThunkPlan};
+    use super::instance_resolution::{InstanceResolutionRequest, InstanceResolutionTarget};
+    use super::{
+        LoweredArtifactDependencyKind as Kind, LoweredArtifactPlan as Plan,
+        LoweredInstanceDependencyKind as InstanceKind,
+    };
+    use crate::specialization::{
+        ArtifactRequestKey, CanonicalFunctionType, ReabstractionDirection, ReabstractionThunkKey,
+        StaticDictionarySlot,
+    };
+    use crate::{CheckedTraitBound, CheckedType, TraitEvidence};
+    use staple_syntax::Diagnostic;
+    let record = program
+        .artifacts
+        .get(artifact)
+        .expect("interned dictionary");
+    let origin = &record.origin;
+    let Plan::TraitDictionary(mut plan) = plan else {
+        return Err(vec![Diagnostic::new(
+            origin.span.clone(),
+            "dictionary has a mismatched plan",
+        )]);
+    };
+    let metadata = program.traits.get(plan.trait_id).ok_or_else(|| {
+        vec![Diagnostic::new(
+            origin.span.clone(),
+            "dictionary trait is absent",
+        )]
+    })?;
+    if plan.layout != metadata.dictionary_layout
+        || plan.arguments.len() != metadata.parameters.len()
+    {
+        return Err(vec![Diagnostic::new(
+            origin.span.clone(),
+            "dictionary prefix disagrees with its trait",
+        )]);
+    }
+    plan.slots.clear();
+    plan.methods.clear();
+    plan.prerequisites.clear();
+    plan.associated.clear();
+    let mut requests = Vec::new();
+    let mut method_requests = Vec::new();
+    for (index, method) in metadata.methods.iter().enumerate() {
+        let evidence = program
+            .resolve_trait_evidence(
+                origin,
+                Some(&TraitEvidence::DeclaredBound {
+                    trait_id: plan.trait_id,
+                    method: Some(*method),
+                    arguments: plan.arguments.clone(),
+                    prerequisites: Vec::new(),
+                }),
+                &Default::default(),
+            )
+            .map_err(|error| vec![error])?
+            .ok_or_else(|| {
+                vec![Diagnostic::new(
+                    origin.span.clone(),
+                    "dictionary method has no evidence",
+                )]
+            })?;
+        let TraitEvidence::ExplicitImplementation {
+            implementation,
+            function,
+            ..
+        } = &evidence
+        else {
+            return Err(vec![Diagnostic::new(
+                origin.span.clone(),
+                "explicit dictionary selected a structural method",
+            )]);
+        };
+        if *implementation != plan.implementation {
+            return Err(vec![Diagnostic::new(
+                origin.span.clone(),
+                "dictionary methods select different implementations",
+            )]);
+        }
+        let function_type = super::worklist::instantiate_method_type(
+            program,
+            origin,
+            plan.trait_id,
+            *method,
+            &plan.arguments,
+        )
+        .map_err(|error| vec![error])?;
+        let resolved = program
+            .resolve_instance_request(&InstanceResolutionRequest {
+                function: *function,
+                origin: origin.clone(),
+                function_type: function_type.clone(),
+                substitutions: super::worklist::trait_site_substitutions(
+                    program,
+                    plan.trait_id,
+                    &plan.arguments,
+                ),
+                evidence: Some(evidence),
+                target: InstanceResolutionTarget::Root,
+            })
+            .map_err(|error| vec![error])?;
+        plan.methods.push(PlannedInstance {
+            key: resolved.key.clone(),
+            instance: None,
+            kind: InstanceKind::TraitMethod,
+        });
+        method_requests.push(ClosureRequest::Instance {
+            resolved,
+            kind: InstanceKind::TraitMethod,
+            origin: origin.clone(),
+            use_site: None,
+        });
+        let dictionary_slot = Some(StaticDictionarySlot {
+            implementation: plan.implementation,
+            method: *method,
+            closure_offset: plan.layout.environment + 2 * index,
+        });
+        let key = ArtifactRequestKey::ReabstractionThunk(ReabstractionThunkKey {
+            dictionary_slot: dictionary_slot.clone(),
+            concrete: CanonicalFunctionType::concrete(&function_type, origin)
+                .map_err(|error| vec![error])?,
+            dynamic: CanonicalFunctionType::dynamic(&function_type, origin)
+                .map_err(|error| vec![error])?,
+            direction: ReabstractionDirection::ConcreteToDynamic,
+        });
+        plan.slots.push(PlannedArtifact {
+            key: key.clone(),
+            artifact: None,
+            kind: Kind::ReabstractionThunk,
+        });
+        requests.push(ClosureRequest::Artifact {
+            key,
+            plan: Plan::ReabstractionThunk(ReabstractionThunkPlan {
+                dictionary_slot,
+                concrete: function_type.clone(),
+                dynamic: function_type,
+                direction: ReabstractionDirection::ConcreteToDynamic,
+                children: Vec::new(),
+            }),
+            kind: Kind::ReabstractionThunk,
+            origin: origin.clone(),
+            use_site: None,
+        });
+    }
+    let substitution = metadata
+        .parameters
+        .iter()
+        .zip(&plan.arguments)
+        .filter_map(|(parameter, argument)| {
+            let CheckedType::Parameter { id, .. } = parameter else {
+                return None;
+            };
+            Some((*id, argument.clone()))
+        })
+        .collect();
+    for prerequisite in &metadata.prerequisites {
+        let ids = &program.semantic_ids;
+        if [
+            ids.copy_trait,
+            ids.sized_trait,
+            ids.drop_trait,
+            ids.natural_trait,
+        ]
+        .contains(&Some(prerequisite.trait_id))
+        {
+            plan.prerequisites.push(None);
+            continue;
+        }
+        let bound = CheckedTraitBound {
+            trait_id: prerequisite.trait_id,
+            arguments: prerequisite
+                .arguments
+                .iter()
+                .map(|argument| crate::substitute_type(argument.clone(), &substitution))
+                .collect(),
+        };
+        let request = static_request(program, &bound, origin).map_err(|error| vec![error])?;
+        let ClosureRequest::Artifact { key, kind, .. } = &request else {
+            unreachable!()
+        };
+        plan.prerequisites.push(Some(PlannedArtifact {
+            key: key.clone(),
+            artifact: None,
+            kind: *kind,
+        }));
+        requests.push(request);
+    }
+    for argument in &plan.arguments[plan.arguments.len() - metadata.associated_types.len()..] {
+        let request = super::descriptor_artifacts::descriptor_request(argument, origin)
+            .map_err(|error| vec![error])?;
+        let ClosureRequest::Artifact { key, kind, .. } = &request else {
+            unreachable!()
+        };
+        plan.associated.push(PlannedArtifact {
+            key: key.clone(),
+            artifact: None,
+            kind: *kind,
+        });
+        requests.push(request);
+    }
+    requests.extend(method_requests);
+    plan.expanded = true;
+    Ok((Plan::TraitDictionary(plan), requests))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

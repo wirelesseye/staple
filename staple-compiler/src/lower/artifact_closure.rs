@@ -332,6 +332,9 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 };
                 super::structural_artifacts::expand_structural_method(program, artifact, plan)
             }
+            ArtifactRequestKey::TraitDictionary(_) => {
+                super::trait_dictionaries::expand(program, artifact, plan)
+            }
             ArtifactRequestKey::TypeDescriptor(_)
             | ArtifactRequestKey::DescriptorDrop(_)
             | ArtifactRequestKey::CompoundDescriptorDrop(_)
@@ -430,6 +433,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::StructuralMethod(_)
                 | ArtifactRequestKey::DropGlue(_)
                 | ArtifactRequestKey::TypeDescriptor(_)
+                | ArtifactRequestKey::TraitDictionary(_)
                 | ArtifactRequestKey::DescriptorDrop(_)
                 | ArtifactRequestKey::CompoundDescriptorDrop(_)
                 | ArtifactRequestKey::DescriptorBoundEntry(_)

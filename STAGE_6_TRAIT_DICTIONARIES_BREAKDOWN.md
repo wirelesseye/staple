@@ -43,25 +43,22 @@ the release build of this stage's base commit for every existing input.
 
 ## Current state
 
-- **S0 in progress.** Two trait-heavy runnable fixtures pass with pinned
-  output; the quick differential suite passes 21 programs (2,464 dynamic
-  call sites). Refreshed coverage passes: 1,819 trait-only occurrences,
-  46 distinct trait-rejected templates, zero in-scope rejections. Restriction
-  probes remain.
-- **Checker workarounds:** explicit `USize` indices, explicit projected-result
-  instantiation/result annotation, and an annotated callback parameter.
-- **6a.1 in progress.** Dictionary prefix ranges and associated descriptors
-  are recorded and validated in declaration order. Layout tests cover defaults
-  and associated prerequisites. Static slot entries now reabstract concrete
-  methods from a dictionary tail; key-validation and JIT tests pass. Static
-  dictionary artifacts and their construction remain.
-- **6a.2/6a.3 groundwork.** Instance bodies now retain and validate substituted
-  runtime dictionary obligations, excluding concrete and marker bounds. Tests
-  cover compounds, projections, substitution and corrupted metadata. Checked
-  bounds include prerequisites; declared bounds must still be separated for
-  hidden ABI order. No dictionary signatures or recipes are enabled yet.
-- **Remaining:** static dictionaries, hidden arguments, recipes/selection,
-  builders, trait operations, bounded values, documentation and all exit gates.
+- **S0 in progress.** Both trait fixtures and the 21-program quick differential
+  suite pass. Coverage: 1,819 trait-only occurrences, 46 distinct trait-rejected
+  templates, zero in-scope rejections. Restriction probes remain.
+- **6a.1 implemented for explicit implementations.** Demand-driven static
+  dictionary artifacts contain ordered slots, prerequisite pointers, associated
+  descriptors and concrete method closures. Prefix/key/dependency validation,
+  catalog census and JIT tests pass, including default methods and prerequisite
+  sharing. Concrete calls still build no dictionaries. Structural dictionaries
+  remain in 6a.4; language demand sites are wired in the subsequent steps.
+- **6a.2/6a.3 groundwork.** Instance runtime obligations are recorded and
+  validated. Checked bounds include prerequisites; declared bounds must still
+  be separated for hidden ABI order. Dictionary signatures/recipes are pending.
+- **Remaining:** hidden arguments, recipes/abstract selection, generic and
+  structural builders, trait operations, bounded values, docs and exit gates.
+- Checker workarounds remain: explicit `USize` indices, projected-result type
+  arguments/result annotations, and callback parameter annotations.
 
 ## Decisions
 

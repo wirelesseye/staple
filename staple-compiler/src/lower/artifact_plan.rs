@@ -32,6 +32,7 @@ pub(crate) enum LoweredArtifactPlan {
     /// `Drop` method and the ordered representation cleanup steps.
     DropGlue(DropGluePlan),
     TypeDescriptor(TypeDescriptorPlan),
+    TraitDictionary(TraitDictionaryPlan),
     DescriptorDrop(DescriptorDropPlan),
     CompoundDescriptorDrop(crate::specialization::CompoundDescriptorDropKey),
     /// A dynamic-shape closure's forwarding entry (R-C). The entry loads the
@@ -62,6 +63,21 @@ pub(crate) enum LoweredArtifactPlan {
     /// foreign-symbol declaration parity facts; the callable sites that use
     /// the adapter live on their owners' use records.
     ExternAdapter(ExternAdapterPlan),
+}
+
+/// A static dictionary's ordered pointers and concrete closure tail.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TraitDictionaryPlan {
+    pub trait_id: TraitId,
+    pub arguments: Vec<CheckedType>,
+    pub implementation: super::LoweredTraitImplementationId,
+    pub layout: super::TraitDictionaryLayout,
+    pub slots: Vec<PlannedArtifact>,
+    /// Marker prerequisites have no dictionary; their prefix slot is null.
+    pub prerequisites: Vec<Option<PlannedArtifact>>,
+    pub associated: Vec<PlannedArtifact>,
+    pub methods: Vec<PlannedInstance>,
+    pub expanded: bool,
 }
 
 /// A descriptor-bound entry (R-C): the forwarding function a dynamic-shape
@@ -191,6 +207,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::StructuralMethod(_) => "structural-method",
             LoweredArtifactPlan::DropGlue(_) => "drop-glue",
             LoweredArtifactPlan::TypeDescriptor(_) => "type-descriptor",
+            LoweredArtifactPlan::TraitDictionary(_) => "trait-dictionary",
             LoweredArtifactPlan::DescriptorDrop(_) => "descriptor-drop",
             LoweredArtifactPlan::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             LoweredArtifactPlan::DescriptorBoundEntry(_) => "descriptor-bound-entry",
@@ -280,6 +297,19 @@ impl LoweredArtifactPlan {
                         .zip(&key.arguments)
                         .all(|(argument, expected)| same_type(argument, expected))
                     && same_function(&plan.callable_type, &key.callable_type)
+            }
+            (
+                LoweredArtifactPlan::TraitDictionary(plan),
+                ArtifactRequestKey::TraitDictionary(key),
+            ) => {
+                plan.trait_id == key.trait_id
+                    && plan.implementation == key.implementation
+                    && plan.arguments.len() == key.arguments.len()
+                    && plan
+                        .arguments
+                        .iter()
+                        .zip(&key.arguments)
+                        .all(|(argument, expected)| same_type(argument, expected))
             }
             (
                 LoweredArtifactPlan::TypeDescriptor(plan),
@@ -426,6 +456,7 @@ impl LoweredArtifactPlan {
                 | LoweredArtifactPlan::StructuralMethod(_)
                 | LoweredArtifactPlan::DropGlue(_)
                 | LoweredArtifactPlan::TypeDescriptor(_)
+                | LoweredArtifactPlan::TraitDictionary(_)
                 | LoweredArtifactPlan::DescriptorDrop(_)
                 | LoweredArtifactPlan::CompoundDescriptorDrop(_)
                 | LoweredArtifactPlan::GcFinalizer(_)
@@ -446,6 +477,7 @@ impl LoweredArtifactPlan {
                 !matches!(plan.body, StructuralBody::Unexpanded)
             }
             LoweredArtifactPlan::TypeDescriptor(plan) => plan.expanded,
+            LoweredArtifactPlan::TraitDictionary(plan) => plan.expanded,
             LoweredArtifactPlan::DescriptorDrop(plan) => plan.glue.is_some(),
             LoweredArtifactPlan::DescriptorBoundEntry(_) => true,
             LoweredArtifactPlan::InstantiationAdapter(_) => true,
@@ -648,6 +680,7 @@ impl LoweredArtifactPlan {
                 }
             }
             LoweredArtifactPlan::TypeDescriptor(plan) => visit(Value(&plan.value_type)),
+            LoweredArtifactPlan::TraitDictionary(plan) => values(&plan.arguments, visit),
             LoweredArtifactPlan::DescriptorDrop(plan) => visit(Value(&plan.value_type)),
             LoweredArtifactPlan::CompoundDescriptorDrop(_) => {}
             LoweredArtifactPlan::DropGlue(DropGluePlan { value_type, body }) => {
@@ -841,6 +874,20 @@ impl LoweredArtifactPlan {
                 }
             }
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees(visit),
+            LoweredArtifactPlan::TraitDictionary(plan) => {
+                for slot in &plan.slots {
+                    visit(PlannedCalleeRef::Artifact(slot));
+                }
+                for prerequisite in plan.prerequisites.iter().flatten() {
+                    visit(PlannedCalleeRef::Artifact(prerequisite));
+                }
+                for associated in &plan.associated {
+                    visit(PlannedCalleeRef::Artifact(associated));
+                }
+                for method in &plan.methods {
+                    visit(PlannedCalleeRef::Instance(method));
+                }
+            }
             LoweredArtifactPlan::TypeDescriptor(plan) => {
                 for component in &plan.components {
                     visit(PlannedCalleeRef::Artifact(component));
@@ -885,6 +932,20 @@ impl LoweredArtifactPlan {
                 }
             }
             LoweredArtifactPlan::StructuralMethod(plan) => plan.visit_callees_mut(visit),
+            LoweredArtifactPlan::TraitDictionary(plan) => {
+                for slot in &mut plan.slots {
+                    visit(PlannedCalleeRefMut::Artifact(slot));
+                }
+                for prerequisite in plan.prerequisites.iter_mut().flatten() {
+                    visit(PlannedCalleeRefMut::Artifact(prerequisite));
+                }
+                for associated in &mut plan.associated {
+                    visit(PlannedCalleeRefMut::Artifact(associated));
+                }
+                for method in &mut plan.methods {
+                    visit(PlannedCalleeRefMut::Instance(method));
+                }
+            }
             LoweredArtifactPlan::TypeDescriptor(plan) => {
                 for component in &mut plan.components {
                     visit(PlannedCalleeRefMut::Artifact(component));

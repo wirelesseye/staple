@@ -359,6 +359,7 @@ fn record_plan_requirements(
         }
         LoweredArtifactPlan::ExternAdapter(_)
         | LoweredArtifactPlan::TypeDescriptor(_)
+        | LoweredArtifactPlan::TraitDictionary(_)
         | LoweredArtifactPlan::DescriptorDrop(_)
         | LoweredArtifactPlan::CompoundDescriptorDrop(_)
         | LoweredArtifactPlan::DescriptorBoundEntry(_)

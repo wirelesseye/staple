@@ -253,6 +253,7 @@ pub(crate) enum LoweredArtifactDependencyKind {
     /// A generated drop-glue plan.
     DropGlue,
     TypeDescriptor,
+    TraitDictionary,
     DescriptorDrop,
     CompoundDescriptorDrop,
     DescriptorBoundEntry,
@@ -281,6 +282,7 @@ impl LoweredArtifactDependencyKind {
             LoweredArtifactDependencyKind::StructuralMethod => "structural-method",
             LoweredArtifactDependencyKind::DropGlue => "drop-glue",
             LoweredArtifactDependencyKind::TypeDescriptor => "type-descriptor",
+            LoweredArtifactDependencyKind::TraitDictionary => "trait-dictionary",
             LoweredArtifactDependencyKind::DescriptorDrop => "descriptor-drop",
             LoweredArtifactDependencyKind::CompoundDescriptorDrop => "compound-descriptor-drop",
             LoweredArtifactDependencyKind::DescriptorBoundEntry => "descriptor-bound-entry",
@@ -311,6 +313,9 @@ impl LoweredArtifactDependencyKind {
             ) | (
                 LoweredArtifactDependencyKind::DropGlue,
                 ArtifactRequestKey::DropGlue(_)
+            ) | (
+                LoweredArtifactDependencyKind::TraitDictionary,
+                ArtifactRequestKey::TraitDictionary(_)
             ) | (
                 LoweredArtifactDependencyKind::TypeDescriptor,
                 ArtifactRequestKey::TypeDescriptor(_)
