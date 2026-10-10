@@ -61,7 +61,7 @@ mod value_conversions;
 mod worklist;
 
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
-pub(crate) use trait_dictionaries::TraitDictionaryLayout;
+pub(crate) use trait_dictionaries::{DictionaryRecipe, TraitDictionaryLayout};
 pub(crate) use value_conversions::{
     AdapterConversion, adapter_conversions, concrete_key as conversion_concrete_key,
     takes_descriptor as conversion_takes_descriptor,
@@ -3036,6 +3036,9 @@ pub(crate) struct LoweredProgram {
     /// `InitializerId`. Built at the closure fixed point; instance bodies carry
     /// the same table per body.
     initializer_bindings: Vec<std::collections::BTreeMap<LoweredBindingSite, LoweredBoundTarget>>,
+    initializer_dictionary_calls: Vec<
+        std::collections::BTreeMap<LoweredCallId, Vec<trait_dictionaries::DictionaryCallArgument>>,
+    >,
     /// Reabstraction plans at concrete-to-dynamic boundaries in module
     /// initializers, indexed by `InitializerId` (R-E).
     initializer_conversions:
@@ -16361,6 +16364,207 @@ mod tests {
             unreachable!()
         };
         assert_eq!(names(&result.trait_bounds), ["Own"]);
+    }
+
+    #[test]
+    fn direct_dictionary_calls_demand_static_roots_and_forward_prerequisites() {
+        let module = checked_program(concat!(
+            "trait CallProbe T {}\n",
+            "trait CallRoot T where CallProbe T {}\n",
+            "impl CallProbe I32 {}\n",
+            "impl CallRoot I32 {}\n",
+            "def inner: <T where Copy T> T -> I32 = value => 42\n",
+            "def outer: <T where Copy T> T -> I32 = value => inner value\n",
+            "def run: () -> I32 = () => outer 7\n",
+            "let answer = run ()\n",
+            "let direct_answer = outer 7\n",
+        ));
+        let mut lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&module)
+            .unwrap();
+        let probe = lowered
+            .program
+            .traits
+            .iter()
+            .find_map(|(_, _, t)| (t.name == "CallProbe").then_some(t.semantic_id))
+            .unwrap();
+        let root = lowered
+            .program
+            .traits
+            .iter()
+            .find_map(|(_, _, t)| (t.name == "CallRoot").then_some(t.semantic_id))
+            .unwrap();
+        // Supply the bounded template metadata after the existing support gate
+        // has chosen the dynamic keys. The gate opens with trait operations.
+        let functions = lowered
+            .program
+            .functions
+            .iter()
+            .map(|(_, id, _)| id)
+            .collect::<Vec<_>>();
+        for id in functions {
+            let function = lowered.program.functions.get_mut(id).unwrap();
+            let trait_id = match function.name.as_str() {
+                "inner" => probe,
+                "outer" => root,
+                _ => continue,
+            };
+            let arguments = function.declared_bounds[0].arguments.clone();
+            function.declared_bounds.push(CheckedTraitBound {
+                trait_id,
+                arguments,
+            });
+        }
+        for (_, instance) in lowered.program.instances.iter_mut() {
+            instance.body = None;
+        }
+        let diagnostics = lowered.program.materialize_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let arguments = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "outer")
+                    .then(|| {
+                        instance
+                            .body
+                            .as_ref()
+                            .unwrap()
+                            .dictionary_calls
+                            .values()
+                            .next()
+                            .unwrap()
+                            .clone()
+                    })
+            })
+            .unwrap();
+        assert_eq!(arguments.len(), 1);
+        assert!(
+            matches!(&arguments[0].recipe, DictionaryRecipe::Environment(recipe)
+            if recipe.argument == 0 && recipe.prerequisites == [0])
+        );
+        let diagnostics = lowered
+            .program
+            .close_artifact_catalog(&artifact_closure::ProductionHooks);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        lowered.program.assign_initializer_names();
+        assert!(
+            lowered
+                .program
+                .initializer_dictionary_calls
+                .iter()
+                .any(|calls| !calls.is_empty())
+        );
+        let diagnostics = lowered.program.validate_initializer_bindings();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let diagnostics = lowered.program.validate_instance_bodies();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = lowered.program.validate_closed_catalog();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            lowered
+                .program
+                .artifacts
+                .iter()
+                .filter(|(_, artifact)| matches!(
+                    artifact.plan,
+                    Some(LoweredArtifactPlan::TraitDictionary(_))
+                ))
+                .count(),
+            2
+        );
+        let run = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "run")
+                    .then(|| instance.name.clone())
+            })
+            .unwrap();
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dictionary-call-recipes",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        assert!(text.contains("dictionary.prerequisite"), "{text}");
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&run).unwrap() };
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 42);
+        let outer = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(id, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "outer")
+                    .then_some(id)
+            })
+            .unwrap();
+        lowered
+            .program
+            .instances
+            .get_mut(outer)
+            .unwrap()
+            .body
+            .as_mut()
+            .unwrap()
+            .dictionary_calls
+            .clear();
+        let diagnostics = lowered.program.validate_instance_bodies();
+        assert!(
+            diagnostics.iter().any(|error| error.message
+                == "instance call dictionary recipes disagree with its callee bounds"),
+            "{diagnostics:?}"
+        );
+        let body = lowered
+            .program
+            .instances
+            .get_mut(outer)
+            .unwrap()
+            .body
+            .as_mut()
+            .unwrap();
+        let (_, target) = body
+            .bindings
+            .iter_mut()
+            .find(|(site, _)| matches!(site, LoweredBindingSite::Call(_)))
+            .unwrap();
+        *target = LoweredBoundTarget::Instance(FunctionInstanceId::from_index(usize::MAX));
+        let diagnostics = lowered.program.validate_instance_bodies();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|error| error.message == "dictionary call has no callee instance"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

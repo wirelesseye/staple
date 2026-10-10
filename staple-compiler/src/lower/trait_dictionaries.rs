@@ -190,6 +190,225 @@ pub(super) fn environment_recipe_bound(
     Some(bound)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DictionaryRecipe {
+    Environment(EnvironmentDictionaryRecipe),
+    Static(crate::specialization::ArtifactRequestKey),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DictionaryCallArgument {
+    pub obligation: crate::CheckedTraitBound,
+    pub recipe: DictionaryRecipe,
+}
+
+/// Translate a dynamic callee's declared bounds into the caller's types.
+pub(super) fn plan_direct_call(
+    program: &super::LoweredProgram,
+    environment: &[crate::CheckedTraitBound],
+    call: &super::LoweredCall,
+    callee: super::FunctionInstanceId,
+) -> Result<Vec<DictionaryCallArgument>, staple_syntax::Diagnostic> {
+    let record = program.instances.get(callee).ok_or_else(|| {
+        staple_syntax::Diagnostic::new(
+            call.origin.span.clone(),
+            "dictionary call has no callee instance",
+        )
+    })?;
+    let template = program.functions.get(record.template).ok_or_else(|| {
+        staple_syntax::Diagnostic::new(
+            call.origin.span.clone(),
+            "dictionary call has no callee template",
+        )
+    })?;
+    let key = program
+        .specializations
+        .instance(record.ordinal)
+        .ok_or_else(|| {
+            staple_syntax::Diagnostic::new(
+                call.origin.span.clone(),
+                "dictionary call has no callee key",
+            )
+        })?;
+    let bounds = runtime_obligations(
+        &program.semantic_ids,
+        &template.declared_bounds,
+        &record.environment.substitution_map(),
+        key.runtime(),
+    );
+    let substitution = call
+        .substitutions
+        .types
+        .iter()
+        .map(|entry| (entry.parameter, entry.value_type.clone()))
+        .collect();
+    bounds
+        .into_iter()
+        .map(|bound| {
+            let obligation = crate::CheckedTraitBound {
+                trait_id: bound.trait_id,
+                arguments: bound
+                    .arguments
+                    .into_iter()
+                    .map(|argument| crate::substitute_type(argument, &substitution))
+                    .collect(),
+            };
+            let recipe = if let Some(recipe) = environment_recipe(program, environment, &obligation)
+            {
+                DictionaryRecipe::Environment(recipe)
+            } else {
+                let super::artifact_closure::ClosureRequest::Artifact { key, .. } =
+                    static_request(program, &obligation, &call.origin)?
+                else {
+                    unreachable!()
+                };
+                DictionaryRecipe::Static(key)
+            };
+            Ok(DictionaryCallArgument { obligation, recipe })
+        })
+        .collect()
+}
+
+pub(super) fn scan_instance(
+    program: &super::LoweredProgram,
+    instance: super::FunctionInstanceId,
+) -> super::artifact_closure::ScanResult {
+    let Some(body) = program
+        .instances
+        .get(instance)
+        .and_then(|record| record.body.as_ref())
+    else {
+        return Ok(Vec::new());
+    };
+    let mut requests = Vec::new();
+    for (call, arguments) in &body.dictionary_calls {
+        let origin = &body
+            .calls
+            .get(*call)
+            .ok_or_else(|| {
+                vec![staple_syntax::Diagnostic::new(
+                    body.origin.span.clone(),
+                    "dictionary recipe names a missing call",
+                )]
+            })?
+            .origin;
+        for (index, argument) in arguments.iter().enumerate() {
+            if let DictionaryRecipe::Static(key) = &argument.recipe {
+                let mut request = static_request(program, &argument.obligation, origin)
+                    .map_err(|error| vec![error])?;
+                let super::artifact_closure::ClosureRequest::Artifact {
+                    key: selected,
+                    use_site,
+                    ..
+                } = &mut request
+                else {
+                    unreachable!()
+                };
+                if selected != key {
+                    return Err(vec![staple_syntax::Diagnostic::new(
+                        origin.span.clone(),
+                        "dictionary recipe selection changed",
+                    )]);
+                }
+                *use_site = Some(super::artifact_closure::ArtifactUseSite::CallDictionary {
+                    call: *call,
+                    argument: index,
+                });
+                requests.push(request);
+            }
+        }
+    }
+    Ok(requests)
+}
+
+pub(super) fn initializer_call_arguments(
+    program: &super::LoweredProgram,
+    initializer: super::InitializerId,
+) -> Result<
+    std::collections::BTreeMap<super::LoweredCallId, Vec<DictionaryCallArgument>>,
+    Vec<staple_syntax::Diagnostic>,
+> {
+    struct Visitor<'a> {
+        program: &'a super::LoweredProgram,
+        initializer: super::InitializerId,
+        arguments: std::collections::BTreeMap<super::LoweredCallId, Vec<DictionaryCallArgument>>,
+    }
+    impl super::cleanup_artifacts::LoweredOwnerVisitor for Visitor<'_> {
+        fn call_id_site(
+            &mut self,
+            id: super::LoweredCallId,
+            call: &super::LoweredCall,
+        ) -> Result<(), Vec<staple_syntax::Diagnostic>> {
+            if let Some(callee) = super::initializer_bindings::direct_call_target(
+                self.program,
+                self.initializer,
+                id,
+                call,
+            )? {
+                let arguments = plan_direct_call(self.program, &[], call, callee)
+                    .map_err(|error| vec![error])?;
+                if !arguments.is_empty() {
+                    self.arguments.insert(id, arguments);
+                }
+            }
+            Ok(())
+        }
+    }
+    let mut visitor = Visitor {
+        program,
+        initializer,
+        arguments: Default::default(),
+    };
+    super::cleanup_artifacts::walk_owner(
+        program,
+        super::emission::OwnerArenas::Initializer(initializer),
+        &mut visitor,
+    )?;
+    Ok(visitor.arguments)
+}
+
+pub(super) fn scan_initializer(
+    program: &super::LoweredProgram,
+    initializer: super::InitializerId,
+) -> super::artifact_closure::ScanResult {
+    let arguments = initializer_call_arguments(program, initializer)?;
+    let mut requests = Vec::new();
+    for (call, arguments) in arguments {
+        let origin = &program
+            .calls
+            .get(call)
+            .expect("initializer dictionary call")
+            .origin;
+        for (index, argument) in arguments.iter().enumerate() {
+            let DictionaryRecipe::Static(key) = &argument.recipe else {
+                unreachable!("initializers have no hidden dictionary environment")
+            };
+            let mut request = static_request(program, &argument.obligation, origin)
+                .map_err(|error| vec![error])?;
+            let super::artifact_closure::ClosureRequest::Artifact {
+                key: selected,
+                use_site,
+                ..
+            } = &mut request
+            else {
+                unreachable!()
+            };
+            if selected != key {
+                return Err(vec![staple_syntax::Diagnostic::new(
+                    origin.span.clone(),
+                    "initializer dictionary recipe selection changed",
+                )]);
+            }
+            *use_site = Some(super::artifact_closure::ArtifactUseSite::CallDictionary {
+                call,
+                argument: index,
+            });
+            requests.push(request);
+        }
+    }
+    Ok(requests)
+}
+
 /// A concrete obligation creates a dictionary only at a demand site.
 pub(super) fn static_request(
     program: &super::LoweredProgram,

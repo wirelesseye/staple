@@ -29,6 +29,26 @@ use super::{
     LoweredStringTemplatePart, Origin, TraitEvidence,
 };
 
+pub(super) fn direct_call_target(
+    program: &LoweredProgram,
+    initializer: InitializerId,
+    id: LoweredCallId,
+    call: &LoweredCall,
+) -> Result<Option<FunctionInstanceId>, Vec<Diagnostic>> {
+    if !matches!(call.target, LoweredCallableTarget::DirectFunction { .. }) {
+        return Ok(None);
+    }
+    let mut binder = InitializerBinder::new(program, initializer);
+    binder.bind_call(id, call);
+    if !binder.diagnostics.is_empty() {
+        return Err(binder.diagnostics);
+    }
+    Ok(match binder.bindings.get(&LoweredBindingSite::Call(id)) {
+        Some(LoweredBoundTarget::Instance(instance)) => Some(*instance),
+        _ => None,
+    })
+}
+
 impl LoweredProgram {
     /// Builds the emission initializer binding and evidence tables over
     /// the closed catalog. One table per initializer, indexed by
@@ -52,6 +72,20 @@ impl LoweredProgram {
         }
         self.initializer_bindings = bindings;
         self.initializer_evidence = evidence;
+        self.initializer_dictionary_calls = Vec::with_capacity(count);
+        for index in 0..count {
+            match super::trait_dictionaries::initializer_call_arguments(
+                self,
+                InitializerId::from_index(index),
+            ) {
+                Ok(arguments) => self.initializer_dictionary_calls.push(arguments),
+                Err(mut errors) => {
+                    diagnostics.append(&mut errors);
+                    self.initializer_dictionary_calls.push(BTreeMap::new());
+                }
+            }
+        }
+
         diagnostics
     }
 
@@ -69,6 +103,12 @@ impl LoweredProgram {
             )];
         }
         let mut diagnostics = Vec::new();
+        if self.initializer_dictionary_calls.len() != count {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                "initializer dictionary tables do not cover every initializer",
+            ));
+        }
         for index in 0..count {
             let initializer = InitializerId::from_index(index);
             let validator = InitializerBindingValidator {
@@ -81,6 +121,18 @@ impl LoweredProgram {
             };
             diagnostics.append(&mut validator.run());
             diagnostics.append(&mut self.check_initializer_binding_fixed_point(initializer));
+            match super::trait_dictionaries::initializer_call_arguments(self, initializer) {
+                Ok(arguments)
+                    if self.initializer_dictionary_calls.get(index) != Some(&arguments) =>
+                {
+                    diagnostics.push(Diagnostic::new(
+                        Span::Compiler,
+                        "initializer call dictionary recipes disagree with its callee bounds",
+                    ))
+                }
+                Ok(_) => {}
+                Err(mut errors) => diagnostics.append(&mut errors),
+            }
         }
         diagnostics
     }

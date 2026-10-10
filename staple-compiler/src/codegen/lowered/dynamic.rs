@@ -300,6 +300,55 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         )
     }
 
+    fn dictionary_call_values(
+        &self,
+        owner: EmissionOwner,
+        call: crate::LoweredCallId,
+        environment: Option<&DynamicEnvironment<'context>>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<Vec<PointerValue<'context>>> {
+        self.view
+            .dictionary_call_arguments(owner, call)
+            .iter()
+            .map(|argument| match &argument.recipe {
+                crate::DictionaryRecipe::Static(key) => {
+                    let ordinal = self.view.artifact_ordinal(key).ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "unbound static dictionary recipe")
+                    })?;
+                    Ok(self.descriptor_global(ordinal, span)?.as_pointer_value())
+                }
+                crate::DictionaryRecipe::Environment(recipe) => {
+                    let environment = environment.ok_or_else(|| {
+                        Diagnostic::new(
+                            span.clone(),
+                            "dictionary recipe has no dynamic environment",
+                        )
+                    })?;
+                    let mut dictionary = *environment
+                        .dictionaries
+                        .get(recipe.argument)
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "dictionary recipe argument is absent")
+                        })?;
+                    let pointer = self.backend.context.ptr_type(AddressSpace::default());
+                    let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
+                    for slot in &recipe.prerequisites {
+                        let offset = self
+                            .backend
+                            .size_type
+                            .const_int(*slot as u64 * width, false);
+                        let address = self.backend.dynamic_byte_offset(dictionary, offset)?;
+                        dictionary = self
+                            .load_dynamic_storage(pointer, address, "dictionary.prerequisite")
+                            .map_err(compiler_diagnostic)?
+                            .into_pointer_value();
+                    }
+                    Ok(dictionary)
+                }
+            })
+            .collect()
+    }
+
     fn emit_concrete_dynamic_call_with(
         &self,
         owner: EmissionOwner,
@@ -332,6 +381,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let mut arguments = vec![closure.into()];
         for descriptor in &descriptors {
             arguments.push((*descriptor).into());
+        }
+        for dictionary in self.dictionary_call_values(owner, call_id, None, span)? {
+            arguments.push(dictionary.into());
         }
         let result_type = self.backend.compile_type(&call.result_type)?;
         let result = self
@@ -7388,6 +7440,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         self.dynamic_descriptor(ty, environment, &call.origin.span)?
                             .into(),
                     );
+                }
+                for dictionary in self.dictionary_call_values(
+                    owner,
+                    call_id,
+                    Some(environment),
+                    &call.origin.span,
+                )? {
+                    arguments.push(dictionary.into());
                 }
                 let result = *environment.temporaries.get(&id).ok_or_else(|| {
                     Diagnostic::new(call.origin.span.clone(), "missing dynamic result storage")

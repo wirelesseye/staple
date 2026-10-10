@@ -48,15 +48,18 @@ the release build of this stage's base commit for every existing input.
   templates, zero in-scope rejections. Restriction probes remain.
 - **6a.1 explicit static dictionaries implemented.** Ordered prefixes, concrete
   method closures, default slots and shared prerequisites pass validation and
-  JIT checks. Concrete calls build no dictionaries; language demand sites await
-  recipes. Structural dictionaries remain in 6a.4.
+  JIT checks. Concrete dispatch builds no dictionaries; dynamic direct calls
+  demand static ones. Structural dictionaries remain in 6a.4.
 - **6a.2 partial.** Runtime obligations and lexical declared bound order are
   retained and validated, including implicit thunks. Dynamic signatures and
   entry decoding include dictionaries; LLVM checks cover result/resource/value
-  offsets. Caller, closure, bound-entry and finalizer forwarding remain.
+  offsets. Direct calls forward recorded dictionaries; closure, bound-entry and
+  finalizer forwarding remain.
 - **6a.3 partial.** Direct/transitive environment recipes, including associated
-  prerequisites, are recorded and validated. Demand sites and abstract selection
-  remain, followed by builders, trait operations, bounded values and exit gates.
+  prerequisites, plus static recipes, are recorded and validated on direct calls
+  in functions and initializers. A JIT test covers static demand and prerequisite
+  forwarding. Other demand sites, abstract selection, builders, trait operations,
+  bounded values and exit gates remain.
 - Checker workarounds remain: explicit `USize` indices, projected-result type
   arguments/result annotations, and callback parameter annotations.
 

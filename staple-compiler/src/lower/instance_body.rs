@@ -173,6 +173,8 @@ pub(crate) struct LoweredInstanceBody {
     pub dictionary_obligations: Vec<CheckedTraitBound>,
     /// Hidden dictionary arguments in lexical declaration order (T-C).
     pub dictionary_bounds: Vec<CheckedTraitBound>,
+    pub dictionary_calls:
+        BTreeMap<LoweredCallId, Vec<super::trait_dictionaries::DictionaryCallArgument>>,
     /// Available environment/prerequisite routes for expanded obligations.
     pub dictionary_environment_recipes:
         Vec<Option<super::trait_dictionaries::EnvironmentDictionaryRecipe>>,
@@ -256,6 +258,7 @@ impl LoweredInstanceBody {
             bounds: Vec::new(),
             dictionary_obligations: Vec::new(),
             dictionary_bounds: Vec::new(),
+            dictionary_calls: BTreeMap::new(),
             dictionary_environment_recipes: Vec::new(),
             parameter_style: FunctionParameterStyle::Single,
             parameter_pattern: PatternId::from_index(0),
@@ -749,6 +752,27 @@ impl<'a> BodyCloner<'a> {
             .as_ref()
             .map(|coercion| self.coercion(coercion));
         self.body.body_moved_symbols = function.body_moved_symbols.clone();
+        for (call_id, call) in self.body.calls.iter() {
+            if let Some(super::LoweredBoundTarget::Instance(callee)) = self
+                .body
+                .bindings
+                .get(&super::LoweredBindingSite::Call(call_id))
+            {
+                match super::trait_dictionaries::plan_direct_call(
+                    self.program,
+                    &self.body.dictionary_bounds,
+                    call,
+                    *callee,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        self.body.dictionary_calls.insert(call_id, arguments);
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+
         self.body.body_coercion_plan = self.body.body_coercion.as_ref().and_then(|coercion| {
             super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target).ok()
         });
@@ -3961,6 +3985,33 @@ impl<'a> BodyValidator<'a> {
             self.visit_plan(plan);
         }
         self.check_arena_density();
+        let mut expected_dictionary_calls = BTreeMap::new();
+        for (call_id, call) in self.body.calls.iter() {
+            if let Some(super::LoweredBoundTarget::Instance(callee)) = self
+                .body
+                .bindings
+                .get(&super::LoweredBindingSite::Call(call_id))
+            {
+                match super::trait_dictionaries::plan_direct_call(
+                    self.program,
+                    &self.body.dictionary_bounds,
+                    call,
+                    *callee,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        expected_dictionary_calls.insert(call_id, arguments);
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+        if self.body.dictionary_calls != expected_dictionary_calls {
+            self.report(
+                self.body.origin.span.clone(),
+                "instance call dictionary recipes disagree with its callee bounds",
+            );
+        }
         self.check_bindings();
     }
 

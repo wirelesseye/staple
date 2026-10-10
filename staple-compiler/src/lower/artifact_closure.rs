@@ -87,6 +87,11 @@ pub(super) enum ClosureRequest {
 pub(crate) enum ArtifactUseSite {
     /// Index into the dynamic body's deterministic concrete descriptor list.
     InstanceTypeDescriptor(usize),
+    /// A static dictionary supplied to a direct dynamic call.
+    CallDictionary {
+        call: LoweredCallId,
+        argument: usize,
+    },
     /// Index into the dynamic body's structural cleanup shape list.
     InstanceCompoundDrop(usize),
     /// A scripted test site identified by its position in the hook table.
@@ -263,6 +268,10 @@ impl ArtifactFamilyHooks for ProductionHooks {
             program,
             initializer,
         )?);
+        requests.extend(super::trait_dictionaries::scan_initializer(
+            program,
+            initializer,
+        )?);
         Ok(requests)
     }
 
@@ -275,6 +284,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
         requests.extend(super::descriptor_artifacts::scan_instance(
             program, instance,
         )?);
+        requests.extend(super::trait_dictionaries::scan_instance(program, instance)?);
         Ok(requests)
     }
     fn expand(
@@ -1671,6 +1681,25 @@ impl LoweredProgram {
                 };
                 if !valid {
                     report("compound cleanup", index);
+                }
+            }
+            ArtifactUseSite::CallDictionary { call, argument } => {
+                let valid = match site_owner {
+                    UseSiteOwner::Instance(body) => body
+                        .dictionary_calls
+                        .get(&call)
+                        .is_some_and(|arguments| argument < arguments.len()),
+                    UseSiteOwner::Initializer(id) => {
+                        super::trait_dictionaries::initializer_call_arguments(self, id)
+                            .ok()
+                            .and_then(|calls| {
+                                calls.get(&call).map(|arguments| argument < arguments.len())
+                            })
+                            .unwrap_or(false)
+                    }
+                };
+                if !valid {
+                    report("call dictionary", call.index());
                 }
             }
             ArtifactUseSite::InstanceTypeDescriptor(index) => {

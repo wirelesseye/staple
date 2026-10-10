@@ -387,6 +387,35 @@ impl<'a> EmissionView<'a> {
         &self.program.runtime_requirements
     }
 
+    pub(crate) fn dictionary_call_arguments(
+        &self,
+        owner: EmissionOwner,
+        call: super::LoweredCallId,
+    ) -> &'a [super::trait_dictionaries::DictionaryCallArgument] {
+        match owner {
+            EmissionOwner::Instance(instance) => self
+                .program
+                .instances
+                .get(instance)
+                .and_then(|record| record.body.as_ref())
+                .and_then(|body| body.dictionary_calls.get(&call))
+                .map_or(&[], Vec::as_slice),
+            EmissionOwner::Initializer(initializer) => self
+                .program
+                .initializer_dictionary_calls
+                .get(initializer.index())
+                .and_then(|calls| calls.get(&call))
+                .map_or(&[], Vec::as_slice),
+        }
+    }
+
+    pub(crate) fn artifact_ordinal(
+        &self,
+        key: &crate::specialization::ArtifactRequestKey,
+    ) -> Option<ArtifactOrdinal> {
+        self.program.specializations.artifact_ordinal(key)
+    }
+
     /// The planned emitted name of one interned source-function instance.
     pub(crate) fn planned_name(&self, instance: FunctionInstanceId) -> Option<&'a str> {
         self.program.planned_name(instance)
