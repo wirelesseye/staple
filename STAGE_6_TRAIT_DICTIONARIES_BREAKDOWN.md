@@ -50,8 +50,10 @@ the release build of this stage's base commit for every existing input.
   callback fields. Both pass in default mode with pinned output.
 - Coverage now reports trait-bound occurrences by trait, trait-only
   occurrences, and distinct rejected source templates. The quick differential
-  subset includes both trait fixtures; coverage and differential checks are
-  running.
+  subset includes both trait fixtures and passes (21 programs, 2,464 dynamic
+  call sites). The first coverage run passes with zero in-scope rejections;
+  generated symbol names inflated its distinct count, so identity now uses
+  body source origins. A refreshed report is pending.
 - Checker workarounds: spell the index as `USize :: 0`, instantiate the
   projected-result call explicitly and annotate its result, and annotate the
   callback parameter. Bounded-value and abstract-selection restriction probes

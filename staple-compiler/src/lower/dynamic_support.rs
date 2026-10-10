@@ -1454,7 +1454,10 @@ mod tests {
         // Templates with effect parameters, with or without type parameters.
         let mut effect_total = 0usize;
         let mut effect_reason_counts: HashMap<RejectionReason, usize> = HashMap::new();
-        for (source, root) in corpus_sources() {
+        for (source_index, (source, root)) in corpus_sources().into_iter().enumerate() {
+            if source_index % 20 == 0 {
+                eprintln!("coverage: checking source {}", source_index + 1);
+            }
             let loaded = ProgramLoader::new()
                 .with_standard_library_root(workspace.join("stdlib"))
                 .load_source(&source, &root)
@@ -1504,8 +1507,18 @@ mod tests {
                         RejectionReason::TraitBound | RejectionReason::TraitCallRuntime
                     )
                 }) {
+                    // Generated symbol names contain semantic IDs and change
+                    // between imports. The body origin is the stable identity.
+                    // Inline programs all load as <stdin>, so keep them separate.
+                    let source_scope = match &function.body_origin.span {
+                        staple_syntax::Span::User {
+                            source: Some(source),
+                            ..
+                        } if source.ends_with("<stdin>.sta") => format!("corpus {source_index} "),
+                        _ => String::new(),
+                    };
                     trait_templates
-                        .entry(format!("{} {:?}", function.name, function.origin.span))
+                        .entry(format!("{source_scope}{:?}", function.body_origin.span))
                         .or_default()
                         .extend(reasons.iter().copied());
                     if reasons.iter().all(|reason| {
