@@ -153,7 +153,83 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 136] = [
+static CORPUS: [CorpusProgram; 138] = [
+    expect_stdout(
+        must_run(inline(
+            "trait_dictionary_compound_baseline",
+            r#"use std.io.(IO, println)
+use std.clone.Clone
+use std.fmt.(Display, Debug)
+use std.core.cmp.Eq
+use std.core.index.(Index, MutateIndex)
+trait Measure T { measure: T -> I32 }
+type MeasuredBox T = wrap T
+impl<T where Measure T> Measure (MeasuredBox T) { measure = MeasuredBox value => Measure.measure value }
+impl Measure I32 { measure = value => value }
+type MeasuredNumber = wrap I32
+impl Eq MeasuredNumber {
+    eq = (MeasuredNumber a, MeasuredNumber b) => a == b
+    ne = (a, b) => False
+}
+def measured: <T where Measure T> T -> I32 = value => Measure.measure value
+def nested: <T where Measure T> move T -> I32 = move value => measured (MeasuredBox value)
+def equal: <T where Eq T> (T, T) -> Bool = (a, b) => Eq.ne (a, b)
+def index: <T where Index T USize> T -> Index.Output T USize = value => value[USize :: 0]
+def replace: <T where MutateIndex T USize> (mut T, move MutateIndex.Value T USize) -> () = (mut target, move value) => { target[USize :: 0] = value }
+def debug_sum: <T where Debug T> move T ->{IO} () = move value => {
+    let sum: T | String = value
+    println "${sum:?}"
+}
+def clone_list: <T where Clone T> List T -> List T = value => Clone.clone value
+def walk: <T where Display T> move List T ->{IO} () = move values => {
+    for value in values { println "${value}" }
+}
+def capture: <T where Copy T, Measure T> T -> (() -> I32) = value => () => Measure.measure value
+def callback: <T where Measure T> (move T, T -> I32) -> I32 = (move value, f) => f value
+def run: () ->{IO} () = () => {
+println "${nested 4} ${equal (MeasuredNumber 1, MeasuredNumber 2):?}"
+let values = List.singleton 8
+let mut copied = clone_list values
+let first: I32 = index.<List I32> copied
+println "${first}"
+replace.<List I32> (copied, 11)
+walk copied
+debug_sum 12
+let held = capture 9
+println "${held ()} ${callback (10, (value: I32) => measured value)}"
+}
+run ()
+"#,
+            "trait-dictionaries",
+        )),
+        "4 False\n8\n11\n12\n9 10\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "trait_dictionary_static_baseline",
+            r#"use std.io.(IO, println)
+use std.clone.Clone
+use std.fmt.(Display, Debug)
+use std.string.ToString
+use std.core.cmp.(Eq, Ord)
+def describe: <T where Display T> T -> String = value => ToString.to_string value
+def forward: <T where Display T> T -> String = value => describe value
+def compare: <T where Ord T> (T, T) -> Bool = (a, b) => Eq.ne (a, b)
+def duplicate: <T where Clone T> T -> T = value => Clone.clone value
+def member: <T where Display T> T -> String = value => {
+    let convert: T -> String = ToString.to_string
+    convert value
+}
+def debug_pair: <T where Debug T> move T ->{IO} () = move value => println "${(value, 1):?}"
+println (forward 42)
+println (forward "text")
+println "${compare (1, 2):?} ${duplicate 7} ${member 9}"
+debug_pair 5
+"#,
+            "trait-dictionaries",
+        )),
+        "42\ntext\nTrue 7 9\n(5, 1)\n",
+    ),
     expect_stdout(
         must_run(inline(
             "from_types",

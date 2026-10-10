@@ -1445,6 +1445,12 @@ mod tests {
         let mut in_scope = 0usize;
         let mut unsupported = 0usize;
         let mut total = 0usize;
+        // A source span distinguishes same-named methods in different impls;
+        // semantic IDs alone change when a different corpus imports modules.
+        let mut trait_templates =
+            std::collections::BTreeMap::<String, BTreeSet<RejectionReason>>::new();
+        let mut trait_counts = std::collections::BTreeMap::<String, usize>::new();
+        let mut trait_only = 0usize;
         // Templates with effect parameters, with or without type parameters.
         let mut effect_total = 0usize;
         let mut effect_reason_counts: HashMap<RejectionReason, usize> = HashMap::new();
@@ -1492,6 +1498,39 @@ mod tests {
                     continue;
                 };
                 unsupported += 1;
+                if reasons.iter().any(|reason| {
+                    matches!(
+                        reason,
+                        RejectionReason::TraitBound | RejectionReason::TraitCallRuntime
+                    )
+                }) {
+                    trait_templates
+                        .entry(format!("{} {:?}", function.name, function.origin.span))
+                        .or_default()
+                        .extend(reasons.iter().copied());
+                    if reasons.iter().all(|reason| {
+                        matches!(
+                            reason,
+                            RejectionReason::TraitBound | RejectionReason::TraitCallRuntime
+                        )
+                    }) {
+                        trait_only += 1;
+                    }
+                    let mut traits = BTreeSet::new();
+                    for bound in &function.bounds {
+                        if Some(bound.trait_id) == program.semantic_ids.copy_trait
+                            || Some(bound.trait_id) == program.semantic_ids.sized_trait
+                        {
+                            continue;
+                        }
+                        if let Some(metadata) = program.traits.get(bound.trait_id) {
+                            traits.insert(metadata.name.clone());
+                        }
+                    }
+                    for name in traits {
+                        *trait_counts.entry(name).or_default() += 1;
+                    }
+                }
                 for reason in reasons {
                     *reason_counts.entry(*reason).or_default() += 1;
                 }
@@ -1518,6 +1557,16 @@ mod tests {
                 if reason.in_scope() { "" } else { "  (allowed)" }
             );
         }
+        eprintln!(
+            "trait-only template occurrences: {trait_only}; distinct trait-rejected templates: {}",
+            trait_templates.len()
+        );
+        for (name, count) in trait_counts {
+            eprintln!("trait {name}: {count} bounded template occurrences");
+        }
+        for (name, reasons) in trait_templates {
+            eprintln!("trait template {name}: {reasons:?}");
+        }
         let effect_unsupported = effect_reason_counts.values().sum::<usize>();
         eprintln!(
             "effect-generic templates: {effect_total}, rejection reasons: {effect_unsupported}"
@@ -1527,7 +1576,10 @@ mod tests {
         for (reason, count) in effect_rows {
             eprintln!("{count:5}  {}", reason.description());
         }
-        assert!(effect_total > 0, "the corpus must contain effect-generic templates");
+        assert!(
+            effect_total > 0,
+            "the corpus must contain effect-generic templates"
+        );
         assert!(
             in_scope <= IN_SCOPE_BASELINE,
             "in-scope rejections rose to {in_scope}, above the {IN_SCOPE_BASELINE} baseline"

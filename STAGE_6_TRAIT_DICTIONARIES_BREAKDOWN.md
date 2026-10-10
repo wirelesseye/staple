@@ -43,44 +43,21 @@ the release build of this stage's base commit for every existing input.
 
 ## Current state
 
-Not started. Measured at `1106ba8`:
-
-- **Static dispatch only.** Trait calls lower to
-  `LoweredCallableTarget::TraitImplementation` or `StructuralTraitMethod`
-  with `TraitEvidence`. Inside a generic body, evidence is either an
-  explicit or structural selection made at abstract types (`trait_impl_method`
-  already selects generic implementations such as `Clone (List T)`), or a
-  `DeclaredBound` that specialization resolves after substitution
-  (`resolve_trait_evidence`, `instance_resolution.rs`). Bounds and
-  implementations add no run-time values.
-- **What the support analysis rejects.** `dynamic_support.rs` rejects a
-  template with any bound other than `Copy`/`Sized` (`TraitBound`) and any
-  trait-dependent operation on run-time types (`TraitCallRuntime`): trait
-  method calls, `Index`/`MutateIndex` reads and indexed places, and string
-  interpolation of run-time-typed values. A dynamic body may still call a
-  bounded template whose bound arguments are concrete: Decision 2
-  monomorphizes it.
-- **Coverage.** In the hidden differential mode, 2,195 per-program template
-  occurrences are unsupported (2,050 for `TraitBound`, 1,504 for
-  `TraitCallRuntime`); 1,775 of them only for trait reasons. Distinct, these
-  are a small set of standard-library generic implementations and default
-  methods:
-  - `Eq`/`PartialOrd` default methods (`ne`, `lt`, `le`, `gt`, `ge`);
-  - `Eq` for `Ref T` and `Slice T`;
-  - `Clone (List T)`;
-  - the blanket `ToString T` over `Display T`;
-  - `TryConvert` over `Convert`;
-  - `Formatter.debug` and `Formatter.display`;
-  - plus two corpus functions (`combine`, `debug`).
-
-  The other occurrences also hit a different restriction: `Clone (Buffer T)`
-  needs `__buffer_clone`, and `Natural`-bounded slice conversions need a
-  run-time `Natural` count.
-- **Projections.** `Trait.Name T` on generic arguments is already a hidden
-  type parameter (ids above `PROJECTION_PARAMETER_BASE`), which a dynamic
-  instance receives as a descriptor after its declared parameters (R-A).
-- **The checker** accepts bounded schemes (`CheckedScheme::trait_bounds`),
-  and scheme subsumption checks bound entailment (Stage 3).
+- **S0 in progress.** Two runnable baseline programs cover concrete, generic,
+  and blanket implementations; prerequisites and default overrides;
+  associated-type results; structural product/sum formatting; list indexing,
+  mutation, iteration and cloning; method values; escaping captures; and
+  callback fields. Both pass in default mode with pinned output.
+- Coverage now reports trait-bound occurrences by trait, trait-only
+  occurrences, and distinct rejected source templates. The quick differential
+  subset includes both trait fixtures; coverage and differential checks are
+  running.
+- Checker workarounds: spell the index as `USize :: 0`, instantiate the
+  projected-result call explicitly and annotate its result, and annotate the
+  callback parameter. Bounded-value and abstract-selection restriction probes
+  remain to be added as the supporting paths land.
+- **6a/6b not implemented.** Runtime bounds and trait operations still reject;
+  the dictionary ABI, recipes, builders, bounded values, and exit gates remain.
 
 ## Decisions
 
