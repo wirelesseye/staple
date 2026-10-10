@@ -3937,8 +3937,24 @@ mod tests {
                     function: target, ..
                 } if target == function => Some(call),
                 _ => None,
-            })
-            .unwrap();
+            });
+        let (origin, function_type, substitutions, evidence) = match call {
+            Some(call) => (
+                call.origin.clone(),
+                call.function_type.clone(),
+                call.substitutions.clone(),
+                call.evidence.clone(),
+            ),
+            None => {
+                let template = program.functions.get(function).unwrap();
+                (
+                    template.origin.clone(),
+                    template.signature.clone(),
+                    Default::default(),
+                    None,
+                )
+            }
+        };
         let runtime = program
             .relevant_parameters(function)
             .type_parameters()
@@ -3947,10 +3963,10 @@ mod tests {
             .resolve_instance_request_with_runtime(
                 &InstanceResolutionRequest {
                     function,
-                    origin: call.origin.clone(),
-                    function_type: call.function_type.clone(),
-                    substitutions: call.substitutions.clone(),
-                    evidence: call.evidence.clone(),
+                    origin,
+                    function_type,
+                    substitutions,
+                    evidence,
                     target: InstanceResolutionTarget::Root,
                 },
                 &runtime,
@@ -4007,6 +4023,17 @@ mod tests {
             let plan =
                 LoweredArtifactPlan::DescriptorBoundEntry(super::super::DescriptorBoundEntryPlan {
                     bound,
+                    dictionary_count: super::super::trait_dictionaries::entry_dictionary_partition(
+                        &program, dynamic, bound,
+                    )
+                    .unwrap()
+                    .0,
+                    bound_dictionaries:
+                        super::super::trait_dictionaries::entry_dictionary_partition(
+                            &program, dynamic, bound,
+                        )
+                        .unwrap()
+                        .1,
                     instance: dynamic,
                     runtime,
                     function_type: record.body.as_ref().unwrap().signature.clone(),
@@ -4032,6 +4059,29 @@ mod tests {
         let diagnostics =
             program.validate_artifact_closure(&super::super::artifact_closure::ProductionHooks);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let diagnostics = program.validate_closed_catalog();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        if let Some(entry) = entry {
+            let artifact = LoweredArtifactRequestId::from_index(entry.index());
+            let Some(LoweredArtifactPlan::DescriptorBoundEntry(plan)) =
+                &mut program.artifacts.get_mut(artifact).unwrap().plan
+            else {
+                unreachable!()
+            };
+            plan.dictionary_count += 1;
+            let diagnostics = program.validate_closed_catalog();
+            assert!(
+                diagnostics.iter().any(|error| error.message
+                    == "bound entry dictionary partition disagrees with its instance"),
+                "{diagnostics:?}"
+            );
+            let Some(LoweredArtifactPlan::DescriptorBoundEntry(plan)) =
+                &mut program.artifacts.get_mut(artifact).unwrap().plan
+            else {
+                unreachable!()
+            };
+            plan.dictionary_count -= 1;
+        }
         let name = program
             .instances
             .get(caller.unwrap_or(dynamic))
@@ -4112,6 +4162,105 @@ mod tests {
         let mut result = 0;
         unsafe {
             entry.call(environment.as_ptr(), &second, &mut result, &mut a, &mut b);
+        }
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn partially_bound_entries_forward_lexical_and_own_dictionaries_in_order() {
+        use inkwell::values::AnyValue;
+        let (text, name) = dynamic_test_module_with_entry(
+            concat!(
+                "trait EntryProbe T {}\n",
+                "impl EntryProbe U8 {}\n",
+                "impl EntryProbe I32 {}\n",
+                "def enclosing: <A where Sized A, EntryProbe A> move A -> I32 = move value => {\n",
+                "  def dictionary_entry_value: <B where Sized B, EntryProbe B> (move A, move B) -> B = (move a, move b) => b\n",
+                "  dictionary_entry_value (value, 42)\n",
+                "}\n",
+                "let value = enclosing (U8 :: 1)\n",
+            ),
+            "dictionary_entry_value",
+            None,
+            Some(1),
+        );
+        let context = inkwell::context::Context::create();
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "dictionary-bound-entry",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let entry_ir = llvm
+            .get_function(&name)
+            .unwrap()
+            .print_to_string()
+            .to_string();
+        assert!(entry_ir.contains("entry.dictionary"), "{entry_ir}");
+        assert!(
+            entry_ir.lines().any(|line| line.contains("call void")
+                && line.contains("ptr %2, ptr %3, ptr %4, ptr %5")),
+            "{entry_ir}"
+        );
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        #[repr(C)]
+        struct Descriptor {
+            size: usize,
+            stride: usize,
+            align: usize,
+            flags: u32,
+            drop: usize,
+            count: u32,
+        }
+        let first = Descriptor {
+            size: 1,
+            stride: 1,
+            align: 1,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let second = Descriptor {
+            size: 4,
+            stride: 4,
+            align: 4,
+            flags: 1,
+            drop: 0,
+            count: 0,
+        };
+        let lexical_dictionary = [11usize];
+        let own_dictionary = [29usize];
+        // Reserve both descriptor slots, then the dictionary prefix. The own
+        // descriptor and dictionary are supplied by the entry's caller.
+        let environment = [
+            &first as *const Descriptor as usize,
+            0,
+            lexical_dictionary.as_ptr() as usize,
+            0,
+        ];
+        type Entry = unsafe extern "C" fn(
+            *const usize,
+            *const Descriptor,
+            *const usize,
+            *mut i32,
+            *mut u8,
+            *mut i32,
+        );
+        let entry = unsafe { engine.get_function::<Entry>(&name).unwrap() };
+        let mut a = [1u8, 0, 0, 0];
+        let mut b = 42i32;
+        let mut result = -1;
+        unsafe {
+            entry.call(
+                environment.as_ptr(),
+                &second,
+                own_dictionary.as_ptr(),
+                &mut result,
+                a.as_mut_ptr(),
+                &mut b,
+            );
         }
         assert_eq!(result, 42);
     }

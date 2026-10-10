@@ -2285,6 +2285,15 @@ impl TypedModule {
         self.function_types.get(&function)
     }
 
+    pub(crate) fn own_declared_bounds_of_function(
+        &self,
+        function: FunctionId,
+    ) -> &[CheckedTraitBound] {
+        self.function_declared_bounds
+            .get(&function)
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// Hidden dictionary order: lexical ancestors first, then own declarations.
     /// Prerequisites are reached through dictionary recipes, not extra arguments.
     pub(crate) fn declared_bounds_of_function(

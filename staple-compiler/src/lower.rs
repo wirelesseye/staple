@@ -2741,6 +2741,8 @@ pub(crate) struct LoweredFunction {
     pub bounds: Vec<CheckedTraitBound>,
     /// Lexical ancestors' declarations followed by this function's own bounds.
     pub declared_bounds: Vec<CheckedTraitBound>,
+    /// Own declarations, excluding lexical ancestors, for bound-entry partitioning.
+    pub own_declared_bounds: Vec<CheckedTraitBound>,
     pub parameter_style: staple_syntax::FunctionParameterStyle,
     /// The lowered parameter pattern, with bound symbols in source order.
     pub parameter_pattern: PatternId,
@@ -3751,6 +3753,7 @@ impl LoweredProgram {
             scheme_effect_parameters,
             bounds: module.bounds_of_function(function.id).to_vec(),
             declared_bounds: module.declared_bounds_of_function(function.id),
+            own_declared_bounds: module.own_declared_bounds_of_function(function.id).to_vec(),
             parameter_style: function.parameter_style,
             parameter_pattern,
             parameters: pattern_symbols(resolved, &function.pattern),
@@ -16332,6 +16335,8 @@ mod tests {
             "checker retains expanded prerequisites"
         );
         assert_eq!(names(&inner.declared_bounds), ["OuterB", "Copy", "Own"]);
+        assert_eq!(names(&inner.own_declared_bounds), ["Own"]);
+        assert_eq!(names(&enclosing.own_declared_bounds), ["OuterB", "Copy"]);
         let parameters = inner
             .declared_bounds
             .iter()
@@ -16411,10 +16416,12 @@ mod tests {
                 _ => continue,
             };
             let arguments = function.declared_bounds[0].arguments.clone();
-            function.declared_bounds.push(CheckedTraitBound {
+            let bound = CheckedTraitBound {
                 trait_id,
                 arguments,
-            });
+            };
+            function.declared_bounds.push(bound.clone());
+            function.own_declared_bounds.push(bound);
         }
         for (_, instance) in lowered.program.instances.iter_mut() {
             instance.body = None;

@@ -4324,7 +4324,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .map_err(compiler_diagnostic)?;
             arguments.push(descriptor.into());
         }
-        for parameter in &parameters[1..] {
+        let own_descriptors_end = 1 + plan.runtime.len() - plan.bound;
+        for parameter in &parameters[1..own_descriptors_end] {
+            arguments.push((*parameter).into());
+        }
+        for index in 0..plan.bound_dictionaries {
+            let offset = self
+                .backend
+                .size_type
+                .const_int((plan.runtime.len() + index) as u64 * pointer_bytes, false);
+            let slot = self.backend.dynamic_byte_offset(environment, offset)?;
+            let dictionary = self
+                .load_dynamic_storage(pointer, slot, "entry.dictionary")
+                .map_err(compiler_diagnostic)?;
+            arguments.push(dictionary.into());
+        }
+        // Own dictionaries, result, row and value arguments follow unchanged.
+        for parameter in &parameters[own_descriptors_end..] {
             arguments.push((*parameter).into());
         }
         self.backend

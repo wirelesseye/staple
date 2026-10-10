@@ -88,6 +88,9 @@ pub(crate) struct TraitDictionaryPlan {
 pub(crate) struct DescriptorBoundEntryPlan {
     /// Number of leading descriptors supplied by the closure environment.
     pub bound: usize,
+    /// Dictionaries in the full instance ABI and its bound lexical prefix.
+    pub dictionary_count: usize,
+    pub bound_dictionaries: usize,
     /// The dynamic instance the entry forwards to.
     pub instance: FunctionInstanceId,
     /// The instance's run-time parameters in descriptor ABI order (R-A).
@@ -330,6 +333,7 @@ impl LoweredArtifactPlan {
                 plan.instance.index() == key.instance.index()
                     && plan.bound == key.bound
                     && plan.bound <= plan.runtime.len()
+                    && plan.bound_dictionaries <= plan.dictionary_count
             }
             (
                 LoweredArtifactPlan::InstantiationAdapter(plan),
@@ -832,6 +836,8 @@ impl LoweredArtifactPlan {
             // design; the plan is not part of the concrete closed catalog.
             LoweredArtifactPlan::DescriptorBoundEntry(DescriptorBoundEntryPlan {
                 bound: _,
+                dictionary_count: _,
+                bound_dictionaries: _,
                 instance: _,
                 runtime: _,
                 function_type: _,

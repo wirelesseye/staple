@@ -523,10 +523,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
                 LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
                     // Only descriptors bound by the environment are omitted.
-                    let ty = self.backend.compile_dynamic_function_type(
-                        &plan.function_type,
-                        plan.runtime.len() - plan.bound,
-                    )?;
+                    let ty = self
+                        .backend
+                        .compile_dynamic_function_type_with_dictionaries(
+                            &plan.function_type,
+                            plan.runtime.len() - plan.bound,
+                            plan.dictionary_count - plan.bound_dictionaries,
+                        )?;
                     vec![
                         self.backend
                             .llvm_module

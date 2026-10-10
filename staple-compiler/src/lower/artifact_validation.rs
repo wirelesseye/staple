@@ -15,6 +15,7 @@ impl LoweredProgram {
         let mut diagnostics = Vec::new();
         self.check_plan_types(&mut diagnostics);
         self.check_dictionary_layouts(&mut diagnostics);
+        self.check_bound_entry_dictionary_partitions(&mut diagnostics);
         for (id, expected) in self.planned_initializer_names() {
             let initializer = self
                 .initializers
@@ -28,6 +29,26 @@ impl LoweredProgram {
             }
         }
         diagnostics
+    }
+
+    fn check_bound_entry_dictionary_partitions(&self, diagnostics: &mut Vec<Diagnostic>) {
+        for (_, artifact) in self.artifacts.iter() {
+            let Some(crate::LoweredArtifactPlan::DescriptorBoundEntry(plan)) = &artifact.plan
+            else {
+                continue;
+            };
+            if super::trait_dictionaries::entry_dictionary_partition(
+                self,
+                plan.instance,
+                plan.bound,
+            ) != Some((plan.dictionary_count, plan.bound_dictionaries))
+            {
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    "bound entry dictionary partition disagrees with its instance",
+                ));
+            }
+        }
     }
 
     fn check_dictionary_layouts(&self, diagnostics: &mut Vec<Diagnostic>) {

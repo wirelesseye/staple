@@ -53,8 +53,9 @@ the release build of this stage's base commit for every existing input.
 - **6a.2 partial.** Runtime obligations and lexical declared bound order are
   retained and validated, including implicit thunks. Dynamic signatures and
   entry decoding include dictionaries; LLVM checks cover result/resource/value
-  offsets. Direct calls forward recorded dictionaries; closure, bound-entry and
-  finalizer forwarding remain.
+  offsets. Direct calls and bound entries forward dictionaries; entries validate
+  the lexical/own partition and pass JIT checks. Closure capture/storage and
+  finalizer offsets remain.
 - **6a.3 partial.** Direct/transitive environment recipes, including associated
   prerequisites, plus static recipes, are recorded and validated on direct calls
   in functions and initializers. A JIT test covers static demand and prerequisite

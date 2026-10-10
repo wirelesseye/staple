@@ -409,6 +409,39 @@ pub(super) fn scan_initializer(
     Ok(requests)
 }
 
+/// Dictionary ABI partition of an entry: bound lexical arguments precede
+/// own scheme arguments. A monomorphic entry binds all descriptors/dictionaries.
+pub(super) fn entry_dictionary_partition(
+    program: &super::LoweredProgram,
+    instance: super::FunctionInstanceId,
+    bound_descriptors: usize,
+) -> Option<(usize, usize)> {
+    let record = program.instances.get(instance)?;
+    let template = program.functions.get(record.template)?;
+    let key = program.specializations.instance(record.ordinal)?;
+    let substitution = record.environment.substitution_map();
+    let total = runtime_obligations(
+        &program.semantic_ids,
+        &template.declared_bounds,
+        &substitution,
+        key.runtime(),
+    )
+    .len();
+    let bound = if bound_descriptors == key.runtime().len() {
+        total
+    } else {
+        let own = runtime_obligations(
+            &program.semantic_ids,
+            &template.own_declared_bounds,
+            &substitution,
+            key.runtime(),
+        )
+        .len();
+        total.checked_sub(own)?
+    };
+    Some((total, bound))
+}
+
 /// A concrete obligation creates a dictionary only at a demand site.
 pub(super) fn static_request(
     program: &super::LoweredProgram,

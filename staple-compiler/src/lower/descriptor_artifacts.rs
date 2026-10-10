@@ -409,6 +409,16 @@ pub(super) fn scan_instance(
                 ),
                 plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
                     bound,
+                    dictionary_count: super::trait_dictionaries::entry_dictionary_partition(
+                        program, *callee, bound,
+                    )
+                    .expect("dictionary partition")
+                    .0,
+                    bound_dictionaries: super::trait_dictionaries::entry_dictionary_partition(
+                        program, *callee, bound,
+                    )
+                    .expect("dictionary partition")
+                    .1,
                     instance: *callee,
                     runtime: runtime.clone(),
                     function_type: callable.function_type.clone(),
@@ -523,6 +533,20 @@ pub(super) fn scan_instance(
                 ),
                 plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
                     bound: runtime.len(),
+                    dictionary_count: super::trait_dictionaries::entry_dictionary_partition(
+                        program,
+                        *callee,
+                        runtime.len(),
+                    )
+                    .expect("thunk dictionary partition")
+                    .0,
+                    bound_dictionaries: super::trait_dictionaries::entry_dictionary_partition(
+                        program,
+                        *callee,
+                        runtime.len(),
+                    )
+                    .expect("thunk dictionary partition")
+                    .1,
                     instance: *callee,
                     runtime: runtime.clone(),
                     function_type: thunk.signature.clone(),
