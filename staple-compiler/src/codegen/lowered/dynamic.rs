@@ -103,6 +103,29 @@ impl<'context> DynamicEnvironment<'context> {
     }
 }
 
+/// The ABI slots one evaluated operand supplies when a whole product is
+/// borrowed as several parameters: records sharing the operand, led by
+/// `argument`. Their values are fields of the evaluated product.
+fn shared_operand_group(call: &crate::LoweredCall, argument: usize) -> Option<Vec<usize>> {
+    let expression = call.arguments.get(argument)?.expression?;
+    let group = call
+        .arguments
+        .iter()
+        .enumerate()
+        .filter(|(_, other)| other.expression == Some(expression) && other.slot.is_some())
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    (group.len() > 1 && group[0] == argument).then_some(group)
+}
+
+/// Where a dynamic indirect call finds its code and environment.
+enum DynamicCalleeSource {
+    /// A closure value evaluated at the call.
+    Expression(ExpressionId),
+    /// A trait member slot of a dictionary, which is the environment (T-D).
+    Slot(crate::lower::DictionarySlotCall),
+}
+
 impl<'program, 'context> LoweredEmitter<'program, 'context> {
     /// Dynamic ABI storage and field offsets preserve each value's natural alignment.
     fn load_dynamic_storage<T: inkwell::types::BasicType<'context>>(
@@ -322,43 +345,49 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     ) -> CodeGenerationResult<Vec<PointerValue<'context>>> {
         arguments
             .iter()
-            .map(|argument| match &argument.recipe {
-                crate::DictionaryRecipe::Static(key) => {
-                    let ordinal = self.view.artifact_ordinal(key).ok_or_else(|| {
-                        Diagnostic::new(span.clone(), "unbound static dictionary recipe")
-                    })?;
-                    Ok(self.descriptor_global(ordinal, span)?.as_pointer_value())
-                }
-                crate::DictionaryRecipe::Environment(recipe) => {
-                    let environment = environment.ok_or_else(|| {
-                        Diagnostic::new(
-                            span.clone(),
-                            "dictionary recipe has no dynamic environment",
-                        )
-                    })?;
-                    let mut dictionary = *environment
-                        .dictionaries
-                        .get(recipe.argument)
-                        .ok_or_else(|| {
-                            Diagnostic::new(span.clone(), "dictionary recipe argument is absent")
-                        })?;
-                    let pointer = self.backend.context.ptr_type(AddressSpace::default());
-                    let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
-                    for slot in &recipe.prerequisites {
-                        let offset = self
-                            .backend
-                            .size_type
-                            .const_int(*slot as u64 * width, false);
-                        let address = self.backend.dynamic_byte_offset(dictionary, offset)?;
-                        dictionary = self
-                            .load_dynamic_storage(pointer, address, "dictionary.prerequisite")
-                            .map_err(compiler_diagnostic)?
-                            .into_pointer_value();
-                    }
-                    Ok(dictionary)
-                }
-            })
+            .map(|argument| self.dictionary_recipe_value(&argument.recipe, environment, span))
             .collect()
+    }
+
+    fn dictionary_recipe_value(
+        &self,
+        recipe: &crate::DictionaryRecipe,
+        environment: Option<&DynamicEnvironment<'context>>,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<PointerValue<'context>> {
+        match recipe {
+            crate::DictionaryRecipe::Static(key) => {
+                let ordinal = self.view.artifact_ordinal(key).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "unbound static dictionary recipe")
+                })?;
+                Ok(self.descriptor_global(ordinal, span)?.as_pointer_value())
+            }
+            crate::DictionaryRecipe::Environment(recipe) => {
+                let environment = environment.ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "dictionary recipe has no dynamic environment")
+                })?;
+                let mut dictionary = *environment
+                    .dictionaries
+                    .get(recipe.argument)
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "dictionary recipe argument is absent")
+                    })?;
+                let pointer = self.backend.context.ptr_type(AddressSpace::default());
+                let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
+                for slot in &recipe.prerequisites {
+                    let offset = self
+                        .backend
+                        .size_type
+                        .const_int(*slot as u64 * width, false);
+                    let address = self.backend.dynamic_byte_offset(dictionary, offset)?;
+                    dictionary = self
+                        .load_dynamic_storage(pointer, address, "dictionary.prerequisite")
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value();
+                }
+                Ok(dictionary)
+            }
+        }
     }
 
     fn emit_concrete_dynamic_call_with(
@@ -644,10 +673,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .and_then(|functions| functions.first())
                 .copied()
                 .ok_or_else(|| Diagnostic::new(span.clone(), "bound artifact is not declared")),
-            LoweredBoundTarget::Route(_) => Err(Diagnostic::new(
-                span.clone(),
-                "bound site is not a function",
-            )),
+            LoweredBoundTarget::Route(_) | LoweredBoundTarget::Dictionary(_) => Err(
+                Diagnostic::new(span.clone(), "bound site is not a function"),
+            ),
         }
     }
 
@@ -2619,7 +2647,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         id: ExpressionId,
         call_id: crate::LoweredCallId,
         call: &crate::LoweredCall,
-        callee: ExpressionId,
+        callee: DynamicCalleeSource,
         environment: &mut DynamicEnvironment<'context>,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let span = &call.origin.span;
@@ -2630,33 +2658,59 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         } else {
             None
         };
+        // A dictionary slot always has the dynamic ABI (T-D).
         let dynamic_shape = polymorphic_types.is_some()
+            || matches!(callee, DynamicCalleeSource::Slot(_))
             || crate::contains_type_parameter(&CheckedType::Function(call.function_type.clone()));
         let storage = *environment
             .temporaries
             .get(&id)
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic closure call storage"))?;
-        let closure = self.emit_dynamic_expression(owner, callee, environment)?;
-        let closure_type = self.backend.closure_type();
         let pointer_type = self.backend.context.ptr_type(AddressSpace::default());
-        let code = self
-            .backend
-            .builder
-            .build_struct_gep(closure_type, closure, 0, "closure.code.slot")
-            .map_err(compiler_diagnostic)?;
-        let code = self
-            .load_dynamic_storage(pointer_type, code, "closure.code")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
-        let closure_environment = self
-            .backend
-            .builder
-            .build_struct_gep(closure_type, closure, 1, "closure.environment.slot")
-            .map_err(compiler_diagnostic)?;
-        let closure_environment = self
-            .load_dynamic_storage(pointer_type, closure_environment, "closure.environment")
-            .map_err(compiler_diagnostic)?
-            .into_pointer_value();
+        let (code, closure_environment) = match &callee {
+            DynamicCalleeSource::Expression(callee) => {
+                let closure = self.emit_dynamic_expression(owner, *callee, environment)?;
+                let closure_type = self.backend.closure_type();
+                let code = self
+                    .backend
+                    .builder
+                    .build_struct_gep(closure_type, closure, 0, "closure.code.slot")
+                    .map_err(compiler_diagnostic)?;
+                let code = self
+                    .load_dynamic_storage(pointer_type, code, "closure.code")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let closure_environment = self
+                    .backend
+                    .builder
+                    .build_struct_gep(closure_type, closure, 1, "closure.environment.slot")
+                    .map_err(compiler_diagnostic)?;
+                let closure_environment = self
+                    .load_dynamic_storage(
+                        pointer_type,
+                        closure_environment,
+                        "closure.environment",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                (code, closure_environment)
+            }
+            DynamicCalleeSource::Slot(dispatch) => {
+                let dictionary =
+                    self.dictionary_recipe_value(&dispatch.recipe, Some(environment), span)?;
+                let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
+                let offset = self
+                    .backend
+                    .size_type
+                    .const_int(dispatch.slot as u64 * width, false);
+                let address = self.backend.dynamic_byte_offset(dictionary, offset)?;
+                let code = self
+                    .load_dynamic_storage(pointer_type, address, "dictionary.slot")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                (code, dictionary)
+            }
+        };
         let types = super::flattened_parameter_types(&call.function_type.parameter);
         let indirect = self.backend.indirect_parameter_mask(&call.function_type);
         let moved =
@@ -2681,6 +2735,32 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let record = &call.arguments[*argument];
                     let value =
                         self.emit_dynamic_argument(owner, id, call, *argument, environment)?;
+                    if let Some(group) = shared_operand_group(call, *argument) {
+                        let descriptor = self.dynamic_descriptor(
+                            &call.function_type.parameter,
+                            environment,
+                            span,
+                        )?;
+                        for member in group {
+                            let member = &call.arguments[member];
+                            let slot = member.slot.expect("grouped records have slots");
+                            let field = self
+                                .dynamic_product_field(descriptor, value, slot as u32)?
+                                .0;
+                            if member.drops_after_call
+                                || (member.temporary
+                                    && !moved[slot]
+                                    && crate::contains_type_parameter(&member.expected))
+                            {
+                                cleanups.push((
+                                    self.dynamic_descriptor(&member.expected, environment, span)?,
+                                    field,
+                                ));
+                            }
+                            slots[slot] = Some(field);
+                        }
+                        continue;
+                    }
                     let cleanup = record.drops_after_call
                         || (record.temporary
                             && record.slot.is_some_and(|slot| !moved[slot])
@@ -7448,7 +7528,19 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         id,
                         call_id,
                         call,
-                        callee,
+                        DynamicCalleeSource::Expression(callee),
+                        environment,
+                    );
+                }
+                if let Some(LoweredBoundTarget::Dictionary(dispatch)) =
+                    self.view.binding(owner, LoweredBindingSite::Call(call_id))
+                {
+                    return self.emit_dynamic_indirect_concrete_call(
+                        owner,
+                        id,
+                        call_id,
+                        call,
+                        DynamicCalleeSource::Slot(dispatch.clone()),
                         environment,
                     );
                 }
@@ -7549,6 +7641,36 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                 *argument_index,
                                 environment,
                             )?;
+                            if let Some(group) = shared_operand_group(call, *argument_index) {
+                                let descriptor = self.dynamic_descriptor(
+                                    &call.function_type.parameter,
+                                    environment,
+                                    &call.origin.span,
+                                )?;
+                                for member in group {
+                                    let member = &call.arguments[member];
+                                    let slot = member.slot.expect("grouped records have slots");
+                                    let field = self
+                                        .dynamic_product_field(descriptor, value, slot as u32)?
+                                        .0;
+                                    if member.drops_after_call
+                                        || (member.temporary
+                                            && !moved[slot]
+                                            && crate::contains_type_parameter(&member.expected))
+                                    {
+                                        cleanups.push((
+                                            self.dynamic_descriptor(
+                                                &member.expected,
+                                                environment,
+                                                &call.origin.span,
+                                            )?,
+                                            field,
+                                        ));
+                                    }
+                                    slots[slot] = Some(field);
+                                }
+                                continue;
+                            }
                             if let Some(slot) = argument.slot {
                                 if argument.drops_after_call
                                     || (argument.temporary

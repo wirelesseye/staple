@@ -153,7 +153,26 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 138] = [
+static CORPUS: [CorpusProgram; 139] = [
+    expect_stdout(
+        must_run(inline(
+            "trait_dictionary_environment",
+            r#"use std.io.(IO, println)
+use std.core.cmp.(Eq, Ord)
+trait Measure T { measure: T -> I32 }
+impl Measure I32 { measure = value => value }
+type Boxed = wrap I32
+impl Measure Boxed { measure = Boxed value => value + 100 }
+def measured: <T where Measure T> T -> I32 = value => Measure.measure value
+def forward: <T where Measure T> T -> I32 = value => measured value
+def twice: <T where Measure T> (T, T) -> I32 = (a, b) => Measure.measure a + Measure.measure b
+def compare: <T where Ord T> (T, T) -> Bool = (a, b) => Eq.ne (a, b)
+println "${measured 5} ${forward (Boxed 7)} ${twice (1, 2)} ${compare (1, 2):?} ${compare (3, 3):?}"
+"#,
+            "trait-dictionaries",
+        )),
+        "5 107 3 True False\n",
+    ),
     expect_stdout(
         must_run(inline(
             "trait_dictionary_compound_baseline",

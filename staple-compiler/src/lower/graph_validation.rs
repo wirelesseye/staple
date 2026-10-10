@@ -370,14 +370,24 @@ impl<'a> GraphValidator<'a> {
             .instance(record.ordinal)
             .map(|key| key.runtime_ids())
             .unwrap_or_default();
-        for (_, call) in body.calls.iter() {
+        let dictionary_site = |site| {
+            matches!(
+                body.binding(site),
+                Some(super::LoweredBoundTarget::Dictionary(_))
+            )
+        };
+        for (call_id, call) in body.calls.iter() {
             let bound = call
                 .scheme
                 .as_ref()
                 .map(|scheme| scheme.bound_ids())
                 .unwrap_or_default();
             self.check_substitutions(&call.origin, &call.substitutions, "call", &runtime, &bound);
-            if let Some(evidence) = &call.evidence {
+            // A dictionary dispatch keeps its declared obligation: the
+            // dictionary, not an implementation, answers it.
+            if let Some(evidence) = &call.evidence
+                && !dictionary_site(super::LoweredBindingSite::Call(call_id))
+            {
                 self.check_evidence(&call.origin, evidence);
             }
         }

@@ -47,7 +47,7 @@ mod cleanup_artifacts;
 mod coroutine_artifacts;
 mod descriptor_artifacts;
 mod dynamic_support;
-mod trait_dictionaries;
+pub(crate) mod trait_dictionaries;
 mod emission;
 mod extern_artifacts;
 pub(crate) mod graph_validation;
@@ -61,7 +61,9 @@ mod value_conversions;
 mod worklist;
 
 pub(crate) use runtime_call_facts::LoweredRuntimeCallFacts;
-pub(crate) use trait_dictionaries::{DictionaryCallArgument, DictionaryRecipe, TraitDictionaryLayout};
+pub(crate) use trait_dictionaries::{
+    DictionaryCallArgument, DictionaryRecipe, DictionarySlotCall, TraitDictionaryLayout,
+};
 pub(crate) use value_conversions::{
     AdapterConversion, adapter_conversions, concrete_key as conversion_concrete_key,
     takes_descriptor as conversion_takes_descriptor,
@@ -24060,6 +24062,76 @@ mod tests {
     }
 
     #[test]
+    fn bounded_generics_call_trait_members_through_environment_dictionaries() {
+        let module = checked_program(concat!(
+            "trait Measure T { measure: T -> I32 }\n",
+            "impl Measure I32 { measure = value => value + 1 }\n",
+            "trait Weigh T where Measure T { weigh: T -> I32 }\n",
+            "impl Weigh I32 { weigh = value => value * 2 }\n",
+            "def measured: <T where Measure T> T -> I32 = value => Measure.measure value\n",
+            "def weighed: <T where Weigh T> T -> I32 = value => Weigh.weigh value + Measure.measure value\n",
+            "def run: () -> I32 = () => measured 20 + weighed 5\n",
+            "let answer = run ()\n",
+        ));
+        let lowered = Lowerer::new()
+            .with_dictionary_pass_generic_calls(true)
+            .lower(&module)
+            .unwrap();
+        let mut slots = Vec::new();
+        for (_, instance) in lowered.program.instances.iter() {
+            let function = lowered.program.functions.get(instance.template).unwrap();
+            let body = instance.body.as_ref().unwrap();
+            for (_, target) in body.bindings.iter() {
+                if let LoweredBoundTarget::Dictionary(dispatch) = target {
+                    slots.push((function.name.clone(), dispatch.clone()));
+                }
+            }
+        }
+        assert_eq!(slots.len(), 3, "{slots:?}");
+        let weighed = slots
+            .iter()
+            .filter(|(name, _)| name == "weighed")
+            .collect::<Vec<_>>();
+        assert_eq!(weighed.len(), 2);
+        assert!(weighed.iter().any(|(_, dispatch)| matches!(
+            &dispatch.recipe,
+            DictionaryRecipe::Environment(recipe) if recipe.prerequisites.len() == 1
+        )));
+        let run = lowered
+            .program
+            .instances
+            .iter()
+            .find_map(|(_, instance)| {
+                (lowered
+                    .program
+                    .functions
+                    .get(instance.template)
+                    .unwrap()
+                    .name
+                    == "run")
+                    .then(|| instance.name.clone())
+            })
+            .unwrap();
+        let context = inkwell::context::Context::create();
+        let text = crate::CodeGenerator::new(&context)
+            .compile_module(&lowered)
+            .unwrap();
+        assert!(text.contains("dictionary.slot"), "{text}");
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range_copy(
+            text.as_bytes(),
+            "environment-dictionaries",
+        );
+        let llvm = context.create_module_from_ir(buffer).unwrap();
+        llvm.verify().unwrap();
+        let engine = llvm
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        type Run = unsafe extern "C" fn(*const usize) -> i32;
+        let run = unsafe { engine.get_function::<Run>(&run).unwrap() };
+        assert_eq!(unsafe { run.call(std::ptr::null()) }, 21 + 10 + 6);
+    }
+
+    #[test]
     fn polymorphic_lambdas_enforce_declared_effect_rows() {
         for row in ["", "{state.read}"] {
             let source = format!(
@@ -25067,3 +25139,4 @@ mod tests {
         assert_eq!(first_snapshot, normalized_program_snapshot(&second));
     }
 }
+

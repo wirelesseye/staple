@@ -1789,6 +1789,19 @@ impl<'a> WorklistBuilder<'a> {
                 return;
             }
         };
+        // A run-time obligation dispatches through a dictionary and depends on
+        // no implementation instance (T-K).
+        if let Some(enclosing) = enclosing
+            && super::trait_dictionaries::site_runtime_obligation(
+                &program.semantic_ids,
+                evidence,
+                &site_environment,
+                enclosing.key.runtime(),
+            )
+            .is_some()
+        {
+            return;
+        }
         let resolved =
             match program.resolve_trait_evidence(origin, Some(evidence), &site_environment) {
                 Ok(resolved) => resolved,

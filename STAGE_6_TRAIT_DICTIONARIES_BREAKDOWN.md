@@ -43,9 +43,10 @@ the release build of this stage's base commit for every existing input.
 
 ## Current state
 
-- **S0 partial.** Both trait fixtures and the 21-program quick differential
-  suite pass. Coverage: 1,819 trait-only occurrences, 46 distinct trait-rejected
-  templates, zero in-scope rejections. Restriction probes remain.
+- **S0 partial.** Both trait fixtures, the environment fixture and the
+  21-program quick differential suite pass. Trait-only rejections fell from
+  1,819 occurrences / 46 templates to 290 / 16 (all `TraitCallRuntime`: builders,
+  structural traits, operations, members as values). Restriction probes remain.
 - **6a.1 explicit static dictionaries implemented.** Ordered prefixes, concrete
   method closures, default slots and shared prerequisites pass validation and
   JIT checks. Concrete dispatch builds no dictionaries; dynamic direct calls
@@ -57,11 +58,14 @@ the release build of this stage's base commit for every existing input.
   recipes, thunk prefixes) and the finalizer and body offsets follow. A JIT test
   covers callable values; the thunk path is untested. Instantiation adapters
   and the audit of `runtime()` counts remain.
-- **6a.3 partial.** Direct/transitive environment recipes, including associated
-  prerequisites, plus static recipes, are recorded and validated on direct calls
-  in functions and initializers. A JIT test covers static demand and prerequisite
-  forwarding. Other demand sites, abstract selection, builders, trait operations,
-  bounded values and exit gates remain.
+- **6a.3 partial.** Direct/transitive environment recipes, static recipes and
+  prerequisite routes are recorded and validated on calls and callable values.
+  Trait-member calls at run-time obligations dispatch through an environment
+  dictionary slot (`LoweredBoundTarget::Dictionary`): the support analysis, the
+  worklist, bodies, validators and the dynamic emitter agree, and routed calls
+  require static dictionaries. JIT and corpus tests cover it. Abstract selection
+  (T-F), builders, structural recipes, the other T-K operations, members as
+  values, bounded values and the exit gates remain.
 - Checker workarounds remain: explicit `USize` indices, projected-result type
   arguments/result annotations, and callback parameter annotations.
 

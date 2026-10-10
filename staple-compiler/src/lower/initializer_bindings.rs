@@ -1086,6 +1086,13 @@ impl<'a> InitializerBindingValidator<'a> {
                 ));
                 false
             }
+            Some(LoweredBoundTarget::Dictionary(_)) => {
+                self.report(format!(
+                    "initializer {} dispatch site {site:?} reads a dictionary",
+                    self.initializer.index()
+                ));
+                false
+            }
             Some(LoweredBoundTarget::Route(_)) if needs_target => {
                 self.report(format!(
                     "initializer {} dispatch site {site:?} is bound to a route instead of an instance or artifact",

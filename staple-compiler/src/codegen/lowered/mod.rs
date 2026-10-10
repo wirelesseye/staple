@@ -3934,10 +3934,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .and_then(|functions| functions.first())
                 .copied()
                 .ok_or_else(|| Diagnostic::new(span.clone(), "bound artifact is not declared")),
-            LoweredBoundTarget::Route(_) => Err(Diagnostic::new(
-                span.clone(),
-                "bound site is not a function",
-            )),
+            LoweredBoundTarget::Route(_) | LoweredBoundTarget::Dictionary(_) => Err(
+                Diagnostic::new(span.clone(), "bound site is not a function"),
+            ),
         }
     }
 

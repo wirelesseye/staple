@@ -202,6 +202,106 @@ pub(crate) struct DictionaryCallArgument {
     pub recipe: DictionaryRecipe,
 }
 
+/// A trait-member call through a dictionary at a run-time obligation (T-K).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DictionarySlotCall {
+    pub obligation: crate::CheckedTraitBound,
+    pub recipe: DictionaryRecipe,
+    /// Absolute pointer-slot offset of the member in the dictionary prefix.
+    pub slot: usize,
+}
+
+/// The trait, completed arguments and member a recorded evidence names.
+pub(super) fn evidence_obligation(
+    evidence: &crate::TraitEvidence,
+) -> (
+    crate::TraitId,
+    &[crate::CheckedType],
+    Option<crate::TraitMethodId>,
+) {
+    match evidence {
+        crate::TraitEvidence::ExplicitImplementation {
+            trait_id,
+            arguments,
+            method,
+            ..
+        } => (*trait_id, arguments, Some(*method)),
+        crate::TraitEvidence::Structural {
+            trait_id,
+            arguments,
+            method,
+            ..
+        } => (*trait_id, arguments, Some(*method)),
+        crate::TraitEvidence::DeclaredBound {
+            trait_id,
+            arguments,
+            method,
+            ..
+        } => (*trait_id, arguments, *method),
+    }
+}
+
+/// The obligation of a trait site when, after the site's substitution, it
+/// mentions a run-time parameter of the enclosing instance (T-B). Other sites
+/// keep static dispatch.
+pub(super) fn site_runtime_obligation(
+    ids: &super::LoweredSemanticIds,
+    evidence: &crate::TraitEvidence,
+    environment: &super::instance_resolution::SubstitutionEnvironment,
+    runtime: &std::collections::BTreeSet<crate::TypeParameterId>,
+) -> Option<crate::CheckedTraitBound> {
+    let (trait_id, arguments, _) = evidence_obligation(evidence);
+    let map = environment.substitution_map();
+    let bound = crate::CheckedTraitBound {
+        trait_id,
+        arguments: arguments
+            .iter()
+            .map(|argument| crate::substitute_type(argument.clone(), &map))
+            .collect(),
+    };
+    runtime_obligations(ids, std::slice::from_ref(&bound), &Default::default(), runtime)
+        .into_iter()
+        .next()
+}
+
+/// Select the dictionary and slot a run-time trait member call reads. An
+/// environment bound wins (T-F); other recipe kinds arrive with builders.
+pub(super) fn plan_slot_call(
+    program: &super::LoweredProgram,
+    environment: &[crate::CheckedTraitBound],
+    obligation: &crate::CheckedTraitBound,
+    method: crate::TraitMethodId,
+    origin: &crate::Origin,
+) -> Result<DictionarySlotCall, staple_syntax::Diagnostic> {
+    let metadata = program.traits.get(obligation.trait_id).ok_or_else(|| {
+        staple_syntax::Diagnostic::new(origin.span.clone(), "dictionary trait is absent")
+    })?;
+    let slot = metadata
+        .methods
+        .iter()
+        .position(|candidate| *candidate == method)
+        .ok_or_else(|| {
+            staple_syntax::Diagnostic::new(
+                origin.span.clone(),
+                "dictionary trait has no such member",
+            )
+        })?;
+    let recipe = environment_recipe(program, environment, obligation).ok_or_else(|| {
+        staple_syntax::Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "trait `{}` is required at a run-time type and no dictionary provides it",
+                metadata.name
+            ),
+        )
+    })?;
+    Ok(DictionarySlotCall {
+        obligation: obligation.clone(),
+        recipe: DictionaryRecipe::Environment(recipe),
+        slot: metadata.dictionary_layout.slots.start + slot,
+    })
+}
+
 /// Translate a dynamic callee's declared bounds into the caller's types.
 pub(super) fn plan_direct_call(
     program: &super::LoweredProgram,

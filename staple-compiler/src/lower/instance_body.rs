@@ -121,6 +121,8 @@ pub(crate) enum LoweredBoundTarget {
     /// The site keeps its non-source route (indirect closure, external,
     /// intrinsic, or ordinary constructor call).
     Route(LoweredCallableCategory),
+    /// A trait member read from a dictionary at a run-time obligation.
+    Dictionary(super::trait_dictionaries::DictionarySlotCall),
 }
 
 impl LoweredBoundTarget {
@@ -3104,6 +3106,28 @@ impl<'a> BodyCloner<'a> {
                 return;
             }
         };
+        if let Some(obligation) = super::trait_dictionaries::site_runtime_obligation(
+            &self.program.semantic_ids,
+            evidence,
+            &site_environment,
+            self.enclosing.key.runtime(),
+        ) {
+            match super::trait_dictionaries::plan_slot_call(
+                self.program,
+                &self.body.dictionary_bounds,
+                &obligation,
+                method,
+                origin,
+            ) {
+                Ok(dispatch) => {
+                    self.body
+                        .bindings
+                        .insert(site, LoweredBoundTarget::Dictionary(dispatch));
+                }
+                Err(diagnostic) => self.diagnostics.push(diagnostic),
+            }
+            return;
+        }
         let resolved =
             match self
                 .program
@@ -4630,6 +4654,17 @@ impl<'a> BodyValidator<'a> {
         // A spread evaluates its operand once and supplies every mapped slot.
         let mut supplied = std::collections::HashSet::new();
         for step in &call.steps {
+            // A whole-product operand borrowed as several parameters is one
+            // evaluation shared by every record that names it.
+            if let LoweredCallStep::Argument { argument } = step
+                && let Some(expression) = call.arguments[*argument].expression
+            {
+                for (index, other) in call.arguments.iter().enumerate() {
+                    if other.expression == Some(expression) && other.slot.is_some() {
+                        supplied.insert(index);
+                    }
+                }
+            }
             match step {
                 LoweredCallStep::Argument { argument }
                 | LoweredCallStep::ProductElement { argument, .. }
@@ -5119,6 +5154,36 @@ impl<'a> BodyValidator<'a> {
                                 .map(|origin| origin.span.clone())
                                 .unwrap_or(Span::Compiler),
                             "instance body artifact binding does not match a specialization artifact request",
+                        );
+                    }
+                }
+                LoweredBoundTarget::Dictionary(dispatch) => {
+                    let valid = super::trait_dictionaries::environment_recipe_bound(
+                        self.program,
+                        &self.body.dictionary_bounds,
+                        match &dispatch.recipe {
+                            super::DictionaryRecipe::Environment(recipe) => recipe,
+                            super::DictionaryRecipe::Static(_) => {
+                                self.report(
+                                    origin
+                                        .as_ref()
+                                        .map(|origin| origin.span.clone())
+                                        .unwrap_or(Span::Compiler),
+                                    "dictionary dispatch uses a static recipe",
+                                );
+                                continue;
+                            }
+                        },
+                    )
+                    .as_ref()
+                        == Some(&dispatch.obligation);
+                    if !valid || self.site_category(site).is_none() {
+                        self.report(
+                            origin
+                                .as_ref()
+                                .map(|origin| origin.span.clone())
+                                .unwrap_or(Span::Compiler),
+                            "instance body dictionary dispatch disagrees with its bounds",
                         );
                     }
                 }

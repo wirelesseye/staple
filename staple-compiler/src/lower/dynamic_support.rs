@@ -235,6 +235,14 @@ impl LoweredProgram {
             return None;
         }
         let relevant = self.relevant_parameters(function);
+        // A routed call supplies each run-time bound as a static dictionary
+        // (T-B), so a bound no static dictionary serves keeps the call
+        // monomorphized.
+        if self.dictionary_pass_generic_calls
+            && !self.static_dictionaries_available(function, &relevant, substitutions)
+        {
+            return None;
+        }
         let scope = crate::RuntimeScope {
             types: if self.dictionary_pass_generic_calls {
                 relevant.type_parameters().collect()
@@ -248,6 +256,43 @@ impl LoweredProgram {
             },
         };
         (!scope.is_empty()).then_some(scope)
+    }
+
+    fn static_dictionaries_available(
+        &self,
+        function: FunctionId,
+        relevant: &crate::RelevantParameters,
+        substitutions: &crate::CallSubstitutions,
+    ) -> bool {
+        let Some(callee) = self.functions.get(function) else {
+            return true;
+        };
+        let runtime = relevant.type_parameters().collect::<BTreeSet<_>>();
+        let substitution = substitutions
+            .types
+            .iter()
+            .map(|entry| (entry.parameter, entry.value_type.clone()))
+            .collect();
+        super::trait_dictionaries::runtime_obligations(
+            &self.semantic_ids,
+            &callee.declared_bounds,
+            &Default::default(),
+            &runtime,
+        )
+        .into_iter()
+        .map(|obligation| crate::CheckedTraitBound {
+            trait_id: obligation.trait_id,
+            arguments: obligation
+                .arguments
+                .into_iter()
+                .map(|argument| crate::substitute_type(argument, &substitution))
+                .collect(),
+        })
+        .all(|obligation| {
+            !obligation.arguments.iter().any(contains_type_parameter)
+                && super::trait_dictionaries::static_request(self, &obligation, &callee.origin)
+                    .is_ok()
+        })
     }
 
     /// The cached per-template support decision. Computed once after the
@@ -386,6 +431,11 @@ impl LoweredProgram {
     ) -> (BTreeSet<RejectionReason>, HashSet<FunctionId>) {
         let mut walker = SupportWalker {
             program: self,
+            declared: self
+                .functions
+                .get(function)
+                .map(|template| template.declared_bounds.clone())
+                .unwrap_or_default(),
             reasons: BTreeSet::new(),
             dependencies: HashSet::new(),
             visited_blocks: HashSet::new(),
@@ -412,13 +462,8 @@ impl LoweredProgram {
         if let Some(reason) = signature_function_restriction(&template.signature) {
             walker.reject(reason);
         }
-        let copy = self.semantic_ids.copy_trait;
-        let sized = self.semantic_ids.sized_trait;
-        for bound in &template.bounds {
-            if Some(bound.trait_id) != copy && Some(bound.trait_id) != sized {
-                walker.reject(RejectionReason::TraitBound);
-            }
-        }
+        // Stage 6: a bound becomes a hidden dictionary (T-C). What a body does
+        // with it is checked at each trait-dependent site.
         if let Some(body) = template.body {
             walker.block(body);
         }
@@ -580,6 +625,9 @@ fn signature_function_restriction(function_type: &CheckedFunctionType) -> Option
 
 struct SupportWalker<'program> {
     program: &'program LoweredProgram,
+    /// The scanned template's declared bounds: the dictionaries its dynamic
+    /// instance receives (T-C).
+    declared: Vec<crate::CheckedTraitBound>,
     reasons: BTreeSet<RejectionReason>,
     dependencies: HashSet<FunctionId>,
     visited_blocks: HashSet<BlockId>,
@@ -593,6 +641,100 @@ struct SupportWalker<'program> {
 impl SupportWalker<'_> {
     fn reject(&mut self, reason: RejectionReason) {
         self.reasons.insert(reason);
+    }
+
+    /// Whether a trait-member call at run-time types can read a dictionary
+    /// this template receives: its obligation mentions a type parameter and an
+    /// equal declared bound, or one of its prerequisites, provides it.
+    fn trait_call_has_dictionary(&self, evidence: Option<&crate::TraitEvidence>) -> bool {
+        let Some(evidence) = evidence else {
+            return false;
+        };
+        let (trait_id, arguments, _) = crate::lower::trait_dictionaries::evidence_obligation(evidence);
+        if !arguments.iter().any(contains_type_parameter) {
+            return false;
+        }
+        let obligation = crate::CheckedTraitBound {
+            trait_id,
+            arguments: arguments.to_vec(),
+        };
+        crate::lower::trait_dictionaries::environment_recipe(
+            self.program,
+            &self.declared,
+            &obligation,
+        )
+        .is_some()
+    }
+
+    /// A dynamic callee's dictionaries must be suppliable here: from this
+    /// template's own, or as static ones when the obligation is concrete.
+    fn callee_bounds_supplied(
+        &mut self,
+        function: FunctionId,
+        substitutions: &crate::CallSubstitutions,
+    ) {
+        let Some(callee) = self.program.functions.get(function) else {
+            return;
+        };
+        let substitution = substitutions
+            .types
+            .iter()
+            .map(|entry| (entry.parameter, entry.value_type.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let runtime = self
+            .program
+            .relevant_parameters(function)
+            .type_parameters()
+            .collect::<BTreeSet<_>>();
+        for bound in &callee.declared_bounds {
+            let arguments = bound
+                .arguments
+                .iter()
+                .map(|argument| crate::substitute_type(argument.clone(), &substitution))
+                .collect::<Vec<_>>();
+            // Only bounds over the callee's run-time parameters become
+            // dictionaries (T-B).
+            let mut referenced = BTreeSet::new();
+            for argument in &bound.arguments {
+                crate::lower::instance_resolution::collect_referenced_parameters(
+                    argument,
+                    &mut referenced,
+                );
+            }
+            if referenced.is_disjoint(&runtime)
+                || [
+                    self.program.semantic_ids.copy_trait,
+                    self.program.semantic_ids.sized_trait,
+                    self.program.semantic_ids.drop_trait,
+                    self.program.semantic_ids.natural_trait,
+                ]
+                .contains(&Some(bound.trait_id))
+            {
+                continue;
+            }
+            let obligation = crate::CheckedTraitBound {
+                trait_id: bound.trait_id,
+                arguments,
+            };
+            let supplied = if obligation.arguments.iter().any(contains_type_parameter) {
+                crate::lower::trait_dictionaries::environment_recipe(
+                    self.program,
+                    &self.declared,
+                    &obligation,
+                )
+                .is_some()
+            } else {
+                crate::lower::trait_dictionaries::static_request(
+                    self.program,
+                    &obligation,
+                    &callee.origin,
+                )
+                .is_ok()
+            };
+            if !supplied {
+                self.reject(RejectionReason::TraitCallRuntime);
+            }
+        }
     }
 
     fn block(&mut self, id: BlockId) {
@@ -764,9 +906,26 @@ impl SupportWalker<'_> {
                         .is_some()
                 {
                     self.dependencies.insert(*function);
+                    self.callee_bounds_supplied(*function, &callable.substitutions);
                 }
                 if dynamic_shape && !dynamic_target {
                     self.reject(RejectionReason::CallableValue);
+                }
+                // A trait member used as a value at a run-time type is a
+                // closure over a dictionary slot (T-L).
+                if matches!(
+                    callable.target,
+                    LoweredCallableTarget::TraitImplementation { .. }
+                        | LoweredCallableTarget::StructuralTraitMethod { .. }
+                ) && (dynamic_shape
+                    || callable.evidence.as_ref().is_some_and(|evidence| {
+                        crate::lower::trait_dictionaries::evidence_obligation(evidence)
+                            .1
+                            .iter()
+                            .any(contains_type_parameter)
+                    }))
+                {
+                    self.reject(RejectionReason::TraitCallRuntime);
                 }
             }
             LoweredExpressionKind::Resource(_) => {}
@@ -957,6 +1116,7 @@ impl SupportWalker<'_> {
                         || relevant.effect_parameters().next().is_some();
                     if generic {
                         self.dependencies.insert(*function);
+                        self.callee_bounds_supplied(*function, &call.substitutions);
                     } else if contains_type_parameter(&CheckedType::Function(
                         call.function_type.clone(),
                     )) {
@@ -978,13 +1138,9 @@ impl SupportWalker<'_> {
             }
             // A concrete trait call dispatches to a monomorphized implementation
             // and needs no dictionary; a parameter-dependent one is Stage 6.
-            LoweredCallableTarget::TraitImplementation { .. } => {
-                if mentions_parameters {
-                    self.reject(RejectionReason::TraitCallRuntime);
-                }
-            }
-            LoweredCallableTarget::StructuralTraitMethod { .. } => {
-                if mentions_parameters {
+            LoweredCallableTarget::TraitImplementation { .. }
+            | LoweredCallableTarget::StructuralTraitMethod { .. } => {
+                if mentions_parameters && !self.trait_call_has_dictionary(call.evidence.as_ref()) {
                     self.reject(RejectionReason::TraitCallRuntime);
                 }
             }
