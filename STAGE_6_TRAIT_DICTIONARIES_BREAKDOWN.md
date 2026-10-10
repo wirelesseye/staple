@@ -58,8 +58,12 @@ the release build of this stage's base commit for every existing input.
   projected-result call explicitly and annotate its result, and annotate the
   callback parameter. Bounded-value and abstract-selection restriction probes
   remain to be added as the supporting paths land.
-- **6a/6b not implemented.** Runtime bounds and trait operations still reject;
-  the dictionary ABI, recipes, builders, bounded values, and exit gates remain.
+- **6a.1 in progress.** Trait metadata records the dictionary prefix ranges
+  and associated descriptors in declaration order, validated at the lowering
+  boundary. Tests cover default slots and associated-type prerequisites.
+  Static dictionary artifacts and slot thunks remain.
+- **6a.2–6b.3 pending.** Runtime bounds and trait operations still reject;
+  hidden arguments, recipes, builders, bounded values, and exit gates remain.
 
 ## Decisions
 

@@ -47,6 +47,7 @@ mod cleanup_artifacts;
 mod coroutine_artifacts;
 mod descriptor_artifacts;
 mod dynamic_support;
+mod trait_dictionaries;
 mod emission;
 mod extern_artifacts;
 pub(crate) mod graph_validation;
@@ -2896,6 +2897,10 @@ pub(crate) struct LoweredTraitMetadata {
     pub prerequisites: Vec<CheckedTraitBound>,
     /// Declared method order.
     pub methods: Vec<TraitMethodId>,
+    /// Hidden associated-type arguments, in declaration order. These become
+    /// the descriptors in the dictionary prefix.
+    pub associated_types: Vec<CheckedType>,
+    pub dictionary_layout: trait_dictionaries::TraitDictionaryLayout,
     /// Default implementations, in declared method order.
     pub default_methods: Vec<(TraitMethodId, FunctionId)>,
 }
@@ -3253,6 +3258,18 @@ impl LoweredProgram {
                     .get(&trait_id)
                     .cloned()
                     .unwrap_or_default(),
+                associated_types: parameter_arguments
+                    .get(&trait_id)
+                    .map(|parameters| {
+                        parameters[parameters.len() - trait_.declaration.associated_types.len()..]
+                            .to_vec()
+                    })
+                    .unwrap_or_default(),
+                dictionary_layout: trait_dictionaries::TraitDictionaryLayout::new(
+                    trait_.methods.len(),
+                    module.trait_prerequisites(trait_id).len(),
+                    trait_.declaration.associated_types.len(),
+                ),
                 prerequisites: module.trait_prerequisites(trait_id).to_vec(),
                 methods: trait_.methods.clone(),
                 default_methods,
@@ -12903,6 +12920,19 @@ impl LoweredProgram {
                     ),
                 ));
             }
+            if info.dictionary_layout
+                != trait_dictionaries::TraitDictionaryLayout::new(
+                    info.methods.len(),
+                    info.prerequisites.len(),
+                    info.associated_types.len(),
+                )
+                || !info.parameters.ends_with(&info.associated_types)
+            {
+                diagnostics.push(Diagnostic::new(
+                    info.origin.span.clone(),
+                    format!("trait {key:?} has an inconsistent dictionary prefix"),
+                ));
+            }
             if self.modules.get(info.module).is_none() {
                 diagnostics.push(invalid_reference(
                     &info.origin,
@@ -16204,6 +16234,11 @@ mod tests {
 
         let convert = lowered_trait(&program, "TestConvert");
         assert_eq!(convert.parameters.len(), 3);
+        assert_eq!(convert.associated_types, convert.parameters[2..]);
+        assert_eq!(convert.dictionary_layout.slots, 0..1);
+        assert_eq!(convert.dictionary_layout.prerequisites, 1..1);
+        assert_eq!(convert.dictionary_layout.associated, 1..2);
+        assert_eq!(convert.dictionary_layout.environment, 2);
         assert_eq!(convert.methods.len(), 1);
         let method = program
             .trait_methods
@@ -16216,6 +16251,10 @@ mod tests {
         let ordered = lowered_trait(&program, "TestOrdered");
         assert!(!ordered.prerequisites.is_empty());
         assert_eq!(ordered.methods.len(), 2);
+        assert_eq!(ordered.dictionary_layout.slots, 0..2);
+        assert_eq!(ordered.dictionary_layout.prerequisites, 2..3);
+        assert_eq!(ordered.dictionary_layout.associated, 3..3);
+        assert_eq!(ordered.dictionary_layout.environment, 3);
         assert_eq!(ordered.default_methods.len(), 1);
         assert_eq!(ordered.default_methods[0].0, ordered.methods[1]);
         let names = ordered
@@ -16243,6 +16282,36 @@ mod tests {
                 .get(ordered.default_methods[0].1)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn dictionary_prefix_preserves_associated_prerequisites_and_default_slots() {
+        let module = checked_program(concat!(
+            "trait DictBase T { base: T -> Bool }\n",
+            "trait DictOther T { other: T -> Bool }\n",
+            "trait DictFull T where DictBase T {\n",
+            "  type First where DictBase First\n",
+            "  type Second where DictOther Second\n",
+            "  required: (T, First, Second) -> Bool\n",
+            "  defaulted: (T, First, Second) -> Bool = value => required value\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+        let full = lowered_trait(&program, "DictFull");
+        assert_eq!(full.associated_types, full.parameters[1..]);
+        let prerequisite_names = full
+            .prerequisites
+            .iter()
+            .map(|bound| program.traits.get(bound.trait_id).unwrap().name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(prerequisite_names, ["DictBase", "DictBase", "DictOther"]);
+        assert_eq!(full.dictionary_layout.slots, 0..2);
+        assert_eq!(full.dictionary_layout.prerequisites, 2..5);
+        assert_eq!(full.dictionary_layout.associated, 5..7);
+        assert_eq!(full.dictionary_layout.environment, 7);
+        assert_eq!(full.default_methods[0].0, full.methods[1]);
     }
 
     #[test]
