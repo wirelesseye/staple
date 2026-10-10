@@ -173,6 +173,9 @@ pub(crate) struct LoweredInstanceBody {
     pub dictionary_obligations: Vec<CheckedTraitBound>,
     /// Hidden dictionary arguments in lexical declaration order (T-C).
     pub dictionary_bounds: Vec<CheckedTraitBound>,
+    /// Available environment/prerequisite routes for expanded obligations.
+    pub dictionary_environment_recipes:
+        Vec<Option<super::trait_dictionaries::EnvironmentDictionaryRecipe>>,
     pub parameter_style: FunctionParameterStyle,
     /// The instance-local parameter pattern.
     pub parameter_pattern: PatternId,
@@ -253,6 +256,7 @@ impl LoweredInstanceBody {
             bounds: Vec::new(),
             dictionary_obligations: Vec::new(),
             dictionary_bounds: Vec::new(),
+            dictionary_environment_recipes: Vec::new(),
             parameter_style: FunctionParameterStyle::Single,
             parameter_pattern: PatternId::from_index(0),
             parameters: Vec::new(),
@@ -644,6 +648,18 @@ impl<'a> BodyCloner<'a> {
             &self.substitution,
             self.enclosing.key.runtime(),
         );
+        self.body.dictionary_environment_recipes = self
+            .body
+            .dictionary_obligations
+            .iter()
+            .map(|bound| {
+                super::trait_dictionaries::environment_recipe(
+                    self.program,
+                    &self.body.dictionary_bounds,
+                    bound,
+                )
+            })
+            .collect();
         self.body.bounds = function
             .bounds
             .iter()
@@ -3820,6 +3836,39 @@ impl<'a> BodyValidator<'a> {
                         self.body.origin.span.clone(),
                         "instance hidden dictionary order disagrees with its declarations",
                     );
+                }
+                let recipes = expected
+                    .iter()
+                    .map(|bound| {
+                        super::trait_dictionaries::environment_recipe(
+                            self.program,
+                            &declared,
+                            bound,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if self.body.dictionary_environment_recipes != recipes {
+                    self.report(
+                        self.body.origin.span.clone(),
+                        "instance dictionary environment recipes disagree with its bounds",
+                    );
+                }
+                for (bound, recipe) in expected
+                    .iter()
+                    .zip(&self.body.dictionary_environment_recipes)
+                {
+                    if let Some(recipe) = recipe {
+                        if super::trait_dictionaries::environment_recipe_bound(
+                            self.program,
+                            &declared,
+                            recipe,
+                        )
+                        .as_ref()
+                            != Some(bound)
+                        {
+                            self.report(self.body.origin.span.clone(), "instance dictionary prerequisite recipe carries the wrong obligation");
+                        }
+                    }
                 }
                 if self.body.dictionary_obligations != expected {
                     self.report(

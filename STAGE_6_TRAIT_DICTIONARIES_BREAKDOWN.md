@@ -55,7 +55,9 @@ the release build of this stage's base commit for every existing input.
 - **6a.2/6a.3 groundwork.** Instance runtime obligations are recorded and
   validated separately from declared hidden dictionary bounds. Written scheme
   order and lexical inheritance (including implicit thunks) are retained without
-  prerequisite arguments. Dictionary signatures/recipes are pending.
+  prerequisite arguments. Instance bodies record and validate direct/transitive
+  environment recipes, including associated prerequisites. Hidden signatures,
+  demand-site recipes and abstract selection are pending.
 - **Remaining:** hidden arguments, recipes/abstract selection, generic and
   structural builders, trait operations, bounded values, docs and exit gates.
 - Checker workarounds remain: explicit `USize` indices, projected-result type

@@ -74,6 +74,122 @@ pub(super) fn runtime_obligations(
         .collect()
 }
 
+/// A route from a hidden argument through zero or more fixed prefix slots.
+/// This contains no implementation choice; an equal environment bound wins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EnvironmentDictionaryRecipe {
+    pub argument: usize,
+    /// Absolute pointer-slot offsets in each successive dictionary prefix.
+    pub prerequisites: Vec<usize>,
+}
+
+/// Search direct arguments before any prerequisite path. Visit each equal
+/// obligation once per root so cyclic prerequisite graphs terminate.
+pub(super) fn environment_recipe(
+    program: &super::LoweredProgram,
+    environment: &[crate::CheckedTraitBound],
+    obligation: &crate::CheckedTraitBound,
+) -> Option<EnvironmentDictionaryRecipe> {
+    if let Some(argument) = environment.iter().position(|bound| bound == obligation) {
+        return Some(EnvironmentDictionaryRecipe {
+            argument,
+            prerequisites: Vec::new(),
+        });
+    }
+    let mut queue = std::collections::VecDeque::new();
+    let mut visited = environment
+        .iter()
+        .map(|bound| vec![bound.clone()])
+        .collect::<Vec<_>>();
+    for (argument, bound) in environment.iter().enumerate() {
+        queue.push_back((
+            bound.clone(),
+            EnvironmentDictionaryRecipe {
+                argument,
+                prerequisites: Vec::new(),
+            },
+        ));
+    }
+    while let Some((bound, recipe)) = queue.pop_front() {
+        let metadata = program.traits.get(bound.trait_id)?;
+        let substitution = dictionary_substitution(metadata, &bound.arguments)?;
+        for (index, prerequisite) in metadata.prerequisites.iter().enumerate() {
+            let next = crate::CheckedTraitBound {
+                trait_id: prerequisite.trait_id,
+                arguments: prerequisite
+                    .arguments
+                    .iter()
+                    .map(|argument| crate::substitute_type(argument.clone(), &substitution))
+                    .collect(),
+            };
+            if visited[recipe.argument].contains(&next) {
+                continue;
+            }
+            let mut route = recipe.clone();
+            route
+                .prerequisites
+                .push(metadata.dictionary_layout.prerequisites.start + index);
+            if &next == obligation {
+                return Some(route);
+            }
+            visited[recipe.argument].push(next.clone());
+            queue.push_back((next, route));
+        }
+    }
+    None
+}
+
+fn dictionary_substitution(
+    metadata: &super::LoweredTraitMetadata,
+    arguments: &[crate::CheckedType],
+) -> Option<std::collections::HashMap<crate::TypeParameterId, crate::CheckedType>> {
+    if metadata.parameters.len() != arguments.len() {
+        return None;
+    }
+    Some(
+        metadata
+            .parameters
+            .iter()
+            .zip(arguments)
+            .filter_map(|(parameter, argument)| {
+                let crate::CheckedType::Parameter { id, .. } = parameter else {
+                    return None;
+                };
+                Some((*id, argument.clone()))
+            })
+            .collect(),
+    )
+}
+
+/// Recompute the obligation carried by a recorded route, checking each slot
+/// against the owning trait's prefix. Consumers never infer an implementation.
+pub(super) fn environment_recipe_bound(
+    program: &super::LoweredProgram,
+    environment: &[crate::CheckedTraitBound],
+    recipe: &EnvironmentDictionaryRecipe,
+) -> Option<crate::CheckedTraitBound> {
+    let mut bound = environment.get(recipe.argument)?.clone();
+    for slot in &recipe.prerequisites {
+        let metadata = program.traits.get(bound.trait_id)?;
+        if !metadata.dictionary_layout.prerequisites.contains(slot) {
+            return None;
+        }
+        let prerequisite = metadata
+            .prerequisites
+            .get(slot - metadata.dictionary_layout.prerequisites.start)?;
+        let substitution = dictionary_substitution(metadata, &bound.arguments)?;
+        bound = crate::CheckedTraitBound {
+            trait_id: prerequisite.trait_id,
+            arguments: prerequisite
+                .arguments
+                .iter()
+                .map(|argument| crate::substitute_type(argument.clone(), &substitution))
+                .collect(),
+        };
+    }
+    Some(bound)
+}
+
 /// A concrete obligation creates a dictionary only at a demand site.
 pub(super) fn static_request(
     program: &super::LoweredProgram,

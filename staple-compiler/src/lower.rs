@@ -16364,6 +16364,85 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_environment_recipes_follow_transitive_and_associated_prefixes() {
+        let module = checked_program(concat!(
+            "trait RecipeBase T { base: T -> Bool }\n",
+            "trait RecipeMiddle T where RecipeBase (List T) { middle: T -> Bool }\n",
+            "trait RecipeRoot T where RecipeMiddle T {\n",
+            "  type Item where RecipeBase Item\n",
+            "  root: (T, Item) -> Bool\n",
+            "}\n",
+            "def inspect: <T where RecipeRoot T> T -> I32 = value => 42\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let function = program
+            .functions
+            .iter()
+            .find_map(|(_, _, f)| (f.name == "inspect").then_some(f))
+            .unwrap();
+        let environment = &function.declared_bounds;
+        let root = program.traits.get(environment[0].trait_id).unwrap();
+        let base = function
+            .bounds
+            .iter()
+            .find(|bound| program.traits.get(bound.trait_id).unwrap().name == "RecipeBase")
+            .unwrap();
+        let recipe = trait_dictionaries::environment_recipe(&program, environment, base)
+            .expect("transitive prerequisite");
+        let middle = program
+            .traits
+            .iter()
+            .find_map(|(_, _, t)| (t.name == "RecipeMiddle").then_some(t))
+            .unwrap();
+        assert_eq!(recipe.argument, 0);
+        assert_eq!(
+            recipe.prerequisites,
+            [
+                root.dictionary_layout.prerequisites.start,
+                middle.dictionary_layout.prerequisites.start
+            ]
+        );
+        assert_eq!(
+            trait_dictionaries::environment_recipe_bound(&program, environment, &recipe).as_ref(),
+            Some(base)
+        );
+        let mut direct = environment.clone();
+        direct.push(base.clone());
+        let preferred = trait_dictionaries::environment_recipe(&program, &direct, base).unwrap();
+        assert_eq!(preferred.argument, 1);
+        assert!(preferred.prerequisites.is_empty());
+        let associated = trait_dictionaries::EnvironmentDictionaryRecipe {
+            argument: 0,
+            prerequisites: vec![root.dictionary_layout.prerequisites.start + 1],
+        };
+        let associated_bound =
+            trait_dictionaries::environment_recipe_bound(&program, environment, &associated)
+                .unwrap();
+        assert_eq!(
+            associated_bound.arguments,
+            vec![environment[0].arguments.last().unwrap().clone()]
+        );
+        assert_eq!(
+            trait_dictionaries::environment_recipe(&program, environment, &associated_bound),
+            Some(associated)
+        );
+        let bad_slot = trait_dictionaries::EnvironmentDictionaryRecipe {
+            argument: 0,
+            prerequisites: vec![root.dictionary_layout.associated.start],
+        };
+        assert!(
+            trait_dictionaries::environment_recipe_bound(&program, environment, &bad_slot)
+                .is_none()
+        );
+        let mut unrelated = base.clone();
+        unrelated.arguments = vec![CheckedType::String];
+        assert!(
+            trait_dictionaries::environment_recipe(&program, environment, &unrelated).is_none()
+        );
+    }
+
+    #[test]
     fn implicit_thunks_inherit_declared_dictionary_bounds() {
         let module = checked_program(concat!(
             "def evaluate: (() -> String) -> String = callback => callback ()\n",
