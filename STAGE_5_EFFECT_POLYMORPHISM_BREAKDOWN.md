@@ -227,7 +227,7 @@ After Stage 5:
 
 | Restriction | Message | Lifted in |
 |---|---|---|
-| Trait bound other than `Copy`/`Sized` | "polymorphic values with trait bounds are not supported yet" | Stage 6 |
+| Trait bound other than `Copy`/`Sized` | "polymorphic values with trait bounds are not supported yet" | Lifted in Stage 6 |
 | Coroutine, async, or reactive body, transitively, including `block_on`, `spawn`, `reaction`, and `batch` | the existing coroutine, async, and reactive messages | Stage 8 |
 | Trait member used as a polymorphic value | "trait members cannot be used as polymorphic values yet" | Stage 7 |
 | Run-time `Natural` count; function values behind references | unchanged | Not planned |

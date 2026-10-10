@@ -95,6 +95,11 @@ pub(crate) enum ArtifactUseSite {
     /// The n-th artifact a body's dictionary builders need (slot entries and
     /// nested static dictionaries), in `body_builder_uses` order.
     DictionaryBuilder(usize),
+    /// A static dictionary stored in an instantiation adapter's environment.
+    CoercionDictionary {
+        expression: ExpressionId,
+        argument: usize,
+    },
     /// A static dictionary stored in a callable value's closure environment.
     ValueDictionary {
         value: LoweredCallableValueId,
@@ -1635,6 +1640,26 @@ impl LoweredProgram {
         }
     }
 
+    fn dictionary_site_has_argument(
+        &self,
+        site_owner: &UseSiteOwner<'_>,
+        site: super::trait_dictionaries::DictionarySite,
+        argument: usize,
+    ) -> bool {
+        match site_owner {
+            UseSiteOwner::Instance(body) => body
+                .dictionary_calls
+                .get(&site)
+                .is_some_and(|arguments| argument < arguments.len()),
+            UseSiteOwner::Initializer(id) => {
+                super::trait_dictionaries::initializer_call_arguments(self, *id)
+                    .ok()
+                    .and_then(|sites| sites.get(&site).map(|arguments| argument < arguments.len()))
+                    .unwrap_or(false)
+            }
+        }
+    }
+
     /// Every use site's ID must resolve inside the owning body's own arenas, so
     /// a scanner cannot tie an edge to a site that emission could not emit from.
     fn check_use_site(
@@ -1696,22 +1721,26 @@ impl LoweredProgram {
                 }
             }
             ArtifactUseSite::CallDictionary { call, argument } => {
-                let valid = match site_owner {
-                    UseSiteOwner::Instance(body) => body
-                        .dictionary_calls
-                        .get(&call)
-                        .is_some_and(|arguments| argument < arguments.len()),
-                    UseSiteOwner::Initializer(id) => {
-                        super::trait_dictionaries::initializer_call_arguments(self, id)
-                            .ok()
-                            .and_then(|calls| {
-                                calls.get(&call).map(|arguments| argument < arguments.len())
-                            })
-                            .unwrap_or(false)
-                    }
-                };
+                let valid = self.dictionary_site_has_argument(
+                    &site_owner,
+                    super::trait_dictionaries::DictionarySite::Call(call),
+                    argument,
+                );
                 if !valid {
                     report("call dictionary", call.index());
+                }
+            }
+            ArtifactUseSite::CoercionDictionary {
+                expression,
+                argument,
+            } => {
+                let valid = self.dictionary_site_has_argument(
+                    &site_owner,
+                    super::trait_dictionaries::DictionarySite::Coercion(expression),
+                    argument,
+                );
+                if !valid {
+                    report("coercion dictionary", expression.index());
                 }
             }
             ArtifactUseSite::DictionaryBuilder(index) => {

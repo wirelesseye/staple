@@ -73,6 +73,7 @@ fn instantiation_types(expression: &super::LoweredExpression) -> &[CheckedType] 
 /// The adapter request for one expression that instantiates a polymorphic
 /// value, or `None` for every other expression.
 fn instantiation_request(
+    program: &super::LoweredProgram,
     id: super::ExpressionId,
     expression: &super::LoweredExpression,
 ) -> Result<Option<ClosureRequest>, Vec<Diagnostic>> {
@@ -98,12 +99,23 @@ fn instantiation_request(
         target: CanonicalType::dynamic(&produced, &expression.origin)
             .map_err(|error| vec![error])?,
     };
+    let (dictionaries, target_dictionaries, entailment) = super::trait_dictionaries::adapter_dictionaries(
+        program,
+        scheme,
+        types,
+        &produced,
+        &expression.origin,
+    )
+    .map_err(|error| vec![error])?;
     Ok(Some(ClosureRequest::Artifact {
         key: ArtifactRequestKey::InstantiationAdapter(key),
         plan: Plan::InstantiationAdapter(crate::InstantiationAdapterPlan {
             scheme: scheme.as_ref().clone(),
             target: produced,
             types: types.clone(),
+            dictionaries,
+            target_dictionaries,
+            entailment,
             children: Vec::new(),
         }),
         kind: Kind::InstantiationAdapter,
@@ -693,7 +705,7 @@ pub(super) fn scan_instance(
         });
     }
     for (id, expression) in body.expressions() {
-        requests.extend(instantiation_request(id, expression)?);
+        requests.extend(instantiation_request(program, id, expression)?);
     }
     requests.extend(reabstraction_requests(&body.conversions, &body.origin)?);
     Ok(requests)
@@ -728,6 +740,7 @@ pub(super) fn scan_initializer(
 ) -> super::artifact_closure::ScanResult {
     let types = concrete_initializer_types(program, id);
     let mut adapters = InitializerAdapterVisitor {
+        program,
         requests: Vec::new(),
     };
     super::cleanup_artifacts::walk_owner(
@@ -766,17 +779,19 @@ struct InitializerDescriptorVisitor<'a> {
 
 /// Collects the instantiation-adapter requests of an initializer's
 /// polymorphic-value coercions.
-struct InitializerAdapterVisitor {
+struct InitializerAdapterVisitor<'a> {
+    program: &'a super::LoweredProgram,
     requests: Vec<ClosureRequest>,
 }
 
-impl super::cleanup_artifacts::LoweredOwnerVisitor for InitializerAdapterVisitor {
+impl super::cleanup_artifacts::LoweredOwnerVisitor for InitializerAdapterVisitor<'_> {
     fn expression_site(
         &mut self,
         id: super::ExpressionId,
         expression: &super::LoweredExpression,
     ) -> Result<(), Vec<staple_syntax::Diagnostic>> {
-        self.requests.extend(instantiation_request(id, expression)?);
+        self.requests
+            .extend(instantiation_request(self.program, id, expression)?);
         Ok(())
     }
 }

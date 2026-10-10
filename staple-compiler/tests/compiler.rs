@@ -13534,15 +13534,6 @@ fn stage4b_reports_each_polymorphic_value_restriction_at_its_construction() {
     for (source, message) in [
         (
             concat!(
-                "trait Named T { name: T -> String }\n",
-                "impl Named I32 { name = value => \"int\" }\n",
-                "def label: <T where Named T> T -> String = value => Named.name value\n",
-                "let stored = label\n",
-            ),
-            "polymorphic values with trait bounds are not supported yet",
-        ),
-        (
-            concat!(
                 "use std.coroutine.*\n",
                 "def launch: <T> move T -> Coroutine{} I32 = move value => coro { 1 }\n",
                 "let stored = launch\n",
@@ -13579,6 +13570,19 @@ fn stage4b_reports_each_polymorphic_value_restriction_at_its_construction() {
             "{message} must point at the construction site"
         );
     }
+}
+
+#[test]
+fn stage6_bounded_functions_become_polymorphic_values() {
+    // Bounds become hidden dictionaries, so the value constructs and a call
+    // through it passes the dictionary for the instantiation.
+    lower(&type_check(concat!(
+        "trait Named T { name: T -> String }\n",
+        "impl Named I32 { name = value => \"int\" }\n",
+        "def label: <T where Named T> T -> String = value => Named.name value\n",
+        "let stored = label\n",
+        "let answer = stored 3\n",
+    )));
 }
 
 #[test]

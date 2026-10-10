@@ -153,7 +153,91 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 140] = [
+static CORPUS: [CorpusProgram; 143] = [
+    expect_stdout(
+        must_run(inline(
+            "trait_dictionary_adapters",
+            r#"use std.io.(IO, println)
+use std.fmt.Display
+use std.core.cmp.(Eq, Ord)
+def show: <T where Display T> move T ->{IO} () = move value => println "${value}"
+let stored: <T where Display T> move T ->{IO} () = show
+let int_show: move I32 ->{IO} () = stored
+int_show 5
+def apply: <A where Display A> move A ->{IO} () = move a => {
+    let narrowed: move A ->{IO} () = stored
+    narrowed a
+}
+apply 6
+let text: String = "seven"
+apply text
+def different: <T where Eq T> (T, T) -> Bool = (a, b) => Eq.ne (a, b)
+let eq_poly: <T where Eq T> (T, T) -> Bool = different
+let ord_poly: <U where Ord U> (U, U) -> Bool = eq_poly
+println "${ord_poly (1, 2):?} ${ord_poly (3, 3):?}"
+"#,
+            "trait-dictionaries",
+        )),
+        "5\n6\nseven\nTrue False\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "trait_dictionary_captures",
+            r#"use std.io.(IO, println)
+use std.fmt.Display
+use std.core.cmp.(Eq, Ord)
+let lam: <T where Display T> move T ->{IO} () = move value => println "lambda ${value}"
+lam 3
+def compare: <T where Ord T> (T, T) -> Bool = (a, b) => Eq.ne (a, b)
+let cmp: <T where Ord T> (T, T) -> Bool = compare
+println "${cmp (1, 2):?} ${cmp (2, 2):?}"
+def make: <A where Copy A, Display A> A -> (<T where Display T> move T ->{IO} ()) = prefix => {
+    let inner: <T where Display T> move T ->{IO} () = move value => println "${prefix} ${value}"
+    inner
+}
+let made = make 100
+made 7
+let label: String = "x"
+made label
+type Wrapped T = wrap T
+impl<T where Display T> Display (Wrapped T) { fmt = (Wrapped inner, mut formatter) => Display.fmt (inner, formatter) }
+def call_with_wrapped: <A where Display A> move A ->{IO} () = move a => {
+    let poly: <T where Display T> move T ->{IO} () = lam
+    poly (Wrapped a)
+}
+call_with_wrapped 55
+def make_wrapped: <A where Copy A, Display A> A -> (<T where Display T> move T ->{IO} ()) = prefix => make (Wrapped prefix)
+let wrapped_made = make_wrapped 9
+wrapped_made 1
+let wrapped_again = make_wrapped 10
+wrapped_again 2
+wrapped_made 3
+"#,
+            "trait-dictionaries",
+        )),
+        "lambda 3\nTrue False\n100 7\n100 x\nlambda 55\n9 1\n10 2\n9 3\n",
+    ),
+    expect_stdout(
+        must_run(inline(
+            "trait_dictionary_values",
+            r#"use std.io.(IO, println)
+use std.fmt.Display
+use std.string.ToString
+def show: <T where Display T> move T ->{IO} () = move value => println "${value}"
+let stored: <T where Display T> move T ->{IO} () = show
+def twice: (<T where Display T> move T ->{IO} ()) ->{IO} () = print => {
+    print 42
+    print.<String> "text"
+}
+twice stored
+def describe: <T where Display T> T -> String = value => ToString.to_string value
+let described: <T where Display T> T -> String = describe
+println (described 7)
+"#,
+            "trait-dictionaries",
+        )),
+        "42\ntext\n7\n",
+    ),
     expect_stdout(
         must_run(inline(
             "trait_dictionary_builder",

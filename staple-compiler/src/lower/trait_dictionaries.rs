@@ -673,6 +673,7 @@ pub(super) fn callee_runtime_obligations(
     function: crate::FunctionId,
     substitutions: &crate::CallSubstitutions,
     enclosing: &super::instance_resolution::ResolvedInstanceRequest,
+    own: &[crate::TypeParameterId],
 ) -> Vec<crate::CheckedTraitBound> {
     let Some(callee) = program.functions.get(function) else {
         return Vec::new();
@@ -721,9 +722,18 @@ pub(super) fn callee_runtime_obligations(
         callee
             .scheme_type_parameters
             .iter()
+            .chain(own)
             .all(|parameter| !referenced.contains(parameter))
     })
     .collect()
+}
+
+/// Where a dictionary list is passed or stored: a call's hidden arguments, or
+/// an instantiation adapter's environment at a coerced expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DictionarySite {
+    Call(super::LoweredCallId),
+    Coercion(super::ExpressionId),
 }
 
 /// A trait-member call through a dictionary at a run-time obligation (T-K).
@@ -896,6 +906,144 @@ pub(super) fn plan_direct_call(
     )
 }
 
+/// The non-marker bounds of a scheme at an instantiation, in scheme order.
+fn scheme_obligations(
+    program: &super::LoweredProgram,
+    scheme: &crate::CheckedScheme,
+    substitution: &std::collections::HashMap<crate::TypeParameterId, crate::CheckedType>,
+) -> Vec<crate::CheckedTraitBound> {
+    let markers = marker_traits(program);
+    scheme
+        .trait_bounds
+        .iter()
+        .filter(|bound| !markers.contains(&Some(bound.trait_id)))
+        .map(|bound| crate::CheckedTraitBound {
+            trait_id: bound.trait_id,
+            arguments: bound
+                .arguments
+                .iter()
+                .map(|argument| crate::substitute_type(argument.clone(), substitution))
+                .collect(),
+        })
+        .collect()
+}
+
+fn plan_obligations(
+    program: &super::LoweredProgram,
+    enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
+    environment: &[crate::CheckedTraitBound],
+    obligations: Vec<crate::CheckedTraitBound>,
+    origin: &crate::Origin,
+) -> Result<Vec<DictionaryCallArgument>, staple_syntax::Diagnostic> {
+    obligations
+        .into_iter()
+        .map(|obligation| {
+            let recipe = plan_recipe(program, enclosing, environment, &obligation, origin)?;
+            Ok(DictionaryCallArgument { obligation, recipe })
+        })
+        .collect()
+}
+
+/// What an adapter between a scheme and its instantiation or subsumption
+/// needs (T-M): the number of dictionaries the source scheme's entry takes,
+/// the number the target scheme passes in, and, for a scheme target, recipes
+/// that derive the source's from the target's.
+pub(super) fn adapter_dictionaries(
+    program: &super::LoweredProgram,
+    source: &crate::CheckedScheme,
+    types: &[crate::CheckedType],
+    target: &crate::CheckedType,
+    origin: &crate::Origin,
+) -> Result<(usize, usize, Vec<DictionaryCallArgument>), staple_syntax::Diagnostic> {
+    let identity = Default::default();
+    let source_obligations = |substitution: &std::collections::HashMap<
+        crate::TypeParameterId,
+        crate::CheckedType,
+    >| scheme_obligations(program, source, substitution);
+    let count = source_obligations(&identity).len();
+    let crate::CheckedType::Forall(target_scheme) = target else {
+        return Ok((count, 0, Vec::new()));
+    };
+    let target_bounds = scheme_obligations(program, target_scheme, &identity);
+    let substitution = source
+        .type_parameter_ids()
+        .into_iter()
+        .zip(types.iter().cloned())
+        .collect();
+    let mut recipes = Vec::new();
+    for obligation in source_obligations(&substitution) {
+        let selection = select_dictionary(program, &target_bounds, &obligation, origin)?;
+        let recipe = materialize_recipe(program, &selection, &mut |_| None, origin).map_err(|_| {
+            staple_syntax::Diagnostic::new(
+                origin.span.clone(),
+                "subsuming a polymorphic value needs a dictionary built from an implementation, which is not supported yet",
+            )
+        })?;
+        recipes.push(DictionaryCallArgument { obligation, recipe });
+    }
+    Ok((count, target_bounds.len(), recipes))
+}
+
+/// Dictionaries a call through a polymorphic value passes (T-M): the scheme's
+/// bounds at the call's instantiation, in scheme order.
+pub(super) fn plan_scheme_call(
+    program: &super::LoweredProgram,
+    enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
+    environment: &[crate::CheckedTraitBound],
+    call: &super::LoweredCall,
+) -> Result<Vec<DictionaryCallArgument>, staple_syntax::Diagnostic> {
+    let Some(scheme) = &call.scheme else {
+        return Ok(Vec::new());
+    };
+    let substitution = call
+        .substitutions
+        .types
+        .iter()
+        .map(|entry| (entry.parameter, entry.value_type.clone()))
+        .collect();
+    plan_obligations(
+        program,
+        enclosing,
+        environment,
+        scheme_obligations(program, scheme, &substitution),
+        &call.origin,
+    )
+}
+
+/// Dictionaries an instantiation adapter stores beside its descriptors
+/// (T-M): the source scheme's bounds at the instantiation types.
+pub(super) fn plan_instantiation(
+    program: &super::LoweredProgram,
+    enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
+    environment: &[crate::CheckedTraitBound],
+    expression: &super::LoweredExpression,
+) -> Result<Vec<DictionaryCallArgument>, staple_syntax::Diagnostic> {
+    let (Some(coercion), Some(plan)) = (&expression.coercion, &expression.coercion_plan) else {
+        return Ok(Vec::new());
+    };
+    let Some((leaf, _, _)) = plan.split_instantiation(&coercion.target) else {
+        return Ok(Vec::new());
+    };
+    let super::LoweredCoercionPlan::Instantiate { types } = leaf else {
+        return Ok(Vec::new());
+    };
+    let crate::CheckedType::Forall(scheme) = &coercion.source else {
+        return Ok(Vec::new());
+    };
+    let substitution = scheme
+        .type_parameter_ids()
+        .into_iter()
+        .zip(types.iter().cloned())
+        .collect();
+    plan_obligations(
+        program,
+        enclosing,
+        environment,
+        scheme_obligations(program, scheme, &substitution),
+        &expression.origin,
+    )
+}
+
 /// Dictionaries a callable value stores in its closure environment: the
 /// callee's lexical prefix, which its descriptor-bound entry forwards. A
 /// scheme value's own dictionaries arrive from its caller (T-C).
@@ -1061,10 +1209,16 @@ pub(super) fn body_builder_uses(
         walk_recipe(program, obligation, recipe, true, &mut uses);
         found.extend(uses.into_iter().map(|(_, use_)| (origin.clone(), use_)));
     };
-    for (call, arguments) in &body.dictionary_calls {
-        if let Some(call) = body.calls.get(*call) {
+    for (site, arguments) in &body.dictionary_calls {
+        let origin = match site {
+            DictionarySite::Call(call) => body.calls.get(*call).map(|call| &call.origin),
+            DictionarySite::Coercion(expression) => body
+                .expression(*expression)
+                .map(|expression| &expression.origin),
+        };
+        if let Some(origin) = origin {
             for argument in arguments {
-                walked(&call.origin, &argument.obligation, &argument.recipe);
+                walked(origin, &argument.obligation, &argument.recipe);
             }
         }
     }
@@ -1172,17 +1326,19 @@ pub(super) fn scan_instance(
         return Ok(Vec::new());
     };
     let mut requests = Vec::new();
-    for (call, arguments) in &body.dictionary_calls {
-        let origin = &body
-            .calls
-            .get(*call)
-            .ok_or_else(|| {
-                vec![staple_syntax::Diagnostic::new(
-                    body.origin.span.clone(),
-                    "dictionary recipe names a missing call",
-                )]
-            })?
-            .origin;
+    for (site, arguments) in &body.dictionary_calls {
+        let origin = match site {
+            DictionarySite::Call(call) => body.calls.get(*call).map(|call| &call.origin),
+            DictionarySite::Coercion(expression) => body
+                .expression(*expression)
+                .map(|expression| &expression.origin),
+        }
+        .ok_or_else(|| {
+            vec![staple_syntax::Diagnostic::new(
+                body.origin.span.clone(),
+                "dictionary recipe names a missing site",
+            )]
+        })?;
         for (index, argument) in arguments.iter().enumerate() {
             if let DictionaryRecipe::Static(key) = &argument.recipe {
                 let mut request = static_request(program, &argument.obligation, origin)
@@ -1201,10 +1357,7 @@ pub(super) fn scan_instance(
                         "dictionary recipe selection changed",
                     )]);
                 }
-                *use_site = Some(super::artifact_closure::ArtifactUseSite::CallDictionary {
-                    call: *call,
-                    argument: index,
-                });
+                *use_site = Some(dictionary_use_site(*site, index));
                 requests.push(request);
             }
         }
@@ -1271,13 +1424,13 @@ pub(super) fn initializer_call_arguments(
     program: &super::LoweredProgram,
     initializer: super::InitializerId,
 ) -> Result<
-    std::collections::BTreeMap<super::LoweredCallId, Vec<DictionaryCallArgument>>,
+    std::collections::BTreeMap<DictionarySite, Vec<DictionaryCallArgument>>,
     Vec<staple_syntax::Diagnostic>,
 > {
     struct Visitor<'a> {
         program: &'a super::LoweredProgram,
         initializer: super::InitializerId,
-        arguments: std::collections::BTreeMap<super::LoweredCallId, Vec<DictionaryCallArgument>>,
+        arguments: std::collections::BTreeMap<DictionarySite, Vec<DictionaryCallArgument>>,
     }
     impl super::cleanup_artifacts::LoweredOwnerVisitor for Visitor<'_> {
         fn call_id_site(
@@ -1294,8 +1447,27 @@ pub(super) fn initializer_call_arguments(
                 let arguments = plan_direct_call(self.program, None, &[], call, callee)
                     .map_err(|error| vec![error])?;
                 if !arguments.is_empty() {
-                    self.arguments.insert(id, arguments);
+                    self.arguments.insert(DictionarySite::Call(id), arguments);
                 }
+            } else if call.scheme.is_some() {
+                let arguments = plan_scheme_call(self.program, None, &[], call)
+                    .map_err(|error| vec![error])?;
+                if !arguments.is_empty() {
+                    self.arguments.insert(DictionarySite::Call(id), arguments);
+                }
+            }
+            Ok(())
+        }
+
+        fn expression_site(
+            &mut self,
+            id: super::ExpressionId,
+            expression: &super::LoweredExpression,
+        ) -> Result<(), Vec<staple_syntax::Diagnostic>> {
+            let arguments = plan_instantiation(self.program, None, &[], expression)
+                .map_err(|error| vec![error])?;
+            if !arguments.is_empty() {
+                self.arguments.insert(DictionarySite::Coercion(id), arguments);
             }
             Ok(())
         }
@@ -1319,12 +1491,15 @@ pub(super) fn scan_initializer(
 ) -> super::artifact_closure::ScanResult {
     let arguments = initializer_call_arguments(program, initializer)?;
     let mut requests = Vec::new();
-    for (call, arguments) in arguments {
-        let origin = &program
-            .calls
-            .get(call)
-            .expect("initializer dictionary call")
-            .origin;
+    for (site, arguments) in arguments {
+        let origin = match site {
+            DictionarySite::Call(call) => program.calls.get(call).map(|call| &call.origin),
+            DictionarySite::Coercion(expression) => program
+                .expressions
+                .get(expression)
+                .map(|expression| &expression.origin),
+        }
+        .expect("initializer dictionary site");
         for (index, argument) in arguments.iter().enumerate() {
             let DictionaryRecipe::Static(key) = &argument.recipe else {
                 unreachable!("initializers have no hidden dictionary environment")
@@ -1345,14 +1520,28 @@ pub(super) fn scan_initializer(
                     "initializer dictionary recipe selection changed",
                 )]);
             }
-            *use_site = Some(super::artifact_closure::ArtifactUseSite::CallDictionary {
-                call,
-                argument: index,
-            });
+            *use_site = Some(dictionary_use_site(site, index));
             requests.push(request);
         }
     }
     Ok(requests)
+}
+
+fn dictionary_use_site(
+    site: DictionarySite,
+    argument: usize,
+) -> super::artifact_closure::ArtifactUseSite {
+    match site {
+        DictionarySite::Call(call) => {
+            super::artifact_closure::ArtifactUseSite::CallDictionary { call, argument }
+        }
+        DictionarySite::Coercion(expression) => {
+            super::artifact_closure::ArtifactUseSite::CoercionDictionary {
+                expression,
+                argument,
+            }
+        }
+    }
 }
 
 /// Dictionary ABI partition of an entry: bound lexical arguments precede

@@ -557,9 +557,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                                     "scheme adapter target is not a function",
                                 ));
                             };
-                            self.backend.compile_dynamic_function_type(
+                            self.backend.compile_dynamic_function_type_with_dictionaries(
                                 target,
                                 scheme.type_parameter_ids().len(),
+                                plan.target_dictionaries,
                             )?
                         }
                         CheckedType::Function(target)

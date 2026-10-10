@@ -56,9 +56,8 @@ pub(crate) enum RejectionReason {
     /// A template excluded only because it calls an excluded template.
     CallsExcludedTemplate,
     // Allowed reasons (belonging to later stages or documented restrictions).
-    /// A trait bound other than `Copy`/`Sized` (Stage 6).
-    TraitBound,
-    /// A trait call with run-time arguments (Stage 6).
+    /// A trait obligation at run-time types that no dictionary can satisfy
+    /// (Stage 6).
     TraitCallRuntime,
     /// An async intrinsic: completion, task, resolver (Stage 8).
     AsyncIntrinsic,
@@ -95,8 +94,7 @@ impl RejectionReason {
     pub(crate) fn in_scope(self) -> bool {
         !matches!(
             self,
-            RejectionReason::TraitBound
-                | RejectionReason::TraitCallRuntime
+            RejectionReason::TraitCallRuntime
                 | RejectionReason::AsyncIntrinsic
                 | RejectionReason::ReactiveIntrinsic
                 | RejectionReason::CoroutineExpression
@@ -124,7 +122,6 @@ impl RejectionReason {
             RejectionReason::ExternWithParameters => "parameter-dependent extern call",
             RejectionReason::Malformed => "malformed lowered record",
             RejectionReason::CallsExcludedTemplate => "calls an excluded template",
-            RejectionReason::TraitBound => "trait bound other than Copy/Sized",
             RejectionReason::TraitCallRuntime => "trait call with run-time arguments",
             RejectionReason::AsyncIntrinsic => "async intrinsic",
             RejectionReason::ReactiveIntrinsic => "reactive intrinsic",
@@ -391,11 +388,14 @@ impl LoweredProgram {
     ) -> Vec<staple_syntax::Diagnostic> {
         use RejectionReason::*;
         let mut reasons = BTreeSet::new();
-        if scheme.trait_bounds.iter().any(|bound| {
-            Some(bound.trait_id) != self.semantic_ids.copy_trait
-                && Some(bound.trait_id) != self.semantic_ids.sized_trait
-        }) {
-            reasons.insert(TraitBound);
+        // Bounds become hidden dictionaries (T-M); only a `Natural` bound,
+        // which constrains compile-time counts, keeps its restriction.
+        if scheme
+            .trait_bounds
+            .iter()
+            .any(|bound| Some(bound.trait_id) == self.semantic_ids.natural_trait)
+        {
+            reasons.insert(RuntimeNaturalCount);
         }
         let mut pending = function.into_iter().collect::<Vec<_>>();
         let mut visited = HashSet::new();
@@ -408,7 +408,7 @@ impl LoweredProgram {
             pending.extend(dependencies);
         }
         let messages = reasons.into_iter().map(|reason| match reason {
-            TraitBound | TraitCallRuntime => "polymorphic values with trait bounds are not supported yet".to_owned(),
+            TraitCallRuntime => "a trait obligation of this polymorphic value's implementation has no dictionary at run time (it needs a bound in scope, or exactly one matching implementation)".to_owned(),
             CoroutineExpression => "functions with coroutine bodies cannot be used as polymorphic values yet".to_owned(),
             AsyncIntrinsic => "functions with async bodies cannot be used as polymorphic values yet".to_owned(),
             ReactiveIntrinsic | ReactiveNameRead | ReactiveCall | SignalBinding | ReactiveBinding | SignalAssignment => "functions with reactive bodies cannot be used as polymorphic values yet".to_owned(),
@@ -1700,7 +1700,7 @@ mod tests {
                 if reasons.iter().any(|reason| {
                     matches!(
                         reason,
-                        RejectionReason::TraitBound | RejectionReason::TraitCallRuntime
+                        RejectionReason::TraitCallRuntime
                     )
                 }) {
                     // Generated symbol names contain semantic IDs and change
@@ -1720,7 +1720,7 @@ mod tests {
                     if reasons.iter().all(|reason| {
                         matches!(
                             reason,
-                            RejectionReason::TraitBound | RejectionReason::TraitCallRuntime
+                            RejectionReason::TraitCallRuntime
                         )
                     }) {
                         trait_only += 1;

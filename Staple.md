@@ -1746,6 +1746,14 @@ Inference is shallow. Only the outermost quantifier of a value is solved, so a
 scheme nested in an argument is never instantiated implicitly; an explicit
 argument such as `f.<(<U> move U -> U)>` may name one.
 
+**Bounds.** A scheme may carry trait bounds, as in
+`<T where Display T> move T ->{IO} ()`. Each call or instantiation of the value
+supplies a dictionary for every bound at the types it uses, from a bound in
+scope or an implementation, and a value subsumed into another scheme obtains
+its dictionaries from the target's bounds and their prerequisites. A bound that
+needs a dictionary built from an implementation when subsuming a value is not
+supported yet.
+
 **Storage.** A polymorphic value is a closure and is `Copy`. A `let mut`
 binding keeps the scheme it was declared with, and an assignment must supply a
 value of that scheme.
@@ -1755,11 +1763,12 @@ implementation can run without knowing its type arguments at compile time.
 The compiler reports the following at the place the value is built, and the
 same function still works when it is called directly:
 
-* a trait bound other than `Copy` or `Sized`, in the scheme or in anything the
-  implementation reaches (trait bounds on values are planned for a later
-  release);
+* a trait obligation in the implementation that no dictionary can satisfy: it
+  must come from a bound in scope or match exactly one implementation, and the
+  compiler-derived `Index`, `MutateIndex` and iteration traits at run-time
+  shapes are not covered;
+* a `Natural` bound or an array length that depends on a type parameter;
 * a coroutine, async, or reactive body;
-* an array length that depends on a type parameter of the scheme;
 * a function value behind `Ref`, `Slice`, `Buffer`, or a shared cell that
   crosses into the implementation;
 * a trait member used as a polymorphic value.
@@ -2379,8 +2388,10 @@ def equal_ordered: <T where Ord T> T -> T -> Bool = left => right => {
 }
 ```
 
-Prerequisite cycles are rejected. Prerequisites participate only in static
-checking and do not add runtime dictionaries or function parameters.
+Prerequisite cycles are rejected. A prerequisite is part of the bound's
+dictionary when the bound is passed at run time (see [Traits and bounded
+generic functions](#traits-and-bounded-generic-functions)): it adds nothing to
+code that is monomorphized.
 
 A member may provide a default function body after `=`. An implementation may
 omit a defaulted member or replace it with an explicit member of the same name.
@@ -2408,14 +2419,34 @@ function values and may be called unqualified when unambiguous or qualified as
 `ToString.to_string`; a namespace-qualified trait may be used as
 `strings.ToString.to_string`.
 
-Traits use static dispatch. Bounds and implementations add no runtime values or
-function parameters. During monomorphization, the compiler substitutes the
-concrete trait arguments and emits a direct reference to the selected
-implementation member. An entire implementation may be generic over its own
-compile-time parameters (see below); an individual trait member may not
-independently introduce parameters beyond the ones its implementation
-declares. Trait objects, runtime dictionaries, and associated items are not
-currently supported.
+Traits use a hybrid strategy. A call whose types are known at compile time is
+monomorphized: the compiler substitutes the concrete trait arguments and emits
+a direct reference to the selected implementation member, with no run-time
+value or function parameter. A generic `def` that is used as a polymorphic
+value (see [Generic functions](#generic-functions)) keeps its type parameters
+at run time, and each of its trait bounds becomes a hidden *dictionary*
+argument after the type descriptors: a table of the trait's members, its
+prerequisite dictionaries, and its associated types. Code that calls a bound's
+member, or passes the bound to another generic function, reads the dictionary
+instead of selecting an implementation.
+
+A dictionary is chosen where a run-time obligation arises. A bound in scope
+supplies its own dictionary, and its prerequisites supply theirs (an `Ord T`
+bound provides `Eq T`). Otherwise exactly one implementation must match the
+obligation when the run-time types are treated as unknowns, and its `where`
+clause must be provable; the dictionary is built from that implementation's
+dictionaries when the code runs. An obligation that could match more than one
+implementation is rejected at the place the polymorphic value is built, even
+though monomorphization might pick one: `Clone (List T)` at an unknown `T` is
+ambiguous when an implementation for one particular `List` instantiation also
+exists. The
+compiler-derived `Debug` of products and sums over such types is built from
+their components' dictionaries. `Copy`, `Sized`, and `Drop` need no dictionary.
+An entire implementation may be generic over its own compile-time parameters
+(see below); an individual trait member may not independently introduce
+parameters beyond the ones its implementation declares. Trait objects and
+associated items beyond those named in a trait's header are not currently
+supported.
 
 ### Generic trait implementations
 

@@ -376,7 +376,7 @@ Reported at the construction site (B-I), each with a test.
 
 | Restriction | Message | Lifted in |
 |---|---|---|
-| Trait bound other than `Copy`/`Sized` in the scheme, or reached transitively | "polymorphic values with trait bounds are not supported yet" | Stage 6 |
+| Trait bound other than `Copy`/`Sized` in the scheme, or reached transitively | "polymorphic values with trait bounds are not supported yet" | Lifted in Stage 6: bounds are dictionaries. An obligation no dictionary satisfies reports "a trait obligation of this polymorphic value's implementation has no dictionary at run time …" |
 | Coroutine, async, or reactive body, transitively | "functions with coroutine bodies cannot be used as polymorphic values yet" (and the async and reactive forms) | Stage 8 |
 | `__buffer_clone`, transitively | "`__buffer_clone` cannot be used in a polymorphic value's implementation yet" | Stage 6. Unreachable from user code: `__buffer_clone` is private and its public callers need a `Clone` bound, so the trait-bound restriction applies first. Kept as an internal reason and left out of `Staple.md`. |
 | Run-time `Natural` count, including `__slice_from_ref` | "array lengths cannot depend on a polymorphic value's type parameters yet" | Not planned |

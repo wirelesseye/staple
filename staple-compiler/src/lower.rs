@@ -3042,7 +3042,10 @@ pub(crate) struct LoweredProgram {
     /// the same table per body.
     initializer_bindings: Vec<std::collections::BTreeMap<LoweredBindingSite, LoweredBoundTarget>>,
     initializer_dictionary_calls: Vec<
-        std::collections::BTreeMap<LoweredCallId, Vec<trait_dictionaries::DictionaryCallArgument>>,
+        std::collections::BTreeMap<
+            trait_dictionaries::DictionarySite,
+            Vec<trait_dictionaries::DictionaryCallArgument>,
+        >,
     >,
     /// Reabstraction plans at concrete-to-dynamic boundaries in module
     /// initializers, indexed by `InitializerId` (R-E).
@@ -24261,6 +24264,74 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_selection_at_unknown_types_is_unique_or_rejected() {
+        let module = checked_program(concat!(
+            "trait Pick T { pick: T -> I32 }\n",
+            "impl Pick I32 { pick = value => 1 }\n",
+            "impl Pick Bool { pick = value => 2 }\n",
+            "type Holder T = wrap T\n",
+            "impl<T where Pick T> Pick (Holder T) { pick = Holder value => Pick.pick value }\n",
+            "let answer = Pick.pick 1\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let pick = program
+            .traits
+            .iter()
+            .find_map(|(_, id, t)| (t.name == "Pick").then_some(id))
+            .unwrap();
+        let unknown = CheckedType::Parameter {
+            id: TypeParameterId(900_000),
+            name: "T".to_owned(),
+            sized: true,
+            parameter_product_capable: false,
+        };
+        let origin = Origin::compiler();
+        let select = |environment: &[CheckedTraitBound], arguments: Vec<CheckedType>| {
+            trait_dictionaries::select_dictionary(
+                &program,
+                environment,
+                &CheckedTraitBound {
+                    trait_id: pick,
+                    arguments,
+                },
+                &origin,
+            )
+        };
+        // Two concrete implementations could both apply to an unknown type.
+        let error = select(&[], vec![unknown.clone()]).unwrap_err();
+        assert!(error.message.contains("ambiguous"), "{error:?}");
+        // A bound in scope wins whatever else could match.
+        let bound = CheckedTraitBound {
+            trait_id: pick,
+            arguments: vec![unknown.clone()],
+        };
+        assert!(matches!(
+            select(std::slice::from_ref(&bound), vec![unknown.clone()]),
+            Ok(trait_dictionaries::DictionarySelection::Environment(_))
+        ));
+        // A generic implementation over the unknown type is the one candidate,
+        // and its `where` clause must be provable from the environment.
+        let holder = program
+            .types
+            .iter()
+            .find_map(|(_, _, t)| (t.name == "Holder").then_some(t.semantic_id))
+            .unwrap();
+        let boxed = CheckedType::Wrapper {
+            id: holder,
+            name: "Holder".to_owned(),
+            arguments: vec![unknown.clone()],
+            representation: Box::new(unknown.clone()),
+            introduction: crate::WrapperIntroduction::Explicit,
+        };
+        assert!(select(&[], vec![boxed.clone()]).is_err());
+        assert!(matches!(
+            select(std::slice::from_ref(&bound), vec![boxed]),
+            Ok(trait_dictionaries::DictionarySelection::Build(_))
+        ));
+    }
+
+    #[test]
     fn polymorphic_lambdas_enforce_declared_effect_rows() {
         for row in ["", "{state.read}"] {
             let source = format!(
@@ -24595,9 +24666,8 @@ mod tests {
     #[test]
     fn polymorphic_support_checks_reject_at_the_construction_site() {
         let module = checked_program(concat!(
-            "use std.clone.Clone\n",
-            "def inner: <T where Clone T> move T -> T = move value => value\n",
-            "def outer: <T where Clone T> move T -> T = move value => inner value\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+            "def outer: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => repeat value n\n",
             "let stored = outer\n",
         ));
         let mut program = LoweredProgram::default();
@@ -24611,7 +24681,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(
             diagnostics[0].message,
-            "polymorphic values with trait bounds are not supported yet"
+            "array lengths cannot depend on a polymorphic value's type parameters yet"
         );
         assert_eq!(diagnostics[0].span, origin.span);
         let direct = checked_program(concat!(
@@ -24619,6 +24689,7 @@ mod tests {
             "def inner: <T where Clone T> move T -> T = move value => value\n",
             "def outer: <T where Clone T> move T -> T = move value => inner value\n",
             "let result = outer 42\n",
+            "let stored = outer\n",
         ));
         assert!(Lowerer::new().lower(&direct).is_ok());
     }

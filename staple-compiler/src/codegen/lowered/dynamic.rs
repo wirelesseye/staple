@@ -805,7 +805,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     .map_err(compiler_diagnostic)?;
             }
             DynamicCallee::Indirect { code, count } => {
-                let function_type = self.backend.compile_dynamic_function_type(signature, count)?;
+                let function_type = self.backend.compile_dynamic_function_type_with_dictionaries(
+                    signature,
+                    count,
+                    self.view.dictionary_call_arguments(owner, call_id).len(),
+                )?;
                 self.backend
                     .builder
                     .build_indirect_call(function_type, code, &arguments, "polymorphic.call")
@@ -3221,6 +3225,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             for ty in types {
                 arguments.push(self.dynamic_descriptor(ty, environment, span)?.into());
             }
+            // The scheme's bounds follow its descriptors (T-C, T-M).
+            for dictionary in
+                self.dictionary_call_values(owner, call_id, Some(environment), span)?
+            {
+                arguments.push(dictionary.into());
+            }
         }
         if dynamic_shape {
             // The result goes through a caller-provided out slot and every
@@ -3319,9 +3329,10 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         }
         let signature = if dynamic_shape {
-            self.backend.compile_dynamic_function_type(
+            self.backend.compile_dynamic_function_type_with_dictionaries(
                 signature,
                 polymorphic_types.as_ref().map_or(0, Vec::len),
+                self.view.dictionary_call_arguments(owner, call_id).len(),
             )?
         } else {
             self.backend
@@ -4231,19 +4242,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         code: PointerValue<'context>,
         closure_environment: PointerValue<'context>,
         descriptors: &[PointerValue<'context>],
+        dictionaries: &[PointerValue<'context>],
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<PointerValue<'context>> {
         let pointer_bytes = self.backend.target_data.get_pointer_byte_size(None) as u64;
         let environment = self.backend.build_gc_allocation(
-            self.backend
-                .size_type
-                .const_int((2 + descriptors.len() as u64) * pointer_bytes, false),
+            self.backend.size_type.const_int(
+                (2 + descriptors.len() + dictionaries.len()) as u64 * pointer_bytes,
+                false,
+            ),
             "instantiation.environment",
             span.clone(),
         )?;
         let words = [code, closure_environment]
             .into_iter()
             .chain(descriptors.iter().copied())
+            .chain(dictionaries.iter().copied())
             .collect::<Vec<_>>();
         for (index, word) in words.into_iter().enumerate() {
             let slot = self.backend.dynamic_byte_offset(
@@ -4294,8 +4308,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .iter()
             .map(|ty| self.static_dynamic_descriptor(ty, span))
             .collect::<CodeGenerationResult<Vec<_>>>()?;
-        let environment =
-            self.build_instantiation_environment(code, closure_environment, &descriptors, span)?;
+        let dictionaries = self.dictionary_recipe_values(
+            self.view.dictionary_coercion_arguments(owner, id),
+            None,
+            span,
+        )?;
+        let environment = self.build_instantiation_environment(
+            code,
+            closure_environment,
+            &descriptors,
+            &dictionaries,
+            span,
+        )?;
         let adapter = self.instantiation_adapter_code(owner, id, span)?;
         Ok(self
             .backend
@@ -4336,8 +4360,18 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let descriptor = self.dynamic_descriptor(ty, environment, span)?;
             descriptors.push(self.copy_descriptor_to_gc(descriptor, span)?);
         }
-        let adapter_environment =
-            self.build_instantiation_environment(parts[0], parts[1], &descriptors, span)?;
+        let dictionaries = self.dictionary_recipe_values(
+            self.view.dictionary_coercion_arguments(owner, id),
+            Some(environment),
+            span,
+        )?;
+        let adapter_environment = self.build_instantiation_environment(
+            parts[0],
+            parts[1],
+            &descriptors,
+            &dictionaries,
+            span,
+        )?;
         let adapter = self.instantiation_adapter_code(owner, id, span)?;
         let closure = self
             .backend
@@ -4486,6 +4520,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
         };
         let own_descriptors = target_scheme.map_or(0, |scheme| scheme.type_parameter_ids().len());
+        let own_dictionaries = if target_scheme.is_some() {
+            plan.target_dictionaries
+        } else {
+            0
+        };
         let dynamic_shape = target_scheme.is_some()
             || crate::contains_type_parameter(&CheckedType::Function(target.clone()));
         let entry = self.backend.context.append_basic_block(function, "entry");
@@ -4497,7 +4536,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let environment_words = if target_scheme.is_some() {
             2
         } else {
-            2 + plan.types.len()
+            2 + plan.types.len() + plan.dictionaries
         };
         let mut words = Vec::new();
         for index in 0..environment_words {
@@ -4514,9 +4553,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             );
         }
         let code = words[0];
-        // The descriptors the quantified entry receives, in its scheme order.
-        let source_descriptors = match target_scheme {
-            None => words[2..].to_vec(),
+        // The descriptors and dictionaries the quantified entry receives, in
+        // its scheme order.
+        let (source_descriptors, source_dictionaries) = match target_scheme {
+            None => (
+                words[2..2 + plan.types.len()].to_vec(),
+                words[2 + plan.types.len()..].to_vec(),
+            ),
             Some(target_scheme) => {
                 let mut dynamic = DynamicEnvironment {
                     descriptors: target_scheme
@@ -4526,7 +4569,12 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                         .map(|(index, parameter)| (parameter, parameters[1 + index].into_pointer_value()))
                         .collect(),
                     compound_descriptors: Vec::new(),
-                    dictionaries: Vec::new(),
+                    // The target's dictionaries follow its descriptors.
+                    dictionaries: parameters
+                        [1 + own_descriptors..1 + own_descriptors + own_dictionaries]
+                        .iter()
+                        .map(|parameter| parameter.into_pointer_value())
+                        .collect(),
                     bindings: HashMap::new(),
                     binding_order: Vec::new(),
                     temporaries: HashMap::new(),
@@ -4539,7 +4587,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     resources: HashMap::new(),
                     loops: Vec::new(),
                     closure: environment,
-                    result: parameters[1 + own_descriptors].into_pointer_value(),
+                    result: parameters[1 + own_descriptors + own_dictionaries]
+                        .into_pointer_value(),
                     result_descriptor: pointer.const_null(),
                     bundle: None,
                     returned: false,
@@ -4548,12 +4597,22 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 for ty in &plan.types {
                     built.push(self.prepare_dynamic_descriptor(ty, &mut dynamic, span)?);
                 }
-                built
+                let derived = plan
+                    .entailment
+                    .iter()
+                    .map(|argument| {
+                        self.dictionary_recipe_value(&argument.recipe, Some(&dynamic), span)
+                    })
+                    .collect::<CodeGenerationResult<Vec<_>>>()?;
+                (built, derived)
             }
         };
         let mut arguments: Vec<BasicMetadataValueEnum<'context>> = vec![words[1].into()];
         for descriptor in &source_descriptors {
             arguments.push((*descriptor).into());
+        }
+        for dictionary in &source_dictionaries {
+            arguments.push((*dictionary).into());
         }
         let resources = target.effects.resources.len();
         let whole = target.mutations.contains(&crate::CheckedMutation::Whole);
@@ -4565,7 +4624,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         // Result storage: the dynamic ABI hands it in, the concrete ABI
         // returns by value.
         let result = if dynamic_shape {
-            parameters[1 + own_descriptors].into_pointer_value()
+            parameters[1 + own_descriptors + own_dictionaries].into_pointer_value()
         } else {
             self.backend
                 .entry_builder()
@@ -4574,7 +4633,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         };
         arguments.push(result.into());
         let first_resource = if dynamic_shape {
-            2 + own_descriptors
+            2 + own_descriptors + own_dictionaries
         } else {
             1
         };
@@ -4788,9 +4847,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         for slot in &slots {
             arguments.push((*slot).into());
         }
-        let function_type = self
-            .backend
-            .compile_dynamic_function_type(signature, source_descriptors.len())?;
+        let function_type = self.backend.compile_dynamic_function_type_with_dictionaries(
+            signature,
+            source_descriptors.len(),
+            plan.dictionaries,
+        )?;
         self.backend
             .builder
             .build_indirect_call(function_type, code, &arguments, "instantiation.call")

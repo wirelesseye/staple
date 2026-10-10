@@ -43,30 +43,22 @@ the release build of this stage's base commit for every existing input.
 
 ## Current state
 
-- **S0 partial.** Both trait fixtures plus the environment and builder fixtures
-  and the quick differential suite pass. Trait-only rejections fell from 1,819
-  occurrences / 46 templates to 0 outside the coroutine and reactive bodies of
-  Stage 8. Restriction probes remain.
-- **6a.1 done.** Static dictionaries (ordered prefixes, method closures,
-  defaults, shared prerequisites) pass validation and JIT checks.
-- **6a.2 partial.** Dynamic signatures, entries, direct calls, bound entries and
-  closure environments carry dictionaries (environments store them after the
-  descriptors). Instantiation adapters and the audit of `runtime()` counts
-  remain.
-- **6a.3 partial.** Recipes: environment (with prerequisite routes), static and
-  builder, selected uniquely at abstract types (T-F) and validated in bodies.
-  Restriction messages are reported at lowering; the final wording and probes
-  remain.
-- **6a.4 done for the planned scope.** Generic and blanket implementations
-  build dictionaries in GC memory from the caller's descriptors and recipes;
-  member slots are descriptor-bound entries over the dictionary tail.
-  Structural `Debug` over products and sums builds a shape slot over component
-  dictionaries. Other structural traits (`Index`, `IntoIterator`, ...) at
-  run-time shapes report a restriction.
-- **6a.5 partial.** Method calls, operators, interpolation, `Index`,
-  `MutateIndex`, `__buffer_clone` and members as values dispatch through
-  dictionary slots; `for` loops use these calls. The support analysis admits a
-  site when a recipe exists. Eligible-call audit remains.
+- **S0 done.** The trait fixtures plus the environment, builder, values,
+  adapters and captures programs run in default and differential modes.
+  Trait-only rejections fell from 1,819 occurrences / 46 templates to 0 outside
+  the coroutine and reactive bodies of Stage 8.
+- **6a.1–6a.5 done.** Static and built dictionaries (generic and blanket
+  implementations in GC memory, structural `Debug` over products and sums),
+  environment/static/builder/structural recipes selected uniquely at abstract
+  types, hidden dictionary arguments in signatures, entries, calls, closure
+  environments and adapters, and every T-K operation through slot calls.
+- **6b.1 done.** Bounded schemes are values: construction, calls (dictionaries
+  after descriptors), instantiation adapters (site-evaluated dictionaries stored
+  beside the descriptors) and scheme adapters (entailment through prerequisite
+  routes and static dictionaries; a builder-derived entailment is a
+  restriction). `Staple.md` and the restriction tables are updated.
+- **Gates remaining.** Reachability tests; the IR comparison against `1106ba8`;
+  the full differential runs; the main plan's Stage 6 status.
 - Checker workarounds remain: explicit `USize` indices, projected-result type
   arguments/result annotations, and callback parameter annotations.
 

@@ -175,8 +175,10 @@ pub(crate) struct LoweredInstanceBody {
     pub dictionary_obligations: Vec<CheckedTraitBound>,
     /// Hidden dictionary arguments in lexical declaration order (T-C).
     pub dictionary_bounds: Vec<CheckedTraitBound>,
-    pub dictionary_calls:
-        BTreeMap<LoweredCallId, Vec<super::trait_dictionaries::DictionaryCallArgument>>,
+    pub dictionary_calls: BTreeMap<
+        super::trait_dictionaries::DictionarySite,
+        Vec<super::trait_dictionaries::DictionaryCallArgument>,
+    >,
     /// Dictionaries a callable value stores in its closure environment.
     pub dictionary_values: BTreeMap<
         super::LoweredCallableValueId,
@@ -774,13 +776,52 @@ impl<'a> BodyCloner<'a> {
                     *callee,
                 ) {
                     Ok(arguments) if !arguments.is_empty() => {
-                        self.body.dictionary_calls.insert(call_id, arguments);
+                        self.body
+                            .dictionary_calls
+                            .insert(super::trait_dictionaries::DictionarySite::Call(call_id), arguments);
                     }
                     Ok(_) => {}
                     Err(error) => self.diagnostics.push(error),
                 }
             }
         }
+        for (call_id, call) in self.body.calls.iter() {
+            if call.scheme.is_some() {
+                match super::trait_dictionaries::plan_scheme_call(
+                    self.program,
+                    Some(&self.enclosing),
+                    &self.body.dictionary_bounds,
+                    call,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        self.body
+                            .dictionary_calls
+                            .insert(super::trait_dictionaries::DictionarySite::Call(call_id), arguments);
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+        let mut coercions = Vec::new();
+        for (expression_id, expression) in self.body.expressions() {
+            match super::trait_dictionaries::plan_instantiation(
+                self.program,
+                Some(&self.enclosing),
+                &self.body.dictionary_bounds,
+                expression,
+            ) {
+                Ok(arguments) if !arguments.is_empty() => {
+                    coercions.push((
+                        super::trait_dictionaries::DictionarySite::Coercion(expression_id),
+                        arguments,
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => self.diagnostics.push(error),
+            }
+        }
+        self.body.dictionary_calls.extend(coercions);
         for (value_id, value) in self.body.callable_values.iter() {
             if let Some(super::LoweredBoundTarget::Instance(callee)) = self
                 .body
@@ -4140,12 +4181,51 @@ impl<'a> BodyValidator<'a> {
                     *callee,
                 ) {
                     Ok(arguments) if !arguments.is_empty() => {
-                        expected_dictionary_calls.insert(call_id, arguments);
+                        expected_dictionary_calls.insert(
+                            super::trait_dictionaries::DictionarySite::Call(call_id),
+                            arguments,
+                        );
                     }
                     Ok(_) => {}
                     Err(error) => self.diagnostics.push(error),
                 }
             }
+        for (call_id, call) in self.body.calls.iter() {
+            if call.scheme.is_some() {
+                match super::trait_dictionaries::plan_scheme_call(
+                    self.program,
+                    enclosing.as_ref(),
+                    &self.body.dictionary_bounds,
+                    call,
+                ) {
+                    Ok(arguments) if !arguments.is_empty() => {
+                        expected_dictionary_calls.insert(
+                            super::trait_dictionaries::DictionarySite::Call(call_id),
+                            arguments,
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.diagnostics.push(error),
+                }
+            }
+        }
+        for (expression_id, expression) in self.body.expressions() {
+            match super::trait_dictionaries::plan_instantiation(
+                self.program,
+                enclosing.as_ref(),
+                &self.body.dictionary_bounds,
+                expression,
+            ) {
+                Ok(arguments) if !arguments.is_empty() => {
+                    expected_dictionary_calls.insert(
+                        super::trait_dictionaries::DictionarySite::Coercion(expression_id),
+                        arguments,
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => self.diagnostics.push(error),
+            }
+        }
         let mut expected_dictionary_values = BTreeMap::new();
         for (value_id, value) in self.body.callable_values.iter() {
             if let Some(super::LoweredBoundTarget::Instance(callee)) = self
@@ -5301,10 +5381,19 @@ impl<'a> BodyValidator<'a> {
         // Members of built dictionaries are requested by the site that needs
         // the dictionary and bound inside its recipe.
         let mut members = Vec::new();
-        for (call, arguments) in &self.body.dictionary_calls {
-            if let Some(call) = self.body.calls.get(*call) {
+        for (site, arguments) in &self.body.dictionary_calls {
+            let origin = match site {
+                super::trait_dictionaries::DictionarySite::Call(call) => {
+                    self.body.calls.get(*call).map(|call| call.origin.clone())
+                }
+                super::trait_dictionaries::DictionarySite::Coercion(expression) => self
+                    .body
+                    .expression(*expression)
+                    .map(|expression| expression.origin.clone()),
+            };
+            if let Some(origin) = origin {
                 for argument in arguments {
-                    recipe_member_instances(&argument.recipe, &call.origin, &mut members);
+                    recipe_member_instances(&argument.recipe, &origin, &mut members);
                 }
             }
         }

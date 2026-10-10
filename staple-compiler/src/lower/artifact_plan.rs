@@ -128,6 +128,14 @@ pub(crate) struct InstantiationAdapterPlan {
     /// The scheme's instantiation, one type per type parameter. For a scheme
     /// target the types mention the target's own parameters.
     pub types: Vec<CheckedType>,
+    /// Dictionaries the quantified entry receives: the scheme's non-marker
+    /// bounds. An instantiation adapter stores them beside its descriptors.
+    pub dictionaries: usize,
+    /// A scheme target's own dictionaries, which the adapter receives.
+    pub target_dictionaries: usize,
+    /// For a scheme target: recipes producing the source's dictionaries from
+    /// the target's, in the source's bound order (bound entailment, T-M).
+    pub entailment: Vec<crate::lower::DictionaryCallArgument>,
     /// Value conversions for function-typed arguments and results (R5), in
     /// `value_conversions::adapter_conversions` order: per argument slot the
     /// concrete-to-dynamic conversion and, for a mutated slot, the
@@ -879,6 +887,9 @@ impl LoweredArtifactPlan {
                 scheme: _,
                 target: _,
                 types: _,
+                dictionaries: _,
+                target_dictionaries: _,
+                entailment: _,
                 children: _,
             }) => {}
             LoweredArtifactPlan::ReabstractionThunk(ReabstractionThunkPlan {

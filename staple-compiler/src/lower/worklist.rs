@@ -1573,6 +1573,7 @@ impl<'a> WorklistBuilder<'a> {
                         *function,
                         &call.substitutions,
                         enclosing,
+                        &[],
                     ) {
                         self.request_dictionary_members(
                             &obligation,
@@ -1692,6 +1693,11 @@ impl<'a> WorklistBuilder<'a> {
                         *function,
                         &value.substitutions,
                         enclosing,
+                        &value
+                            .scheme
+                            .as_ref()
+                            .map(|scheme| scheme.type_parameter_ids())
+                            .unwrap_or_default(),
                     ) {
                         self.request_dictionary_members(
                             &obligation,

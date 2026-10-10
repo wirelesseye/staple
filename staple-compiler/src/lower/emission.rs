@@ -423,19 +423,39 @@ impl<'a> EmissionView<'a> {
         owner: EmissionOwner,
         call: super::LoweredCallId,
     ) -> &'a [super::trait_dictionaries::DictionaryCallArgument] {
+        self.dictionary_site_arguments(owner, super::trait_dictionaries::DictionarySite::Call(call))
+    }
+
+    /// Dictionaries an instantiation adapter stores for a coerced expression.
+    pub(crate) fn dictionary_coercion_arguments(
+        &self,
+        owner: EmissionOwner,
+        expression: super::ExpressionId,
+    ) -> &'a [super::trait_dictionaries::DictionaryCallArgument] {
+        self.dictionary_site_arguments(
+            owner,
+            super::trait_dictionaries::DictionarySite::Coercion(expression),
+        )
+    }
+
+    fn dictionary_site_arguments(
+        &self,
+        owner: EmissionOwner,
+        site: super::trait_dictionaries::DictionarySite,
+    ) -> &'a [super::trait_dictionaries::DictionaryCallArgument] {
         match owner {
             EmissionOwner::Instance(instance) => self
                 .program
                 .instances
                 .get(instance)
                 .and_then(|record| record.body.as_ref())
-                .and_then(|body| body.dictionary_calls.get(&call))
+                .and_then(|body| body.dictionary_calls.get(&site))
                 .map_or(&[], Vec::as_slice),
             EmissionOwner::Initializer(initializer) => self
                 .program
                 .initializer_dictionary_calls
                 .get(initializer.index())
-                .and_then(|calls| calls.get(&call))
+                .and_then(|calls| calls.get(&site))
                 .map_or(&[], Vec::as_slice),
         }
     }
