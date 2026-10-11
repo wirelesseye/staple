@@ -13768,3 +13768,16 @@ fn stage3_lowering_admits_polymorphic_values_stored_and_called() {
     ));
     lower(&module);
 }
+
+#[test]
+fn resolves_independently_generic_trait_member_scopes() {
+    resolve("trait Visit T { visit: <A> (T, A) -> A = (_, value) => { let item: A = value; item } }\n");
+}
+
+#[test]
+fn checks_independently_generic_trait_member_declarations() {
+    TypeChecker::new().check(resolve("trait Visit T { visit: <A> (T, A) -> A }\n"))
+        .expect("member scheme should check");
+    TypeChecker::new().check(resolve("trait Apply T { apply: T -> (<A> move A -> A) -> T }\n"))
+        .expect("nested member scheme should check");
+}

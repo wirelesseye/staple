@@ -1576,6 +1576,7 @@ pub struct TypedModule {
     /// Direct declared bounds, without prerequisite expansion.
     function_declared_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
+    trait_member_schemes: HashMap<TraitMethodId, CheckedScheme>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
     trait_functional_dependencies: HashMap<TraitId, Vec<CheckedFunctionalDependency>>,
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
@@ -1785,6 +1786,10 @@ impl TypedModule {
     /// The scheme a function implements: its binding's written `<…>`
     /// annotation (a generic `def` or a scheme-annotated `let`), or the
     /// expected scheme a lambda was checked against.
+    pub fn scheme_of_trait_member(&self, method: TraitMethodId) -> Option<&CheckedScheme> {
+        self.trait_member_schemes.get(&method)
+    }
+
     pub fn scheme_of_function(&self, function: FunctionId) -> Option<&CheckedScheme> {
         self.function_schemes.get(&function)
     }
@@ -2526,6 +2531,7 @@ pub struct TypeChecker {
     declared_scheme_symbols: HashSet<SymbolId>,
     explicit_application_schemes: HashMap<SyntaxId, CheckedScheme>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
+    trait_member_schemes: HashMap<TraitMethodId, CheckedScheme>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
     trait_functional_dependencies: HashMap<TraitId, Vec<CheckedFunctionalDependency>>,
     trait_prerequisites: HashMap<TraitId, Vec<CheckedTraitBound>>,
@@ -2723,12 +2729,6 @@ impl TypeChecker {
         self.collect_parameter_product_capabilities(&module);
         self.collect_string_representation(&module);
         self.collect_traits(&module);
-        for (method, ty) in &self.trait_method_types {
-            if type_contains_scheme(ty) && let Some(member) = module.trait_method(*method) {
-                self.diagnostics.push(Diagnostic::new(member.annotation.syntax().span.clone(),
-                    "generic function types are not supported in trait members yet"));
-            }
-        }
         self.validate_indexing_trait_method_types(&module);
         self.collect_trait_implementations(&module);
         self.validate_trait_implementation_prerequisites(&module);
@@ -2837,6 +2837,7 @@ impl TypeChecker {
             function_bounds: self.function_bounds,
             function_declared_bounds: self.function_declared_bounds,
             trait_method_types: self.trait_method_types,
+            trait_member_schemes: self.trait_member_schemes,
             trait_parameter_arguments: self.trait_parameter_arguments,
             trait_functional_dependencies: self.trait_functional_dependencies,
             trait_dispatches: self.trait_dispatches,
@@ -3081,7 +3082,30 @@ impl TypeChecker {
         for resolved_trait in module.traits().values() {
             for method in &resolved_trait.methods {
                 let member = module.trait_method(*method).expect("resolved trait member");
-                let value_type = self.resolve_source_type(module, &member.annotation);
+                let declared = self.resolve_source_type(module, &member.annotation);
+                let (value_type, own) = match declared {
+                    CheckedType::Forall(scheme) => (*scheme.body.clone(), Some(*scheme)),
+                    body => (body, None),
+                };
+                let mut parameters = resolved_trait.declaration.type_parameters.iter()
+                    .take(resolved_trait.declaration.type_parameters.len() - resolved_trait.declaration.associated_types.len())
+                    .map(|p| CheckedSchemeParameter::from_pattern(self.checked_type_parameter_pattern(module, p)))
+                    .collect::<Vec<_>>();
+                let mut bounds = vec![CheckedTraitBound {
+                    trait_id: resolved_trait.id,
+                    arguments: self.trait_parameter_arguments[&resolved_trait.id].clone(),
+                }];
+                let mut subtype_bounds = Vec::new();
+                if let Some(own) = &own {
+                    parameters.extend(own.parameters.clone());
+                    bounds.extend(own.trait_bounds.clone());
+                    subtype_bounds = own.subtype_bounds.clone();
+                }
+                let scheme = CheckedScheme {
+                    parameters, trait_bound_names: self.trait_bound_names(&bounds),
+                    trait_bounds: bounds, subtype_bounds, body: Box::new(value_type.clone()),
+                };
+                self.trait_member_schemes.insert(*method, scheme.clone());
                 if !matches!(value_type, CheckedType::Function(_)) {
                     self.diagnostics.push(Diagnostic::new(
                         member.syntax.span.clone(),
@@ -3115,6 +3139,7 @@ impl TypeChecker {
                     && let CheckedType::Function(function_type) = value_type.clone()
                 {
                     self.impl_function_types.insert(function, function_type);
+                    self.function_schemes.insert(function, scheme);
                     self.default_function_traits
                         .insert(function, resolved_trait.id);
                 }

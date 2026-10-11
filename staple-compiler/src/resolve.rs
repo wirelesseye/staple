@@ -3635,12 +3635,28 @@ impl NameResolver {
                 }
                 let mut default_methods = HashMap::new();
                 for member in &declaration.members {
+                    self.push_type_parameter_scope();
+                    let mut parameters = declaration.type_parameters.clone();
                     if let Type::Forall(ty) = &member.annotation {
-                        self.resolve_forall_type(
-                            ty,
-                            true,
-                            "trait members cannot introduce their own compile-time parameters yet",
-                        );
+                        for parameter in &ty.generics.parameters {
+                            self.declare_type_parameter_pattern(parameter);
+                        }
+                        parameters.extend(ty.generics.parameters.clone());
+                        for bound in &ty.generics.trait_bounds {
+                            if let Some(id) = self.resolve_trait_name(&bound.trait_name) {
+                                self.trait_references.insert(bound.syntax.id, id);
+                            }
+                            for argument in &bound.arguments { self.resolve_type(argument); }
+                        }
+                        for bound in &ty.generics.subtype_bounds {
+                            if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                                self.type_parameters.insert(bound.syntax.id, id);
+                            }
+                            self.resolve_type(&bound.supertype);
+                        }
+                        self.resolve_type(&ty.body);
+                        self.binding_trait_bounds.insert(member.syntax.id, ty.generics.trait_bounds.clone());
+                        self.binding_subtype_bounds.insert(member.syntax.id, ty.generics.subtype_bounds.clone());
                     } else {
                         self.resolve_type(&member.annotation);
                     }
@@ -3648,10 +3664,11 @@ impl NameResolver {
                         self.validate_representation(&member.annotation, Visibility::Public);
                     }
                     let Some(default) = &member.default else {
+                        self.pop_type_parameter_scope();
                         continue;
                     };
                     self.binding_type_parameters
-                        .insert(member.syntax.id, declaration.type_parameters.clone());
+                        .insert(member.syntax.id, parameters);
                     let function_name = format!("trait.default.{}.{}", trait_id.0, member.name);
                     self.resolve_expression(
                         default,
@@ -3669,6 +3686,7 @@ impl NameResolver {
                             "default trait member implementations must be function values",
                         ));
                     }
+                    self.pop_type_parameter_scope();
                 }
                 self.traits
                     .get_mut(&trait_id)

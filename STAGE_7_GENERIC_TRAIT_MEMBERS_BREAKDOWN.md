@@ -68,12 +68,11 @@ every existing input.
 
 ## Current state
 
-S0 is in progress at `1583957`. The release baseline is preserved for the
-IR comparison. Static and value fixtures are in `tests/fixtures/stage7/`;
-they will enter the runnable corpus as their implementation steps land.
-The resolver and checker still reject member schemes. Existing explicit
-trait-member arguments use only `Eq.eq`; no associated-type member call
-writes explicit arguments in the standard library, examples, or tests.
+S0 fixtures and baseline probes are recorded; the base release binary is
+preserved for IR comparison. 7a.1 resolves member parameters and default-body
+scope, accepts nested schemes, and records member schemes beside dispatch
+body templates. Declaration tests and `cargo check --workspace` pass.
+Conformance, use-site instantiation, lowering, and 7b remain.
 
 ## Decisions
 
