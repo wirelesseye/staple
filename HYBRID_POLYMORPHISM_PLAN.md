@@ -463,9 +463,13 @@ expressions carry their dictionaries in one site table.
 - **Exit:** a trait with a generic member works through static dispatch,
   through a bounded polymorphic value, and as a member value.
 
-**Breakdown plan: required.** It changes trait declaration checking,
-implementation conformance, default member bodies, explicit type arguments,
-and dictionary layout together.
+**Breakdown plan: required.** See
+[STAGE_7_GENERIC_TRAIT_MEMBERS_BREAKDOWN.md](STAGE_7_GENERIC_TRAIT_MEMBERS_BREAKDOWN.md).
+It changes trait declaration checking, implementation conformance, default
+member bodies, explicit type arguments, and dictionary layout together. It has
+two substages: 7a, member schemes, conformance, explicit arguments and static
+dispatch; 7b, slots for generic members and trait members as polymorphic
+values.
 
 ### Stage 8 — Extensions
 
@@ -493,7 +497,7 @@ small plan, and they can be scheduled separately or dropped.
 | 4 — Core dictionary passing | **Required** (split 4a/4b) — [written](STAGE_4_DICTIONARY_PASSING_BREAKDOWN.md); 4a [remainder](STAGE_4A_REMAINDER_BREAKDOWN.md), 4b [written, complete](STAGE_4B_POLYMORPHIC_VALUES_BREAKDOWN.md) |
 | 5 — Effect polymorphism at run time | **Required** (split 5a/5b) — [written](STAGE_5_EFFECT_POLYMORPHISM_BREAKDOWN.md) |
 | 6 — Trait bounds via dictionaries | **Required** (split 6a/6b) — [written](STAGE_6_TRAIT_DICTIONARIES_BREAKDOWN.md) |
-| 7 — Independently generic trait methods | **Required** |
+| 7 — Independently generic trait methods | **Required** (split 7a/7b) — [written](STAGE_7_GENERIC_TRAIT_MEMBERS_BREAKDOWN.md) |
 | 8 — Extensions | **Required** (one per item) |
 
 ## Testing
