@@ -1764,6 +1764,10 @@ same function still works when it is called directly:
 * a trait obligation in the implementation that no dictionary can satisfy: it
   must come from a bound in scope or match exactly one implementation;
 * a `Natural` bound or an array length that depends on a type parameter;
+* a scheme that names an associated type of its parameters, such as
+  `<Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter)`
+  (a generic function with such a type can still be called directly, at
+  concrete or generic types);
 * a coroutine, async, or reactive body;
 * a function value behind `Ref`, `Slice`, `Buffer`, or a shared cell that
   crosses into the implementation;
@@ -2431,18 +2435,17 @@ supplies its own dictionary, and its prerequisites supply theirs (an `Ord T`
 bound provides `Eq T`). Otherwise exactly one implementation must match the
 obligation when the run-time types are treated as unknowns, and its `where`
 clause must be provable; the dictionary is built from that implementation's
-dictionaries when the code runs. An obligation that could match more than one
-implementation is rejected at the place the polymorphic value is built, even
-though monomorphization might pick one: `Clone (List T)` at an unknown `T` is
-ambiguous when an implementation for one particular `List` instantiation also
-exists. The
-compiler-derived `Debug` of products and sums over such types is built from
-their components' dictionaries. `Copy`, `Sized`, and `Drop` need no dictionary.
-An entire implementation may be generic over its own compile-time parameters
-(see below); an individual trait member may not independently introduce
-parameters beyond the ones its implementation declares. Trait objects and
-associated items beyond those named in a trait's header are not currently
-supported.
+dictionaries when the code runs. An obligation that more than one
+implementation could match is rejected at the place the polymorphic value is
+built, so that dictionary passing always selects what monomorphization would;
+because overlapping implementations are already rejected (see [Generic trait
+implementations](#generic-trait-implementations)), this does not arise for
+ordinary programs. The compiler-derived `Debug` of products and sums is built
+from their components' dictionaries, at run-time and at concrete types alike.
+`Copy`, `Sized`, and `Drop` need no dictionary. An entire implementation may be
+generic over its own compile-time parameters (see below); an individual trait
+member may not independently introduce parameters beyond the ones its
+implementation declares. Trait objects are not supported.
 
 ### Generic trait implementations
 
@@ -2471,14 +2474,15 @@ inside its members' bodies, exactly as they are inside a bounded generic
 implementation's `where` clause, alongside trait bounds, exactly as in a
 generic `def`.
 
-Two implementations that are alpha-equivalent — the same header shape up to
-renaming the compile-time parameters — are rejected as duplicates, the same as
-two concrete implementations for the same arguments. The compiler does not
-perform full overlap checking between implementations, so a concrete
-implementation and a generic implementation whose bound happens to be
-satisfied by the same concrete type may both be declared; dispatch reports an
-ambiguous-implementation error only where a call site is actually reachable
-that both would apply to.
+Two implementations of the same trait overlap when their headers unify and
+every bound of both could hold for the unified arguments; overlapping
+implementations are rejected as duplicates, the same as two concrete
+implementations for the same arguments. A concrete implementation and a
+generic one whose bound the concrete type satisfies therefore cannot both be
+declared. Two implementations whose headers unify may coexist only when a bound
+rules the overlap out: `impl<T where Copy T> Clone T` and
+`impl<T where Clone T> Clone (List T)` coexist because `List T` is never
+`Copy`.
 
 ### Subtype bounds
 

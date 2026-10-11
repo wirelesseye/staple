@@ -64,8 +64,49 @@ the release build of this stage's base commit for every existing input.
   release build over 136 corpus programs and 11 examples; the coverage report
   lists no trait-only template; reachability tests (a concretely called bounded
   `def` and an unused bounded value build nothing).
-- Checker workarounds remain: explicit `USize` indices, projected-result type
-  arguments/result annotations, and callback parameter annotations.
+- **Review of `0a02cf0`.** Probing found three Stage 6 defects in shapes the
+  corpus did not exercise. All are fixed, each with a corpus program:
+  - **Concrete compound arguments** (`09ae6d7`). A concrete tuple or sum
+    passed to a `Debug`-bounded value was rejected: a concrete obligation
+    always took a static dictionary, which needs an explicit implementation.
+    It now falls back to the structural derivation, and concrete owners
+    build that dictionary at the call from static descriptors and component
+    dictionaries (`trait_dictionary_concrete_structural`).
+  - **`Clone` of collections** (`db33bc0`). The dynamic `__buffer_clone`
+    allocates a dynamic buffer, but only `Buffer.with_capacity` planned the
+    buffer finalizer, so any `Clone` of a `List` or `Buffer` through a bound
+    failed to compile. This is what lifts the 4b `__buffer_clone` restriction
+    (`trait_dictionary_list_operations`).
+  - **Nested bounded lambdas** (`f35cd9d`, `db33bc0`). A scheme lambda in a
+    bounded implementation, used at instantiated types, crashed or was
+    rejected. The root cause predates Stage 6 (below). On top of it, an
+    instantiated closure must store every dictionary its entry binds, while
+    a polymorphic one stores only the enclosing ones
+    (`site_stored_dictionary_count`). When both kinds of closure share one
+    capturing instance, the use is routed through the polymorphic path so
+    every closure lays out its environment alike
+    (`trait_dictionary_nested_lambdas`).
+
+  The review also fixed problems that predate Stage 6, each with a test:
+  - **Nested scheme calls (4b).** A use of a `let`-bound scheme lambda at
+    instantiated types inside a dynamic body reused the binding's polymorphic
+    closure, and returned garbage (`polymorphic_nested_scheme_calls`).
+  - **A tuple passed whole to a bounded function** failed with "incomplete
+    call" (part of `09ae6d7`).
+  - **Parser panic** on nested `List.of (List.of (…), …)` (`c883145`).
+  - **Index reads of a `let` local** inside a function failed
+    (`local_index_places`).
+  - **`with mut` inside a function** failed validation
+    (`with_mut_inside_functions`).
+  - **Projections at call sites.** A generic function whose result names an
+    associated type (`IterStep (Iter, Iterator.Item Iter)`) was not
+    normalized at its uses, concrete or generic. Instantiation now resolves
+    each projection through its linking bound (`projection_results`). A
+    scheme annotation naming a projection now checks, but a polymorphic value
+    with such a type is a restriction (below).
+
+  The checker workarounds that remain are explicit `USize` indices and
+  callback parameter annotations.
 
 ## Decisions
 
@@ -144,6 +185,11 @@ the release build of this stage's base commit for every existing input.
     obligation's dictionary.
   - **Normalization at abstract types** follows T-F: a unique implementation
     or a restriction.
+  - **Not in polymorphic values.** A scheme whose type names a projection
+    would need its placeholder as a run-time parameter of the polymorphic
+    entry, passed by callers and mapped by scheme adapters. That is not
+    built, so such a value is a restriction; generic functions with such
+    types are still called directly.
 - **T-I. Bounds that need no dictionary.**
   - `Copy` and `Sized` use the descriptor (Stage 4).
   - `Drop` behavior is the descriptor's drop glue, and user code cannot call
@@ -160,7 +206,11 @@ the release build of this stage's base commit for every existing input.
     closure environment does (with a tail offset).
   - A defaulted member's instance receives the dictionary itself as its bound.
   - A member that needs no descriptors stays concrete and is not yet supported
-    in built dictionaries.
+    in built dictionaries. No probe reached this; a generic member's type
+    mentions the implementation's parameters, which keeps them run-time.
+  - **Closure environments.** A polymorphic closure stores the enclosing
+    dictionaries; its callers pass the scheme's own. An instantiated closure
+    stores every dictionary its entry binds.
 - **T-K. Trait-dependent operations share one mechanism.** These all carry
   evidence today, and each becomes a slot call through a recipe:
   - method calls and operators (`==`, `<`, `+`);
@@ -307,9 +357,10 @@ After Stage 6:
 
 | Restriction | Message | Lifted in |
 |---|---|---|
-| An obligation at run-time types that more than one implementation could satisfy (T-F) | "trait `X` for `Y` is ambiguous at run-time types: candidates …". The checker rejects overlapping implementations, so only an unknown type matching several concrete implementations reaches it | Not planned: it is the price of agreeing with monomorphization |
+| An obligation at run-time types that more than one implementation could satisfy (T-F) | "trait `X` for `Y` is ambiguous at run-time types: candidates …". The checker rejects overlapping implementations (headers that unify with bounds that could all hold), so ordinary programs do not reach it | Not planned: it is the price of agreeing with monomorphization |
 | An obligation no dictionary can satisfy: no bound in scope and no unique implementation | "a trait obligation of this polymorphic value's implementation has no dictionary at run time …" at the construction site | Not planned |
 | `Natural` bound or run-time `Natural` count | "array lengths cannot depend on a polymorphic value's type parameters yet" | Not planned |
+| A scheme naming an associated type of its parameters (T-H) | "polymorphic values whose type names an associated type (such as `Iterator.Item Iter`) are not supported yet" | Not planned yet: needs projection placeholders as run-time parameters of polymorphic entries |
 | Trait member used as a polymorphic value; independently generic trait members | "trait members cannot be used as polymorphic values yet" | Stage 7 |
 | Coroutine, async, or reactive body, transitively | the existing messages | Stage 8 |
 | Function values behind references | unchanged | Not planned |
@@ -336,7 +387,10 @@ After Stage 6:
   Every capture path (closures, adapters, implicit thunks, dictionaries
   inside dictionaries) needs a test that outlives the frame.
 - **Corpus blind spots.** Stage 5's review found three defects in shapes the
-  corpus never exercised. S0 writes a program for every T-K operation and
-  recipe kind before 6a starts.
+  corpus never exercised, and Stage 6's found three more, despite S0: concrete
+  compound arguments, `Clone` of collections, and nested bounded lambdas. A
+  program per operation and recipe kind is not enough; each must also be
+  reached from concrete owners, from dynamic bodies, and from nested
+  closures.
 - **Checker coupling.** Bounded code in generic bodies exercises inference
   paths that monomorphization never stressed. S0 surfaces them early.
