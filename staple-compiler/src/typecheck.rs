@@ -3135,10 +3135,14 @@ impl TypeChecker {
                 let mut value_scheme = scheme.clone();
                 let explicit = resolved_trait.declaration.type_parameters.len()
                     - resolved_trait.declaration.associated_types.len();
+                let explicit_parameters = resolved_trait.parameters.len()
+                    - resolved_trait.declaration.associated_types.len();
                 let arguments =
                     self.trait_parameter_arguments[&resolved_trait.id][..explicit].to_vec();
                 let mut projections = HashMap::new();
-                for (associated, hidden) in resolved_trait.parameters[explicit..].iter().enumerate()
+                for (associated, hidden) in resolved_trait.parameters[explicit_parameters..]
+                    .iter()
+                    .enumerate()
                 {
                     let existing = self.projection_parameters.iter().find(|p| {
                         p.trait_id == resolved_trait.id
@@ -3202,7 +3206,7 @@ impl TypeChecker {
                 for (parameter, name) in resolved_trait
                     .parameters
                     .iter()
-                    .take(explicit)
+                    .take(explicit_parameters)
                     .zip(parameter_names)
                 {
                     if !contains_type_parameter_id(&value_type, *parameter) {
@@ -13035,6 +13039,26 @@ impl TypeChecker {
             &substitutions,
             application.syntax.span.clone(),
         );
+        if !methods.is_empty()
+            && self.direct_callee_syntax.contains(&application.syntax.id)
+            && let Some(CheckedType::Function(expected)) = expected
+            && expected.result.as_ref() == &CheckedType::Inferred
+            && contains_type_parameter(&instantiated)
+        {
+            // Calls infer from their actual inputs before completing the
+            // trait's associated types. An unspecified result must not
+            // constrain a product or a returned function prematurely.
+            self.explicit_value_substitutions
+                .insert(application.syntax.id, substitutions.clone());
+            return self.resolve_trait_method_use(
+                module,
+                application.syntax.id,
+                methods,
+                Some(&expected.parameter),
+                None,
+                application.syntax.span.clone(),
+            );
+        }
         let instantiated = if methods.is_empty() {
             let declared = parameters.iter().flat_map(type_parameter_ids).collect();
             let sized = parameters

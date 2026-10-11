@@ -13423,7 +13423,10 @@ fn stage3_polymorphic_values_check_in_every_value_position() {
 #[test]
 fn stage3_rejects_invalid_polymorphic_values() {
     for (source, message) in [
-        ("trait Test T { apply: (<U> move U -> U) -> I32 }\n", "trait members"),
+        (
+            "trait Test T { apply: (<U> move U -> U) -> I32 }\n",
+            "must mention trait parameter `T`",
+        ),
         ("let f: <T> T = 42\n", "function body"),
         (
             "type Token = wrap I32\nimpl !Copy Token {}\ndef escaping: Token -> (<U> move U -> U) = token => move value => { let n = token.*; value }\nlet token = Token 42\nlet f = escaping token\n",
@@ -13968,4 +13971,25 @@ fn generic_trait_member_bounds_check_completed_associated_arguments() {
             .any(|d| d.message.contains("trait bound")),
         "{diagnostics:?}"
     );
+}
+
+#[test]
+fn generic_trait_members_preserve_product_trait_parameters() {
+    let module = type_check(concat!(
+        "trait Pair (Left, Right) { carry: <A> (Left, Right, move A) -> A = (_, _, move value) => value }\n",
+        "impl Pair (I32, String) {}\n",
+        "let direct = Pair.carry.<(I32, String), I32> (1, \"right\", 42)\n",
+        "let member = Pair.carry\n",
+        "let stored = member.<(I32, String), Bool> (1, \"right\", (Bool :: True))\n",
+        "def relay: <L, R, A where Pair (L, R)> (L, R, move A) -> A = (left, right, move value) => Pair.carry.<(L, R), A> (left, right, value)\n",
+        "let generic = relay\n",
+        "let result = generic (1, \"right\", 7)\n",
+        "trait AssociatedPair (Left, Right) { type Output; carry: <A> (Left, Right, move A) -> (Output, A) }\n",
+        "impl AssociatedPair (I32, String) { type Output = Bool; carry = (_, _, move value) => ((Bool :: True), value) }\n",
+        "let associated = AssociatedPair.carry.<(I32, String), I32> (1, \"right\", 8)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&lower(&module))
+        .expect("product trait parameters remain grouped before member arguments");
 }

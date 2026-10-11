@@ -168,7 +168,7 @@ static CORPUS: [CorpusProgram; 156] = [
             "staple-compiler/tests/fixtures/stage7/dictionaries.sta",
             "generic-trait-members",
         ),
-        "42\nbuilder\ndefault\n9\n7\nbound\n12\n3\neffect\n4\nTrue\nFalse\n5\n6\n21\n22\n23\n24\n25\neffect\n26\n27\n28\n29\nTrue\n5\neffect\n4\n30\n1\neffect\n1\n31\nTrue\n27\n28\n29\nFalse\n5\neffect\n4\n30\n1\neffect\n1\n31\nTrue\n",
+        "42\nbuilder\ndefault\n9\n7\nbound\n12\n3\neffect\n4\nTrue\nFalse\n5\n6\n21\n22\n23\n24\n25\neffect\n26\n27\n28\n29\nTrue\n5\neffect\n4\n30\n1\neffect\n1\n31\nTrue\n27\n28\n29\nFalse\n5\neffect\n4\n30\n1\neffect\n1\n31\nTrue\n40\nTrue\nTrue\n41\n42\n",
     ),
     expect_stdout(
         file(

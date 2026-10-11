@@ -720,9 +720,6 @@ impl SupportWalker<'_> {
             return false;
         };
         let (trait_id, arguments, _) = crate::lower::trait_dictionaries::evidence_obligation(evidence);
-        if !arguments.iter().any(contains_type_parameter) {
-            return false;
-        }
         let obligation = crate::CheckedTraitBound {
             trait_id,
             arguments: arguments.to_vec(),

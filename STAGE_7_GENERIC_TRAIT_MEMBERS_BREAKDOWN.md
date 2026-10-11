@@ -57,11 +57,11 @@ every existing input.
 
 ## Current state
 
-7a and 7b.1–7b.3 are implemented, documented, and formatted. Stage 7 execution
-fixtures pass, including every member shape inside escaping closures. All 127
-LSP tests pass, with full member schemes in diagnostics and editor signatures.
-All 153 existing corpus inputs and 11 standalone examples match the base IR.
-The workspace suite and full differential exit gates are still running.
+7a and 7b.1–7b.3 are implemented and documented. Expanded execution fixtures
+pass in both differential modes, including product trait headers, associated
+return values, curried members, and escaping closures. Full member schemes
+appear in diagnostics and editor signatures. The workspace, full differential,
+and base IR exit gates are being revalidated after compatibility fixes.
 
 ## Decisions
 

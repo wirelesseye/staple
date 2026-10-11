@@ -116,3 +116,36 @@ let int_closure = stored_nested 1
 int_closure ()
 let box_closure = stored_nested (Box 1)
 box_closure ()
+
+trait Pair (Left, Right) {
+    carry: <A> (Left, Right, move A) -> A = (_, _, move value) => value
+}
+impl Pair (I32, String) {}
+def pair_relay: <L, R, A where Pair (L, R)> (L, R, move A) -> A =
+    (left, right, move value) => Pair.carry.<(L, R), A> (left, right, value)
+let pair_relay_value = pair_relay
+println "${pair_relay_value (1, "pair", 40)}"
+let pair_member = Pair.carry
+println "${pair_member.<(I32, String), Bool> (1, "pair", Bool :: True)}"
+
+trait AssociatedPair (Left, Right) {
+    type Output
+    carry: <A> (Left, Right, move A) -> (Output, A)
+}
+impl AssociatedPair (I32, String) {
+    type Output = Bool
+    carry = (_, _, move value) => (Bool :: True, value)
+}
+def associated_relay: <A> move A -> (Bool, A) = move value =>
+    AssociatedPair.carry.<(I32, String), A> (1, "pair", value)
+let associated_relay_value = associated_relay
+let (associated_flag, associated_value) = associated_relay_value 41
+println "${associated_flag}"
+println "${associated_value}"
+
+trait Curried T { pass: <A> [T] -> ([move A] -> A) }
+impl Curried I32 { pass = [_] => [move value] => value }
+def curried_relay: <T, A where Curried T> (T, move A) -> A =
+    (item, move value) => Curried.pass.<T, A> item value
+let curried_relay_value = curried_relay
+println "${curried_relay_value (1, 42)}"
