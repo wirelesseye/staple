@@ -543,6 +543,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .add_function(name, ty, Some(Linkage::Internal)),
                     ]
                 }
+                LoweredArtifactPlan::TraitMemberEntry(plan) => {
+                    let ty = self.backend.compile_dynamic_function_type_with_dictionaries(
+                        &plan.function_type, plan.descriptors, plan.dictionaries)?;
+                    vec![self.backend.llvm_module.add_function(name, ty, Some(Linkage::Internal))]
+                }
                 LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
                     // Only descriptors bound by the environment are omitted.
                     let ty = self
@@ -1949,6 +1954,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             }
             LoweredArtifactPlan::CompoundDescriptorDrop(plan) => {
                 self.emit_compound_descriptor_drop(ordinal, *plan, &artifact.origin.span)
+            }
+            LoweredArtifactPlan::TraitMemberEntry(plan) => {
+                self.emit_trait_member_entry(ordinal, plan, &artifact.origin.span)
             }
             LoweredArtifactPlan::DescriptorBoundEntry(plan) => {
                 self.emit_descriptor_bound_entry(ordinal, plan, &artifact.origin.span)

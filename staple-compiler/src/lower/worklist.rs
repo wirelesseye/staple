@@ -257,6 +257,7 @@ pub(crate) enum LoweredArtifactDependencyKind {
     DescriptorDrop,
     CompoundDescriptorDrop,
     DescriptorBoundEntry,
+    TraitMemberEntry,
     DynamicStructural,
     InstantiationAdapter,
     ReabstractionThunk,
@@ -287,6 +288,7 @@ impl LoweredArtifactDependencyKind {
             LoweredArtifactDependencyKind::DescriptorDrop => "descriptor-drop",
             LoweredArtifactDependencyKind::CompoundDescriptorDrop => "compound-descriptor-drop",
             LoweredArtifactDependencyKind::DescriptorBoundEntry => "descriptor-bound-entry",
+            LoweredArtifactDependencyKind::TraitMemberEntry => "trait-member-entry",
             LoweredArtifactDependencyKind::DynamicStructural => "dynamic-structural",
             LoweredArtifactDependencyKind::InstantiationAdapter => "instantiation-adapter",
             LoweredArtifactDependencyKind::ReabstractionThunk => "reabstraction-thunk",
@@ -330,6 +332,9 @@ impl LoweredArtifactDependencyKind {
             ) | (
                 LoweredArtifactDependencyKind::DescriptorBoundEntry,
                 ArtifactRequestKey::DescriptorBoundEntry(_)
+            ) | (
+                LoweredArtifactDependencyKind::TraitMemberEntry,
+                ArtifactRequestKey::TraitMemberEntry(_)
             ) | (
                 LoweredArtifactDependencyKind::DynamicStructural,
                 ArtifactRequestKey::DynamicStructural(_)
@@ -1940,7 +1945,7 @@ impl<'a> WorklistBuilder<'a> {
         for member in members {
             let evidence = (!program.relevant_parameters(member.function).is_empty())
                 .then(|| member.evidence.clone());
-            self.request_function(
+            self.request_function_in_scope(
                 member.function,
                 origin,
                 member.function_type.clone(),
@@ -1951,6 +1956,8 @@ impl<'a> WorklistBuilder<'a> {
                 LoweredInstanceDependencyKind::TraitMethod,
                 false,
                 false,
+                Some(super::trait_dictionaries::evidence_obligation(&member.evidence).2
+                    .map(|method| super::trait_dictionaries::method_runtime_scope(program, method)).unwrap_or_default()),
             );
         }
     }

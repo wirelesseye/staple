@@ -787,6 +787,11 @@ impl<'a> BodyCloner<'a> {
             }
         }
         for (call_id, call) in self.body.calls.iter() {
+            if let Some(LoweredBoundTarget::Dictionary(dispatch)) = self.body.bindings.get(&LoweredBindingSite::Call(call_id))
+                && !dispatch.dictionaries.is_empty()
+            {
+                self.body.dictionary_calls.insert(super::trait_dictionaries::DictionarySite::Call(call_id), dispatch.dictionaries.clone());
+            }
             if call.scheme.is_some() {
                 match super::trait_dictionaries::plan_scheme_call(
                     self.program,
@@ -3351,10 +3356,13 @@ impl<'a> BodyCloner<'a> {
                 method,
                 origin,
             ) {
-                Ok(dispatch) => {
-                    self.body
-                        .bindings
-                        .insert(site, LoweredBoundTarget::Dictionary(dispatch));
+                Ok(mut dispatch) => {
+                    if let Err(error) = super::trait_dictionaries::instantiate_slot_call(self.program,
+                        &self.enclosing, &self.body.dictionary_bounds, &mut dispatch, method,
+                        recorded_type.as_ref(), &substitutions, origin) {
+                        self.diagnostics.push(error); return;
+                    }
+                    self.body.bindings.insert(site, LoweredBoundTarget::Dictionary(dispatch));
                 }
                 Err(diagnostic) => self.diagnostics.push(diagnostic),
             }
@@ -4302,6 +4310,11 @@ impl<'a> BodyValidator<'a> {
                 }
             }
         for (call_id, call) in self.body.calls.iter() {
+            if let Some(LoweredBoundTarget::Dictionary(dispatch)) = self.body.bindings.get(&LoweredBindingSite::Call(call_id))
+                && !dispatch.dictionaries.is_empty()
+            {
+                expected_dictionary_calls.insert(super::trait_dictionaries::DictionarySite::Call(call_id), dispatch.dictionaries.clone());
+            }
             if call.scheme.is_some() {
                 match super::trait_dictionaries::plan_scheme_call(
                     self.program,

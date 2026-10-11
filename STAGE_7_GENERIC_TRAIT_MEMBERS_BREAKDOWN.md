@@ -68,12 +68,13 @@ every existing input.
 
 ## Current state
 
-7a.1–7a.4 implement checking and monomorphized dispatch, including member
-substitutions in instance requests and metadata. Seven focused checker tests
-pass. The static corpus fixture runs with its pinned output, covering concrete
-and generic implementations, defaults, overrides, bounds, and explicit `_`.
-The 7a differential/workspace/IR gate is pending alongside 7b slot support.
-Dictionary slots and polymorphic member entries remain.
+7a checking/static dispatch and 7b.1 generic dictionary slots are implemented.
+The static and dictionary fixtures run with pinned output, including generic
+builders, defaults, member bounds (also on trait parameters), effect rows,
+nested schemes, escaping closures, and packed product arguments. Slot entries
+are reachable worklist artifacts; builder tails bind only header arguments.
+The targeted differential test and workspace suite are running. Polymorphic
+member entries, documentation, restrictions, and final gates remain.
 
 ## Decisions
 

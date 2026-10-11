@@ -120,10 +120,17 @@ impl LoweredProgram {
                     method: metadata.methods[index],
                     closure_offset: plan.layout.environment + 2 * index,
                 };
-                if !matches!(&slot.key, crate::specialization::ArtifactRequestKey::ReabstractionThunk(key)
-                    if key.dictionary_slot.as_ref() == Some(&expected)
-                        && key.direction == crate::specialization::ReabstractionDirection::ConcreteToDynamic)
-                {
+                let valid = match &slot.key {
+                    crate::specialization::ArtifactRequestKey::ReabstractionThunk(key) =>
+                        key.dictionary_slot.as_ref() == Some(&expected)
+                            && key.direction == crate::specialization::ReabstractionDirection::ConcreteToDynamic,
+                    crate::specialization::ArtifactRequestKey::TraitMemberEntry(crate::specialization::TraitMemberEntryKey::Slot(key)) => {
+                        key == &plan.methods[index].key
+                            && !super::trait_dictionaries::method_runtime_scope(self, metadata.methods[index]).is_empty()
+                    }
+                    _ => false,
+                };
+                if !valid {
                     diagnostics.push(Diagnostic::new(
                         artifact.origin.span.clone(),
                         "dictionary slot order disagrees with its trait",

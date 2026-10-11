@@ -422,8 +422,16 @@ fn select_at_depth(
         let template = program.functions.get(function).ok_or_else(|| {
             staple_syntax::Diagnostic::new(origin.span.clone(), "dictionary member has no template")
         })?;
+        let own_scope = method_runtime_scope(program, *method);
         let mut dictionaries = Vec::new();
         for bound in &template.declared_bounds {
+            if bound.arguments.iter().any(|argument| {
+                let mut referenced = std::collections::BTreeSet::new();
+                super::instance_resolution::collect_referenced_parameters(argument, &mut referenced);
+                !referenced.is_disjoint(&own_scope.types)
+            }) {
+                continue;
+            }
             if markers.contains(&Some(bound.trait_id)) {
                 continue;
             }
@@ -942,10 +950,13 @@ pub(super) fn materialize_recipe(
                     )
                 };
                 let id = instance(member).ok_or_else(missing)?;
+                let (_, _, method) = evidence_obligation(&member.evidence);
+                let own_scope = method.map(|method| method_runtime_scope(program, method)).unwrap_or_default();
                 let descriptors = program
                     .instance_runtime_order(id)
                     .ok_or_else(missing)?
                     .into_iter()
+                    .filter(|parameter| !own_scope.types.contains(parameter))
                     .map(|parameter| {
                         build.substitution.get(&parameter).cloned().ok_or_else(|| {
                             staple_syntax::Diagnostic::new(
@@ -1097,6 +1108,9 @@ pub(crate) struct DictionarySlotCall {
     pub slot: usize,
     /// The member's type at the obligation's types: its dynamic ABI.
     pub function_type: crate::CheckedFunctionType,
+    pub entry_type: crate::CheckedFunctionType,
+    pub descriptors: Vec<crate::CheckedType>,
+    pub dictionaries: Vec<DictionaryCallArgument>,
 }
 
 /// The trait, completed arguments and member a recorded evidence names.
@@ -1171,7 +1185,9 @@ fn member_instance(
         evidence: (!relevant_empty).then(|| member.evidence.clone()),
         target: InstanceResolutionTarget::Nested(enclosing),
     };
-    let resolved = program.resolve_instance_request(&request).ok()?;
+    let (_, _, method) = evidence_obligation(&member.evidence);
+    let scope = method.map(|method| method_runtime_scope(program, method)).unwrap_or_default();
+    let resolved = program.resolve_instance_request_in_scope(&request, &scope).ok()?;
     let ordinal = program.specializations.instance_ordinal(&resolved.key)?;
     let id = <super::FunctionInstanceId as super::ArenaId>::from_index(ordinal.index());
     program.instances.contains(id).then_some(id)
@@ -1226,6 +1242,23 @@ pub(super) fn plan_recipe(
 
 /// Select the dictionary and slot a run-time trait member call reads: an
 /// environment bound, or a dictionary built from the selected implementation.
+pub(super) fn method_runtime_scope(program: &super::LoweredProgram, method: crate::TraitMethodId) -> super::instance_resolution::RuntimeScope {
+    let mut scope = super::instance_resolution::RuntimeScope::default();
+    if let Some(member) = program.trait_methods.get(method) {
+        fn collect(parameter: &crate::typecheck::CheckedSchemeParameter, scope: &mut super::instance_resolution::RuntimeScope) {
+            match parameter {
+                crate::typecheck::CheckedSchemeParameter::Type { id, .. } => { scope.types.insert(*id); }
+                crate::typecheck::CheckedSchemeParameter::Effect { id, .. } => { scope.effects.insert(*id); }
+                crate::typecheck::CheckedSchemeParameter::Product(parameters) => {
+                    for parameter in parameters { collect(parameter, scope); }
+                }
+            }
+        }
+        for parameter in &member.own_parameters { collect(parameter, &mut scope); }
+    }
+    scope
+}
+
 pub(super) fn plan_slot_call(
     program: &super::LoweredProgram,
     enclosing: Option<&super::instance_resolution::ResolvedInstanceRequest>,
@@ -1265,8 +1298,48 @@ pub(super) fn plan_slot_call(
         obligation,
         recipe,
         slot: metadata.dictionary_layout.slots.start + slot,
-        function_type,
+        entry_type: function_type.clone(), function_type,
+        descriptors: Vec::new(), dictionaries: Vec::new(),
     })
+}
+
+pub(super) fn instantiate_slot_call(
+    program: &super::LoweredProgram,
+    enclosing: &super::instance_resolution::ResolvedInstanceRequest,
+    environment: &[crate::CheckedTraitBound],
+    dispatch: &mut DictionarySlotCall,
+    method: crate::TraitMethodId,
+    actual: Option<&crate::CheckedFunctionType>,
+    substitutions: &crate::CallSubstitutions,
+    origin: &crate::Origin,
+) -> Result<(), staple_syntax::Diagnostic> {
+    let member = program.trait_methods.get(method).expect("member metadata");
+    let mut map = enclosing.environment.substitution_map();
+    let enclosing_map = map.clone();
+    map.extend(substitutions.types.iter().map(|s| (s.parameter, crate::substitute_type(s.value_type.clone(), &enclosing_map))));
+    for effect in &substitutions.effects {
+        map.insert(effect.parameter, crate::typecheck::effect_substitution_type(effect.effects.clone()));
+    }
+    if let Some(actual) = actual {
+        crate::infer_type_parameters(&crate::CheckedType::Function(dispatch.entry_type.clone()),
+            &crate::CheckedType::Function(actual.clone()), &mut map);
+    }
+    dispatch.descriptors = member.own_parameters.iter().filter_map(|parameter| {
+        if let crate::typecheck::CheckedSchemeParameter::Type { id, .. } = parameter {
+            Some(map.get(id).cloned().unwrap_or_else(|| parameter.substitution_pattern()))
+        } else { None }
+    }).collect();
+    dispatch.function_type = match crate::substitute_type(crate::CheckedType::Function(dispatch.entry_type.clone()), &map) {
+        crate::CheckedType::Function(ty) => ty, _ => unreachable!(),
+    };
+    let trait_map = dictionary_substitution(program.traits.get(dispatch.obligation.trait_id).unwrap(), &dispatch.obligation.arguments).unwrap_or_default();
+    map.extend(trait_map);
+    let own_bounds = member.scheme.trait_bounds[1..].iter().map(|bound| crate::CheckedTraitBound {
+        trait_id: bound.trait_id,
+        arguments: bound.arguments.iter().map(|argument| crate::substitute_type(argument.clone(), &map)).collect(),
+    }).filter(|bound| !marker_traits(program).contains(&Some(bound.trait_id))).collect();
+    dispatch.dictionaries = plan_obligations(program, Some(enclosing), environment, own_bounds, origin)?;
+    Ok(())
 }
 
 /// Translate a dynamic callee's declared bounds into the caller's types.
@@ -1826,6 +1899,9 @@ pub(super) fn body_builder_uses(
     for target in body.bindings.values() {
         if let super::LoweredBoundTarget::Dictionary(dispatch) = target {
             walked(&body.origin, &dispatch.obligation, &dispatch.recipe);
+            for argument in &dispatch.dictionaries {
+                walked(&body.origin, &argument.obligation, &argument.recipe);
+            }
         }
     }
     for (_, expression) in body.expressions() {
@@ -1873,31 +1949,25 @@ fn member_entry_request(
     let runtime = program
         .instance_runtime_order(member.instance)
         .ok_or_else(|| missing("dictionary member has no descriptor order"))?;
-    if runtime.is_empty() {
-        return Err(missing(
-            "dictionary members that need no descriptors are not supported yet",
-        ));
-    }
     let signature = record
         .body
         .as_ref()
         .ok_or_else(|| missing("dictionary member has no body"))?
         .signature
         .clone();
-    let (dictionary_count, bound_dictionaries) =
-        entry_dictionary_partition(program, member.instance, runtime.len())
-            .ok_or_else(|| missing("dictionary member has no dictionary partition"))?;
+    let dictionary_count = record.body.as_ref().unwrap().dictionary_bounds.len();
+    let bound_dictionaries = member.dictionaries.len();
     let offset = environment + member.region;
     Ok(ClosureRequest::Artifact {
         key: crate::specialization::ArtifactRequestKey::DescriptorBoundEntry(
             crate::specialization::DescriptorBoundEntryKey {
                 instance: record.ordinal,
-                bound: runtime.len(),
+                bound: member.descriptors.len(),
                 offset,
             },
         ),
         plan: super::LoweredArtifactPlan::DescriptorBoundEntry(super::DescriptorBoundEntryPlan {
-            bound: runtime.len(),
+            bound: member.descriptors.len(),
             dictionary_count,
             bound_dictionaries,
             environment_offset: offset,
@@ -2402,8 +2472,7 @@ pub(super) fn expand(
             &plan.arguments,
         )
         .map_err(|error| vec![error])?;
-        let resolved = program
-            .resolve_instance_request(&InstanceResolutionRequest {
+        let request = InstanceResolutionRequest {
                 function: *function,
                 origin: origin.clone(),
                 function_type: function_type.clone(),
@@ -2412,21 +2481,41 @@ pub(super) fn expand(
                     plan.trait_id,
                     &plan.arguments,
                 ),
-                evidence: Some(evidence),
+                evidence: Some(evidence.clone()),
                 target: InstanceResolutionTarget::Root,
-            })
+            };
+        let own_scope = method_runtime_scope(program, *method);
+        let resolved = program.resolve_instance_request_in_scope(&request, &own_scope)
             .map_err(|error| vec![error])?;
         plan.methods.push(PlannedInstance {
             key: resolved.key.clone(),
             instance: None,
             kind: InstanceKind::TraitMethod,
         });
+        let generic_key = resolved.key.clone();
+        let generic_map = resolved.environment.substitution_map();
         method_requests.push(ClosureRequest::Instance {
             resolved,
             kind: InstanceKind::TraitMethod,
             origin: origin.clone(),
             use_site: None,
         });
+        if !own_scope.is_empty() {
+            let signature = match crate::substitute_type(CheckedType::Function(program.functions.get(*function).unwrap().signature.clone()), &generic_map) {
+                CheckedType::Function(signature) => signature, _ => unreachable!(),
+            };
+            let dictionary_count = runtime_obligations(&program.semantic_ids,
+                &program.functions.get(*function).unwrap().declared_bounds, &generic_map, generic_key.runtime()).len();
+            let key = ArtifactRequestKey::TraitMemberEntry(crate::specialization::TraitMemberEntryKey::Slot(generic_key.clone()));
+            plan.slots.push(PlannedArtifact { key: key.clone(), artifact: None, kind: Kind::TraitMemberEntry });
+            requests.push(ClosureRequest::Artifact {
+                key, plan: Plan::TraitMemberEntry(super::artifact_plan::TraitMemberEntryPlan {
+                    method: *method, callee: Some(PlannedInstance { key: generic_key, instance: None, kind: InstanceKind::TraitMethod }),
+                    function_type: signature, descriptors: own_scope.types.len(), dictionaries: dictionary_count,
+                }), kind: Kind::TraitMemberEntry, origin: origin.clone(), use_site: None,
+            });
+            continue;
+        }
         let dictionary_slot = Some(StaticDictionarySlot {
             implementation: plan.implementation,
             method: *method,

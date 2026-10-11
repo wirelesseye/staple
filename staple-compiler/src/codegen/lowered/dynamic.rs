@@ -578,13 +578,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .ptr_type(AddressSpace::default())
             .const_null();
         for (index, member) in build.members.iter().enumerate() {
-            let runtime = self
-                .view
-                .instance_runtime_order(member.instance)
-                .ok_or_else(|| Diagnostic::new(span.clone(), "missing member descriptor order"))?;
             let entry = self.descriptor_bound_entry_code_at(
                 member.instance,
-                runtime.len(),
+                member.descriptors.len(),
                 layout.environment + member.region,
                 span,
             )?;
@@ -3219,7 +3215,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
-        let signature = match &call.scheme {
+        let signature = match (&callee, &call.scheme) {
+            (DynamicCalleeSource::Slot(dispatch), _) => &dispatch.entry_type,
+            (_, scheme) => match scheme {
             Some(scheme) => match scheme.body.as_ref() {
                 CheckedType::Function(signature) => signature,
                 _ => {
@@ -3230,10 +3228,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             },
             None => &call.function_type,
+            },
         };
         // A scheme's single `T` parameter instantiated to a product arrives as
         // one value: pack the placed elements, or pass the whole product.
-        let pack = call.scheme.is_some()
+        let pack = (call.scheme.is_some() || matches!(callee, DynamicCalleeSource::Slot(_)))
             && !matches!(signature.parameter.as_ref(), CheckedType::Product(_))
             && matches!(
                 call.function_type.parameter.as_ref(),
@@ -3276,6 +3275,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 self.dictionary_call_values(owner, call_id, Some(environment), span)?
             {
                 arguments.push(dictionary.into());
+            }
+        }
+        if let DynamicCalleeSource::Slot(dispatch) = &callee {
+            for ty in &dispatch.descriptors {
+                arguments.push(self.dynamic_descriptor(ty, environment, span)?.into());
+            }
+            for dictionary in &dispatch.dictionaries {
+                arguments.push(self.dictionary_recipe_value(&dictionary.recipe, Some(environment), span)?.into());
             }
         }
         if dynamic_shape {
@@ -3377,8 +3384,8 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let signature = if dynamic_shape {
             self.backend.compile_dynamic_function_type_with_dictionaries(
                 signature,
-                polymorphic_types.as_ref().map_or(0, Vec::len),
-                self.view.dictionary_call_arguments(owner, call_id).len(),
+                match &callee { DynamicCalleeSource::Slot(dispatch) => dispatch.descriptors.len(), _ => polymorphic_types.as_ref().map_or(0, Vec::len) },
+                match &callee { DynamicCalleeSource::Slot(dispatch) => dispatch.dictionaries.len(), _ => self.view.dictionary_call_arguments(owner, call_id).len() },
             )?
         } else {
             self.backend
@@ -5402,6 +5409,26 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
     }
 
+    pub(super) fn emit_trait_member_entry(
+        &mut self, ordinal: crate::specialization::ArtifactOrdinal,
+        plan: &crate::lower::TraitMemberEntryPlan,
+        span: &staple_syntax::Span,
+    ) -> CodeGenerationResult<()> {
+        let function = self.artifacts.get(&ordinal).and_then(|functions| functions.first()).copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing trait member entry"))?;
+        let entry = self.backend.context.append_basic_block(function, "entry");
+        self.backend.builder.position_at_end(entry);
+        let Some(callee) = &plan.callee else {
+            return Err(Diagnostic::new(span.clone(), "trait member value entry is not implemented yet"));
+        };
+        let instance = callee.instance.and_then(|instance| self.instances.get(&instance)).copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing generic slot instance"))?;
+        let arguments: Vec<inkwell::values::BasicMetadataValueEnum<'context>> = function.get_params().into_iter().map(Into::into).collect();
+        self.backend.builder.build_direct_call(instance, &arguments, "").map_err(compiler_diagnostic)?;
+        self.backend.builder.build_return(None).map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
     pub(super) fn emit_descriptor_bound_entry(
         &mut self,
         ordinal: crate::specialization::ArtifactOrdinal,
@@ -5443,7 +5470,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         for index in 0..plan.bound_dictionaries {
             let offset = self.backend.size_type.const_int(
-                (plan.environment_offset + plan.runtime.len() + index) as u64 * pointer_bytes,
+                (plan.environment_offset + plan.bound + index) as u64 * pointer_bytes,
                 false,
             );
             let slot = self.backend.dynamic_byte_offset(environment, offset)?;
@@ -5877,15 +5904,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             let signature = match polymorphic {
                 Some(signature) => signature,
                 None => {
-                    let Some(LoweredBoundTarget::Instance(callee)) = self.view.binding(
-                        EmissionOwner::Instance(id),
-                        LoweredBindingSite::Call(call_id),
-                    ) else {
-                        continue;
-                    };
-                    self.view
-                        .instance_signature(*callee)
-                        .expect("callee signature")
+                    match self.view.binding(EmissionOwner::Instance(id), LoweredBindingSite::Call(call_id)) {
+                        Some(LoweredBoundTarget::Instance(callee)) => self.view.instance_signature(*callee).expect("callee signature"),
+                        Some(LoweredBoundTarget::Dictionary(dispatch)) => &dispatch.entry_type,
+                        _ => continue,
+                    }
                 }
             };
             if !matches!(signature.parameter.as_ref(), CheckedType::Product(_))

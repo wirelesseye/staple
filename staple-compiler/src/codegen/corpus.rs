@@ -153,7 +153,10 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 154] = [
+static CORPUS: [CorpusProgram; 155] = [
+    expect_stdout(file("generic_trait_members_dictionaries",
+        "staple-compiler/tests/fixtures/stage7/dictionaries.sta", "generic-trait-members"),
+        "42\nbuilder\ndefault\n9\n7\nbound\n12\n3\neffect\n4\nTrue\nFalse\n5\n6\n"),
     expect_stdout(file("generic_trait_members_static",
         "staple-compiler/tests/fixtures/stage7/static.sta", "generic-trait-members"),
         "42\ngeneric\nTrue\ndefault\n7\n"),

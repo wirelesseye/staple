@@ -3525,6 +3525,8 @@ impl TypeChecker {
                             bound.supertype = substitute_type(bound.supertype.clone(), &substitutions);
                         }
                         self.function_declared_bounds.insert(function_id, scheme.trait_bounds.clone());
+                        self.function_bounds.insert(function_id, self.expand_trait_bounds(scheme.trait_bounds.clone()));
+                        self.function_subtype_bounds.insert(function_id, scheme.subtype_bounds.clone());
                         self.function_schemes.insert(function_id, scheme);
                     }
                 }
@@ -12040,7 +12042,7 @@ impl TypeChecker {
             let CheckedType::Function(function) = &template else {
                 continue;
             };
-            let mut substitutions = HashMap::new();
+            let mut substitutions = self.explicit_value_substitutions.get(&syntax).cloned().unwrap_or_default();
             if let Some(argument) = argument
                 && !infer_type_parameters(&function.parameter, argument, &mut substitutions)
             {
@@ -12858,6 +12860,7 @@ impl TypeChecker {
         }
         self.check_callable_symbol_bounds(symbol, &instantiated, application.syntax.span.clone());
         if !methods.is_empty() {
+            self.explicit_value_substitutions.insert(application.syntax.id, substitutions.clone());
             return self.resolve_trait_method_use(
                 module,
                 application.syntax.id,

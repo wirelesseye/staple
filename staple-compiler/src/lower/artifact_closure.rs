@@ -365,6 +365,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
             | ArtifactRequestKey::DescriptorDrop(_)
             | ArtifactRequestKey::CompoundDescriptorDrop(_)
             | ArtifactRequestKey::DescriptorBoundEntry(_)
+            | ArtifactRequestKey::TraitMemberEntry(_)
             | ArtifactRequestKey::InstantiationAdapter(_) => {
                 super::descriptor_artifacts::expand(program, artifact, plan)
             }
@@ -464,6 +465,7 @@ impl ArtifactFamilyHooks for ProductionHooks {
                 | ArtifactRequestKey::DescriptorDrop(_)
                 | ArtifactRequestKey::CompoundDescriptorDrop(_)
                 | ArtifactRequestKey::DescriptorBoundEntry(_)
+                | ArtifactRequestKey::TraitMemberEntry(_)
                 | ArtifactRequestKey::InstantiationAdapter(_)
                 | ArtifactRequestKey::ReabstractionThunk(_)
                 | ArtifactRequestKey::ValueConversion(_)

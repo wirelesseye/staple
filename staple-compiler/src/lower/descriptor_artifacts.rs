@@ -912,6 +912,20 @@ pub(super) fn expand(
         }
         Plan::CompoundDescriptorDrop(plan) => Plan::CompoundDescriptorDrop(plan),
         Plan::DescriptorBoundEntry(plan) => Plan::DescriptorBoundEntry(plan),
+        Plan::TraitMemberEntry(plan) => {
+            if let Some(callee) = &plan.callee {
+                let ordinal = program.specializations.instance_ordinal(&callee.key).ok_or_else(|| vec![Diagnostic::new(origin.span.clone(), "generic slot instance was not reserved")])?;
+                let id = <super::FunctionInstanceId as super::ArenaId>::from_index(ordinal.index());
+                let instance = program.instances.get(id).ok_or_else(|| vec![Diagnostic::new(origin.span.clone(), "generic slot instance is absent")])?;
+                requests.push(ClosureRequest::Instance {
+                    resolved: super::instance_resolution::ResolvedInstanceRequest {
+                        key: callee.key.clone(), environment: instance.environment.clone(),
+                        relevant: instance.relevant.clone(), evidence: instance.evidence.clone(),
+                    }, kind: callee.kind, origin: origin.clone(), use_site: None,
+                });
+            }
+            Plan::TraitMemberEntry(plan)
+        },
         Plan::InstantiationAdapter(mut plan) => {
             // An adapter converts function-typed arguments and results
             // between the target's ABI and the scheme body's (R5). A scheme

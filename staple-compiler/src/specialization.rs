@@ -1053,6 +1053,12 @@ pub(crate) struct DescriptorBoundEntryKey {
 /// descriptors and builds the source's. The mapping is recomputed from the
 /// pair, so it is not part of the key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum TraitMemberEntryKey {
+    Member(TraitMethodId),
+    Slot(InstanceKey),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct InstantiationAdapterKey {
     pub scheme: CanonicalType,
     pub target: CanonicalType,
@@ -1156,6 +1162,7 @@ pub(crate) enum ArtifactRequestKey {
     DescriptorDrop(CanonicalType),
     CompoundDescriptorDrop(CompoundDescriptorDropKey),
     DescriptorBoundEntry(DescriptorBoundEntryKey),
+    TraitMemberEntry(TraitMemberEntryKey),
     InstantiationAdapter(InstantiationAdapterKey),
     ReabstractionThunk(ReabstractionThunkKey),
     ValueConversion(ValueConversionKey),
@@ -1181,6 +1188,7 @@ impl ArtifactRequestKey {
             ArtifactRequestKey::DescriptorDrop(_) => "descriptor-drop",
             ArtifactRequestKey::CompoundDescriptorDrop(_) => "compound-descriptor-drop",
             ArtifactRequestKey::DescriptorBoundEntry(_) => "descriptor-bound-entry",
+            ArtifactRequestKey::TraitMemberEntry(_) => "trait-member-entry",
             ArtifactRequestKey::InstantiationAdapter(_) => "instantiation-adapter",
             ArtifactRequestKey::ReabstractionThunk(_) => "reabstraction-thunk",
             ArtifactRequestKey::ValueConversion(_) => "value-conversion",
@@ -1412,6 +1420,7 @@ fn artifact_name_prefix(key: &ArtifactRequestKey) -> String {
             "__staple_compound_descriptor_drop".to_owned()
         }
         ArtifactRequestKey::DescriptorBoundEntry(_) => "__staple_descriptor_bound_entry".to_owned(),
+        ArtifactRequestKey::TraitMemberEntry(_) => "__staple_trait_member_entry".to_owned(),
         ArtifactRequestKey::InstantiationAdapter(_) => "__staple_instantiation_adapter".to_owned(),
         ArtifactRequestKey::ReabstractionThunk(_) => "__staple_reabstraction".to_owned(),
         ArtifactRequestKey::ValueConversion(_) => "__staple_value_conversion".to_owned(),

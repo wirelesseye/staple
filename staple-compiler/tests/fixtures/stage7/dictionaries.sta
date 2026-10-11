@@ -1,0 +1,57 @@
+use std.io.(IO, println)
+use std.fmt.Display
+trait Visit T { visit: <A> (T, move A) -> A }
+impl Visit I32 { visit = (_, move value) => value }
+type Box T = wrap T
+impl<T> Visit (Box T) { visit = (_, move value) => value }
+def relay: <T, A where Visit T> (T, move A) -> A = (item, move value) => Visit.visit (item, value)
+let stored = relay
+println "${stored (1, 42)}"
+println "${stored (Box 2, "builder")}"
+trait Fallback T { fallback: <A> (T, move A) -> A = (_, move value) => value }
+impl Fallback I32 {}
+impl<T> Fallback (Box T) {}
+def fallback: <T, A where Fallback T> (T, move A) -> A = (item, move value) => Fallback.fallback (item, value)
+let stored_fallback = fallback
+println "${stored_fallback (1, "default")}"
+println "${stored_fallback (Box 2, 9)}"
+trait Show T { show: <A where Display A> (T, A) -> String }
+impl Show I32 { show = (_, value) => ToString.to_string value }
+impl<X> Show (Box X) { show = (_, value) => ToString.to_string value }
+def show: <T, A where Show T, Display A> (T, A) -> String = pair => Show.show pair
+let stored_show = show
+println (stored_show (1, 7))
+println (stored_show (Box 1, "bound"))
+def capture: <T where Visit T, Copy T> T -> (() -> I32) = item => () => Visit.visit (item, 12)
+let stored_capture = capture
+let escaped = stored_capture (Box 1)
+println "${escaped ()}"
+trait Action T { act: <effect E> (T, () ->{E} I32) ->{E} I32 }
+impl Action I32 { act = (_, f) => f () }
+def act: <T, effect E where Action T> (T, () ->{E} I32) ->{E} I32 = pair => Action.act pair
+let stored_act = act
+def quiet: () -> I32 = () => 3
+def noisy: () ->{IO} I32 = () => { println "effect"; 4 }
+println "${stored_act (1, quiet)}"
+println "${stored_act (1, noisy)}"
+trait Convert X Y { convert: (X, Y) -> Bool }
+impl Convert I32 String { convert = _ => True }
+impl<X> Convert (Box X) String { convert = _ => False }
+trait Compare T { compare: <A where Convert T A> (T, A) -> Bool }
+impl Compare I32 { compare = pair => Convert.convert pair }
+impl<X> Compare (Box X) { compare = pair => Convert.convert pair }
+def compare: <T, A where Compare T, Convert T A> (T, A) -> Bool = pair => Compare.compare pair
+let stored_compare = compare
+println "${stored_compare (1, "yes")}"
+println "${stored_compare (Box 1, "no")}"
+def identity: <A> move A -> A = move value => value
+trait Apply T { apply: T -> (<A> move A -> A) -> I32 }
+impl Apply I32 { apply = _ => f => f 5 }
+def apply: <T where Apply T> T -> I32 = item => Apply.apply item identity
+let stored_apply = apply
+println "${stored_apply 1}"
+trait Make T { make: <A> move A -> T }
+impl Make I32 { make = move value => 6 }
+def make: <T, A where Make T> move A -> T = move value => Make.make value
+let stored_make = make
+println "${stored_make.<I32, (I32, I32)> (1, 2)}"
