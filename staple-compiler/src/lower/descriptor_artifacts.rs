@@ -498,8 +498,10 @@ pub(super) fn scan_instance(
                 ),
                 plan: Plan::GcFinalizer(crate::GcFinalizerPlan::DynamicClosureEnvironment {
                     closure: *callee,
-                    dictionaries: super::trait_dictionaries::stored_dictionary_count(
-                        program, *callee,
+                    dictionaries: super::trait_dictionaries::site_stored_dictionary_count(
+                        program,
+                        *callee,
+                        callable.scheme.is_some(),
                     )
                     .unwrap_or(0),
                     runtime,
@@ -630,12 +632,13 @@ pub(super) fn scan_instance(
         }
     }
     // A dynamic buffer allocation installs the shared dynamic buffer
-    // finalizer (R6).
+    // finalizer (R6). `__buffer_clone` allocates its copy the same way.
     if let Some((call_id, _)) = body.calls.iter().find(|(_, call)| {
         matches!(
             &call.target,
             super::LoweredCallableTarget::Intrinsic {
-                intrinsic: crate::IntrinsicFunction::BufferWithCapacity,
+                intrinsic: crate::IntrinsicFunction::BufferWithCapacity
+                    | crate::IntrinsicFunction::BufferClone,
                 ..
             }
         )

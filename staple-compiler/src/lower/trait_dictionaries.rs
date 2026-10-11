@@ -1596,7 +1596,7 @@ pub(super) fn plan_callable_value(
     value: &super::LoweredCallableValue,
     callee: super::FunctionInstanceId,
 ) -> Result<Vec<DictionaryCallArgument>, staple_syntax::Diagnostic> {
-    let stored = stored_dictionary_count(program, callee).unwrap_or(0);
+    let stored = site_stored_dictionary_count(program, callee, value.scheme.is_some()).unwrap_or(0);
     plan_instance_dictionaries(
         program,
         enclosing,
@@ -1610,6 +1610,33 @@ pub(super) fn plan_callable_value(
 
 /// Dictionaries a dynamic closure environment stores for one instance. They
 /// follow the descriptor region and precede capture descriptors.
+/// Dictionaries one closure of `instance` stores. A polymorphic value's
+/// callers supply the scheme's own bounds, so it stores the enclosing ones
+/// (`stored_dictionary_count`). An instantiated closure is called without
+/// dictionaries, so it stores every one its entry binds
+/// (`entry_dictionary_partition`).
+pub(super) fn site_stored_dictionary_count(
+    program: &super::LoweredProgram,
+    instance: super::FunctionInstanceId,
+    polymorphic: bool,
+) -> Option<usize> {
+    if polymorphic {
+        return stored_dictionary_count(program, instance);
+    }
+    let record = program.instances.get(instance)?;
+    let template = program.functions.get(record.template)?;
+    let key = program.specializations.instance(record.ordinal)?;
+    Some(
+        runtime_obligations(
+            &program.semantic_ids,
+            &template.declared_bounds,
+            &record.environment.substitution_map(),
+            key.runtime(),
+        )
+        .len(),
+    )
+}
+
 pub(super) fn stored_dictionary_count(
     program: &super::LoweredProgram,
     instance: super::FunctionInstanceId,

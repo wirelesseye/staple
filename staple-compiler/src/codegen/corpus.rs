@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 149] = [
+static CORPUS: [CorpusProgram; 150] = [
     expect_stdout(
         must_run(inline(
             "trait_dictionary_adapters",
@@ -2894,6 +2894,54 @@ let value = at (Ref (1, 2), (USize :: 5))
             "emission",
         ),
         "(1, 2)\n(1, \"x\")\n5\n((1, 2.5), 3)\n(3, 4)\n(5, 6)\n\"y\"\n",
+    )),
+    // Clone, Index and iteration over List through dictionaries, at concrete and
+    // run-time element types, including a nested list clone (the dynamic
+    // __buffer_clone and its buffer finalizer), and a bounded def used as a closure
+    // at a run-time type (its closure stores every dictionary its entry binds).
+    must_run(expect_stdout(
+        inline(
+            "trait_dictionary_list_operations",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "use std.list.List\n",
+                "def copy_one: <T where Clone T> List T -> List T = items => Clone.clone items\n",
+                "let stored: <T where Clone T> List T -> List T = copy_one\n",
+                "def first: <A where Copy A> List A -> A = items => items[USize :: 0]\n",
+                "let poly_first: <A where Copy A> List A -> A = first\n",
+                "def print_all: <A where Display A, Copy A> move List A ->{IO} () = move items => {\n",
+                "    for item in items { println (ToString.to_string item) }\n",
+                "}\n",
+                "def copied_then_printed: <A where Clone A, Copy A, Display A> List A ->{IO} () = items => {\n",
+                "    let copied = copy_one items\n",
+                "    println (ToString.to_string copied[USize :: 1])\n",
+                "    print_all copied\n",
+                "}\n",
+                "let poly: <A where Clone A, Copy A, Display A> List A ->{IO} () = copied_then_printed\n",
+                "def describe: <T where Display T> T -> String = value => ToString.to_string value\n",
+                "def apply: <A where Copy A> (A -> String, A) -> String = (f, a) => f a\n",
+                "def run: <B where Display B, Copy B> B -> String = b => apply (describe.<B>, b)\n",
+                "let poly_run: <B where Display B, Copy B> B -> String = run\n",
+                "def main_like: () ->{IO} () = () => {\n",
+                "    let items: List I32 = List.of (4, 5)\n",
+                "    let copied = stored items\n",
+                "    for x in copied { println \"${x}\" }\n",
+                "    println \"${poly_first items}\"\n",
+                "    let more: List F64 = List.of (1.5, 2.5)\n",
+                "    poly more\n",
+                "    let first_row: List I32 = List.of (1, 2)\n",
+                "    let second_row: List I32 = List.of (3,)\n",
+                "    let nested: List (List I32) = List.of (first_row, second_row)\n",
+                "    let deep = stored nested\n",
+                "    println \"nested clone\"\n",
+                "    println (poly_run 4)\n",
+                "    println (poly_run 2.5)\n",
+                "}\n",
+                "main_like ()\n",
+            ),
+            "emission",
+        ),
+        "4\n5\n4\n2.5\n1.5\n2.5\nnested clone\n4\n2.5\n",
     )),
     must_run(expect_stdout(
         inline(

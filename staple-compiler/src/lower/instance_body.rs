@@ -3123,11 +3123,11 @@ impl<'a> BodyCloner<'a> {
         }
     }
 
-    /// A scheme lambda used at instantiated types binds the instance for
-    /// those types. When an instantiation mentions this body's run-time
+    /// A capturing scheme lambda used at instantiated types binds the instance
+    /// for those types. When an instantiation mentions this body's run-time
     /// parameters, that instance keeps the scheme's own parameters at run
     /// time (Decision 2): it is the polymorphic entry, whose closure stores
-    /// only the enclosing dictionaries. The occurrence is then a polymorphic
+    /// only the enclosing dictionaries before its captures. The occurrence is then a polymorphic
     /// value and the call through it a polymorphic call, which passes the
     /// scheme's descriptors and dictionaries (B3), instead of a closure call
     /// that would expect an instantiated closure.
@@ -3146,6 +3146,13 @@ impl<'a> BodyCloner<'a> {
             let Some(scheme) = &template.scheme else {
                 continue;
             };
+            // Only a capturing closure has an environment tail after its
+            // dictionaries, which every closure of one instance must lay out
+            // alike. A capture-free template's instantiated closure simply
+            // stores every dictionary its entry binds.
+            if template.captures.is_empty() {
+                continue;
+            }
             let Some(LoweredBoundTarget::Instance(instance)) = self
                 .body
                 .bindings
