@@ -368,10 +368,9 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 })?;
                 self.build_dictionary(build, environment, span)
             }
+            // At concrete types (a concrete owner has no dynamic environment)
+            // every part is static.
             crate::DictionaryRecipe::Structural(structural) => {
-                let environment = environment.ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "structural dictionary has no dynamic environment")
-                })?;
                 self.build_structural_dictionary(structural, environment, span)
             }
             crate::DictionaryRecipe::Environment(recipe) => {
@@ -448,9 +447,13 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
     fn build_structural_dictionary(
         &self,
         structural: &crate::StructuralRecipe,
-        environment: &DynamicEnvironment<'context>,
+        environment: Option<&DynamicEnvironment<'context>>,
         span: &staple_syntax::Span,
     ) -> CodeGenerationResult<PointerValue<'context>> {
+        let descriptor_of = |ty: &CheckedType| match environment {
+            Some(environment) => self.dynamic_descriptor(ty, environment, span),
+            None => self.static_dynamic_descriptor(ty, span),
+        };
         let layout = self
             .view
             .trait_dictionary_layout(structural.trait_id)
@@ -501,7 +504,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         for (index, prerequisite) in structural.prerequisites.iter().enumerate() {
             let value = match prerequisite {
                 Some(argument) => {
-                    self.dictionary_recipe_value(&argument.recipe, Some(environment), span)?
+                    self.dictionary_recipe_value(&argument.recipe, environment, span)?
                 }
                 None => null,
             };
@@ -512,18 +515,17 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .iter()
             .enumerate()
         {
-            let descriptor = self.dynamic_descriptor(argument, environment, span)?;
+            let descriptor = descriptor_of(argument)?;
             let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
             store(layout.associated.start + index, descriptor)?;
         }
         for (index, ty) in structural.descriptors.iter().enumerate() {
-            let descriptor = self.dynamic_descriptor(ty, environment, span)?;
+            let descriptor = descriptor_of(ty)?;
             let descriptor = self.copy_descriptor_to_gc(descriptor, span)?;
             store(layout.environment + index, descriptor)?;
         }
         for (index, component) in structural.components.iter().enumerate() {
-            let value =
-                self.dictionary_recipe_value(&component.recipe, Some(environment), span)?;
+            let value = self.dictionary_recipe_value(&component.recipe, environment, span)?;
             store(layout.environment + structural.descriptors.len() + index, value)?;
         }
         Ok(dictionary)

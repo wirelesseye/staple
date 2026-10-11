@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 148] = [
+static CORPUS: [CorpusProgram; 149] = [
     expect_stdout(
         must_run(inline(
             "trait_dictionary_adapters",
@@ -2864,6 +2864,36 @@ let value = at (Ref (1, 2), (USize :: 5))
             "emission",
         ),
         "7/1 7/2.5 7/7 7 3 7 7\n0.5/1 0.5/2.5 0.5/0.5 0.5 3 0.5 0.5\n9/1 9/2.5 9/9 9 3 9 9\n",
+    )),
+    // Concrete tuples and sums passed to a Debug-bounded function, directly and as
+    // a polymorphic value, from top-level code and from a concrete function. The
+    // structural dictionary has no implementation to point at; it is built at the
+    // call from static descriptors and component dictionaries.
+    must_run(expect_stdout(
+        inline(
+            "trait_dictionary_concrete_structural",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "use std.fmt.Formatter\n",
+                "def show: <T where Debug T> move T ->{IO} () = move value => println (Formatter.debug value)\n",
+                "let stored: <T where Debug T> move T ->{IO} () = show\n",
+                "let text: String = \"x\"\n",
+                "let either: I32 | String = 5\n",
+                "show (1, 2)\n",
+                "stored (1, text)\n",
+                "stored either\n",
+                "stored ((1, 2.5), 3)\n",
+                "def from_def: () ->{IO} () = () => {\n",
+                "    let other: I32 | String = \"y\"\n",
+                "    show (3, 4)\n",
+                "    stored (5, 6)\n",
+                "    stored other\n",
+                "}\n",
+                "from_def ()\n",
+            ),
+            "emission",
+        ),
+        "(1, 2)\n(1, \"x\")\n5\n((1, 2.5), 3)\n(3, 4)\n(5, 6)\n\"y\"\n",
     )),
     must_run(expect_stdout(
         inline(

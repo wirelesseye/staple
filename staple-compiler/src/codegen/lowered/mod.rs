@@ -5473,6 +5473,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 }
             }
         }
+        // A single argument whose expected type is the whole product parameter
+        // (a `T` instantiated at a tuple) was placed in the first slot; treat it
+        // as the whole product.
+        if parameter_count > 1
+            && unplaced.is_empty()
+            && call.arguments.len() == 1
+            && slots[0].is_some()
+            && slots[1..].iter().all(Option::is_none)
+            && crate::types_equivalent(
+                &call.arguments[0].expected,
+                call.function_type.parameter.as_ref(),
+            )
+        {
+            unplaced.push(slots[0].take().expect("checked above"));
+        }
         // Whole-product fallback: one argument value against a flattened
         // multi-element parameter unpacks the struct, and against a single slot
         // it is that slot's value.
@@ -5491,6 +5506,43 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                             .map_err(compiler_diagnostic)?
                             .into(),
                     );
+                }
+            } else if let BasicMetadataValueEnum::PointerValue(pointer) = value
+                && let CheckedType::Product(product) = call.function_type.parameter.as_ref()
+                && product.elements.len() == parameter_count
+            {
+                // The whole product arrived by pointer (a borrowed or
+                // materialized argument, such as a `T` parameter instantiated
+                // at a tuple): pass each element in its own mode.
+                let product_type = self.backend.compile_product_type(product)?;
+                let indirect = self.backend.indirect_parameter_mask(&call.function_type);
+                for (index, element) in product.elements.iter().enumerate() {
+                    let field = self
+                        .backend
+                        .builder
+                        .build_struct_gep(product_type, pointer, index as u32, "argument.element")
+                        .map_err(compiler_diagnostic)?;
+                    slots[index] = Some(if indirect.get(index).copied().unwrap_or(false) {
+                        field.into()
+                    } else {
+                        let element_type = self.backend.compile_type(&element.value_type)?;
+                        let loaded = self
+                            .backend
+                            .builder
+                            .build_load(element_type, field, "argument.element.value")
+                            .map_err(compiler_diagnostic)?;
+                        use inkwell::values::BasicValue;
+                        loaded
+                            .as_instruction_value()
+                            .expect("a load is an instruction")
+                            .set_alignment(
+                                self.backend.target_data.get_abi_alignment(&element_type),
+                            )
+                            .map_err(|error| {
+                                Diagnostic::new(call.origin.span.clone(), error.to_string())
+                            })?;
+                        loaded.into()
+                    });
                 }
             }
         }

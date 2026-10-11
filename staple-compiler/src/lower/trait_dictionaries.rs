@@ -365,12 +365,19 @@ fn select_at_depth(
         ));
     }
     if !obligation.arguments.iter().any(contains_type_parameter) {
-        let super::artifact_closure::ClosureRequest::Artifact { key, .. } =
-            static_request(program, obligation, origin)?
-        else {
-            unreachable!()
+        // A concrete obligation uses a static dictionary when an explicit
+        // implementation provides it. A compiler-derived structural trait
+        // (the `Debug` of a product or sum) has no implementation to point
+        // at, so its dictionary is built from its components' dictionaries,
+        // as at run-time types.
+        return match static_request(program, obligation, origin) {
+            Ok(super::artifact_closure::ClosureRequest::Artifact { key, .. }) => {
+                Ok(DictionarySelection::Static(key))
+            }
+            Ok(_) => unreachable!(),
+            Err(error) => select_structural(program, environment, obligation, origin, depth)
+                .map_err(|_| error),
         };
-        return Ok(DictionarySelection::Static(key));
     }
     if let Some(recipe) = environment_recipe(program, environment, obligation) {
         return Ok(DictionarySelection::Environment(recipe));
@@ -1490,6 +1497,32 @@ pub(super) fn initializer_builder_uses(
         super::emission::OwnerArenas::Initializer(initializer),
         &mut visitor,
     );
+    // Call sites in an initializer pass static dictionaries, or structural
+    // ones built at the call from static parts.
+    if let Ok(arguments) = initializer_call_arguments(program, initializer) {
+        for (site, arguments) in arguments {
+            let origin = match site {
+                DictionarySite::Call(call) => program.calls.get(call).map(|call| &call.origin),
+                DictionarySite::Coercion(expression) => program
+                    .expressions
+                    .get(expression)
+                    .map(|expression| &expression.origin),
+            };
+            let Some(origin) = origin else {
+                continue;
+            };
+            for argument in arguments {
+                if matches!(argument.recipe, DictionaryRecipe::Static(_)) {
+                    continue;
+                }
+                let mut uses = Vec::new();
+                walk_recipe(program, &argument.obligation, &argument.recipe, true, &mut uses);
+                visitor
+                    .found
+                    .extend(uses.into_iter().map(|(_, use_)| (origin.clone(), use_)));
+            }
+        }
+    }
     visitor.found
 }
 
@@ -1654,6 +1687,9 @@ pub(super) enum BuilderUse {
     Entry(BuilderMember, usize),
     Static(crate::CheckedTraitBound),
     Structural(crate::specialization::DynamicStructuralShape, crate::TraitId),
+    /// A concrete type whose static descriptor a structural dictionary
+    /// stores. A concrete owner has no dynamic environment to build it from.
+    Descriptor(crate::CheckedType),
 }
 
 /// Walk a recipe's builders in a fixed order, collecting their uses.
@@ -1677,6 +1713,19 @@ fn walk_recipe(
                 structural.obligation.clone(),
                 BuilderUse::Structural(structural.shape.clone(), structural.trait_id),
             ));
+            let associated = program
+                .traits
+                .get(structural.trait_id)
+                .map_or(0, |metadata| metadata.dictionary_layout.associated.len());
+            let stored = structural.obligation.arguments
+                [structural.obligation.arguments.len() - associated..]
+                .iter()
+                .chain(&structural.descriptors);
+            for ty in stored {
+                if !crate::contains_type_parameter(ty) {
+                    uses.push((structural.obligation.clone(), BuilderUse::Descriptor(ty.clone())));
+                }
+            }
             for component in &structural.components {
                 walk_recipe(program, &component.obligation, &component.recipe, false, uses);
             }
@@ -1929,6 +1978,7 @@ pub(super) fn scan_instance(
             BuilderUse::Structural(shape, trait_id) => Ok(structural_slot_request(
                 shape, trait_id, &origin,
             )),
+            BuilderUse::Descriptor(ty) => super::descriptor_artifacts::descriptor_request(&ty, &origin),
         }
         .map_err(|error| vec![error])?;
         let super::artifact_closure::ClosureRequest::Artifact { use_site, .. } = &mut request
@@ -2022,8 +2072,10 @@ pub(super) fn scan_initializer(
         }
         .expect("initializer dictionary site");
         for (index, argument) in arguments.iter().enumerate() {
+            // A structural dictionary at concrete types is built at the call
+            // from static parts; its uses are requested below.
             let DictionaryRecipe::Static(key) = &argument.recipe else {
-                unreachable!("initializers have no hidden dictionary environment")
+                continue;
             };
             let mut request = static_request(program, &argument.obligation, origin)
                 .map_err(|error| vec![error])?;
@@ -2057,6 +2109,7 @@ pub(super) fn scan_initializer(
             BuilderUse::Structural(shape, trait_id) => {
                 Ok(structural_slot_request(shape, trait_id, &origin))
             }
+            BuilderUse::Descriptor(ty) => super::descriptor_artifacts::descriptor_request(&ty, &origin),
         }
         .map_err(|error| vec![error])?;
         let super::artifact_closure::ClosureRequest::Artifact { use_site, .. } = &mut request
