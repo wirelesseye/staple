@@ -1755,10 +1755,8 @@ impl<'a> WorklistBuilder<'a> {
                 trait_id, method, ..
             } => {
                 if value.scheme.is_some() {
-                    self.diagnostics.push(Diagnostic::new(
-                        value.origin.span.clone(),
-                        "trait members cannot be used as polymorphic values yet",
-                    ));
+                    let (key, plan) = super::trait_dictionaries::member_value_entry(program, *method);
+                    self.request_artifact(key, Some(plan), &value.origin, owner, LoweredArtifactDependencyKind::TraitMemberEntry);
                     return;
                 }
                 let Some(evidence) = &value.evidence else {
@@ -1900,7 +1898,7 @@ impl<'a> WorklistBuilder<'a> {
                     .relevant_parameters(member.function)
                     .type_parameters()
                     .collect(),
-                effects: BTreeSet::new(),
+                effects: program.relevant_parameters(member.function).effect_parameters().collect(),
             };
             self.request_function_in_scope(
                 member.function,

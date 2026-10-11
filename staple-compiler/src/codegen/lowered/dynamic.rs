@@ -1782,6 +1782,16 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .temporaries
             .get(&id)
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing dynamic callable storage"))?;
+        if callable.scheme.is_some() && matches!(callable.target,
+            LoweredCallableTarget::TraitImplementation { .. } | LoweredCallableTarget::StructuralTraitMethod { .. })
+        {
+            let binding = self.view.binding(owner, LoweredBindingSite::CallableValue(value_id));
+            let code = self.callable_artifact_code(binding, &span, "trait member entry binding")?;
+            let closure = self.backend.build_closure_value(code,
+                self.backend.context.ptr_type(AddressSpace::default()).const_null())?;
+            self.backend.builder.build_store(storage, closure).map_err(compiler_diagnostic)?;
+            return Ok(storage);
+        }
         if let Some(LoweredBoundTarget::Dictionary(dispatch)) = self
             .view
             .binding(owner, LoweredBindingSite::CallableValue(value_id))
@@ -5411,20 +5421,34 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     pub(super) fn emit_trait_member_entry(
         &mut self, ordinal: crate::specialization::ArtifactOrdinal,
-        plan: &crate::lower::TraitMemberEntryPlan,
-        span: &staple_syntax::Span,
+        plan: &crate::lower::TraitMemberEntryPlan, span: &staple_syntax::Span,
     ) -> CodeGenerationResult<()> {
         let function = self.artifacts.get(&ordinal).and_then(|functions| functions.first()).copied()
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing trait member entry"))?;
         let entry = self.backend.context.append_basic_block(function, "entry");
         self.backend.builder.position_at_end(entry);
-        let Some(callee) = &plan.callee else {
-            return Err(Diagnostic::new(span.clone(), "trait member value entry is not implemented yet"));
-        };
-        let instance = callee.instance.and_then(|instance| self.instances.get(&instance)).copied()
-            .ok_or_else(|| Diagnostic::new(span.clone(), "missing generic slot instance"))?;
-        let arguments: Vec<inkwell::values::BasicMetadataValueEnum<'context>> = function.get_params().into_iter().map(Into::into).collect();
-        self.backend.builder.build_direct_call(instance, &arguments, "").map_err(compiler_diagnostic)?;
+        let parameters = function.get_params();
+        if let Some(callee) = &plan.callee {
+            let instance = callee.instance.and_then(|instance| self.instances.get(&instance)).copied()
+                .ok_or_else(|| Diagnostic::new(span.clone(), "missing generic slot instance"))?;
+            let arguments: Vec<inkwell::values::BasicMetadataValueEnum<'context>> = parameters.into_iter().map(Into::into).collect();
+            self.backend.builder.build_direct_call(instance, &arguments, "").map_err(compiler_diagnostic)?;
+        } else {
+            let dictionary_index = 1 + plan.descriptors;
+            let dictionary = parameters[dictionary_index].into_pointer_value();
+            let width = self.backend.target_data.get_pointer_byte_size(None) as u64;
+            let address = self.backend.dynamic_byte_offset(dictionary,
+                self.backend.size_type.const_int(plan.slot as u64 * width, false))?;
+            let pointer = self.backend.context.ptr_type(AddressSpace::default());
+            let code = self.load_dynamic_storage(pointer, address, "member.slot").map_err(compiler_diagnostic)?.into_pointer_value();
+            let own_descriptors = plan.own_descriptors;
+            let own_dictionaries = plan.dictionaries - 1;
+            let mut arguments: Vec<inkwell::values::BasicMetadataValueEnum<'context>> = vec![dictionary.into()];
+            for parameter in &parameters[1 + plan.descriptors - own_descriptors..1 + plan.descriptors] { arguments.push((*parameter).into()); }
+            for parameter in &parameters[dictionary_index + 1..] { arguments.push((*parameter).into()); }
+            let ty = self.backend.compile_dynamic_function_type_with_dictionaries(&plan.function_type, own_descriptors, own_dictionaries)?;
+            self.backend.builder.build_indirect_call(ty, code, &arguments, "member.call").map_err(compiler_diagnostic)?;
+        }
         self.backend.builder.build_return(None).map_err(compiler_diagnostic)?;
         Ok(())
     }

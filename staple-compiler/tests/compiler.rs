@@ -13800,3 +13800,36 @@ fn rejects_polymorphic_recursion_through_generic_trait_dispatch() {
         .expect_err_diagnostics("dispatch cannot recursively expand member arguments");
     assert!(diagnostics.iter().any(|d| d.message.contains("polymorphic recursion")), "{diagnostics:?}");
 }
+
+#[test]
+fn checks_polymorphic_trait_members_and_keeps_projection_restriction() {
+    TypeChecker::new().check(resolve(include_str!("fixtures/stage7/values.sta")))
+        .expect("member values instantiate independently and subsume bounds");
+    let diagnostics = TypeChecker::new().check(resolve("trait Source T { type Element; read: T -> Element }\nlet member = Source.read\n"))
+        .expect_err_diagnostics("associated projections remain unsupported in value schemes");
+    assert!(diagnostics.iter().any(|d| d.message.contains("associated type")), "{diagnostics:?}");
+    TypeChecker::new().check(resolve("trait Source T { type Element; keep: T -> T }\n"))
+        .expect("only explicit trait parameters must occur in each member");
+}
+
+#[test]
+fn rejects_parameter_product_capable_trait_members() {
+    let diagnostics = TypeChecker::new().check(resolve("trait Run T { run: <A> (T, A -> I32) -> I32 }\n"))
+        .expect_err_diagnostics("member parameters cannot depend on unknown function arity");
+    assert!(diagnostics.iter().any(|d| d.message.contains("trait member parameters cannot be parameter-product capable")), "{diagnostics:?}");
+}
+
+#[test]
+fn plans_generic_trait_member_entries_only_when_reachable() {
+    let declarations = "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\n";
+    for use_site in [
+        "let answer = Visit.visit (1, 42)\n",
+        "def unused: <T where Visit T> T -> () = item => { let member = Visit.visit; () }\nlet answer = 42\n",
+    ] {
+        let lowered = lower(&type_check(&format!("{declarations}{use_site}")));
+        assert!(lowered.planned_artifact_names(PlannedArtifactFamily::TraitMemberEntry).is_empty(),
+            "static calls and unreachable templates must not request member entries");
+    }
+    let lowered = lower(&type_check(&format!("{declarations}let member = Visit.visit\nlet answer = member (1, 42)\n")));
+    assert!(!lowered.planned_artifact_names(PlannedArtifactFamily::TraitMemberEntry).is_empty());
+}

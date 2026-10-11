@@ -3163,7 +3163,7 @@ impl TypeChecker {
                     .iter()
                     .flat_map(TypeParameterPattern::names)
                     .collect::<Vec<_>>();
-                for (parameter, name) in resolved_trait.parameters.iter().zip(parameter_names) {
+                for (parameter, name) in resolved_trait.parameters.iter().take(explicit).zip(parameter_names) {
                     if !contains_type_parameter_id(&value_type, *parameter) {
                         self.diagnostics.push(Diagnostic::new(
                             member.syntax.span.clone(),
@@ -12119,6 +12119,16 @@ impl TypeChecker {
             let (method, arguments, member_arguments, value_type) = matches.pop().expect("one method match");
             self.trait_dispatches.insert(syntax, CheckedTraitDispatch { method, arguments, member_arguments });
             let scheme = self.trait_member_schemes[&method].clone();
+            let trait_id = module.trait_for_method(method).expect("member owner");
+            let explicit = module.traits()[&trait_id].declaration.type_parameters.len()
+                - module.traits()[&trait_id].declaration.associated_types.len();
+            if argument.is_none() && scheme.parameters.len() > explicit {
+                if scheme_names_projection(&scheme) {
+                    self.diagnostics.push(Diagnostic::new(span, PROJECTION_VALUE_RESTRICTION));
+                    return CheckedType::Error;
+                }
+                self.expression_schemes.insert(syntax, scheme.clone());
+            }
             self.check_instantiated_bounds(scheme.trait_bounds, scheme.subtype_bounds,
                 &self.trait_method_types[&method].clone(), &value_type, span);
             return value_type;

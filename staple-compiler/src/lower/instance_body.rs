@@ -3280,6 +3280,14 @@ impl<'a> BodyCloner<'a> {
             | LoweredCallableTarget::StructuralTraitMethod {
                 trait_id, method, ..
             } => {
+                if original.scheme.is_some() {
+                    let (key, _) = super::trait_dictionaries::member_value_entry(self.program, *method);
+                    match self.artifacts_by_key.get(&key) {
+                        Some(ordinal) => { self.body.bindings.insert(site, LoweredBoundTarget::Artifact(*ordinal)); }
+                        None => self.diagnostics.push(Diagnostic::new(original.origin.span.clone(), "trait member entry was not reserved")),
+                    }
+                    return;
+                }
                 let Some(evidence) = &original.evidence else {
                     self.diagnostics.push(Diagnostic::new(
                         original.origin.span.clone(),
@@ -4309,6 +4317,7 @@ impl<'a> BodyValidator<'a> {
                     Err(error) => self.diagnostics.push(error),
                 }
             }
+        }
         for (call_id, call) in self.body.calls.iter() {
             if let Some(LoweredBoundTarget::Dictionary(dispatch)) = self.body.bindings.get(&LoweredBindingSite::Call(call_id))
                 && !dispatch.dictionaries.is_empty()
@@ -4377,7 +4386,6 @@ impl<'a> BodyValidator<'a> {
                 self.body.origin.span.clone(),
                 "instance value dictionary recipes disagree with its callee bounds",
             );
-        }
         }
         if self.body.dictionary_calls != expected_dictionary_calls {
             self.report(
@@ -5708,6 +5716,12 @@ impl<'a> BodyValidator<'a> {
         &self,
         site: LoweredBindingSite,
     ) -> Option<LoweredArtifactDependencyKind> {
+        if let LoweredBindingSite::CallableValue(id) = site
+            && self.body.callable_values.get(id).is_some_and(|value| value.scheme.is_some()
+                && matches!(value.target, LoweredCallableTarget::TraitImplementation { .. } | LoweredCallableTarget::StructuralTraitMethod { .. }))
+        {
+            return Some(LoweredArtifactDependencyKind::TraitMemberEntry);
+        }
         match site {
             LoweredBindingSite::Call(_) | LoweredBindingSite::CallableValue(_) => {
                 match self.site_category(site) {

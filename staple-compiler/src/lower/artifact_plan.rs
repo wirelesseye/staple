@@ -112,6 +112,8 @@ pub(crate) struct TraitMemberEntryPlan {
     pub function_type: CheckedFunctionType,
     pub descriptors: usize,
     pub dictionaries: usize,
+    pub slot: usize,
+    pub own_descriptors: usize,
 }
 
 /// A structural dictionary slot at run-time component types. Products write

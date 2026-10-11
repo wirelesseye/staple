@@ -428,6 +428,14 @@ impl<'a> InitializerBinder<'a> {
             | LoweredCallableTarget::StructuralTraitMethod {
                 trait_id, method, ..
             } => {
+                if value.scheme.is_some() {
+                    let (key, _) = super::trait_dictionaries::member_value_entry(self.program, *method);
+                    match self.program.specializations.artifact_ordinal(&key) {
+                        Some(ordinal) => { self.bindings.insert(site, LoweredBoundTarget::Artifact(ordinal)); }
+                        None => self.report(&value.origin, "trait member entry was not reserved"),
+                    }
+                    return;
+                }
                 let Some(evidence) = &value.evidence else {
                     self.report(&value.origin, "trait-method value has no evidence recipe");
                     return;

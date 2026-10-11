@@ -980,7 +980,7 @@ impl SupportWalker<'_> {
                     callable.target,
                     LoweredCallableTarget::TraitImplementation { .. }
                         | LoweredCallableTarget::StructuralTraitMethod { .. }
-                ) && (dynamic_shape
+                ) && callable.scheme.is_none() && (dynamic_shape
                     || callable.evidence.as_ref().is_some_and(|evidence| {
                         crate::lower::trait_dictionaries::evidence_obligation(evidence)
                             .1

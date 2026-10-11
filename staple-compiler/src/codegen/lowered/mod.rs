@@ -4839,6 +4839,14 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         let binding = self
             .view
             .binding(owner, LoweredBindingSite::CallableValue(id));
+        if callable.scheme.is_some() && matches!(callable.target,
+            LoweredCallableTarget::TraitImplementation { .. } | LoweredCallableTarget::StructuralTraitMethod { .. })
+        {
+            let code = self.callable_artifact_code(binding, &callable.origin.span, "trait member entry binding")?;
+            return self.backend.build_closure_value(code,
+                self.backend.context.ptr_type(AddressSpace::default()).const_null())
+                .map(|closure| closure.as_any_value_enum());
+        }
         // Constructor and extern adapter values use the declared adapter
         // artifact; both carry a null environment.
         if matches!(

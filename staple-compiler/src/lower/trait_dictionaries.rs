@@ -1202,10 +1202,11 @@ pub(super) fn member_instance_root(
     member: &MemberSelection,
 ) -> Option<super::FunctionInstanceId> {
     use super::instance_resolution::{InstanceResolutionRequest, InstanceResolutionTarget};
-    let runtime = program
-        .relevant_parameters(member.function)
-        .type_parameters()
-        .collect::<std::collections::BTreeSet<_>>();
+    let relevant = program.relevant_parameters(member.function);
+    let runtime = super::instance_resolution::RuntimeScope {
+        types: relevant.type_parameters().collect(),
+        effects: relevant.effect_parameters().collect(),
+    };
     let request = InstanceResolutionRequest {
         function: member.function,
         origin: origin.clone(),
@@ -1215,7 +1216,7 @@ pub(super) fn member_instance_root(
         target: InstanceResolutionTarget::Root,
     };
     let resolved = program
-        .resolve_instance_request_with_runtime(&request, &runtime)
+        .resolve_instance_request_in_scope(&request, &runtime)
         .ok()?;
     let ordinal = program.specializations.instance_ordinal(&resolved.key)?;
     let id = <super::FunctionInstanceId as super::ArenaId>::from_index(ordinal.index());
@@ -1240,8 +1241,24 @@ pub(super) fn plan_recipe(
     )
 }
 
-/// Select the dictionary and slot a run-time trait member call reads: an
-/// environment bound, or a dictionary built from the selected implementation.
+/// The shared polymorphic entry reads the trait dictionary first, then forwards
+/// the member's own descriptors and dictionaries to its declaration-order slot.
+pub(super) fn member_value_entry(
+    program: &super::LoweredProgram, method: crate::TraitMethodId,
+) -> (crate::specialization::ArtifactRequestKey, super::LoweredArtifactPlan) {
+    let member = program.trait_methods.get(method).expect("member metadata");
+    let crate::CheckedType::Function(function_type) = member.scheme.body.as_ref() else { unreachable!("member function type") };
+    let key = crate::specialization::ArtifactRequestKey::TraitMemberEntry(crate::specialization::TraitMemberEntryKey::Member(method));
+    let plan = super::LoweredArtifactPlan::TraitMemberEntry(super::TraitMemberEntryPlan {
+        method, callee: None, function_type: function_type.clone(),
+        descriptors: member.scheme.type_parameter_ids().len(),
+        dictionaries: scheme_obligations(program, &member.scheme, &Default::default()).len(),
+        slot: program.traits.get(member.trait_id).expect("trait metadata").methods.iter().position(|candidate| *candidate == method).expect("trait slot"),
+        own_descriptors: method_runtime_scope(program, method).types.len(),
+    });
+    (key, plan)
+}
+
 pub(super) fn method_runtime_scope(program: &super::LoweredProgram, method: crate::TraitMethodId) -> super::instance_resolution::RuntimeScope {
     let mut scope = super::instance_resolution::RuntimeScope::default();
     if let Some(member) = program.trait_methods.get(method) {
@@ -2512,6 +2529,7 @@ pub(super) fn expand(
                 key, plan: Plan::TraitMemberEntry(super::artifact_plan::TraitMemberEntryPlan {
                     method: *method, callee: Some(PlannedInstance { key: generic_key, instance: None, kind: InstanceKind::TraitMethod }),
                     function_type: signature, descriptors: own_scope.types.len(), dictionaries: dictionary_count,
+                    slot: index, own_descriptors: own_scope.types.len(),
                 }), kind: Kind::TraitMemberEntry, origin: origin.clone(), use_site: None,
             });
             continue;

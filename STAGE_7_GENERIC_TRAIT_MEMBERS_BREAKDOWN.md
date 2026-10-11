@@ -68,13 +68,12 @@ every existing input.
 
 ## Current state
 
-7a checking/static dispatch and 7b.1 generic dictionary slots are implemented.
-The static and dictionary fixtures run with pinned output, including generic
-builders, defaults, member bounds (also on trait parameters), effect rows,
-nested schemes, escaping closures, and packed product arguments. Slot entries
-are reachable worklist artifacts; builder tails bind only header arguments.
-The targeted differential test and workspace suite are running. Polymorphic
-member entries, documentation, restrictions, and final gates remain.
+7a and 7b.1–7b.2 are implemented: static generic member dispatch, generic
+dictionary slots, and polymorphic trait member entries. All three Stage 7
+fixtures run with pinned output and pass both differential modes. Checker,
+reachability, and completion tests pass; associated projections and capable
+member parameters retain their diagnostics. Documentation and final workspace,
+full differential, and existing-program IR gates remain.
 
 ## Decisions
 

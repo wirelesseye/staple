@@ -2694,6 +2694,7 @@ mod tests {
                 arguments: vec![concrete(&CheckedType::I32)],
                 implementation: crate::LoweredTraitImplementationId::for_test(0),
             }),
+            ArtifactRequestKey::TraitMemberEntry(TraitMemberEntryKey::Member(TraitMethodId(4))),
         ]
     }
 
@@ -2702,7 +2703,7 @@ mod tests {
         let families = artifact_families();
         assert_eq!(
             families.len(),
-            13,
+            14,
             "every artifact family has a representative key"
         );
         let mut names = HashSet::new();
@@ -2935,6 +2936,10 @@ mod tests {
                 associated: Vec::new(),
                 methods: Vec::new(),
                 expanded: false,
+            }),
+            LoweredArtifactPlan::TraitMemberEntry(crate::lower::TraitMemberEntryPlan {
+                method: TraitMethodId(4), callee: None, function_type: simple_callable(),
+                descriptors: 1, dictionaries: 1, slot: 0, own_descriptors: 0,
             }),
         ];
         assert_eq!(plans.len(), keys.len());

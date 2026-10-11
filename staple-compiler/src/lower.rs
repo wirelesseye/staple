@@ -5300,7 +5300,9 @@ impl LoweredProgram {
         value_type: &CheckedType,
     ) -> Option<crate::CheckedScheme> {
         let scheme = module.scheme_of_expression(syntax)?;
-        if module.trait_dispatch_for(syntax).is_some() {
+        if module.trait_dispatch_for(syntax).is_some_and(|dispatch| {
+            self.trait_methods.get(dispatch.method).is_some_and(|method| method.own_parameters.is_empty())
+        }) && matches!(value_type, CheckedType::Function(_)) {
             return None;
         }
         match value_type {
@@ -6951,7 +6953,7 @@ impl LoweredProgram {
                     )
                 })?;
                 let (target, adapter, closure, evidence) =
-                    self.lower_trait_method_value(module, owner, &origin, &dispatch)?;
+                    self.lower_trait_method_value(module, owner, &origin, &dispatch, scheme.is_some())?;
                 let trait_id = resolved.trait_for_method(dispatch.method).expect("member owner");
                 substitutions = trait_call_substitutions(&self.traits.get(trait_id).expect("trait metadata").parameters,
                     &dispatch.arguments);
@@ -7131,6 +7133,7 @@ impl LoweredProgram {
         owner: ExpressionOwner,
         origin: &Origin,
         dispatch: &CheckedTraitDispatch,
+        polymorphic: bool,
     ) -> Result<
         (
             LoweredCallableTarget,
@@ -7146,6 +7149,11 @@ impl LoweredProgram {
                 format!("trait method {} has no owning trait", dispatch.method.0),
             ));
         };
+        if polymorphic {
+            return Ok((LoweredCallableTarget::TraitImplementation {
+                trait_id, method: dispatch.method, function: None,
+            }, LoweredCallableAdapter::None, None, None));
+        }
         let evidence = self.trait_evidence_for(
             module,
             owner,
@@ -14818,6 +14826,7 @@ pub enum PlannedArtifactFamily {
     TypeDescriptor,
     DescriptorDrop,
     CompoundDescriptorDrop,
+    TraitMemberEntry,
 }
 
 impl LoweredModule {
@@ -14853,6 +14862,7 @@ impl LoweredModule {
                 continue;
             };
             let selected = match (family, key) {
+                (TraitMemberEntry, ArtifactRequestKey::TraitMemberEntry(_)) => true,
                 (StructuralDebug, ArtifactRequestKey::StructuralMethod(method)) => {
                     method.structural == StructuralTraitMethod::Debug
                 }
@@ -18413,7 +18423,7 @@ mod tests {
             "  let maker = make_borrower\n",
             "  let cell = cell_capture\n",
             "  let recursive_value = recursive\n",
-            "  let method = test_show\n",
+            "  let method: I32 -> Bool = test_show\n",
             "  anonymous 1\n",
             "}\n",
         )
