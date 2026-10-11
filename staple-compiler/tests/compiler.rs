@@ -5285,6 +5285,25 @@ fn list_supports_bracket_indexing_mutation_and_iteration() {
 }
 
 #[test]
+fn polymorphic_value_naming_an_associated_type_is_a_restriction() {
+    // The scheme annotation checks (its projection links to the bound), but a
+    // polymorphic entry cannot carry the associated type yet.
+    let module = resolve(concat!(
+        "use std.iterator.(Iterator, IterStep)\n",
+        "def step: <Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter) = move iter => Iterator.next iter\n",
+        "let stored: <Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter) = step\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err_diagnostics("a scheme value naming an associated type is restricted");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "polymorphic values whose type names an associated type (such as `Iterator.Item Iter`) are not supported yet"
+    );
+}
+
+#[test]
 fn nested_list_of_macros_check() {
     // A speculative parse of the inner expansion used to compute its error
     // location from a span in the outer file and panic on the slice.

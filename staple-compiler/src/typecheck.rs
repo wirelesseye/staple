@@ -2460,7 +2460,24 @@ impl TypedModule {
 
 /// Type parameters ids at or above this value are synthesized for `Trait.Name`
 /// projections and never collide with resolver-allocated ids.
-const PROJECTION_PARAMETER_BASE: usize = 1 << 40;
+pub(crate) const PROJECTION_PARAMETER_BASE: usize = 1 << 40;
+
+const PROJECTION_VALUE_RESTRICTION: &str = "polymorphic values whose type names an associated type (such as `Iterator.Item Iter`) are not supported yet";
+
+/// Whether a scheme names an associated type of its parameters
+/// (`Iterator.Item Iter`), which a polymorphic value cannot carry yet.
+fn scheme_names_projection(scheme: &CheckedScheme) -> bool {
+    let projection = |ty: &CheckedType| {
+        type_parameter_ids(ty)
+            .iter()
+            .any(|id| id.0 >= PROJECTION_PARAMETER_BASE)
+    };
+    projection(&scheme.body)
+        || scheme
+            .trait_bounds
+            .iter()
+            .any(|bound| bound.arguments.iter().any(projection))
+}
 
 /// A synthesized type parameter standing for `Trait.Name arguments` where the
 /// arguments mention type parameters. The matching declared bound
@@ -7537,9 +7554,11 @@ impl TypeChecker {
                 .flatten()
                 .copied()
                 .collect();
+            // A projection placeholder (`Iterator.Item Iter` in a scheme's
+            // body) is determined by the scheme's bound, as in a `def`.
             type_parameter_ids(&checked_type)
                 .iter()
-                .any(|id| !bound_parameters.contains(id))
+                .any(|id| id.0 < PROJECTION_PARAMETER_BASE && !bound_parameters.contains(id))
         };
         if !binding.is_generic() && has_free_type_parameter && checked_type != CheckedType::Error {
             self.diagnostics.push(Diagnostic::new(
@@ -12677,6 +12696,14 @@ impl TypeChecker {
                 sized,
             )
         };
+        let instantiated = match &value_scheme {
+            Some(scheme) => self.normalize_instantiated_projections(
+                &scheme.trait_bounds,
+                &scheme.body,
+                instantiated,
+            ),
+            None => instantiated,
+        };
         if let Some(function) = self.function_origin(module, &application.value) {
             self.check_function_bounds(
                 function,
@@ -12846,6 +12873,7 @@ impl TypeChecker {
             declared_parameters,
             sized_parameters,
         );
+        let instantiated = self.normalize_instantiated_projections(&bounds, &template, instantiated);
         self.check_instantiated_bounds(
             bounds,
             subtype_bounds,
@@ -12854,6 +12882,72 @@ impl TypeChecker {
             span_for_bounds,
         );
         instantiated
+    }
+
+    /// A projection placeholder in an instantiated scheme
+    /// (`Iterator.Item Iter` in a result type) stands for the associated type
+    /// its linking bound selects at the instantiated arguments: an
+    /// implementation for concrete or abstract types, or a bound in scope.
+    /// Resolve each one that the bound determines.
+    fn normalize_instantiated_projections(
+        &self,
+        bounds: &[CheckedTraitBound],
+        template: &CheckedType,
+        instantiated: CheckedType,
+    ) -> CheckedType {
+        let is_placeholder = |argument: &CheckedType| {
+            matches!(argument, CheckedType::Parameter { id, .. } if id.0 >= PROJECTION_PARAMETER_BASE)
+        };
+        if !bounds
+            .iter()
+            .any(|bound| bound.arguments.iter().any(is_placeholder))
+        {
+            return instantiated;
+        }
+        let mut substitutions = HashMap::new();
+        if !infer_type_parameters(template, &instantiated, &mut substitutions) {
+            return instantiated;
+        }
+        let mut projections = HashMap::new();
+        for bound in bounds {
+            if !bound.arguments.iter().any(is_placeholder) {
+                continue;
+            }
+            let arguments = bound
+                .arguments
+                .iter()
+                .map(|argument| {
+                    if is_placeholder(argument) {
+                        CheckedType::Inferred
+                    } else {
+                        substitute_type(argument.clone(), &substitutions)
+                    }
+                })
+                .collect::<Vec<_>>();
+            if arguments
+                .iter()
+                .zip(&bound.arguments)
+                .any(|(argument, original)| !is_placeholder(original) && contains_inferred_type(argument))
+            {
+                continue;
+            }
+            let Some(completed) = self.resolve_trait_obligation(bound.trait_id, &arguments) else {
+                continue;
+            };
+            for (original, value) in bound.arguments.iter().zip(&completed) {
+                if let CheckedType::Parameter { id, .. } = original
+                    && id.0 >= PROJECTION_PARAMETER_BASE
+                    && !contains_inferred_type(value)
+                {
+                    projections.insert(*id, value.clone());
+                }
+            }
+        }
+        if projections.is_empty() {
+            instantiated
+        } else {
+            substitute_type(instantiated, &projections)
+        }
     }
 
     fn instantiate_function_template(
@@ -13589,6 +13683,9 @@ impl TypeChecker {
                         )
                     })
                     .collect();
+                // The body first: a projection it names (`Iterator.Item Iter`)
+                // must exist before the scheme's bound links it.
+                let body = self.resolve_source_type_inner(module, &ty.body);
                 let trait_bounds = ty
                     .generics
                     .trait_bounds
@@ -13601,7 +13698,6 @@ impl TypeChecker {
                     .iter()
                     .filter_map(|bound| self.resolve_subtype_bound(module, bound))
                     .collect();
-                let body = self.resolve_source_type_inner(module, &ty.body);
                 if !matches!(body, CheckedType::Function(_) | CheckedType::Error) {
                     self.diagnostics.push(Diagnostic::new(
                         ty.syntax.span.clone(),
@@ -13609,13 +13705,20 @@ impl TypeChecker {
                     ));
                     return CheckedType::Error;
                 }
-                CheckedType::Forall(Box::new(CheckedScheme {
+                let scheme = CheckedScheme {
                     parameters,
                     trait_bound_names: self.trait_bound_names(&trait_bounds),
                     trait_bounds,
                     subtype_bounds,
                     body: Box::new(body),
-                }))
+                };
+                if scheme_names_projection(&scheme) {
+                    self.diagnostics.push(Diagnostic::new(
+                        ty.syntax.span.clone(),
+                        PROJECTION_VALUE_RESTRICTION,
+                    ));
+                }
+                CheckedType::Forall(Box::new(scheme))
             }
             Type::Splice(_) => CheckedType::Error,
         }

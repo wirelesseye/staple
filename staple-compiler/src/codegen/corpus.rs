@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 152] = [
+static CORPUS: [CorpusProgram; 153] = [
     expect_stdout(
         must_run(inline(
             "trait_dictionary_adapters",
@@ -2991,6 +2991,48 @@ let value = at (Ref (1, 2), (USize :: 5))
             "emission",
         ),
         "i32 5\n6\n",
+    )),
+    // A generic function whose result names an associated type
+    // (`Iterator.Item Iter`), used at concrete types, from a generic body with
+    // inferred and explicit type arguments, and through a polymorphic value: each
+    // use resolves the projection through the bound's implementation.
+    must_run(expect_stdout(
+        inline(
+            "projection_results",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "use std.list.(List, ListIter)\n",
+                "use std.iterator.(Iterator, IntoIterator, IterStep)\n",
+                "def step: <Iter where Iterator Iter> move Iter -> IterStep (Iter, Iterator.Item Iter) = move iter => Iterator.next iter\n",
+                "def first: <A where Display A, Copy A> move List A ->{IO} () = move items => {\n",
+                "    match step (IntoIterator.into_iterator items) {\n",
+                "        IterStep.Yield (item, rest) => println (ToString.to_string item),\n",
+                "        _ => println \"empty\",\n",
+                "    }\n",
+                "}\n",
+                "def explicit: <A where Display A, Copy A> move List A ->{IO} () = move items => {\n",
+                "    match step.<ListIter A> (IntoIterator.into_iterator items) {\n",
+                "        IterStep.Yield (item, rest) => println (ToString.to_string item),\n",
+                "        _ => println \"empty\",\n",
+                "    }\n",
+                "}\n",
+                "let poly: <A where Display A, Copy A> move List A ->{IO} () = first\n",
+                "def main_like: () ->{IO} () = () => {\n",
+                "    let numbers: List I32 = List.of (4, 5)\n",
+                "    match step (IntoIterator.into_iterator numbers) {\n",
+                "        IterStep.Yield (item, rest) => println \"${item + 1}\",\n",
+                "        _ => println \"empty\",\n",
+                "    }\n",
+                "    let more: List F64 = List.of (1.5, 2.5)\n",
+                "    poly more\n",
+                "    let again: List I32 = List.of (7, 8)\n",
+                "    explicit again\n",
+                "}\n",
+                "main_like ()\n",
+            ),
+            "emission",
+        ),
+        "5\n1.5\n7\n",
     )),
     must_run(expect_stdout(
         inline(

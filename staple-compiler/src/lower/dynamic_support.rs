@@ -387,6 +387,29 @@ impl LoweredProgram {
         origin: &crate::Origin,
     ) -> Vec<staple_syntax::Diagnostic> {
         use RejectionReason::*;
+        // An associated type in the scheme (`Iterator.Item Iter`) is a
+        // placeholder the bound determines. Polymorphic entries do not yet
+        // take it as a run-time parameter, so such a scheme is a restriction.
+        let mut projection = false;
+        let mut note = |ty: &CheckedType| {
+            let mut found = HashSet::new();
+            collect_parameter_ids(ty, &mut found);
+            projection |= found
+                .iter()
+                .any(|id| id.0 >= crate::typecheck::PROJECTION_PARAMETER_BASE);
+        };
+        note(&scheme.body);
+        for bound in &scheme.trait_bounds {
+            for argument in &bound.arguments {
+                note(argument);
+            }
+        }
+        if projection {
+            return vec![staple_syntax::Diagnostic::new(
+                origin.span.clone(),
+                "polymorphic values whose type names an associated type (such as `Iterator.Item Iter`) are not supported yet",
+            )];
+        }
         let mut reasons = BTreeSet::new();
         // Bounds become hidden dictionaries (T-M); only a `Natural` bound,
         // which constrains compile-time counts, keeps its restriction.
@@ -1813,5 +1836,48 @@ mod tests {
             in_scope <= IN_SCOPE_BASELINE,
             "in-scope rejections rose to {in_scope}, above the {IN_SCOPE_BASELINE} baseline"
         );
+    }
+}
+
+/// Every type parameter id a type mentions, including inside schemes and
+/// effect rows' resource types.
+fn collect_parameter_ids(ty: &CheckedType, ids: &mut HashSet<crate::TypeParameterId>) {
+    match ty {
+        CheckedType::Parameter { id, .. } => {
+            ids.insert(*id);
+        }
+        CheckedType::Forall(scheme) => {
+            collect_parameter_ids(&scheme.body, ids);
+            for bound in &scheme.trait_bounds {
+                for argument in &bound.arguments {
+                    collect_parameter_ids(argument, ids);
+                }
+            }
+        }
+        CheckedType::Function(function) => {
+            collect_parameter_ids(&function.parameter, ids);
+            collect_parameter_ids(&function.result, ids);
+        }
+        CheckedType::Product(product) => {
+            for element in &product.elements {
+                collect_parameter_ids(&element.value_type, ids);
+            }
+        }
+        CheckedType::Sum(sum) => {
+            for alternative in &sum.alternatives {
+                collect_parameter_ids(alternative, ids);
+            }
+        }
+        CheckedType::Wrapper { representation, .. } => collect_parameter_ids(representation, ids),
+        CheckedType::Ref(inner) | CheckedType::Slice(inner) | CheckedType::Buffer(inner) => {
+            collect_parameter_ids(inner, ids)
+        }
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
+            for argument in arguments {
+                collect_parameter_ids(argument, ids);
+            }
+        }
+        CheckedType::Array { element, .. } => collect_parameter_ids(element, ids),
+        _ => {}
     }
 }
