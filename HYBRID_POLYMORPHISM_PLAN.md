@@ -61,7 +61,7 @@ actually does.
 Stages 1–7 are implemented: scoped schemes, explicit instantiation,
 monomorphization, runtime type descriptors, effect rows, bounded polymorphic
 values, and independently generic trait members. Stage 7's focused execution
-checks pass; workspace, full differential, and compatibility gates remain.
+and escaping-closure checks pass; final suites and compatibility gates remain.
 Stage 8 and the documented associated-projection, coroutine, and
 parameter-product restrictions remain.
 

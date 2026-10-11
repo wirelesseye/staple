@@ -58,10 +58,10 @@ every existing input.
 ## Current state
 
 7a and 7b.1–7b.3 are implemented and documented. Focused checks and Stage 7
-execution fixtures pass, including conditional implementation bounds, bounded
-defaults, fixed-parameter and effect-only dictionaries, and explicit phantom
-instantiation. The nested-lambda IR regression is corrected. Final workspace,
-full differential, and refreshed IR gates remain.
+execution fixtures pass, including every member shape inside escaping closures.
+Generic implementation diagnostics name the member and its required scheme.
+The conditional-header and nested-lambda compatibility regressions match the
+base IR. Final workspace, full differential, and complete IR gates remain.
 
 ## Decisions
 

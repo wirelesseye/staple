@@ -5185,6 +5185,22 @@ impl TypeChecker {
         }
     }
 
+    fn generic_member_conformance_context(
+        &self,
+        module: &ResolvedModule,
+        function: FunctionId,
+    ) -> Option<String> {
+        let scheme = self.function_schemes.get(&function)?;
+        module.trait_implementations().iter().find_map(|implementation| {
+            let method = implementation.methods.iter()
+                .find_map(|(method, candidate)| (*candidate == function).then_some(*method))?;
+            let trait_ = &module.traits()[&implementation.trait_id];
+            let member = module.trait_method(method)?;
+            Some(format!("trait member `{}.{}` must implement scheme `{scheme}`",
+                trait_.declaration.name, member.name))
+        })
+    }
+
     fn ensure_function_checked(&mut self, module: &ResolvedModule, function_id: FunctionId) {
         if self.checked_functions.contains(&function_id)
             || !self.checking_functions.insert(function_id)
@@ -5197,6 +5213,7 @@ impl TypeChecker {
             .find(|function| function.id == function_id)
             .cloned()
             .expect("resolved function ID must be valid");
+        let diagnostic_start = self.diagnostics.len();
         let function_type = self.function_types[&function.id].clone();
         if let Some(module_id) = self.function_module(module, &function) {
             self.checking_modules.push(module_id);
@@ -5312,6 +5329,11 @@ impl TypeChecker {
             && let Some(symbol) = module.symbol_for(binding_syntax)
         {
             self.replace_symbol_value_type(symbol, CheckedType::Function(checked_function_type));
+        }
+        if let Some(context) = self.generic_member_conformance_context(module, function_id) {
+            for diagnostic in &mut self.diagnostics[diagnostic_start..] {
+                diagnostic.message = format!("{context}: {}", diagnostic.message);
+            }
         }
         self.checking_functions.remove(&function_id);
         self.checked_functions.insert(function_id);
@@ -5991,14 +6013,13 @@ impl TypeChecker {
                 // the one place that keeps an implementation honest against
                 // what its trait method promised callers.
                 let allowed = trait_type.effects.clone();
-                self.diagnostics.push(Diagnostic::new(
-                    function.body.syntax().span.clone(),
-                    format!(
-                        "trait implementation requires effects {}, which are not contained in \
-                         the trait method's declared effect set {}",
-                        actual, allowed
-                    ),
-                ));
+                let message = format!(
+                    "trait implementation requires effects {}, which are not contained in \
+                     the trait method's declared effect set {}", actual, allowed,
+                );
+                let message = self.generic_member_conformance_context(module, function.id)
+                    .map_or_else(|| message.clone(), |context| format!("{context}: {message}"));
+                self.diagnostics.push(Diagnostic::new(function.body.syntax().span.clone(), message));
             }
             let current_module = self.function_module(module, function);
             self.record_expression_effects(
@@ -12143,8 +12164,10 @@ impl TypeChecker {
                 }
                 self.expression_schemes.insert(syntax, scheme.clone());
             }
-            self.check_substituted_bounds(scheme.trait_bounds, scheme.subtype_bounds,
-                &substitutions, span);
+            // Dispatch already resolved the trait's own obligation, including
+            // conditional headers deferred until their arguments are concrete.
+            self.check_substituted_bounds(scheme.trait_bounds.into_iter().skip(1).collect(),
+                scheme.subtype_bounds, &substitutions, span);
             return value_type;
         }
         self.diagnostics.push(Diagnostic::new(

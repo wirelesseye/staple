@@ -3705,12 +3705,17 @@ impl LoweredProgram {
                 })
                 .collect::<Vec<_>>();
             let mut conversions = BTreeMap::new();
-            // Calls through polymorphic values reach a quantified entry in
-            // the dynamic ABI, so a concrete caller converts across it.
+            // Polymorphic values and dictionary slots reach their entry ABI,
+            // including a generic member's quantified callback effect row.
             let polymorphic = body
                 .calls
                 .iter()
                 .filter_map(|(call, record)| {
+                    if let Some(super::LoweredBoundTarget::Dictionary(dispatch)) =
+                        body.bindings.get(&super::LoweredBindingSite::Call(call))
+                    {
+                        return Some((call, dispatch.entry_type.clone()));
+                    }
                     let signature = match record.scheme.as_ref()?.body.as_ref() {
                         CheckedType::Function(signature) => signature.clone(),
                         _ => return None,

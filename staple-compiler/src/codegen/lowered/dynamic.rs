@@ -5798,16 +5798,15 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             {
                 let quantified = if callable.scheme.is_some() {
                     match callable.target {
-                        LoweredCallableTarget::DirectFunction { function, .. } => self
-                            .view
-                            .function(function)
-                            .map(|function| function.scheme_type_parameters.as_slice())
-                            .unwrap_or(&[]),
-                        _ => &[],
+                        LoweredCallableTarget::DirectFunction { function, .. } => self.view
+                            .function(function).map(|function| function.scheme_type_parameters.clone())
+                            .unwrap_or_default(),
+                        LoweredCallableTarget::TraitImplementation { .. }
+                        | LoweredCallableTarget::StructuralTraitMethod { .. } => callable
+                            .substitutions.types.iter().map(|entry| entry.parameter).collect(),
+                        _ => callable.scheme.as_ref().unwrap().type_parameter_ids(),
                     }
-                } else {
-                    &[]
-                };
+                } else { Vec::new() };
                 for entry in &callable.substitutions.types {
                     if quantified.contains(&entry.parameter) {
                         continue;

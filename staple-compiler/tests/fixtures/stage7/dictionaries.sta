@@ -90,3 +90,29 @@ def effect_echo: <T, effect E where EffectEcho T, Label T> (T, () ->{E} I32) ->{
 let stored_effect_echo = effect_echo
 println (stored_effect_echo (25, quiet))
 println (stored_effect_echo (Box 26, noisy))
+
+// Every member shape remains callable inside an escaping dictionary closure.
+impl<X> Apply (Box X) { apply = _ => f => f 5 }
+impl<X> Action (Box X) { act = (_, f) => f () }
+def consume_text: (<U where ToString U> U -> String) -> String = f => f 31
+def nested: <T where Visit T, Fallback T, Show T, Compare T, Convert T String, Apply T, Action T, Echo T, EffectEcho T, Label T, Copy T> T -> (() ->{IO} ()) = item => () => {
+    println "${Visit.visit.<_, _> (item, 27)}"
+    println "${Fallback.fallback (item, 28)}"
+    println (Show.show (item, 29))
+    println "${Compare.compare (item, "nested")}"
+    println "${Apply.apply item identity}"
+    println "${Action.act (item, noisy)}"
+    let member = Visit.visit
+    println "${member (item, 30)}"
+    println (Echo.echo (item, False))
+    println (EffectEcho.effect_echo (item, noisy))
+    let text = ToString.to_string
+    println (consume_text text)
+    let equals: <U where Ord U> (U, U) -> Bool = Eq.eq
+    println "${equals (1, 1)}"
+}
+let stored_nested = nested
+let int_closure = stored_nested 1
+int_closure ()
+let box_closure = stored_nested (Box 1)
+box_closure ()
