@@ -5494,7 +5494,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
         }
         for index in 0..plan.bound_dictionaries {
             let offset = self.backend.size_type.const_int(
-                (plan.environment_offset + plan.bound + index) as u64 * pointer_bytes,
+                (plan.environment_offset + plan.dictionary_prefix + index) as u64 * pointer_bytes,
                 false,
             );
             let slot = self.backend.dynamic_byte_offset(environment, offset)?;

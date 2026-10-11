@@ -74,6 +74,50 @@ pub(super) fn runtime_obligations(
         .collect()
 }
 
+/// Shared schemes retain every declared own dictionary, including bounds
+/// whose arguments become concrete when the implementation header is fixed.
+pub(super) fn declared_runtime_obligations(
+    program: &super::LoweredProgram,
+    template: &super::LoweredFunction,
+    substitution: &std::collections::HashMap<crate::TypeParameterId, crate::CheckedType>,
+    runtime: &std::collections::BTreeSet<crate::TypeParameterId>,
+    effects: &std::collections::BTreeSet<crate::TypeParameterId>,
+) -> Vec<crate::CheckedTraitBound> {
+    let own = own_runtime_obligations(program, template, substitution, runtime, effects);
+    let mut bounds = runtime_obligations(
+        &program.semantic_ids, &template.declared_bounds, substitution, runtime,
+    );
+    bounds.retain(|bound| !own.iter().any(|own| bounds_equivalent(bound, own)));
+    bounds.extend(own);
+    bounds
+}
+
+fn own_runtime_obligations(
+    program: &super::LoweredProgram,
+    template: &super::LoweredFunction,
+    substitution: &std::collections::HashMap<crate::TypeParameterId, crate::CheckedType>,
+    runtime: &std::collections::BTreeSet<crate::TypeParameterId>,
+    effects: &std::collections::BTreeSet<crate::TypeParameterId>,
+) -> Vec<crate::CheckedTraitBound> {
+    let shared = template.scheme_type_parameters.iter().any(|id| runtime.contains(id))
+        || template.scheme_effect_parameters.iter().any(|id| effects.contains(id));
+    if !shared {
+        return runtime_obligations(
+            &program.semantic_ids, &template.own_declared_bounds, substitution, runtime,
+        );
+    }
+    let markers = marker_traits(program);
+    template.own_declared_bounds.iter()
+        .filter(|bound| !markers.contains(&Some(bound.trait_id)))
+        .map(|bound| crate::CheckedTraitBound {
+            trait_id: bound.trait_id,
+            arguments: bound.arguments.iter()
+                .map(|argument| crate::substitute_type(argument.clone(), substitution))
+                .collect(),
+        })
+        .collect()
+}
+
 /// A route from a hidden argument through zero or more fixed prefix slots.
 /// This contains no implementation choice; an equal environment bound wins.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,14 +466,9 @@ fn select_at_depth(
         let template = program.functions.get(function).ok_or_else(|| {
             staple_syntax::Diagnostic::new(origin.span.clone(), "dictionary member has no template")
         })?;
-        let own_scope = method_runtime_scope(program, *method);
         let mut dictionaries = Vec::new();
         for bound in &template.declared_bounds {
-            if bound.arguments.iter().any(|argument| {
-                let mut referenced = std::collections::BTreeSet::new();
-                super::instance_resolution::collect_referenced_parameters(argument, &mut referenced);
-                !referenced.is_disjoint(&own_scope.types)
-            }) {
+            if template.own_declared_bounds.iter().any(|own| bounds_equivalent(bound, own)) {
                 continue;
             }
             if markers.contains(&Some(bound.trait_id)) {
@@ -1020,12 +1059,8 @@ pub(super) fn enclosing_dictionary_bounds(
     let Some(template) = program.functions.get(enclosing.key.function()) else {
         return Vec::new();
     };
-    runtime_obligations(
-        &program.semantic_ids,
-        &template.declared_bounds,
-        &enclosing.environment.substitution_map(),
-        enclosing.key.runtime(),
-    )
+    declared_runtime_obligations(program, template, &enclosing.environment.substitution_map(),
+        enclosing.key.runtime(), enclosing.key.runtime_effects())
 }
 
 /// The obligations a call to `function` passes as dictionaries, at the
@@ -1351,6 +1386,9 @@ pub(super) fn instantiate_slot_call(
     };
     let trait_map = dictionary_substitution(program.traits.get(dispatch.obligation.trait_id).unwrap(), &dispatch.obligation.arguments).unwrap_or_default();
     map.extend(trait_map);
+    for (parameter, argument) in member.scheme.trait_bounds[0].arguments.iter().zip(&dispatch.obligation.arguments) {
+        crate::infer_type_parameters(parameter, argument, &mut map);
+    }
     let own_bounds = member.scheme.trait_bounds[1..].iter().map(|bound| crate::CheckedTraitBound {
         trait_id: bound.trait_id,
         arguments: bound.arguments.iter().map(|argument| crate::substitute_type(argument.clone(), &map)).collect(),
@@ -1717,12 +1755,8 @@ pub(super) fn site_stored_dictionary_count(
     let template = program.functions.get(record.template)?;
     let key = program.specializations.instance(record.ordinal)?;
     Some(
-        runtime_obligations(
-            &program.semantic_ids,
-            &template.declared_bounds,
-            &record.environment.substitution_map(),
-            key.runtime(),
-        )
+        declared_runtime_obligations(program, template, &record.environment.substitution_map(),
+            key.runtime(), key.runtime_effects())
         .len(),
     )
 }
@@ -1735,10 +1769,11 @@ pub(super) fn stored_dictionary_count(
     let template = program.functions.get(record.template)?;
     let key = program.specializations.instance(record.ordinal)?;
     let substitution = record.environment.substitution_map();
-    let count = |bounds: &[crate::CheckedTraitBound]| {
-        runtime_obligations(&program.semantic_ids, bounds, &substitution, key.runtime()).len()
-    };
-    count(&template.declared_bounds).checked_sub(count(&template.own_declared_bounds))
+    let total = declared_runtime_obligations(program, template, &substitution,
+        key.runtime(), key.runtime_effects()).len();
+    let own = own_runtime_obligations(program, template, &substitution,
+        key.runtime(), key.runtime_effects()).len();
+    total.checked_sub(own)
 }
 
 fn plan_instance_dictionaries(
@@ -1768,12 +1803,8 @@ fn plan_instance_dictionaries(
         .ok_or_else(|| {
             staple_syntax::Diagnostic::new(origin.span.clone(), "dictionary call has no callee key")
         })?;
-    let bounds = runtime_obligations(
-        &program.semantic_ids,
-        &template.declared_bounds,
-        &record.environment.substitution_map(),
-        key.runtime(),
-    );
+    let bounds = declared_runtime_obligations(program, template, &record.environment.substitution_map(),
+        key.runtime(), key.runtime_effects());
     let substitution = substitutions
         .types
         .iter()
@@ -1985,6 +2016,7 @@ fn member_entry_request(
         ),
         plan: super::LoweredArtifactPlan::DescriptorBoundEntry(super::DescriptorBoundEntryPlan {
             bound: member.descriptors.len(),
+            dictionary_prefix: member.descriptors.len(),
             dictionary_count,
             bound_dictionaries,
             environment_offset: offset,
@@ -2255,6 +2287,18 @@ fn dictionary_use_site(
 
 /// Dictionary ABI partition of an entry: bound lexical arguments precede
 /// own scheme arguments. A monomorphic entry binds all descriptors/dictionaries.
+pub(super) fn slot_dictionary_partition(
+    program: &super::LoweredProgram,
+    instance: super::FunctionInstanceId,
+) -> Option<(usize, usize)> {
+    let record = program.instances.get(instance)?;
+    let template = program.functions.get(record.template)?;
+    let key = program.specializations.instance(record.ordinal)?;
+    let total = declared_runtime_obligations(program, template,
+        &record.environment.substitution_map(), key.runtime(), key.runtime_effects()).len();
+    Some((total, stored_dictionary_count(program, instance)?))
+}
+
 pub(super) fn entry_dictionary_partition(
     program: &super::LoweredProgram,
     instance: super::FunctionInstanceId,
@@ -2264,22 +2308,14 @@ pub(super) fn entry_dictionary_partition(
     let template = program.functions.get(record.template)?;
     let key = program.specializations.instance(record.ordinal)?;
     let substitution = record.environment.substitution_map();
-    let total = runtime_obligations(
-        &program.semantic_ids,
-        &template.declared_bounds,
-        &substitution,
-        key.runtime(),
-    )
+    let total = declared_runtime_obligations(program, template, &substitution,
+        key.runtime(), key.runtime_effects())
     .len();
     let bound = if bound_descriptors == key.runtime().len() {
         total
     } else {
-        let own = runtime_obligations(
-            &program.semantic_ids,
-            &template.own_declared_bounds,
-            &substitution,
-            key.runtime(),
-        )
+        let own = own_runtime_obligations(program, template, &substitution,
+            key.runtime(), key.runtime_effects())
         .len();
         total.checked_sub(own)?
     };
@@ -2521,8 +2557,8 @@ pub(super) fn expand(
             let signature = match crate::substitute_type(CheckedType::Function(program.functions.get(*function).unwrap().signature.clone()), &generic_map) {
                 CheckedType::Function(signature) => signature, _ => unreachable!(),
             };
-            let dictionary_count = runtime_obligations(&program.semantic_ids,
-                &program.functions.get(*function).unwrap().declared_bounds, &generic_map, generic_key.runtime()).len();
+            let dictionary_count = declared_runtime_obligations(program, program.functions.get(*function).unwrap(),
+                &generic_map, generic_key.runtime(), generic_key.runtime_effects()).len();
             let key = ArtifactRequestKey::TraitMemberEntry(crate::specialization::TraitMemberEntryKey::Slot(generic_key.clone()));
             plan.slots.push(PlannedArtifact { key: key.clone(), artifact: None, kind: Kind::TraitMemberEntry });
             requests.push(ClosureRequest::Artifact {

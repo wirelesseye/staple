@@ -4237,6 +4237,7 @@ mod tests {
             let plan =
                 LoweredArtifactPlan::DescriptorBoundEntry(super::super::DescriptorBoundEntryPlan {
                     bound,
+                    dictionary_prefix: runtime.len(),
                     dictionary_count: super::super::trait_dictionaries::entry_dictionary_partition(
                         &program, dynamic, bound,
                     )

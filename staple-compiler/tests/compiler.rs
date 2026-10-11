@@ -13846,11 +13846,24 @@ fn generic_trait_members_infer_skipped_own_arguments_and_keep_phantom_arguments(
     let declarations = "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\ntrait Read T { read: <A where Copy A> T -> T }\nimpl Read I32 { read = value => value }\n";
     let source = format!("{declarations}let answer = Visit.visit.<I32, _> (1, 42)\nlet phantom = Read.read.<I32, String> 1\n");
     lower(&type_check(&source));
-    lower(&type_check(&format!("{declarations}let member = Read.read\nlet valid = member.<I32, String> 1\n")));
+    let stored = lower(&type_check(&format!("{declarations}let member = Read.read\nlet valid = member.<I32, String> 1\nlet instantiated: I32 -> I32 = member.<I32, String>\nlet result = instantiated 2\n")));
+    let context = Context::create();
+    CodeGenerator::new(&context).compile_module(&stored)
+        .expect("explicit phantom arguments reach instantiation adapters");
     for use_site in ["let result = Read.read 1\n", "let result = Read.read.<I32, _> 1\n"] {
         let diagnostics = TypeChecker::new().check(resolve(&format!("{declarations}{use_site}")))
             .expect_err_diagnostics("phantom member parameters need explicit arguments");
-        assert!(diagnostics.iter().any(|d| d.message.contains("could not infer all trait method arguments")), "{diagnostics:?}");
+        assert!(diagnostics.iter().any(|d| d.message.contains("could not infer all")), "{diagnostics:?}");
+    }
+    for use_site in [
+        "let member = Read.read\nlet invalid = member 1\n",
+        "let member = Read.read\nlet invalid = member.<I32, _> 1\n",
+        "let member = Read.read\nlet invalid: I32 -> I32 = member\n",
+        "let member: <U, B where Read U, Copy B> U -> U = Read.read\nlet invalid = member 1\n",
+    ] {
+        let diagnostics = TypeChecker::new().check(resolve(&format!("{declarations}{use_site}")))
+            .expect_err_diagnostics("stored phantom parameters also require explicit arguments");
+        assert!(diagnostics.iter().any(|d| d.message.contains("could not infer all")), "{diagnostics:?}");
     }
     let bounded = "trait Bound T {}\nimpl Bound I32 {}\ntrait Read T { read: <A where Bound A> T -> T }\nimpl Read I32 { read = value => value }\n";
     for use_site in [

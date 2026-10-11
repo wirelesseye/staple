@@ -724,7 +724,7 @@ impl LoweredProgram {
 
         vec![self.non_convergence(
             &last_request,
-            format!("artifact closure did not converge after {MAX_CLOSURE_ROUNDS} rounds"),
+            format!("artifact closure did not converge after {MAX_CLOSURE_ROUNDS} rounds (possible polymorphic recursion)"),
         )]
     }
 

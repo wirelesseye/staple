@@ -60,12 +60,9 @@ actually does.
 
 Stages 1–7 are implemented: scoped schemes, explicit instantiation,
 monomorphization, runtime type descriptors, effect rows, bounded polymorphic
-values, and independently generic trait members. Concrete calls retain their
-native ABI; polymorphic closures use descriptors and dictionaries through
-reachable worklist artifacts. Trait member schemes quantify explicit trait
-parameters followed by the member's own parameters, excluding hidden
-associated types. Stage 7's compatibility and final test gates are running.
-Stage 8 extensions and the documented associated-projection, coroutine, and
+values, and independently generic trait members. Stage 7's focused execution
+checks pass; workspace, full differential, and compatibility gates remain.
+Stage 8 and the documented associated-projection, coroutine, and
 parameter-product restrictions remain.
 
 ## Design

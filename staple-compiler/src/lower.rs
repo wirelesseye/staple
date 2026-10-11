@@ -570,6 +570,8 @@ pub(crate) struct LoweredExpression {
     /// types still contain declared parameters leaves the plan absent, and
     /// materialization recomputes it from the substituted types.
     pub coercion_plan: Option<LoweredCoercionPlan>,
+    /// Explicit arguments also solve parameters absent from the function body.
+    pub instantiation_substitutions: std::collections::BTreeMap<TypeParameterId, CheckedType>,
     pub moved_symbols: Vec<SymbolId>,
     pub kind: LoweredExpressionKind,
 }
@@ -697,11 +699,12 @@ impl LoweredCoercionPlan {
     fn instantiate(
         scheme: &crate::CheckedScheme,
         target: &CheckedFunctionType,
+        substitutions: &std::collections::BTreeMap<TypeParameterId, CheckedType>,
     ) -> Result<Self, String> {
         let CheckedType::Function(body) = scheme.body.as_ref() else {
             return Err(format!("`{scheme}` is not a function scheme"));
         };
-        let mut inferred = HashMap::new();
+        let mut inferred: HashMap<_, _> = substitutions.iter().map(|(id, value)| (*id, value.clone())).collect();
         let _ = infer_type_parameters_with_schemes(
             &CheckedType::Function(body.clone()),
             &CheckedType::Function(target.clone()),
@@ -752,13 +755,22 @@ impl LoweredCoercionPlan {
     }
 
     pub(crate) fn plan(source: &CheckedType, target: &CheckedType) -> Result<Self, String> {
-        Self::plan_with(source, target, FromCoercion::Allowed)
+        Self::plan_seeded(source, target, &Default::default())
+    }
+
+    pub(crate) fn plan_seeded(
+        source: &CheckedType,
+        target: &CheckedType,
+        substitutions: &std::collections::BTreeMap<TypeParameterId, CheckedType>,
+    ) -> Result<Self, String> {
+        Self::plan_with(source, target, FromCoercion::Allowed, substitutions)
     }
 
     fn plan_with(
         source: &CheckedType,
         target: &CheckedType,
         from: FromCoercion,
+        substitutions: &std::collections::BTreeMap<TypeParameterId, CheckedType>,
     ) -> Result<Self, String> {
         // Emission ends the block with `unreachable` for a `Never` source
         // before any coercion runs, so the plan is never executed.
@@ -779,7 +791,7 @@ impl LoweredCoercionPlan {
             return Ok(LoweredCoercionPlan::Identity);
         }
         if let (CheckedType::Forall(scheme), CheckedType::Function(function)) = (source, target) {
-            return Self::instantiate(scheme, function);
+            return Self::instantiate(scheme, function, substitutions);
         }
         if let (CheckedType::Forall(value), CheckedType::Forall(expected)) = (source, target) {
             if types_equivalent(source, target) {
@@ -795,7 +807,7 @@ impl LoweredCoercionPlan {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, alternative)| {
-                    Self::plan_with(source, alternative, from)
+                    Self::plan_with(source, alternative, from, substitutions)
                         .ok()
                         .map(|plan| (index, plan))
                 })
@@ -819,6 +831,7 @@ impl LoweredCoercionPlan {
                         source,
                         representation,
                         FromCoercion::Forbidden,
+                        substitutions,
                     )?),
                 });
             }
@@ -847,6 +860,7 @@ impl LoweredCoercionPlan {
                                     alternative,
                                     target_alternative,
                                     from,
+                                    substitutions,
                                 )?),
                             }));
                         }
@@ -870,7 +884,7 @@ impl LoweredCoercionPlan {
                 let target_alternative = &target_sum.alternatives[index];
                 Ok(LoweredCoercionPlan::SumInject {
                     alternative: index,
-                    payload: Box::new(Self::plan_with(source, target_alternative, from)?),
+                    payload: Box::new(Self::plan_with(source, target_alternative, from, substitutions)?),
                 })
             }
         }
@@ -3759,6 +3773,17 @@ impl LoweredProgram {
                 out
             })
             .unwrap_or_default();
+        let is_default_member = self.trait_methods.iter()
+            .any(|(_, _, method)| method.default_function == Some(function.id));
+        let is_implementation_member = self.trait_implementations.iter()
+            .any(|(_, implementation)| implementation.methods.iter()
+                .any(|(_, member)| *member == function.id));
+        let own_declared_bounds = if is_default_member || is_implementation_member {
+            scheme.as_ref().map(|scheme| scheme.trait_bounds.iter()
+                .skip(usize::from(is_default_member)).cloned().collect()).unwrap_or_default()
+        } else {
+            module.own_declared_bounds_of_function(function.id).to_vec()
+        };
         let value = LoweredFunction {
             origin: origin.clone(),
             semantic_id: function.id,
@@ -3771,7 +3796,7 @@ impl LoweredProgram {
             scheme,
             bounds: module.bounds_of_function(function.id).to_vec(),
             declared_bounds: module.declared_bounds_of_function(function.id),
-            own_declared_bounds: module.own_declared_bounds_of_function(function.id).to_vec(),
+            own_declared_bounds,
             parameter_style: function.parameter_style,
             parameter_pattern,
             parameters: pattern_symbols(resolved, &function.pattern),
@@ -5394,8 +5419,11 @@ impl LoweredProgram {
             value_type = source.clone();
             coercion = Some(crate::CheckedCoercion { source, target });
         }
+        let instantiation_substitutions = module.explicit_value_substitutions(syntax.id)
+            .into_iter().flat_map(|map| map.iter().map(|(id, value)| (*id, value.clone())))
+            .collect();
         let coercion_plan = match &coercion {
-            Some(coercion) => match LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+            Some(coercion) => match LoweredCoercionPlan::plan_seeded(&coercion.source, &coercion.target, &instantiation_substitutions) {
                 Ok(plan) => Some(plan),
                 Err(message) => {
                     if instance_resolution::unresolved_type_problem(&coercion.source).is_some()
@@ -5435,6 +5463,7 @@ impl LoweredProgram {
             effects,
             coercion,
             coercion_plan,
+            instantiation_substitutions,
             moved_symbols,
             kind,
         });
@@ -12161,7 +12190,7 @@ impl LoweredProgram {
         // Templates whose types still contain declared parameters may leave it
         // absent until materialization.
         match &expression.coercion_plan {
-            Some(plan) => match LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+            Some(plan) => match LoweredCoercionPlan::plan_seeded(&coercion.source, &coercion.target, &expression.instantiation_substitutions) {
                 Ok(expected) if *plan == expected => {}
                 Ok(_) => diagnostics.push(Diagnostic::new(
                     expression.origin.span.clone(),
@@ -17620,6 +17649,7 @@ mod tests {
             effects: CheckedEffectSet::default(),
             coercion: None,
             coercion_plan: None,
+            instantiation_substitutions: Default::default(),
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Block(BlockId::from_index(4)),
         });
@@ -19797,6 +19827,7 @@ mod tests {
             effects: CheckedEffectSet::default(),
             coercion: None,
             coercion_plan: None,
+            instantiation_substitutions: Default::default(),
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Deferred(DeferredExpressionFamily::Callable),
         });
@@ -22127,6 +22158,7 @@ mod tests {
             effects: CheckedEffectSet::default(),
             coercion: None,
             coercion_plan: None,
+            instantiation_substitutions: Default::default(),
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Name(LoweredName {
                 symbol: SymbolId(0),
@@ -25455,6 +25487,70 @@ mod tests {
         assert!(!first_snapshot.is_empty());
         assert_eq!(first_snapshot, normalized_program_snapshot(&second));
     }
+    #[test]
+    fn generic_trait_dictionary_slot_keeps_own_hidden_arguments_in_order() {
+        let module = checked_program(concat!(
+            "trait Visit T { visit: <A where ToString A> (T, A) -> String }\n",
+            "impl Visit I32 { visit = (_, value) => ToString.to_string value }\n",
+            "def relay: <T, A where Visit T, ToString A> (T, A) -> String = (item, value) => Visit.visit (item, value)\n",
+            "let stored = relay\nlet result = stored (1, 42)\n",
+        ));
+        let lowered = Lowerer::new().lower(&module).unwrap();
+        let program = &lowered.program;
+        let metadata = lowered_trait(program, "Visit");
+        assert_eq!(metadata.dictionary_layout.slots, 0..1);
+        let method = metadata.methods[0];
+        let member = program.trait_methods.get(method).unwrap();
+        assert_eq!(member.scheme.parameters.len(), 2);
+        assert_eq!(member.own_parameters.len(), 1);
+        let entry = program.artifacts.iter().find_map(|(_, artifact)| {
+            match &artifact.plan {
+                Some(LoweredArtifactPlan::TraitMemberEntry(plan))
+                    if plan.method == method && plan.callee.is_some() => Some(plan),
+                _ => None,
+            }
+        }).expect("reachable generic slot entry");
+        assert_eq!(entry.descriptors, 1);
+        assert_eq!(entry.dictionaries, 1);
+        assert_eq!(entry.slot, 0);
+        let callee = entry.callee.as_ref().unwrap();
+        assert_eq!(callee.key.runtime().len(), 1);
+    }
+
+    #[test]
+    fn descriptor_bound_entries_preserve_closure_prefixes_and_compact_slot_tails() {
+        let nested = crate::codegen::corpus::codegen_corpus().iter()
+            .find(|program| program.name == "trait_dictionary_nested_lambdas").unwrap();
+        let crate::codegen::corpus::CorpusSource::Inline(source) = nested.source else {
+            panic!("nested-lambda fixture is inline");
+        };
+        for (source, tail) in [(source, false),
+            (concat!(
+                "trait Visit T { visit: <A> (T, move A) -> A }\n",
+                "type Box T = wrap T\n",
+                "impl <T where ToString T> Visit (Box T) { visit = (_, move value) => value }\n",
+                "def relay: <T, A where ToString T> (Box T, move A) -> A = (item, move value) => Visit.visit (item, value)\n",
+                "let stored = relay\nlet result = stored (Box 1, 42)\n",
+            ), true)] {
+            let module = checked_program(source);
+            let lowered = Lowerer::new().lower(&module).unwrap();
+            let entries = lowered.program.artifacts.iter().filter_map(|(_, artifact)| {
+                match &artifact.plan {
+                    Some(LoweredArtifactPlan::DescriptorBoundEntry(plan))
+                        if (plan.environment_offset > 0) == tail
+                            && plan.bound < plan.runtime.len()
+                            && plan.bound_dictionaries > 0 => Some(plan),
+                    _ => None,
+                }
+            }).collect::<Vec<_>>();
+            assert!(!entries.is_empty(), "fixture must exercise a partially bound entry (tail={tail})");
+            for entry in entries {
+                assert_eq!(entry.dictionary_prefix,
+                    if tail { entry.bound } else { entry.runtime.len() });
+            }
+        }
+    }
+
 }
 
 

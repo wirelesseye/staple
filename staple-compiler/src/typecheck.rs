@@ -3510,6 +3510,10 @@ impl TypeChecker {
                     self.impl_function_types.insert(function_id, function_type.clone());
                     if let Type::Forall(_) = &member.annotation {
                         let mut scheme = self.trait_member_schemes[method].clone();
+                        let mut member_substitutions = substitutions.clone();
+                        for (parameter, argument) in scheme.trait_bounds[0].arguments.iter().zip(&arguments) {
+                            infer_type_parameters(parameter, argument, &mut member_substitutions);
+                        }
                         let explicit = resolved_trait.declaration.type_parameters.len()
                             - resolved_trait.declaration.associated_types.len();
                         scheme.parameters.drain(..explicit);
@@ -3518,11 +3522,11 @@ impl TypeChecker {
                         scheme.body = Box::new(CheckedType::Function(function_type));
                         for bound in &mut scheme.trait_bounds {
                             for argument in &mut bound.arguments {
-                                *argument = substitute_type(argument.clone(), &substitutions);
+                                *argument = substitute_type(argument.clone(), &member_substitutions);
                             }
                         }
                         for bound in &mut scheme.subtype_bounds {
-                            bound.supertype = substitute_type(bound.supertype.clone(), &substitutions);
+                            bound.supertype = substitute_type(bound.supertype.clone(), &member_substitutions);
                         }
                         self.function_declared_bounds.insert(function_id, scheme.trait_bounds.clone());
                         self.function_bounds.insert(function_id, self.expand_trait_bounds(scheme.trait_bounds.clone()));
@@ -4905,10 +4909,12 @@ impl TypeChecker {
                 }
                 self.function_types.insert(function.id, expected);
                 if let Some(trait_id) = self.default_function_traits.get(&function.id).copied() {
-                    let declared = vec![CheckedTraitBound {
-                        trait_id,
-                        arguments: self.trait_parameter_arguments[&trait_id].clone(),
-                    }];
+                    let declared = self.function_schemes.get(&function.id)
+                        .map(|scheme| scheme.trait_bounds.clone())
+                        .unwrap_or_else(|| vec![CheckedTraitBound {
+                            trait_id,
+                            arguments: self.trait_parameter_arguments[&trait_id].clone(),
+                        }]);
                     self.function_declared_bounds
                         .insert(function.id, declared.clone());
                     let bounds = self.expand_trait_bounds(declared);
@@ -4929,15 +4935,10 @@ impl TypeChecker {
                     }
                 }
                 if !bounds.is_empty() {
-                    self.function_declared_bounds
-                        .entry(function.id)
-                        .or_default()
-                        .extend(bounds.clone());
+                    bounds.extend(self.function_declared_bounds.remove(&function.id).unwrap_or_default());
+                    self.function_declared_bounds.insert(function.id, bounds.clone());
                     let bounds = self.expand_trait_bounds(bounds);
-                    self.function_bounds
-                        .entry(function.id)
-                        .or_default()
-                        .extend(bounds);
+                    self.function_bounds.insert(function.id, bounds);
                 }
                 let mut subtype_bounds = Vec::new();
                 for bound in &function.subtype_bounds {
@@ -12842,6 +12843,17 @@ impl TypeChecker {
                 return CheckedType::Error;
             }
         }
+        if (!methods.is_empty() || value_scheme.as_ref().is_some_and(|scheme|
+            self.trait_member_schemes.values().any(|member| schemes_alpha_equivalent(member, &scheme))))
+            && parameters.iter().filter_map(|parameter| match parameter {
+            CheckedType::Parameter { id, parameter_product_capable: false, .. } => Some(*id), _ => None,
+        }).any(|id| {
+            !type_contains_parameter(&raw, id) && !substitutions.contains_key(&id)
+        }) {
+            self.diagnostics.push(Diagnostic::new(application.syntax.span.clone(),
+                "could not infer all compile-time parameters; supply explicit type arguments"));
+            return CheckedType::Error;
+        }
         let instantiated = self.substitute_parameter_products(
             raw.clone(),
             &substitutions,
@@ -13033,6 +13045,18 @@ impl TypeChecker {
         let subtype_bounds = scheme.subtype_bounds.clone();
         let template = scheme.body.as_ref().clone();
         let declared_parameters = scheme.bound_ids();
+        if self.trait_member_schemes.values().any(|member| schemes_alpha_equivalent(member, &scheme))
+            && scheme.parameters.iter().filter_map(|parameter| match parameter {
+            CheckedSchemeParameter::Type { id, .. } => Some(id), _ => None,
+        }).any(|id| {
+            !type_contains_parameter(&template, *id)
+                && !syntax.and_then(|syntax| self.explicit_value_substitutions.get(&syntax))
+                    .is_some_and(|substitutions| substitutions.contains_key(id))
+        }) {
+            self.diagnostics.push(Diagnostic::new(span,
+                "could not infer all compile-time parameters; supply explicit type arguments"));
+            return CheckedType::Error;
+        }
         let mut sized_parameters = scheme
             .parameters
             .iter()

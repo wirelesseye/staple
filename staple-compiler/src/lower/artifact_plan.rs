@@ -92,6 +92,9 @@ pub(crate) struct TraitDictionaryPlan {
 pub(crate) struct DescriptorBoundEntryPlan {
     /// Number of leading descriptors supplied by the closure environment.
     pub bound: usize,
+    /// Descriptor slots before bound dictionaries: the full reserved prefix
+    /// for closure environments, or the compact header prefix for slot tails.
+    pub dictionary_prefix: usize,
     /// Dictionaries in the full instance ABI and its bound lexical prefix.
     pub dictionary_count: usize,
     pub bound_dictionaries: usize,
@@ -889,6 +892,7 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::TraitMemberEntry(_) => {}
             LoweredArtifactPlan::DescriptorBoundEntry(DescriptorBoundEntryPlan {
                 bound: _,
+                dictionary_prefix: _,
                 dictionary_count: _,
                 bound_dictionaries: _,
                 environment_offset: _,

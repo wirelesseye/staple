@@ -426,6 +426,7 @@ pub(super) fn scan_instance(
                 ),
                 plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
                     bound,
+                    dictionary_prefix: runtime.len(),
                     dictionary_count: super::trait_dictionaries::entry_dictionary_partition(
                         program, *callee, bound,
                     )
@@ -558,6 +559,7 @@ pub(super) fn scan_instance(
                 ),
                 plan: Plan::DescriptorBoundEntry(crate::DescriptorBoundEntryPlan {
                     bound: runtime.len(),
+                    dictionary_prefix: runtime.len(),
                     dictionary_count: super::trait_dictionaries::entry_dictionary_partition(
                         program,
                         *callee,

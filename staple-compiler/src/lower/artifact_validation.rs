@@ -38,11 +38,17 @@ impl LoweredProgram {
             else {
                 continue;
             };
-            if super::trait_dictionaries::entry_dictionary_partition(
-                self,
-                plan.instance,
-                plan.bound,
-            ) != Some((plan.dictionary_count, plan.bound_dictionaries))
+            let prefix = if plan.environment_offset == 0 { plan.runtime.len() } else { plan.bound };
+            if plan.dictionary_prefix != prefix {
+                diagnostics.push(Diagnostic::new(artifact.origin.span.clone(),
+                    "bound entry dictionary offset disagrees with its environment layout"));
+            }
+            let partition = if plan.environment_offset == 0 {
+                super::trait_dictionaries::entry_dictionary_partition(self, plan.instance, plan.bound)
+            } else {
+                super::trait_dictionaries::slot_dictionary_partition(self, plan.instance)
+            };
+            if partition != Some((plan.dictionary_count, plan.bound_dictionaries))
             {
                 diagnostics.push(Diagnostic::new(
                     artifact.origin.span.clone(),

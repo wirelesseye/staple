@@ -55,3 +55,38 @@ impl Make I32 { make = move value => 6 }
 def make: <T, A where Make T> move A -> T = move value => Make.make value
 let stored_make = make
 println "${stored_make.<I32, (I32, I32)> (1, 2)}"
+
+// Implementation bounds precede caller-supplied member bounds in slot entries.
+trait Inspect T { inspect: <A where ToString A> (T, A) -> String }
+impl<X where ToString X> Inspect (Box X) { inspect = (_, value) => ToString.to_string value }
+def inspect: <X, A where ToString X, ToString A> (Box X, A) -> String = pair => Inspect.inspect pair
+let stored_inspect = inspect
+println (stored_inspect (Box 1, 21))
+
+// A member bound on its trait parameter still comes from the member's caller.
+trait Label T { label: T -> String }
+impl Label I32 { label = value => ToString.to_string value }
+impl<X where Label X> Label (Box X) { label = Box value => Label.label value }
+trait Echo T { echo: <A where Label T> (T, move A) -> String = (item, move unused) => Label.label item }
+impl Echo I32 {}
+impl<X> Echo (Box X) {}
+def echo: <T, A where Echo T, Label T> (T, move A) -> String = (item, move value) => Echo.echo (item, value)
+let stored_echo = echo
+println (stored_echo (22, True))
+println (stored_echo (Box 23, False))
+let echo_member = Echo.echo
+println (echo_member.<I32, String> (24, "member"))
+
+// Effect-only member schemes pass dictionaries without an own type descriptor.
+trait EffectEcho T {
+    effect_echo: <effect E where Label T> (T, () ->{E} I32) ->{E} String = (item, f) => {
+        let ignored = f ()
+        Label.label item
+    }
+}
+impl EffectEcho I32 {}
+impl<X where Label X> EffectEcho (Box X) {}
+def effect_echo: <T, effect E where EffectEcho T, Label T> (T, () ->{E} I32) ->{E} String = pair => EffectEcho.effect_echo pair
+let stored_effect_echo = effect_echo
+println (stored_effect_echo (25, quiet))
+println (stored_effect_echo (Box 26, noisy))

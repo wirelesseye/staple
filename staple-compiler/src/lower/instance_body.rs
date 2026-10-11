@@ -649,11 +649,9 @@ impl<'a> BodyCloner<'a> {
         };
         self.body.origin = function.origin.clone();
         self.body.signature = self.function_type(&function.signature);
-        self.body.dictionary_bounds = super::trait_dictionaries::runtime_obligations(
-            &self.program.semantic_ids,
-            &function.declared_bounds,
-            &self.substitution,
-            self.enclosing.key.runtime(),
+        self.body.dictionary_bounds = super::trait_dictionaries::declared_runtime_obligations(
+            self.program, &function, &self.substitution,
+            self.enclosing.key.runtime(), self.enclosing.key.runtime_effects(),
         );
         self.body.dictionary_obligations = super::trait_dictionaries::runtime_obligations(
             &self.program.semantic_ids,
@@ -1427,9 +1425,11 @@ impl<'a> BodyCloner<'a> {
         // Recompute the coercion plan from the substituted types, like the
         // other concrete-sensitive derived facts. A concrete pair unsupported
         // by lowering produces a diagnostic rather than a missing plan.
+        let instantiation_substitutions = expression.instantiation_substitutions.iter()
+            .map(|(id, value)| (*id, self.ty(value))).collect();
         let coercion_plan = match &coercion {
             Some(coercion) => {
-                match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+                match super::LoweredCoercionPlan::plan_seeded(&coercion.source, &coercion.target, &instantiation_substitutions) {
                     Ok(plan) => Some(plan),
                     Err(message) => {
                         self.diagnostics
@@ -1447,6 +1447,7 @@ impl<'a> BodyCloner<'a> {
             effects: self.effects(&expression.effects),
             coercion,
             coercion_plan,
+            instantiation_substitutions,
             moved_symbols: expression.moved_symbols,
             kind,
         });
@@ -1721,6 +1722,7 @@ impl<'a> BodyCloner<'a> {
             effects: CheckedEffectSet::default(),
             coercion: None,
             coercion_plan: None,
+            instantiation_substitutions: Default::default(),
             moved_symbols: Vec::new(),
             kind: LoweredExpressionKind::Deferred(super::DeferredExpressionFamily::Callable),
         })
@@ -4147,11 +4149,9 @@ impl<'a> BodyValidator<'a> {
                     &self.instance.environment.substitution_map(),
                     key.runtime(),
                 );
-                let declared = super::trait_dictionaries::runtime_obligations(
-                    &self.program.semantic_ids,
-                    &template.declared_bounds,
-                    &self.instance.environment.substitution_map(),
-                    key.runtime(),
+                let declared = super::trait_dictionaries::declared_runtime_obligations(
+                    self.program, template, &self.instance.environment.substitution_map(),
+                    key.runtime(), key.runtime_effects(),
                 );
                 if self.body.dictionary_bounds != declared {
                     self.report(
@@ -4577,7 +4577,7 @@ impl<'a> BodyValidator<'a> {
             // recomputed, and it must agree with a fresh computation.
             match &expression.coercion_plan {
                 Some(plan) => {
-                    match super::LoweredCoercionPlan::plan(&coercion.source, &coercion.target) {
+                    match super::LoweredCoercionPlan::plan_seeded(&coercion.source, &coercion.target, &expression.instantiation_substitutions) {
                         Ok(expected) if *plan == expected => {}
                         Ok(_) | Err(_) => self.report(
                             origin.span.clone(),
