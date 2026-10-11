@@ -68,12 +68,12 @@ every existing input.
 
 ## Current state
 
-7a.1–7a.3 implement declaration scopes, conformance, combined member schemes,
-call inference, explicit trait/member argument order (associated types omitted),
-member value checking, hover schemes, and recursion rejection. Seven focused
-generic-trait tests pass, including existing defaults. Static lowering and
-7b dictionary slots/member entries remain; the S0 fixtures are not yet enabled
-in the runnable corpus.
+7a.1–7a.4 implement checking and monomorphized dispatch, including member
+substitutions in instance requests and metadata. Seven focused checker tests
+pass. The static corpus fixture runs with its pinned output, covering concrete
+and generic implementations, defaults, overrides, bounds, and explicit `_`.
+The 7a differential/workspace/IR gate is pending alongside 7b slot support.
+Dictionary slots and polymorphic member entries remain.
 
 ## Decisions
 

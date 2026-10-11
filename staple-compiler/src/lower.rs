@@ -2923,6 +2923,8 @@ pub(crate) struct LoweredTraitMethodMetadata {
     pub name: String,
     pub trait_id: TraitId,
     pub value_type: CheckedType,
+    pub scheme: crate::CheckedScheme,
+    pub own_parameters: Vec<crate::typecheck::CheckedSchemeParameter>,
     pub default_function: Option<FunctionId>,
 }
 
@@ -3317,6 +3319,9 @@ impl LoweredProgram {
                     name,
                     trait_id,
                     value_type,
+                    scheme: module.scheme_of_trait_member(*method).expect("checked member scheme").clone(),
+                    own_parameters: module.scheme_of_trait_member(*method).expect("checked member scheme").parameters[
+                        trait_.declaration.type_parameters.len() - trait_.declaration.associated_types.len()..].to_vec(),
                     default_function: trait_.default_methods.get(method).copied(),
                 };
                 if let Err(diagnostic) =
@@ -6947,6 +6952,13 @@ impl LoweredProgram {
                 })?;
                 let (target, adapter, closure, evidence) =
                     self.lower_trait_method_value(module, owner, &origin, &dispatch)?;
+                let trait_id = resolved.trait_for_method(dispatch.method).expect("member owner");
+                substitutions = trait_call_substitutions(&self.traits.get(trait_id).expect("trait metadata").parameters,
+                    &dispatch.arguments);
+                let member = self.trait_methods.get(dispatch.method).expect("member metadata");
+                let own = substitutions_from_map(member_substitution_map(member, &dispatch.member_arguments));
+                substitutions.types.extend(own.types);
+                substitutions.effects.extend(own.effects);
                 let function_type = checked_function_type
                     .or_else(|| {
                         match self
@@ -7582,6 +7594,14 @@ impl LoweredProgram {
                 };
                 let function_type = module
                     .instantiated_trait_method_type(trait_id, &completed, dispatch.method)
+                    .map(|function| {
+                        let member = self.trait_methods.get(dispatch.method).expect("member metadata");
+                        let map = member_substitution_map(member, &dispatch.member_arguments);
+                        match crate::substitute_type(CheckedType::Function(function), &map) {
+                            CheckedType::Function(function) => function,
+                            _ => unreachable!("function substitution"),
+                        }
+                    })
                     .or_else(|| {
                         match self
                             .trait_methods
@@ -7625,6 +7645,10 @@ impl LoweredProgram {
                     .map(|trait_| trait_.parameters.clone())
                     .unwrap_or_default();
                 substitutions = trait_call_substitutions(&parameters, &completed);
+                let member = self.trait_methods.get(dispatch.method).expect("member metadata");
+                let own = substitutions_from_map(member_substitution_map(member, &dispatch.member_arguments));
+                substitutions.types.extend(own.types);
+                substitutions.effects.extend(own.effects);
                 evidence = Some(recipe);
                 (target, None, function_type)
             }
@@ -14129,6 +14153,17 @@ fn call_substitutions(
 
 /// Trait-call substitutions: the trait's declared parameter templates mapped
 /// onto the completed call-site arguments.
+fn member_substitution_map(
+    member: &LoweredTraitMethodMetadata,
+    arguments: &[CheckedType],
+) -> HashMap<TypeParameterId, CheckedType> {
+    let mut map = HashMap::new();
+    for (parameter, argument) in member.own_parameters.iter().zip(arguments) {
+        let _ = infer_type_parameters(&parameter.substitution_pattern(), argument, &mut map);
+    }
+    map
+}
+
 fn trait_call_substitutions(
     parameters: &[CheckedType],
     arguments: &[CheckedType],
