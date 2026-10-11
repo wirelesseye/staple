@@ -5123,6 +5123,10 @@ impl<'a> BodyValidator<'a> {
         };
         self.visit_provider(with.provider);
         self.visit_expression(with.value);
+        // A `mut` provider borrows its value through a place.
+        if let Some(place) = with.place {
+            self.visit_place(place);
+        }
         self.visit_block(with.body);
     }
 

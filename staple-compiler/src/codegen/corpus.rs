@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 151] = [
+static CORPUS: [CorpusProgram; 152] = [
     expect_stdout(
         must_run(inline(
             "trait_dictionary_adapters",
@@ -2963,6 +2963,34 @@ let value = at (Ref (1, 2), (USize :: 5))
             "emission",
         ),
         "5 6\n4 9\n",
+    )),
+    // A `with mut` provider inside a function borrows its value through a place,
+    // which the instance body must keep reachable; the provider also reaches a
+    // bounded polymorphic value's effectful member.
+    must_run(expect_stdout(
+        inline(
+            "with_mut_inside_functions",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "type Counter = wrap (value: I32)\n",
+                "trait Speak T { speak: T ->{IO, mut Counter} () }\n",
+                "impl Speak I32 { speak = value => { (resource Counter).value = (resource Counter).value + value; println \"i32 ${value}\" } }\n",
+                "def bump: () ->{mut Counter} () = () => { (resource Counter).value = (resource Counter).value + 1 }\n",
+                "def talk: <T where Speak T, Copy T> T ->{IO, mut Counter} () = value => Speak.speak value\n",
+                "let stored: <T where Speak T, Copy T> T ->{IO, mut Counter} () = talk\n",
+                "def run: () ->{IO} () = () => {\n",
+                "    let mut counter = Counter (value: 0)\n",
+                "    with mut Counter = counter {\n",
+                "        bump ()\n",
+                "        stored 5\n",
+                "    }\n",
+                "    println \"${counter.value}\"\n",
+                "}\n",
+                "run ()\n",
+            ),
+            "emission",
+        ),
+        "i32 5\n6\n",
     )),
     must_run(expect_stdout(
         inline(
