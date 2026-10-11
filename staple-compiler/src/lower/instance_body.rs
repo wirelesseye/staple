@@ -650,8 +650,11 @@ impl<'a> BodyCloner<'a> {
         self.body.origin = function.origin.clone();
         self.body.signature = self.function_type(&function.signature);
         self.body.dictionary_bounds = super::trait_dictionaries::declared_runtime_obligations(
-            self.program, &function, &self.substitution,
-            self.enclosing.key.runtime(), self.enclosing.key.runtime_effects(),
+            self.program,
+            &function,
+            &self.substitution,
+            self.enclosing.key.runtime(),
+            self.enclosing.key.runtime_effects(),
         );
         self.body.dictionary_obligations = super::trait_dictionaries::runtime_obligations(
             &self.program.semantic_ids,
@@ -785,10 +788,14 @@ impl<'a> BodyCloner<'a> {
             }
         }
         for (call_id, call) in self.body.calls.iter() {
-            if let Some(LoweredBoundTarget::Dictionary(dispatch)) = self.body.bindings.get(&LoweredBindingSite::Call(call_id))
+            if let Some(LoweredBoundTarget::Dictionary(dispatch)) =
+                self.body.bindings.get(&LoweredBindingSite::Call(call_id))
                 && !dispatch.dictionaries.is_empty()
             {
-                self.body.dictionary_calls.insert(super::trait_dictionaries::DictionarySite::Call(call_id), dispatch.dictionaries.clone());
+                self.body.dictionary_calls.insert(
+                    super::trait_dictionaries::DictionarySite::Call(call_id),
+                    dispatch.dictionaries.clone(),
+                );
             }
             if call.scheme.is_some() {
                 match super::trait_dictionaries::plan_scheme_call(
@@ -916,7 +923,11 @@ impl<'a> BodyCloner<'a> {
     fn dispatch(&self, dispatch: &CheckedTraitDispatch) -> CheckedTraitDispatch {
         CheckedTraitDispatch {
             method: dispatch.method,
-            member_arguments: dispatch.member_arguments.iter().map(|argument| self.ty(argument)).collect(),
+            member_arguments: dispatch
+                .member_arguments
+                .iter()
+                .map(|argument| self.ty(argument))
+                .collect(),
             arguments: dispatch
                 .arguments
                 .iter()
@@ -1425,11 +1436,18 @@ impl<'a> BodyCloner<'a> {
         // Recompute the coercion plan from the substituted types, like the
         // other concrete-sensitive derived facts. A concrete pair unsupported
         // by lowering produces a diagnostic rather than a missing plan.
-        let instantiation_substitutions = expression.instantiation_substitutions.iter()
-            .map(|(id, value)| (*id, self.ty(value))).collect();
+        let instantiation_substitutions = expression
+            .instantiation_substitutions
+            .iter()
+            .map(|(id, value)| (*id, self.ty(value)))
+            .collect();
         let coercion_plan = match &coercion {
             Some(coercion) => {
-                match super::LoweredCoercionPlan::plan_seeded(&coercion.source, &coercion.target, &instantiation_substitutions) {
+                match super::LoweredCoercionPlan::plan_seeded(
+                    &coercion.source,
+                    &coercion.target,
+                    &instantiation_substitutions,
+                ) {
                     Ok(plan) => Some(plan),
                     Err(message) => {
                         self.diagnostics
@@ -3283,10 +3301,18 @@ impl<'a> BodyCloner<'a> {
                 trait_id, method, ..
             } => {
                 if original.scheme.is_some() {
-                    let (key, _) = super::trait_dictionaries::member_value_entry(self.program, *method);
+                    let (key, _) =
+                        super::trait_dictionaries::member_value_entry(self.program, *method);
                     match self.artifacts_by_key.get(&key) {
-                        Some(ordinal) => { self.body.bindings.insert(site, LoweredBoundTarget::Artifact(*ordinal)); }
-                        None => self.diagnostics.push(Diagnostic::new(original.origin.span.clone(), "trait member entry was not reserved")),
+                        Some(ordinal) => {
+                            self.body
+                                .bindings
+                                .insert(site, LoweredBoundTarget::Artifact(*ordinal));
+                        }
+                        None => self.diagnostics.push(Diagnostic::new(
+                            original.origin.span.clone(),
+                            "trait member entry was not reserved",
+                        )),
                     }
                     return;
                 }
@@ -3367,12 +3393,22 @@ impl<'a> BodyCloner<'a> {
                 origin,
             ) {
                 Ok(mut dispatch) => {
-                    if let Err(error) = super::trait_dictionaries::instantiate_slot_call(self.program,
-                        &self.enclosing, &self.body.dictionary_bounds, &mut dispatch, method,
-                        recorded_type.as_ref(), &substitutions, origin) {
-                        self.diagnostics.push(error); return;
+                    if let Err(error) = super::trait_dictionaries::instantiate_slot_call(
+                        self.program,
+                        &self.enclosing,
+                        &self.body.dictionary_bounds,
+                        &mut dispatch,
+                        method,
+                        recorded_type.as_ref(),
+                        &substitutions,
+                        origin,
+                    ) {
+                        self.diagnostics.push(error);
+                        return;
                     }
-                    self.body.bindings.insert(site, LoweredBoundTarget::Dictionary(dispatch));
+                    self.body
+                        .bindings
+                        .insert(site, LoweredBoundTarget::Dictionary(dispatch));
                 }
                 Err(diagnostic) => self.diagnostics.push(diagnostic),
             }
@@ -4155,8 +4191,11 @@ impl<'a> BodyValidator<'a> {
                     key.runtime(),
                 );
                 let declared = super::trait_dictionaries::declared_runtime_obligations(
-                    self.program, template, &self.instance.environment.substitution_map(),
-                    key.runtime(), key.runtime_effects(),
+                    self.program,
+                    template,
+                    &self.instance.environment.substitution_map(),
+                    key.runtime(),
+                    key.runtime_effects(),
                 );
                 if self.body.dictionary_bounds != declared {
                     self.report(
@@ -4324,10 +4363,14 @@ impl<'a> BodyValidator<'a> {
             }
         }
         for (call_id, call) in self.body.calls.iter() {
-            if let Some(LoweredBoundTarget::Dictionary(dispatch)) = self.body.bindings.get(&LoweredBindingSite::Call(call_id))
+            if let Some(LoweredBoundTarget::Dictionary(dispatch)) =
+                self.body.bindings.get(&LoweredBindingSite::Call(call_id))
                 && !dispatch.dictionaries.is_empty()
             {
-                expected_dictionary_calls.insert(super::trait_dictionaries::DictionarySite::Call(call_id), dispatch.dictionaries.clone());
+                expected_dictionary_calls.insert(
+                    super::trait_dictionaries::DictionarySite::Call(call_id),
+                    dispatch.dictionaries.clone(),
+                );
             }
             if call.scheme.is_some() {
                 match super::trait_dictionaries::plan_scheme_call(
@@ -4582,7 +4625,11 @@ impl<'a> BodyValidator<'a> {
             // recomputed, and it must agree with a fresh computation.
             match &expression.coercion_plan {
                 Some(plan) => {
-                    match super::LoweredCoercionPlan::plan_seeded(&coercion.source, &coercion.target, &expression.instantiation_substitutions) {
+                    match super::LoweredCoercionPlan::plan_seeded(
+                        &coercion.source,
+                        &coercion.target,
+                        &expression.instantiation_substitutions,
+                    ) {
                         Ok(expected) if *plan == expected => {}
                         Ok(_) | Err(_) => self.report(
                             origin.span.clone(),
@@ -5722,8 +5769,14 @@ impl<'a> BodyValidator<'a> {
         site: LoweredBindingSite,
     ) -> Option<LoweredArtifactDependencyKind> {
         if let LoweredBindingSite::CallableValue(id) = site
-            && self.body.callable_values.get(id).is_some_and(|value| value.scheme.is_some()
-                && matches!(value.target, LoweredCallableTarget::TraitImplementation { .. } | LoweredCallableTarget::StructuralTraitMethod { .. }))
+            && self.body.callable_values.get(id).is_some_and(|value| {
+                value.scheme.is_some()
+                    && matches!(
+                        value.target,
+                        LoweredCallableTarget::TraitImplementation { .. }
+                            | LoweredCallableTarget::StructuralTraitMethod { .. }
+                    )
+            })
         {
             return Some(LoweredArtifactDependencyKind::TraitMemberEntry);
         }

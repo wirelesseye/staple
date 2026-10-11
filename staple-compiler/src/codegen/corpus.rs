@@ -154,16 +154,30 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
 }
 
 static CORPUS: [CorpusProgram; 156] = [
-    expect_stdout(file("generic_trait_members_values",
-        "staple-compiler/tests/fixtures/stage7/values.sta", "generic-trait-members"),
-        "dynamic\n42\nTrue\n7\n13\n14\nmember effect\n15\nTrue\n16\n"),
-    expect_stdout(file("generic_trait_members_dictionaries",
-        "staple-compiler/tests/fixtures/stage7/dictionaries.sta", "generic-trait-members"),
-        "42\nbuilder\ndefault\n9\n7\nbound\n12\n3\neffect\n4\nTrue\nFalse\n5\n6\n21\n22\n23\n24\n25\neffect\n26\n27\n28\n29\nTrue\n5\neffect\n4\n30\n1\neffect\n1\n31\nTrue\n27\n28\n29\nFalse\n5\neffect\n4\n30\n1\neffect\n1\n31\nTrue\n"),
-    expect_stdout(file("generic_trait_members_static",
-        "staple-compiler/tests/fixtures/stage7/static.sta", "generic-trait-members"),
-        "42\ngeneric\nTrue\ndefault\n7\n"),
-
+    expect_stdout(
+        file(
+            "generic_trait_members_values",
+            "staple-compiler/tests/fixtures/stage7/values.sta",
+            "generic-trait-members",
+        ),
+        "dynamic\n42\nTrue\n7\n13\n14\nmember effect\n15\nTrue\n16\n",
+    ),
+    expect_stdout(
+        file(
+            "generic_trait_members_dictionaries",
+            "staple-compiler/tests/fixtures/stage7/dictionaries.sta",
+            "generic-trait-members",
+        ),
+        "42\nbuilder\ndefault\n9\n7\nbound\n12\n3\neffect\n4\nTrue\nFalse\n5\n6\n21\n22\n23\n24\n25\neffect\n26\n27\n28\n29\nTrue\n5\neffect\n4\n30\n1\neffect\n1\n31\nTrue\n27\n28\n29\nFalse\n5\neffect\n4\n30\n1\neffect\n1\n31\nTrue\n",
+    ),
+    expect_stdout(
+        file(
+            "generic_trait_members_static",
+            "staple-compiler/tests/fixtures/stage7/static.sta",
+            "generic-trait-members",
+        ),
+        "42\ngeneric\nTrue\ndefault\n7\n",
+    ),
     expect_stdout(
         must_run(inline(
             "trait_dictionary_adapters",

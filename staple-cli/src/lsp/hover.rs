@@ -600,15 +600,36 @@ impl Collector<'_> {
                     self.named_with_docs(
                         &member.syntax,
                         &member.name,
-                        self.typed.resolved().traits().values()
-                            .find(|resolved| resolved.declaration.syntax.id == declaration.syntax.id)
-                            .and_then(|resolved| resolved.methods.iter().find(|method|
-                                self.typed.resolved().trait_method(**method)
-                                    .is_some_and(|resolved| resolved.name == member.name)))
-                            .map(|method| self.trait_member_signature(*method, &member.name,
-                                member.annotation.syntax().text().trim()))
-                            .unwrap_or_else(|| format!("{}.{}: {}", declaration.name, member.name,
-                                member.annotation.syntax().text().trim())),
+                        self.typed
+                            .resolved()
+                            .traits()
+                            .values()
+                            .find(|resolved| {
+                                resolved.declaration.syntax.id == declaration.syntax.id
+                            })
+                            .and_then(|resolved| {
+                                resolved.methods.iter().find(|method| {
+                                    self.typed
+                                        .resolved()
+                                        .trait_method(**method)
+                                        .is_some_and(|resolved| resolved.name == member.name)
+                                })
+                            })
+                            .map(|method| {
+                                self.trait_member_signature(
+                                    *method,
+                                    &member.name,
+                                    member.annotation.syntax().text().trim(),
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "{}.{}: {}",
+                                    declaration.name,
+                                    member.name,
+                                    member.annotation.syntax().text().trim()
+                                )
+                            }),
                         member.docs.clone(),
                         module,
                     );
@@ -1372,9 +1393,13 @@ impl Collector<'_> {
                     .and_then(|symbol| self.typed.declared_type_of_symbol(symbol))
             })
             .or_else(|| {
-                self.typed.resolved().trait_methods_for_expression(method_syntax)
-                    .first().and_then(|method| self.typed.scheme_of_trait_member(*method))
-                    .cloned().map(|scheme| CheckedType::Forall(Box::new(scheme)))
+                self.typed
+                    .resolved()
+                    .trait_methods_for_expression(method_syntax)
+                    .first()
+                    .and_then(|method| self.typed.scheme_of_trait_member(*method))
+                    .cloned()
+                    .map(|scheme| CheckedType::Forall(Box::new(scheme)))
             });
         if let Some(value_type) = expression_type.as_ref() {
             let value_type = self.display_type(value_type);
@@ -1700,7 +1725,10 @@ impl Collector<'_> {
         member_name: &str,
         annotation: &str,
     ) -> String {
-        let scheme = self.typed.scheme_of_trait_member(method).map(ToString::to_string);
+        let scheme = self
+            .typed
+            .scheme_of_trait_member(method)
+            .map(ToString::to_string);
         let annotation = scheme.as_deref().unwrap_or(annotation);
         if let Some(resolved) = self
             .typed

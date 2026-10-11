@@ -3646,7 +3646,9 @@ impl NameResolver {
                             if let Some(id) = self.resolve_trait_name(&bound.trait_name) {
                                 self.trait_references.insert(bound.syntax.id, id);
                             }
-                            for argument in &bound.arguments { self.resolve_type(argument); }
+                            for argument in &bound.arguments {
+                                self.resolve_type(argument);
+                            }
                         }
                         for bound in &ty.generics.subtype_bounds {
                             if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
@@ -3655,8 +3657,10 @@ impl NameResolver {
                             self.resolve_type(&bound.supertype);
                         }
                         self.resolve_type(&ty.body);
-                        self.binding_trait_bounds.insert(member.syntax.id, ty.generics.trait_bounds.clone());
-                        self.binding_subtype_bounds.insert(member.syntax.id, ty.generics.subtype_bounds.clone());
+                        self.binding_trait_bounds
+                            .insert(member.syntax.id, ty.generics.trait_bounds.clone());
+                        self.binding_subtype_bounds
+                            .insert(member.syntax.id, ty.generics.subtype_bounds.clone());
                     } else {
                         self.resolve_type(&member.annotation);
                     }

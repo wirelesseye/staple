@@ -13766,14 +13766,20 @@ fn stage3_lowering_admits_polymorphic_values_stored_and_called() {
 
 #[test]
 fn resolves_independently_generic_trait_member_scopes() {
-    resolve("trait Visit T { visit: <A> (T, A) -> A = (_, value) => { let item: A = value; item } }\n");
+    resolve(
+        "trait Visit T { visit: <A> (T, A) -> A = (_, value) => { let item: A = value; item } }\n",
+    );
 }
 
 #[test]
 fn checks_independently_generic_trait_member_declarations() {
-    TypeChecker::new().check(resolve("trait Visit T { visit: <A> (T, A) -> A }\n"))
+    TypeChecker::new()
+        .check(resolve("trait Visit T { visit: <A> (T, A) -> A }\n"))
         .expect("member scheme should check");
-    TypeChecker::new().check(resolve("trait Apply T { apply: T -> (<A> move A -> A) -> T }\n"))
+    TypeChecker::new()
+        .check(resolve(
+            "trait Apply T { apply: T -> (<A> move A -> A) -> T }\n",
+        ))
         .expect("nested member scheme should check");
 }
 
@@ -13783,13 +13789,18 @@ fn checks_generic_trait_member_conformance() {
         .expect("implementation must work for every member argument");
     let diagnostics = TypeChecker::new().check(resolve("trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => 42 }\n"))
         .expect_err_diagnostics("implementation cannot fix A to I32");
-    assert!(diagnostics.iter().any(|d| d.message.contains("Visit.visit")
-        && d.message.contains("scheme `<A>") && d.message.contains("expected")), "{diagnostics:?}");
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("Visit.visit")
+            && d.message.contains("scheme `<A>")
+            && d.message.contains("expected")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
 fn infers_generic_trait_member_arguments_and_explicit_order() {
-    TypeChecker::new().check(resolve(include_str!("fixtures/stage7/static.sta")))
+    TypeChecker::new()
+        .check(resolve(include_str!("fixtures/stage7/static.sta")))
         .expect("static generic member calls should check");
     TypeChecker::new().check(resolve("trait Source T { type Element; read: T -> Element }\nimpl Source I32 { type Element = I32; read = x => x }\nlet x = Source.read.<I32> 1\n"))
         .expect("associated parameters are omitted from explicit argument order");
@@ -13799,25 +13810,46 @@ fn infers_generic_trait_member_arguments_and_explicit_order() {
 fn rejects_polymorphic_recursion_through_generic_trait_dispatch() {
     let diagnostics = TypeChecker::new().check(resolve("trait Grow T { grow: <A where Copy A> (T, A) -> () = (item, value) => Grow.grow (item, (value, value)) }\n"))
         .expect_err_diagnostics("dispatch cannot recursively expand member arguments");
-    assert!(diagnostics.iter().any(|d| d.message.contains("polymorphic recursion")), "{diagnostics:?}");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("polymorphic recursion")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
 fn checks_polymorphic_trait_members_and_keeps_projection_restriction() {
-    TypeChecker::new().check(resolve(include_str!("fixtures/stage7/values.sta")))
+    TypeChecker::new()
+        .check(resolve(include_str!("fixtures/stage7/values.sta")))
         .expect("member values instantiate independently and subsume bounds");
-    let diagnostics = TypeChecker::new().check(resolve("trait Source T { type Element; read: T -> Element }\nlet member = Source.read\n"))
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "trait Source T { type Element; read: T -> Element }\nlet member = Source.read\n",
+        ))
         .expect_err_diagnostics("associated projections remain unsupported in value schemes");
-    assert!(diagnostics.iter().any(|d| d.message.contains("associated type")), "{diagnostics:?}");
-    TypeChecker::new().check(resolve("trait Source T { type Element; keep: T -> T }\n"))
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("associated type")),
+        "{diagnostics:?}"
+    );
+    TypeChecker::new()
+        .check(resolve("trait Source T { type Element; keep: T -> T }\n"))
         .expect("only explicit trait parameters must occur in each member");
 }
 
 #[test]
 fn rejects_parameter_product_capable_trait_members() {
-    let diagnostics = TypeChecker::new().check(resolve("trait Run T { run: <A> (T, A -> I32) -> I32 }\n"))
+    let diagnostics = TypeChecker::new()
+        .check(resolve("trait Run T { run: <A> (T, A -> I32) -> I32 }\n"))
         .expect_err_diagnostics("member parameters cannot depend on unknown function arity");
-    assert!(diagnostics.iter().any(|d| d.message.contains("trait member parameters cannot be parameter-product capable")), "{diagnostics:?}");
+    assert!(
+        diagnostics.iter().any(|d| d
+            .message
+            .contains("trait member parameters cannot be parameter-product capable")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
@@ -13828,33 +13860,62 @@ fn plans_generic_trait_member_entries_only_when_reachable() {
         "def unused: <T where Visit T> T -> () = item => { let member = Visit.visit; () }\nlet answer = 42\n",
     ] {
         let lowered = lower(&type_check(&format!("{declarations}{use_site}")));
-        assert!(lowered.planned_artifact_names(PlannedArtifactFamily::TraitMemberEntry).is_empty(),
-            "static calls and unreachable templates must not request member entries");
+        assert!(
+            lowered
+                .planned_artifact_names(PlannedArtifactFamily::TraitMemberEntry)
+                .is_empty(),
+            "static calls and unreachable templates must not request member entries"
+        );
     }
-    let lowered = lower(&type_check(&format!("{declarations}let member = Visit.visit\nlet answer = member (1, 42)\n")));
-    assert!(!lowered.planned_artifact_names(PlannedArtifactFamily::TraitMemberEntry).is_empty());
+    let lowered = lower(&type_check(&format!(
+        "{declarations}let member = Visit.visit\nlet answer = member (1, 42)\n"
+    )));
+    assert!(
+        !lowered
+            .planned_artifact_names(PlannedArtifactFamily::TraitMemberEntry)
+            .is_empty()
+    );
 }
 
 #[test]
 fn implementation_bodies_do_not_inherit_member_parameter_names() {
     let diagnostics = resolve_result("trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => { let saved: A = value; saved } }\n")
         .expect_err_diagnostics("member parameter names are private to the declaration");
-    assert!(diagnostics.iter().any(|d| d.message.contains("A") && d.message.contains("unknown")), "{diagnostics:?}");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("A") && d.message.contains("unknown")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]
 fn generic_trait_members_infer_skipped_own_arguments_and_keep_phantom_arguments() {
     let declarations = "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\ntrait Read T { read: <A where Copy A> T -> T }\nimpl Read I32 { read = value => value }\n";
-    let source = format!("{declarations}let answer = Visit.visit.<I32, _> (1, 42)\nlet phantom = Read.read.<I32, String> 1\n");
+    let source = format!(
+        "{declarations}let answer = Visit.visit.<I32, _> (1, 42)\nlet phantom = Read.read.<I32, String> 1\n"
+    );
     lower(&type_check(&source));
-    let stored = lower(&type_check(&format!("{declarations}let member = Read.read\nlet valid = member.<I32, String> 1\nlet instantiated: I32 -> I32 = member.<I32, String>\nlet result = instantiated 2\n")));
+    let stored = lower(&type_check(&format!(
+        "{declarations}let member = Read.read\nlet valid = member.<I32, String> 1\nlet instantiated: I32 -> I32 = member.<I32, String>\nlet result = instantiated 2\n"
+    )));
     let context = Context::create();
-    CodeGenerator::new(&context).compile_module(&stored)
+    CodeGenerator::new(&context)
+        .compile_module(&stored)
         .expect("explicit phantom arguments reach instantiation adapters");
-    for use_site in ["let result = Read.read 1\n", "let result = Read.read.<I32, _> 1\n"] {
-        let diagnostics = TypeChecker::new().check(resolve(&format!("{declarations}{use_site}")))
+    for use_site in [
+        "let result = Read.read 1\n",
+        "let result = Read.read.<I32, _> 1\n",
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&format!("{declarations}{use_site}")))
             .expect_err_diagnostics("phantom member parameters need explicit arguments");
-        assert!(diagnostics.iter().any(|d| d.message.contains("could not infer all")), "{diagnostics:?}");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("could not infer all")),
+            "{diagnostics:?}"
+        );
     }
     for use_site in [
         "let member = Read.read\nlet invalid = member 1\n",
@@ -13862,9 +13923,15 @@ fn generic_trait_members_infer_skipped_own_arguments_and_keep_phantom_arguments(
         "let member = Read.read\nlet invalid: I32 -> I32 = member\n",
         "let member: <U, B where Read U, Copy B> U -> U = Read.read\nlet invalid = member 1\n",
     ] {
-        let diagnostics = TypeChecker::new().check(resolve(&format!("{declarations}{use_site}")))
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&format!("{declarations}{use_site}")))
             .expect_err_diagnostics("stored phantom parameters also require explicit arguments");
-        assert!(diagnostics.iter().any(|d| d.message.contains("could not infer all")), "{diagnostics:?}");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("could not infer all")),
+            "{diagnostics:?}"
+        );
     }
     let bounded = "trait Bound T {}\nimpl Bound I32 {}\ntrait Read T { read: <A where Bound A> T -> T }\nimpl Read I32 { read = value => value }\n";
     for use_site in [
@@ -13872,17 +13939,33 @@ fn generic_trait_members_infer_skipped_own_arguments_and_keep_phantom_arguments(
         "let member = Read.read\nlet invalid = member.<I32, Bool> 1\n",
         "let member = Read.read\nlet invalid: I32 -> I32 = member.<I32, Bool>\n",
     ] {
-        let diagnostics = TypeChecker::new().check(resolve(&format!("{bounded}{use_site}")))
+        let diagnostics = TypeChecker::new()
+            .check(resolve(&format!("{bounded}{use_site}")))
             .expect_err_diagnostics("explicit phantom arguments still discharge member bounds");
-        assert!(diagnostics.iter().any(|d| d.message.contains("trait bound")), "{diagnostics:?}");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("trait bound")),
+            "{diagnostics:?}"
+        );
     }
 }
 
 #[test]
 fn generic_trait_member_bounds_check_completed_associated_arguments() {
     let declarations = "trait Bound T {}\nimpl Bound I32 {}\ntrait Source T { type Element; check: <A where Copy A, Bound Element> T -> T }\nimpl Source I32 { type Element = I32; check = value => value }\nimpl Source Bool { type Element = String; check = value => value }\n";
-    lower(&type_check(&format!("{declarations}let valid = Source.check.<I32, I32> 1\n")));
-    let diagnostics = TypeChecker::new().check(resolve(&format!("{declarations}let invalid = Source.check.<Bool, I32> (Bool :: True)\n")))
+    lower(&type_check(&format!(
+        "{declarations}let valid = Source.check.<I32, I32> 1\n"
+    )));
+    let diagnostics = TypeChecker::new()
+        .check(resolve(&format!(
+            "{declarations}let invalid = Source.check.<Bool, I32> (Bool :: True)\n"
+        )))
         .expect_err_diagnostics("member bounds must use completed associated types");
-    assert!(diagnostics.iter().any(|d| d.message.contains("trait bound")), "{diagnostics:?}");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("trait bound")),
+        "{diagnostics:?}"
+    );
 }

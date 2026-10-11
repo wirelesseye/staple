@@ -996,7 +996,9 @@ impl Collector<'_> {
                     Some(format!(
                         "{}: {}",
                         method.name,
-                        self.typed.scheme_of_trait_member(id).map(ToString::to_string)
+                        self.typed
+                            .scheme_of_trait_member(id)
+                            .map(ToString::to_string)
                             .unwrap_or_else(|| method.annotation.syntax().text().trim().to_owned())
                     )),
                 )
@@ -1614,9 +1616,14 @@ mod tests {
         let source = "trait Visit T { visit: <A> (T, move A) -> A }\n";
         let path = std::env::temp_dir().join("staple-completion-generic-member.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent().unwrap().join("stdlib"))
-            .load_source_at(&path, source).unwrap();
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
+            .load_source_at(&path, source)
+            .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
         let typed = TypeChecker::new().check(resolved).unwrap();
         let module = parse(source).unwrap();

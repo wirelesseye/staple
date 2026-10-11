@@ -57,11 +57,11 @@ every existing input.
 
 ## Current state
 
-7a and 7b.1–7b.3 are implemented and documented. Stage 7 execution fixtures
-pass, including every member shape inside escaping closures. Member diagnostics,
-hover, completion, and signature help show the required schemes; all 127 LSP
-tests pass. The 11 standalone examples and both compatibility regression inputs
-match the base IR. Final workspace, full differential, and corpus IR gates remain.
+7a and 7b.1–7b.3 are implemented, documented, and formatted. Stage 7 execution
+fixtures pass, including every member shape inside escaping closures. All 127
+LSP tests pass, with full member schemes in diagnostics and editor signatures.
+All 153 existing corpus inputs and 11 standalone examples match the base IR.
+The workspace suite and full differential exit gates are still running.
 
 ## Decisions
 

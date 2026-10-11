@@ -4841,11 +4841,20 @@ mod tests {
         let options = parse_options([std::ffi::OsString::from("corpus.sta")]).unwrap();
         let mut tested = 0;
         for program in staple_compiler::codegen_corpus() {
-            if program.topic != "generic-trait-members" { continue; }
+            if program.topic != "generic-trait-members" {
+                continue;
+            }
             let (source, source_root) = corpus_source(program, root);
             for effects in [false, true] {
-                differential_compare_with(program.name, &source, &source_root,
-                    &standard_library, &options, !effects, effects);
+                differential_compare_with(
+                    program.name,
+                    &source,
+                    &source_root,
+                    &standard_library,
+                    &options,
+                    !effects,
+                    effects,
+                );
             }
             tested += 1;
         }

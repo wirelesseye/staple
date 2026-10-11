@@ -61,9 +61,9 @@ actually does.
 Stages 1–7 are implemented: scoped schemes, explicit instantiation,
 monomorphization, runtime type descriptors, effect rows, bounded polymorphic
 values, and independently generic trait members with full LSP signatures.
-Stage 7's execution and LSP checks pass; final suites and compatibility gates
-remain. Stage 8 and the documented associated-projection, coroutine, and
-parameter-product restrictions remain.
+Stage 7's execution, LSP, and 164 IR compatibility checks pass; the workspace
+suite and full differential gates remain. Stage 8 and the documented
+associated-projection, coroutine, and parameter-product restrictions remain.
 
 ## Design
 

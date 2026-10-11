@@ -366,12 +366,18 @@ impl LoweredArtifactPlan {
                 LoweredArtifactPlan::CompoundDescriptorDrop(plan),
                 ArtifactRequestKey::CompoundDescriptorDrop(key),
             ) => plan == key,
-            (LoweredArtifactPlan::TraitMemberEntry(plan), ArtifactRequestKey::TraitMemberEntry(key)) => {
-                match key {
-                    crate::specialization::TraitMemberEntryKey::Member(method) => plan.method == *method && plan.callee.is_none(),
-                    crate::specialization::TraitMemberEntryKey::Slot(key) => plan.callee.as_ref().is_some_and(|callee| &callee.key == key),
+            (
+                LoweredArtifactPlan::TraitMemberEntry(plan),
+                ArtifactRequestKey::TraitMemberEntry(key),
+            ) => match key {
+                crate::specialization::TraitMemberEntryKey::Member(method) => {
+                    plan.method == *method && plan.callee.is_none()
                 }
-            }
+                crate::specialization::TraitMemberEntryKey::Slot(key) => plan
+                    .callee
+                    .as_ref()
+                    .is_some_and(|callee| &callee.key == key),
+            },
             (
                 LoweredArtifactPlan::DescriptorBoundEntry(plan),
                 ArtifactRequestKey::DescriptorBoundEntry(key),
@@ -979,7 +985,9 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees(visit),
             LoweredArtifactPlan::TraitMemberEntry(plan) => {
-                if let Some(callee) = &plan.callee { visit(PlannedCalleeRef::Instance(callee)); }
+                if let Some(callee) = &plan.callee {
+                    visit(PlannedCalleeRef::Instance(callee));
+                }
             }
             LoweredArtifactPlan::DynamicStructural(plan) => {
                 if let Some(write) = &plan.write {
@@ -1045,7 +1053,9 @@ impl LoweredArtifactPlan {
             LoweredArtifactPlan::GcFinalizer(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::CoroutineCodes(plan) => plan.visit_callees_mut(visit),
             LoweredArtifactPlan::TraitMemberEntry(plan) => {
-                if let Some(callee) = &mut plan.callee { visit(PlannedCalleeRefMut::Instance(callee)); }
+                if let Some(callee) = &mut plan.callee {
+                    visit(PlannedCalleeRefMut::Instance(callee));
+                }
             }
             LoweredArtifactPlan::DynamicStructural(plan) => {
                 if let Some(write) = &mut plan.write {

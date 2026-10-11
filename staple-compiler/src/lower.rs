@@ -119,14 +119,14 @@ pub(crate) use artifact_closure::{ArtifactUseSite, LoweredArtifactUse, LoweredIn
 // Family-specific plan types are also used within the lowering subtree.
 pub(crate) use artifact_plan::{
     ConstructorAdapterPlan, ConstructorConstruction, CoroutineCodesPlan, CoroutineFrameBinding,
-    CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorBoundEntryPlan, TraitMemberEntryPlan,
+    CoroutineFramePlan, CoroutineResourceSlot, DebugDelegate, DebugStep, DescriptorBoundEntryPlan,
     DescriptorDropPlan, DropGlueBody, DropGluePlan, DroppedAlternative, DroppedCapture,
-    DroppedElement, DynamicCapture, DynamicStructuralPlan, ExternAdapterPlan, ExternDeclaration, GcFinalizerPlan,
-    IndexedElement, InstantiationAdapterPlan, LoweredArtifactPlan, PlanType, PlannedArtifact, PlannedCallee,
-    PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance, ReabstractionThunkPlan,
-    ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot, RuntimeRelease, StructuralBody,
-    StructuralMethodPlan, SumAlternative, TraitDelegate, TraitDictionaryPlan, TypeDescriptorPlan,
-    ValueConversionPlan,
+    DroppedElement, DynamicCapture, DynamicStructuralPlan, ExternAdapterPlan, ExternDeclaration,
+    GcFinalizerPlan, IndexedElement, InstantiationAdapterPlan, LoweredArtifactPlan, PlanType,
+    PlannedArtifact, PlannedCallee, PlannedCalleeRef, PlannedCalleeRefMut, PlannedInstance,
+    ReabstractionThunkPlan, ReactiveRunnerBody, ReactiveRunnerPlan, RunnerResourceSlot,
+    RuntimeRelease, StructuralBody, StructuralMethodPlan, SumAlternative, TraitDelegate,
+    TraitDictionaryPlan, TraitMemberEntryPlan, TypeDescriptorPlan, ValueConversionPlan,
 };
 
 // Runtime requirements. Fixed-named runtime surfaces are not an
@@ -704,7 +704,10 @@ impl LoweredCoercionPlan {
         let CheckedType::Function(body) = scheme.body.as_ref() else {
             return Err(format!("`{scheme}` is not a function scheme"));
         };
-        let mut inferred: HashMap<_, _> = substitutions.iter().map(|(id, value)| (*id, value.clone())).collect();
+        let mut inferred: HashMap<_, _> = substitutions
+            .iter()
+            .map(|(id, value)| (*id, value.clone()))
+            .collect();
         let _ = infer_type_parameters_with_schemes(
             &CheckedType::Function(body.clone()),
             &CheckedType::Function(target.clone()),
@@ -884,7 +887,12 @@ impl LoweredCoercionPlan {
                 let target_alternative = &target_sum.alternatives[index];
                 Ok(LoweredCoercionPlan::SumInject {
                     alternative: index,
-                    payload: Box::new(Self::plan_with(source, target_alternative, from, substitutions)?),
+                    payload: Box::new(Self::plan_with(
+                        source,
+                        target_alternative,
+                        from,
+                        substitutions,
+                    )?),
                 })
             }
         }
@@ -3333,9 +3341,16 @@ impl LoweredProgram {
                     name,
                     trait_id,
                     value_type,
-                    scheme: module.scheme_of_trait_member(*method).expect("checked member scheme").clone(),
-                    own_parameters: module.scheme_of_trait_member(*method).expect("checked member scheme").parameters[
-                        trait_.declaration.type_parameters.len() - trait_.declaration.associated_types.len()..].to_vec(),
+                    scheme: module
+                        .scheme_of_trait_member(*method)
+                        .expect("checked member scheme")
+                        .clone(),
+                    own_parameters: module
+                        .scheme_of_trait_member(*method)
+                        .expect("checked member scheme")
+                        .parameters[trait_.declaration.type_parameters.len()
+                        - trait_.declaration.associated_types.len()..]
+                        .to_vec(),
                     default_function: trait_.default_methods.get(method).copied(),
                 };
                 if let Err(diagnostic) =
@@ -3773,14 +3788,31 @@ impl LoweredProgram {
                 out
             })
             .unwrap_or_default();
-        let is_default_member = self.trait_methods.iter()
+        let is_default_member = self
+            .trait_methods
+            .iter()
             .any(|(_, _, method)| method.default_function == Some(function.id));
-        let is_implementation_member = self.trait_implementations.iter()
-            .any(|(_, implementation)| implementation.methods.iter()
-                .any(|(_, member)| *member == function.id));
+        let is_implementation_member =
+            self.trait_implementations
+                .iter()
+                .any(|(_, implementation)| {
+                    implementation
+                        .methods
+                        .iter()
+                        .any(|(_, member)| *member == function.id)
+                });
         let own_declared_bounds = if is_default_member || is_implementation_member {
-            scheme.as_ref().map(|scheme| scheme.trait_bounds.iter()
-                .skip(usize::from(is_default_member)).cloned().collect()).unwrap_or_default()
+            scheme
+                .as_ref()
+                .map(|scheme| {
+                    scheme
+                        .trait_bounds
+                        .iter()
+                        .skip(usize::from(is_default_member))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
         } else {
             module.own_declared_bounds_of_function(function.id).to_vec()
         };
@@ -5326,8 +5358,11 @@ impl LoweredProgram {
     ) -> Option<crate::CheckedScheme> {
         let scheme = module.scheme_of_expression(syntax)?;
         if module.trait_dispatch_for(syntax).is_some_and(|dispatch| {
-            self.trait_methods.get(dispatch.method).is_some_and(|method| method.own_parameters.is_empty())
-        }) && matches!(value_type, CheckedType::Function(_)) {
+            self.trait_methods
+                .get(dispatch.method)
+                .is_some_and(|method| method.own_parameters.is_empty())
+        }) && matches!(value_type, CheckedType::Function(_))
+        {
             return None;
         }
         match value_type {
@@ -5419,11 +5454,17 @@ impl LoweredProgram {
             value_type = source.clone();
             coercion = Some(crate::CheckedCoercion { source, target });
         }
-        let instantiation_substitutions = module.explicit_value_substitutions(syntax.id)
-            .into_iter().flat_map(|map| map.iter().map(|(id, value)| (*id, value.clone())))
+        let instantiation_substitutions = module
+            .explicit_value_substitutions(syntax.id)
+            .into_iter()
+            .flat_map(|map| map.iter().map(|(id, value)| (*id, value.clone())))
             .collect();
         let coercion_plan = match &coercion {
-            Some(coercion) => match LoweredCoercionPlan::plan_seeded(&coercion.source, &coercion.target, &instantiation_substitutions) {
+            Some(coercion) => match LoweredCoercionPlan::plan_seeded(
+                &coercion.source,
+                &coercion.target,
+                &instantiation_substitutions,
+            ) {
                 Ok(plan) => Some(plan),
                 Err(message) => {
                     if instance_resolution::unresolved_type_problem(&coercion.source).is_some()
@@ -6981,13 +7022,32 @@ impl LoweredProgram {
                         "trait-method value has no checked dispatch",
                     )
                 })?;
-                let (target, adapter, closure, evidence) =
-                    self.lower_trait_method_value(module, owner, &origin, &dispatch, scheme.is_some())?;
-                let trait_id = resolved.trait_for_method(dispatch.method).expect("member owner");
-                substitutions = trait_call_substitutions(&self.traits.get(trait_id).expect("trait metadata").parameters,
-                    &dispatch.arguments);
-                let member = self.trait_methods.get(dispatch.method).expect("member metadata");
-                let own = substitutions_from_map(member_substitution_map(member, &dispatch.member_arguments));
+                let (target, adapter, closure, evidence) = self.lower_trait_method_value(
+                    module,
+                    owner,
+                    &origin,
+                    &dispatch,
+                    scheme.is_some(),
+                )?;
+                let trait_id = resolved
+                    .trait_for_method(dispatch.method)
+                    .expect("member owner");
+                substitutions = trait_call_substitutions(
+                    &self
+                        .traits
+                        .get(trait_id)
+                        .expect("trait metadata")
+                        .parameters,
+                    &dispatch.arguments,
+                );
+                let member = self
+                    .trait_methods
+                    .get(dispatch.method)
+                    .expect("member metadata");
+                let own = substitutions_from_map(member_substitution_map(
+                    member,
+                    &dispatch.member_arguments,
+                ));
                 substitutions.types.extend(own.types);
                 substitutions.effects.extend(own.effects);
                 let function_type = checked_function_type
@@ -7179,9 +7239,16 @@ impl LoweredProgram {
             ));
         };
         if polymorphic {
-            return Ok((LoweredCallableTarget::TraitImplementation {
-                trait_id, method: dispatch.method, function: None,
-            }, LoweredCallableAdapter::None, None, None));
+            return Ok((
+                LoweredCallableTarget::TraitImplementation {
+                    trait_id,
+                    method: dispatch.method,
+                    function: None,
+                },
+                LoweredCallableAdapter::None,
+                None,
+                None,
+            ));
         }
         let evidence = self.trait_evidence_for(
             module,
@@ -7632,7 +7699,10 @@ impl LoweredProgram {
                 let function_type = module
                     .instantiated_trait_method_type(trait_id, &completed, dispatch.method)
                     .map(|function| {
-                        let member = self.trait_methods.get(dispatch.method).expect("member metadata");
+                        let member = self
+                            .trait_methods
+                            .get(dispatch.method)
+                            .expect("member metadata");
                         let map = member_substitution_map(member, &dispatch.member_arguments);
                         match crate::substitute_type(CheckedType::Function(function), &map) {
                             CheckedType::Function(function) => function,
@@ -7682,8 +7752,14 @@ impl LoweredProgram {
                     .map(|trait_| trait_.parameters.clone())
                     .unwrap_or_default();
                 substitutions = trait_call_substitutions(&parameters, &completed);
-                let member = self.trait_methods.get(dispatch.method).expect("member metadata");
-                let own = substitutions_from_map(member_substitution_map(member, &dispatch.member_arguments));
+                let member = self
+                    .trait_methods
+                    .get(dispatch.method)
+                    .expect("member metadata");
+                let own = substitutions_from_map(member_substitution_map(
+                    member,
+                    &dispatch.member_arguments,
+                ));
                 substitutions.types.extend(own.types);
                 substitutions.effects.extend(own.effects);
                 evidence = Some(recipe);
@@ -12190,7 +12266,11 @@ impl LoweredProgram {
         // Templates whose types still contain declared parameters may leave it
         // absent until materialization.
         match &expression.coercion_plan {
-            Some(plan) => match LoweredCoercionPlan::plan_seeded(&coercion.source, &coercion.target, &expression.instantiation_substitutions) {
+            Some(plan) => match LoweredCoercionPlan::plan_seeded(
+                &coercion.source,
+                &coercion.target,
+                &expression.instantiation_substitutions,
+            ) {
                 Ok(expected) if *plan == expected => {}
                 Ok(_) => diagnostics.push(Diagnostic::new(
                     expression.origin.span.clone(),
@@ -25503,13 +25583,18 @@ mod tests {
         let member = program.trait_methods.get(method).unwrap();
         assert_eq!(member.scheme.parameters.len(), 2);
         assert_eq!(member.own_parameters.len(), 1);
-        let entry = program.artifacts.iter().find_map(|(_, artifact)| {
-            match &artifact.plan {
+        let entry = program
+            .artifacts
+            .iter()
+            .find_map(|(_, artifact)| match &artifact.plan {
                 Some(LoweredArtifactPlan::TraitMemberEntry(plan))
-                    if plan.method == method && plan.callee.is_some() => Some(plan),
+                    if plan.method == method && plan.callee.is_some() =>
+                {
+                    Some(plan)
+                }
                 _ => None,
-            }
-        }).expect("reachable generic slot entry");
+            })
+            .expect("reachable generic slot entry");
         assert_eq!(entry.descriptors, 1);
         assert_eq!(entry.dictionaries, 1);
         assert_eq!(entry.slot, 0);
@@ -25519,38 +25604,59 @@ mod tests {
 
     #[test]
     fn descriptor_bound_entries_preserve_closure_prefixes_and_compact_slot_tails() {
-        let nested = crate::codegen::corpus::codegen_corpus().iter()
-            .find(|program| program.name == "trait_dictionary_nested_lambdas").unwrap();
+        let nested = crate::codegen::corpus::codegen_corpus()
+            .iter()
+            .find(|program| program.name == "trait_dictionary_nested_lambdas")
+            .unwrap();
         let crate::codegen::corpus::CorpusSource::Inline(source) = nested.source else {
             panic!("nested-lambda fixture is inline");
         };
-        for (source, tail) in [(source, false),
-            (concat!(
-                "trait Visit T { visit: <A> (T, move A) -> A }\n",
-                "type Box T = wrap T\n",
-                "impl <T where ToString T> Visit (Box T) { visit = (_, move value) => value }\n",
-                "def relay: <T, A where ToString T> (Box T, move A) -> A = (item, move value) => Visit.visit (item, value)\n",
-                "let stored = relay\nlet result = stored (Box 1, 42)\n",
-            ), true)] {
+        for (source, tail) in [
+            (source, false),
+            (
+                concat!(
+                    "trait Visit T { visit: <A> (T, move A) -> A }\n",
+                    "type Box T = wrap T\n",
+                    "impl <T where ToString T> Visit (Box T) { visit = (_, move value) => value }\n",
+                    "def relay: <T, A where ToString T> (Box T, move A) -> A = (item, move value) => Visit.visit (item, value)\n",
+                    "let stored = relay\nlet result = stored (Box 1, 42)\n",
+                ),
+                true,
+            ),
+        ] {
             let module = checked_program(source);
             let lowered = Lowerer::new().lower(&module).unwrap();
-            let entries = lowered.program.artifacts.iter().filter_map(|(_, artifact)| {
-                match &artifact.plan {
+            let entries = lowered
+                .program
+                .artifacts
+                .iter()
+                .filter_map(|(_, artifact)| match &artifact.plan {
                     Some(LoweredArtifactPlan::DescriptorBoundEntry(plan))
                         if (plan.environment_offset > 0) == tail
                             && plan.bound < plan.runtime.len()
-                            && plan.bound_dictionaries > 0 => Some(plan),
+                            && plan.bound_dictionaries > 0 =>
+                    {
+                        Some(plan)
+                    }
                     _ => None,
-                }
-            }).collect::<Vec<_>>();
-            assert!(!entries.is_empty(), "fixture must exercise a partially bound entry (tail={tail})");
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                !entries.is_empty(),
+                "fixture must exercise a partially bound entry (tail={tail})"
+            );
             for entry in entries {
-                assert_eq!(entry.dictionary_prefix,
-                    if tail { entry.bound } else { entry.runtime.len() });
+                assert_eq!(
+                    entry.dictionary_prefix,
+                    if tail {
+                        entry.bound
+                    } else {
+                        entry.runtime.len()
+                    }
+                );
             }
         }
     }
-
 }
 
 

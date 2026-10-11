@@ -1755,8 +1755,15 @@ impl<'a> WorklistBuilder<'a> {
                 trait_id, method, ..
             } => {
                 if value.scheme.is_some() {
-                    let (key, plan) = super::trait_dictionaries::member_value_entry(program, *method);
-                    self.request_artifact(key, Some(plan), &value.origin, owner, LoweredArtifactDependencyKind::TraitMemberEntry);
+                    let (key, plan) =
+                        super::trait_dictionaries::member_value_entry(program, *method);
+                    self.request_artifact(
+                        key,
+                        Some(plan),
+                        &value.origin,
+                        owner,
+                        LoweredArtifactDependencyKind::TraitMemberEntry,
+                    );
                     return;
                 }
                 let Some(evidence) = &value.evidence else {
@@ -1898,7 +1905,10 @@ impl<'a> WorklistBuilder<'a> {
                     .relevant_parameters(member.function)
                     .type_parameters()
                     .collect(),
-                effects: program.relevant_parameters(member.function).effect_parameters().collect(),
+                effects: program
+                    .relevant_parameters(member.function)
+                    .effect_parameters()
+                    .collect(),
             };
             self.request_function_in_scope(
                 member.function,
@@ -1954,8 +1964,14 @@ impl<'a> WorklistBuilder<'a> {
                 LoweredInstanceDependencyKind::TraitMethod,
                 false,
                 false,
-                Some(super::trait_dictionaries::evidence_obligation(&member.evidence).2
-                    .map(|method| super::trait_dictionaries::method_runtime_scope(program, method)).unwrap_or_default()),
+                Some(
+                    super::trait_dictionaries::evidence_obligation(&member.evidence)
+                        .2
+                        .map(|method| {
+                            super::trait_dictionaries::method_runtime_scope(program, method)
+                        })
+                        .unwrap_or_default(),
+                ),
             );
         }
     }

@@ -980,13 +980,14 @@ impl SupportWalker<'_> {
                     callable.target,
                     LoweredCallableTarget::TraitImplementation { .. }
                         | LoweredCallableTarget::StructuralTraitMethod { .. }
-                ) && callable.scheme.is_none() && (dynamic_shape
-                    || callable.evidence.as_ref().is_some_and(|evidence| {
-                        crate::lower::trait_dictionaries::evidence_obligation(evidence)
-                            .1
-                            .iter()
-                            .any(contains_type_parameter)
-                    }))
+                ) && callable.scheme.is_none()
+                    && (dynamic_shape
+                        || callable.evidence.as_ref().is_some_and(|evidence| {
+                            crate::lower::trait_dictionaries::evidence_obligation(evidence)
+                                .1
+                                .iter()
+                                .any(contains_type_parameter)
+                        }))
                     && !self.trait_call_has_dictionary(callable.evidence.as_ref(), &callable.origin)
                 {
                     self.reject(RejectionReason::TraitCallRuntime);

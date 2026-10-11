@@ -2,8 +2,8 @@ pub mod completion;
 pub mod definition;
 pub mod hover;
 pub mod semantic;
-pub mod source_projection;
 mod signature;
+pub mod source_projection;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -170,7 +170,12 @@ fn initialize(connection: &Connection) -> Result<(), String> {
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         signature_help_provider: Some(SignatureHelpOptions {
-            trigger_characters: Some(vec![" ".to_owned(), "(".to_owned(), "<".to_owned(), ",".to_owned()]),
+            trigger_characters: Some(vec![
+                " ".to_owned(),
+                "(".to_owned(),
+                "<".to_owned(),
+                ",".to_owned(),
+            ]),
             retrigger_characters: Some(vec![",".to_owned()]),
             work_done_progress_options: WorkDoneProgressOptions::default(),
         }),
@@ -432,13 +437,20 @@ impl Server {
             let params: SignatureHelpParams =
                 serde_json::from_value(request.params).map_err(|error| error.to_string())?;
             let position = params.text_document_position_params;
-            let result = self.documents.get(&position.text_document.uri).and_then(|document| {
-                let offset = semantic::offset(&document.text, position.position)?;
-                signature::help(&document.text, &document.hover_entries, offset)
-            });
-            self.connection.sender.send(Message::Response(Response::new_ok(
-                request.id, serde_json::to_value(result).unwrap(),
-            ))).map_err(|error| error.to_string())?;
+            let result = self
+                .documents
+                .get(&position.text_document.uri)
+                .and_then(|document| {
+                    let offset = semantic::offset(&document.text, position.position)?;
+                    signature::help(&document.text, &document.hover_entries, offset)
+                });
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(
+                    request.id,
+                    serde_json::to_value(result).unwrap(),
+                )))
+                .map_err(|error| error.to_string())?;
         } else if request.method == HoverRequest::METHOD {
             let params: HoverParams =
                 serde_json::from_value(request.params).map_err(|error| error.to_string())?;

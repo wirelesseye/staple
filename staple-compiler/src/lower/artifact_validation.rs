@@ -38,18 +38,27 @@ impl LoweredProgram {
             else {
                 continue;
             };
-            let prefix = if plan.environment_offset == 0 { plan.runtime.len() } else { plan.bound };
+            let prefix = if plan.environment_offset == 0 {
+                plan.runtime.len()
+            } else {
+                plan.bound
+            };
             if plan.dictionary_prefix != prefix {
-                diagnostics.push(Diagnostic::new(artifact.origin.span.clone(),
-                    "bound entry dictionary offset disagrees with its environment layout"));
+                diagnostics.push(Diagnostic::new(
+                    artifact.origin.span.clone(),
+                    "bound entry dictionary offset disagrees with its environment layout",
+                ));
             }
             let partition = if plan.environment_offset == 0 {
-                super::trait_dictionaries::entry_dictionary_partition(self, plan.instance, plan.bound)
+                super::trait_dictionaries::entry_dictionary_partition(
+                    self,
+                    plan.instance,
+                    plan.bound,
+                )
             } else {
                 super::trait_dictionaries::slot_dictionary_partition(self, plan.instance)
             };
-            if partition != Some((plan.dictionary_count, plan.bound_dictionaries))
-            {
+            if partition != Some((plan.dictionary_count, plan.bound_dictionaries)) {
                 diagnostics.push(Diagnostic::new(
                     artifact.origin.span.clone(),
                     "bound entry dictionary partition disagrees with its instance",
@@ -127,12 +136,20 @@ impl LoweredProgram {
                     closure_offset: plan.layout.environment + 2 * index,
                 };
                 let valid = match &slot.key {
-                    crate::specialization::ArtifactRequestKey::ReabstractionThunk(key) =>
+                    crate::specialization::ArtifactRequestKey::ReabstractionThunk(key) => {
                         key.dictionary_slot.as_ref() == Some(&expected)
-                            && key.direction == crate::specialization::ReabstractionDirection::ConcreteToDynamic,
-                    crate::specialization::ArtifactRequestKey::TraitMemberEntry(crate::specialization::TraitMemberEntryKey::Slot(key)) => {
+                            && key.direction
+                                == crate::specialization::ReabstractionDirection::ConcreteToDynamic
+                    }
+                    crate::specialization::ArtifactRequestKey::TraitMemberEntry(
+                        crate::specialization::TraitMemberEntryKey::Slot(key),
+                    ) => {
                         key == &plan.methods[index].key
-                            && !super::trait_dictionaries::method_runtime_scope(self, metadata.methods[index]).is_empty()
+                            && !super::trait_dictionaries::method_runtime_scope(
+                                self,
+                                metadata.methods[index],
+                            )
+                            .is_empty()
                     }
                     _ => false,
                 };

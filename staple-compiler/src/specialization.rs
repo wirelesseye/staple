@@ -2938,8 +2938,13 @@ mod tests {
                 expanded: false,
             }),
             LoweredArtifactPlan::TraitMemberEntry(crate::lower::TraitMemberEntryPlan {
-                method: TraitMethodId(4), callee: None, function_type: simple_callable(),
-                descriptors: 1, dictionaries: 1, slot: 0, own_descriptors: 0,
+                method: TraitMethodId(4),
+                callee: None,
+                function_type: simple_callable(),
+                descriptors: 1,
+                dictionaries: 1,
+                slot: 0,
+                own_descriptors: 0,
             }),
         ];
         assert_eq!(plans.len(), keys.len());
