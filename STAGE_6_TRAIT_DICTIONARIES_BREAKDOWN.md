@@ -108,6 +108,14 @@ the release build of this stage's base commit for every existing input.
   The checker workarounds that remain are explicit `USize` indices and
   callback parameter annotations.
 
+  Verified after the review fixes: `cargo test --workspace` (1,528 passed,
+  3 ignored); the full type differential run (151 programs, 150 with dynamic
+  calls, 17,672 call sites) and effect-row run (150 programs); and IR against
+  the `1106ba8` release build: all 140 existing corpus programs and 11
+  examples identical. `polymorphic_nested_scheme_calls` differs because
+  `1106ba8` miscompiled it, and the other 12 new programs do not compile
+  there.
+
 ## Decisions
 
 - **T-A. Two substages.** 6a runs bounded generic templates in

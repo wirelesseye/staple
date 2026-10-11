@@ -5854,6 +5854,11 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 LoweredArgumentPassMode::BorrowedPointer | LoweredArgumentPassMode::MutablePlace
             )
             && let Some(place) = record.place
+            // A borrowed argument rooted in a plain `let` local passes a
+            // copy of the value below, as it always has; only index reads
+            // need the local's stack copy as a place.
+            && !(record.pass_mode == LoweredArgumentPassMode::BorrowedPointer
+                && self.place_rooted_in_plain_local(owner, place, environment))
         {
             match self.emit_place_pointer(owner, place, environment) {
                 Ok(pointer) => return Ok(pointer.into()),
@@ -6100,6 +6105,32 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
 
     /// Emits a place pointer using recorded projections and resource providers.
     /// Symbol lookup prefers parameter pointers, then cells, then module globals.
+    /// Whether a place's root is a plain `let` local: an SSA value with no
+    /// parameter pointer, binding cell, or module global behind it.
+    fn place_rooted_in_plain_local(
+        &self,
+        owner: EmissionOwner,
+        id: crate::PlaceId,
+        environment: &FunctionEnvironment<'context>,
+    ) -> bool {
+        let Some(place) = self.view.place(owner, id) else {
+            return false;
+        };
+        match &place.kind {
+            crate::LoweredPlaceKind::Symbol { symbol } => {
+                environment.locals.contains_key(symbol)
+                    && !environment.parameter_pointers.contains_key(symbol)
+                    && !environment.binding_cells.contains_key(symbol)
+                    && !self.storage.contains_key(symbol)
+            }
+            crate::LoweredPlaceKind::ProductElement { base, .. }
+            | crate::LoweredPlaceKind::Representation { base } => {
+                self.place_rooted_in_plain_local(owner, *base, environment)
+            }
+            _ => false,
+        }
+    }
+
     fn emit_place_pointer(
         &mut self,
         owner: EmissionOwner,
