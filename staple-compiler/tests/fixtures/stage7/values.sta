@@ -1,0 +1,12 @@
+use std.io.println
+trait Visit T { visit: <A> (T, A) -> A }
+impl Visit I32 { visit = (_, value) => value }
+def relay: <T, A where Visit T> (T, A) -> A = pair => Visit.visit pair
+let stored = relay
+println (stored (1, "dynamic"))
+let member = Visit.visit
+println (member (1, 42))
+let text = ToString.to_string
+println (text True)
+def consume: (<T where ToString T> T -> String) -> String = f => f 7
+println (consume ToString.to_string)

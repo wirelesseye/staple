@@ -68,50 +68,12 @@ every existing input.
 
 ## Current state
 
-Probed at `6b32a64` (programs in the scratchpad `p7/`):
-
-- **Member schemes are rejected in the resolver.**
-  `map: <A, B> F -> (A -> B) -> A -> B` reports "trait members cannot
-  introduce their own compile-time parameters yet". The resolver resolves
-  the `Forall` in its own scope so the error stays single
-  (`resolve.rs`, the trait member loop).
-- **Nested schemes are rejected in the checker.**
-  `apply: T -> (<A> move A -> A) -> T` reports "generic function types are not
-  supported in trait members yet" (`type_contains_scheme` over
-  `trait_method_types`, in `check_module`).
-- **Trait members are not schemes.** Stage 2 left them as free-parameter
-  templates: `trait_method_types` holds the member type with the trait's
-  parameters free, and `resolve_trait_method_use` infers those parameters
-  from the argument or the expected type. Consequences:
-  - `let g = ToString.to_string` reports "generic value `g` requires a
-    concrete expected type";
-  - `let f: <T where ToString T> T -> String = ToString.to_string` reports
-    "could not infer all trait method arguments";
-  - the lowering restriction "trait members cannot be used as polymorphic
-    values yet" (`worklist.rs`) is unreachable from source today.
-- **Explicit arguments use the trait's full parameter list.**
-  `check_explicit_type_application` takes the order from
-  `trait_parameter_arguments`, which includes one hidden parameter per
-  associated type. `Iterator.next.<Counter>` therefore reports "generic value
-  expects 2 type arguments, but 1 were supplied". Trait members with
-  explicit arguments are checked by `instantiate_function_template` with
-  declared parameters taken from the type itself.
-- **Dispatch records carry trait arguments only.** `CheckedTraitDispatch` is
-  `{ method, arguments }`, and lowering derives an implementation member's
-  substitutions from the selected header (`TraitEvidence` arguments). A
-  member's own parameters have nowhere to go.
-- **Implementation members cannot be annotated.** The parser requires `=`
-  after an implementation member name, and the member's type is the trait
-  member's type with the header substituted (`impl_function_types`).
-- **Default bodies** get the trait's parameters in scope
-  (`binding_type_parameters`), and their type is the unsubstituted member
-  type.
-- **Dictionary slots** (T-D) have the dynamic ABI with the dictionary as the
-  environment, and no hidden arguments of their own. A trait member used as a
-  value at a run-time type is the slot closed over the dictionary (T-L).
-- **Polymorphic recursion** is detected per generic `def`, when the
-  expected type of a self-use substitutes a declared parameter with a type
-  containing it. Dispatch through a trait member is not part of that check.
+S0 is in progress at `1583957`. The release baseline is preserved for the
+IR comparison. Static and value fixtures are in `tests/fixtures/stage7/`;
+they will enter the runnable corpus as their implementation steps land.
+The resolver and checker still reject member schemes. Existing explicit
+trait-member arguments use only `Eq.eq`; no associated-type member call
+writes explicit arguments in the standard library, examples, or tests.
 
 ## Decisions
 

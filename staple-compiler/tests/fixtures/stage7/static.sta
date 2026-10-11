@@ -1,0 +1,18 @@
+use std.io.println
+trait Visit T {
+    visit: <A> (T, A) -> A
+}
+impl Visit I32 { visit = (_, value) => value }
+type Box T = wrap T
+impl<T> Visit (Box T) { visit = (_, value) => value }
+trait DefaultVisit T {
+    visit_default: <A> (T, A) -> A = (_, value) => value
+}
+impl DefaultVisit I32 {}
+impl DefaultVisit Bool { visit_default = (_, value) => value }
+def relay: <T, A where Visit T> (T, A) -> A = pair => Visit.visit pair
+println (Visit.visit (1, 42))
+println (Visit.visit.<_, String> (Box True, "generic"))
+println (relay (1, True))
+println (DefaultVisit.visit_default (1, "default"))
+println (DefaultVisit.visit_default (True, 7))
