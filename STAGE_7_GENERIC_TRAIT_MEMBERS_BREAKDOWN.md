@@ -57,11 +57,11 @@ every existing input.
 
 ## Current state
 
-7a and 7b.1–7b.3 are implemented and documented. Expanded execution fixtures
-pass in both differential modes, including product trait headers, associated
-return values, curried members, and escaping closures. Full member schemes
-appear in diagnostics and editor signatures. The workspace, full differential,
-and base IR exit gates are being revalidated after compatibility fixes.
+Stage 7 is complete, including 7b.4. Generic member schemes, conformance,
+static and dictionary dispatch, polymorphic member values, diagnostics, and
+editor signatures are implemented and documented. The workspace and both
+full differential runs pass; all 153 existing corpus inputs and 11 examples
+retain identical IR. Reachability and expanded execution fixtures pass.
 
 ## Decisions
 

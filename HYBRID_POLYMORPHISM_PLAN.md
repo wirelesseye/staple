@@ -58,11 +58,11 @@ actually does.
 
 ## Current State
 
-Stages 1–7 are implemented: scoped schemes, explicit instantiation,
+Stages 1–7 are complete: scoped schemes, explicit instantiation,
 monomorphization, runtime type descriptors, effect rows, bounded polymorphic
 values, and independently generic trait members with full LSP signatures.
-Stage 7's expanded execution fixtures pass; compatibility fixes are undergoing
-final validation. Stage 8 and the documented associated-projection, coroutine,
+Stage 7 passes the workspace, both full differential runs, and all 164 base
+IR comparisons. Stage 8 and the documented associated-projection, coroutine,
 and parameter-product restrictions remain.
 
 ## Design
