@@ -5285,6 +5285,15 @@ fn list_supports_bracket_indexing_mutation_and_iteration() {
 }
 
 #[test]
+fn nested_list_of_macros_check() {
+    // A speculative parse of the inner expansion used to compute its error
+    // location from a span in the outer file and panic on the slice.
+    type_check(concat!(
+        "let rows: List (List I32) = List.of (List.of (1, 2), List.of (3,))\n",
+    ));
+}
+
+#[test]
 fn list_of_macro_builds_a_list_from_values() {
     let module = type_check(concat!(
         "def exercise: () -> () = () => {\n",

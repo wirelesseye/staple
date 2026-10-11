@@ -4093,11 +4093,18 @@ impl Grammar {
     }
 
     fn location(&self, offset: usize) -> SourceLocation {
-        let line = self.line_starts.partition_point(|start| *start <= offset);
-        let line_start = self.line_starts[line - 1];
+        // Re-parsed macro fragments carry tokens whose spans point into the
+        // original file; never slice past this parser's source.
+        let offset = offset.min(self.source.len());
+        let line = self.line_starts.partition_point(|start| *start <= offset).max(1);
+        let line_start = self.line_starts[line - 1].min(offset);
         SourceLocation {
             line,
-            column: self.source[line_start..offset].chars().count() + 1,
+            column: self
+                .source
+                .get(line_start..offset)
+                .map_or(0, |text| text.chars().count())
+                + 1,
         }
     }
 }
