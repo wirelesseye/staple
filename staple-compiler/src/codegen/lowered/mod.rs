@@ -6142,7 +6142,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                     let slot = self
                         .backend
                         .entry_builder()
-                        .build_alloca(value.get_type(), "local.place")
+                        .build_alloca(value.get_type(), "borrow.temporary")
                         .map_err(compiler_diagnostic)?;
                     self.backend
                         .builder
