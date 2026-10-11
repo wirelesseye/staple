@@ -267,8 +267,8 @@ Verified at the mixed-layout follow-up:
 - **B-J. Calls stay monomorphized where they are today.** A direct call or
   concrete instantiation of a known generic `def` is monomorphized, as
   Decision 3 requires. `let id = identity; id 42` goes through the
-  polymorphic value; devirtualizing it is Stage 8. Trait members can't be
-  polymorphic values until Stage 7.
+  polymorphic value; devirtualizing it is Stage 8. Stage 7 adds trait members
+  as polymorphic values.
 
 ## Steps
 
@@ -381,7 +381,6 @@ Reported at the construction site (B-I), each with a test.
 | `__buffer_clone`, transitively | "`__buffer_clone` cannot be used in a polymorphic value's implementation yet" | Stage 6. Unreachable from user code: `__buffer_clone` is private and its public callers need a `Clone` bound, so the trait-bound restriction applies first. Kept as an internal reason and left out of `Staple.md`. |
 | Run-time `Natural` count, including `__slice_from_ref` | "array lengths cannot depend on a polymorphic value's type parameters yet" | Not planned |
 | Function value behind `Ref`, `Slice`, `Buffer`, or a shared cell crossing into a polymorphic implementation | "function values inside references cannot be passed to a polymorphic value's implementation" | Not planned |
-| Trait member used as a polymorphic value | "trait members cannot be used as polymorphic values yet" | Stage 7 |
 
 Restrictions enforced by the checker since Stage 3 (signals, ordinary
 externs, capable parameters, polymorphic recursion) are unchanged.

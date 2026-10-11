@@ -58,64 +58,15 @@ actually does.
 
 ## Current State
 
-- **AST.**
-  - `Binding` (`staple-syntax/src/ast/item.rs`) stores `type_parameters`,
-    `trait_bounds`, and `subtype_bounds` beside an `annotation` that is a
-    plain `Type::Function`.
-  - `ResolvedFunction` (`staple-compiler/src/resolve.rs`) copies those
-    fields.
-  - Trait members, `impl`s, companions, type declarations, and macros carry
-    their own declaration-level parameter lists.
-  - A companion member's call-site parameters are the companion's parameters
-    followed by the member's own. An `extern` block inside a companion
-    inherits the companion's parameters and bounds.
-  - Generic `extern` bindings exist, but only for the reserved
-    `"staple-intrinsic"` ABI. Intrinsics must be called directly and can't be
-    used as values.
-  - Associated types (which replaced functional dependencies) are stored as
-    hidden trailing trait parameters: `TraitDeclaration::type_parameters`
-    holds the explicit parameters followed by one per associated type.
-    Projections are written `Trait.Name arguments`.
-  - Explicit call-site type arguments are `Expression::TypeApplication`
-    (`identity.<I32>`, with `_` for an argument still to be inferred).
-  - Type ascription is the prefix form `Type :: expression`.
-- **Checker.**
-  - There is no quantifier node. A generic function's type is a
-    `CheckedFunctionType` containing free `CheckedType::Parameter` nodes.
-  - `TypeChecker::instantiate_function_use` (`typecheck.rs`) separates
-    generic from non-generic uses with a `generic_function: bool` flag and
-    `active_generic_parameters`.
-  - A generic value without a concrete expected type is rejected ("generic
-    value … requires a concrete expected type").
-  - `check_explicit_type_application` takes a generic value's parameter order
-    from side tables, not from its type: the `call_type_parameters` map for
-    functions and constructors, and `trait_parameter_arguments` for trait
-    methods.
-- **Lowering.**
-  - Instances are keyed by `CallSubstitutions` and the
-    `SubstitutionEnvironment` in `lower/instance_resolution.rs`.
-  - Every lowered instance is fully concrete.
-- **Codegen ABI is type-specific.** Closures are `{fn*, env*}`
-  (`codegen/layout.rs`), but `compile_closure_function_type`
-  (`codegen/abi.rs`) derives these from the concrete type:
-  - each resource effect's pass mode (by value, or by pointer when `mut` or
-    non-`Copy`);
-  - each parameter's flattening and direct/indirect pass mode.
-
-  Code that takes its types at run time therefore cannot share an ABI with
-  concrete closures. Converting between the two needs adapters (Swift calls
-  them reabstraction thunks) and run-time type descriptors. This is the main
-  cost driver.
-- **Layout.**
-  - Products compile as natural LLVM structs (`compile_product_type`). Each
-    field starts at the previous end rounded up to its alignment; total size
-    rounds up to the largest field alignment. Field order is unchanged.
-  - Sums retain the byte carrier, upgraded to the first alternative with a
-    strictly larger ABI alignment. Aggregate carriers expose their payload
-    bytes explicitly, so SSA transport
-    preserves bytes that fall in the carrier type's padding.
-  - Every stack slot is allocated in the function's entry block (commit
-    944cb3f).
+Stages 1–7 are implemented: scoped schemes, explicit instantiation,
+monomorphization, runtime type descriptors, effect rows, bounded polymorphic
+values, and independently generic trait members. Concrete calls retain their
+native ABI; polymorphic closures use descriptors and dictionaries through
+reachable worklist artifacts. Trait member schemes quantify explicit trait
+parameters followed by the member's own parameters, excluding hidden
+associated types. Stage 7's compatibility and final test gates are running.
+Stage 8 extensions and the documented associated-projection, coroutine, and
+parameter-product restrictions remain.
 
 ## Design
 
@@ -446,7 +397,7 @@ and iteration over products and sums. Dictionary hidden arguments follow the des
 entries, closure environments and adapter environments; calls and coerced
 expressions carry their dictionaries in one site table.
 
-### Stage 7 — Independently generic trait methods
+### Stage 7 — Independently generic trait methods (implemented)
 
 - Allow trait member annotations to quantify over extra parameters.
 - Check implementation members against the member scheme.
@@ -463,7 +414,7 @@ expressions carry their dictionaries in one site table.
 - **Exit:** a trait with a generic member works through static dispatch,
   through a bounded polymorphic value, and as a member value.
 
-**Breakdown plan: required.** See
+**Breakdown plan:** See
 [STAGE_7_GENERIC_TRAIT_MEMBERS_BREAKDOWN.md](STAGE_7_GENERIC_TRAIT_MEMBERS_BREAKDOWN.md).
 It changes trait declaration checking, implementation conformance, default
 member bodies, explicit type arguments, and dictionary layout together. It has

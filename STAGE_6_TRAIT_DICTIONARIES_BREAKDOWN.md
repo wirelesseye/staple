@@ -231,8 +231,7 @@ the release build of this stage's base commit for every existing input.
   lifting its 4b restriction.
 - **T-L. Trait members as values.** At a run-time type, `ToString.to_string`
   used as a value is a closure of the slot with the (GC-copied) dictionary as
-  its environment (T-D). Using a trait member as a *polymorphic* value stays
-  Stage 7.
+  its environment (T-D). Stage 7 adds trait members as polymorphic values.
 - **T-M. Bounded schemes as values (6b).**
   - **Entries:** a bounded scheme's entry takes T-C's dictionaries.
   - **Calls:** concrete callers pass static dictionaries or built ones.
@@ -369,7 +368,6 @@ After Stage 6:
 | An obligation no dictionary can satisfy: no bound in scope and no unique implementation | "a trait obligation of this polymorphic value's implementation has no dictionary at run time …" at the construction site | Not planned |
 | `Natural` bound or run-time `Natural` count | "array lengths cannot depend on a polymorphic value's type parameters yet" | Not planned |
 | A scheme naming an associated type of its parameters (T-H) | "polymorphic values whose type names an associated type (such as `Iterator.Item Iter`) are not supported yet" | Not planned yet: needs projection placeholders as run-time parameters of polymorphic entries |
-| Trait member used as a polymorphic value; independently generic trait members | "trait members cannot be used as polymorphic values yet" | Stage 7 |
 | Coroutine, async, or reactive body, transitively | the existing messages | Stage 8 |
 | Function values behind references | unchanged | Not planned |
 

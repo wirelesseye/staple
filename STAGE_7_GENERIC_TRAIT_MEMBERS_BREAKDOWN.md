@@ -14,43 +14,32 @@ polymorphic value itself. Every trait member, generic or not, can be used as a
 polymorphic value:
 
 ```staple
-use std.io.(IO, println)
+use std.io.println
 
-trait Container C {
-    type Element
-    // `B` belongs to the member, not to the trait.
-    map_into: <B> C -> (Element -> B) -> List B
+trait Visit T {
+    // `A` belongs to the member, not the trait.
+    visit: <A> (T, move A) -> A
 }
+impl Visit I32 { visit = (_, move value) => value }
 
-impl Container (List I32) {
-    type Element = I32
-    map_into = items => f => {
-        let mut out = List.new ()
-        for item in items { out = List.push out (f item) }
-        out
-    }
-}
+// Concrete calls specialize both trait and member arguments.
+println "${Visit.visit.<_, I32> (1, 42)}"
 
-// Static dispatch: everything is concrete, so this is monomorphized.
-let strings = Container.map_into (List.of (1, 2)) (value => "${value}")
+// A stored bounded function reads Visit's dictionary slot.
+def relay: <T, A where Visit T> (T, move A) -> A =
+    (item, move value) => Visit.visit (item, value)
+let stored = relay
+println (stored (1, "dynamic"))
 
-// Through a bound: `Container C` arrives as a dictionary, and the slot for
-// `map_into` takes `B`'s descriptor from the caller.
-def describe_all: <C where Container C, Display (Container.Element C)> C -> List String =
-    items => Container.map_into items (value => "${value}")
-
-// A trait member as a polymorphic value. Its scheme is the trait's
-// parameters, then the member's, with the trait bound first.
+// The member itself is a polymorphic value, with trait parameters first.
+let member: <T, A where Visit T> (T, move A) -> A = Visit.visit
+println (member (1, "member"))
 let to_text: <T where ToString T> T -> String = ToString.to_string
-println (to_text 42)
-
-// Explicit arguments: trait parameters (hidden associated types excluded),
-// then the member's own. `_` skips any of them.
-let numbers = Container.map_into.<_, I32> (List.of (1, 2)) (value => value + 1)
+println (to_text 7)
 ```
 
-The examples are illustrative. S0 checks each one against the checker and
-replaces any it cannot express with an equivalent program.
+The static, dictionary, and value fixtures pin equivalent runnable examples,
+including generic defaults, member bounds, effects, and nested schemes.
 
 The resolver diagnostic "trait members cannot introduce their own
 compile-time parameters yet" and the checker diagnostic "generic function
@@ -68,12 +57,11 @@ every existing input.
 
 ## Current state
 
-7a and 7b.1–7b.2 are implemented: static generic member dispatch, generic
-dictionary slots, and polymorphic trait member entries. All three Stage 7
-fixtures run with pinned output and pass both differential modes. Checker,
-reachability, and completion tests pass; associated projections and capable
-member parameters retain their diagnostics. Documentation and final workspace,
-full differential, and existing-program IR gates remain.
+7a and 7b.1–7b.3 are implemented. Static dispatch, generic dictionary slots,
+and polymorphic member values pass the Stage 7 execution and differential
+fixtures. The language reference documents schemes, parameter order,
+conformance, and runtime dispatch; obsolete restrictions are removed. Final
+workspace, full differential, and existing-program IR gates are running.
 
 ## Decisions
 

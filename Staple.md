@@ -1770,8 +1770,7 @@ same function still works when it is called directly:
   concrete or generic types);
 * a coroutine, async, or reactive body;
 * a function value behind `Ref`, `Slice`, `Buffer`, or a shared cell that
-  crosses into the implementation;
-* a trait member used as a polymorphic value.
+  crosses into the implementation.
 
 The checker separately rejects signals, ordinary `extern` declarations,
 parameter-product-capable type parameters, and polymorphic recursion in
@@ -2443,9 +2442,41 @@ implementations](#generic-trait-implementations)), this does not arise for
 ordinary programs. The compiler-derived `Debug` of products and sums is built
 from their components' dictionaries, at run-time and at concrete types alike.
 `Copy`, `Sized`, and `Drop` need no dictionary. An entire implementation may be
-generic over its own compile-time parameters (see below); an individual trait
-member may not independently introduce parameters beyond the ones its
-implementation declares. Trait objects are not supported.
+generic over its own compile-time parameters (see below). Trait objects are
+not supported.
+
+A member may also declare its own type or effect parameters:
+
+```staple
+trait Visit T { visit: <A> (T, move A) -> A }
+impl Visit I32 { visit = (_, move value) => value }
+let answer = Visit.visit.<_, I32> (1, 42)
+let member = Visit.visit
+let text = member (1, "hello")
+```
+
+The implementation must work for every member argument; its body is checked
+with those parameters held abstract. The member's parameter names are in
+scope in its default body, along with the trait's parameters. An `impl` body
+uses its own header's parameter names and does not inherit the member's names.
+Member parameters cannot be parameter-product capable (see [Generic
+functions](#generic-functions)). Each member must mention every explicit trait
+parameter in its function type.
+
+As a polymorphic value, `Visit.visit` has the scheme
+`<T, A where Visit T> (T, move A) -> A`. The trait's explicit parameters precede
+the member's own parameters, and the trait bound precedes the member's bounds.
+Explicit `.<…>` arguments follow that order; hidden associated-type parameters
+are omitted, and `_` leaves a position to inference. Each use instantiates the
+scheme independently. Ordinary members such as `ToString.to_string` can also
+be stored or passed as polymorphic values. Schemes that name associated-type
+projections retain the [polymorphic-value restriction](#generic-functions).
+
+Concrete calls specialize both sets of parameters. In dictionary-passed code,
+a generic member's slot accepts its own descriptors, bound dictionaries, and
+effect arguments from the caller. An instantiated member closure retains any
+trait descriptors and dictionaries it needs, so it may escape the call that
+created it.
 
 ### Generic trait implementations
 
