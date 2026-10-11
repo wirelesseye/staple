@@ -13833,3 +13833,34 @@ fn plans_generic_trait_member_entries_only_when_reachable() {
     let lowered = lower(&type_check(&format!("{declarations}let member = Visit.visit\nlet answer = member (1, 42)\n")));
     assert!(!lowered.planned_artifact_names(PlannedArtifactFamily::TraitMemberEntry).is_empty());
 }
+
+#[test]
+fn implementation_bodies_do_not_inherit_member_parameter_names() {
+    let diagnostics = resolve_result("trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => { let saved: A = value; saved } }\n")
+        .expect_err_diagnostics("member parameter names are private to the declaration");
+    assert!(diagnostics.iter().any(|d| d.message.contains("A") && d.message.contains("unknown")), "{diagnostics:?}");
+}
+
+#[test]
+fn generic_trait_members_infer_skipped_own_arguments_and_keep_phantom_arguments() {
+    let declarations = "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\ntrait Read T { read: <A where Copy A> T -> T }\nimpl Read I32 { read = value => value }\n";
+    let source = format!("{declarations}let answer = Visit.visit.<I32, _> (1, 42)\nlet phantom = Read.read.<I32, String> 1\n");
+    lower(&type_check(&source));
+    for use_site in ["let result = Read.read 1\n", "let result = Read.read.<I32, _> 1\n"] {
+        let diagnostics = TypeChecker::new().check(resolve(&format!("{declarations}{use_site}")))
+            .expect_err_diagnostics("phantom member parameters need explicit arguments");
+        assert!(diagnostics.iter().any(|d| d.message.contains("could not infer all trait method arguments")), "{diagnostics:?}");
+    }
+    let diagnostics = TypeChecker::new().check(resolve("trait Bound T {}\nimpl Bound I32 {}\ntrait Read T { read: <A where Bound A> T -> T }\nimpl Read I32 { read = value => value }\nlet invalid = Read.read.<I32, Bool> 1\n"))
+        .expect_err_diagnostics("explicit phantom arguments still discharge member bounds");
+    assert!(diagnostics.iter().any(|d| d.message.contains("trait bound")), "{diagnostics:?}");
+}
+
+#[test]
+fn generic_trait_member_bounds_check_completed_associated_arguments() {
+    let declarations = "trait Bound T {}\nimpl Bound I32 {}\ntrait Source T { type Element; check: <A where Copy A, Bound Element> T -> T }\nimpl Source I32 { type Element = I32; check = value => value }\nimpl Source Bool { type Element = String; check = value => value }\n";
+    lower(&type_check(&format!("{declarations}let valid = Source.check.<I32, I32> 1\n")));
+    let diagnostics = TypeChecker::new().check(resolve(&format!("{declarations}let invalid = Source.check.<Bool, I32> (Bool :: True)\n")))
+        .expect_err_diagnostics("member bounds must use completed associated types");
+    assert!(diagnostics.iter().any(|d| d.message.contains("trait bound")), "{diagnostics:?}");
+}

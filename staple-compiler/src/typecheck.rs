@@ -12102,6 +12102,18 @@ impl TypeChecker {
             let explicit = resolved_trait.declaration.type_parameters.len()
                 - resolved_trait.declaration.associated_types.len();
             let scheme = &self.trait_member_schemes[method];
+            // The value scheme represents hidden associated parameters as
+            // projections. Dispatch completed those arguments already, so
+            // retain their substitutions when checking the member's bounds.
+            for (pattern, argument) in scheme.trait_bounds[0].arguments.iter().zip(&arguments) {
+                infer_type_parameters(pattern, argument, &mut substitutions);
+            }
+            if scheme.parameters[explicit..].iter().any(|parameter| {
+                type_parameter_ids(&parameter.substitution_pattern()).iter()
+                    .any(|id| !substitutions.contains_key(id))
+            }) {
+                continue;
+            }
             let member_arguments = scheme.parameters[explicit..].iter()
                 .map(|p| substitute_type(p.substitution_pattern(), &substitutions)).collect::<Vec<_>>();
             for parameter in &scheme.parameters[explicit..] {
@@ -12113,24 +12125,25 @@ impl TypeChecker {
                     }
                 }
             }
-            matches.push((*method, arguments, member_arguments, substitute_type(template, &substitutions)));
+            matches.push((*method, arguments, member_arguments, substitute_type(template, &substitutions), substitutions));
         }
         if matches.len() == 1 {
-            let (method, arguments, member_arguments, value_type) = matches.pop().expect("one method match");
+            let (method, arguments, member_arguments, value_type, substitutions) = matches.pop().expect("one method match");
             self.trait_dispatches.insert(syntax, CheckedTraitDispatch { method, arguments, member_arguments });
             let scheme = self.trait_member_schemes[&method].clone();
             let trait_id = module.trait_for_method(method).expect("member owner");
             let explicit = module.traits()[&trait_id].declaration.type_parameters.len()
                 - module.traits()[&trait_id].declaration.associated_types.len();
-            if argument.is_none() && scheme.parameters.len() > explicit {
+            if argument.is_none() && scheme.parameters.len() > explicit
+                && !self.direct_callee_syntax.contains(&syntax) {
                 if scheme_names_projection(&scheme) {
                     self.diagnostics.push(Diagnostic::new(span, PROJECTION_VALUE_RESTRICTION));
                     return CheckedType::Error;
                 }
                 self.expression_schemes.insert(syntax, scheme.clone());
             }
-            self.check_instantiated_bounds(scheme.trait_bounds, scheme.subtype_bounds,
-                &self.trait_method_types[&method].clone(), &value_type, span);
+            self.check_substituted_bounds(scheme.trait_bounds, scheme.subtype_bounds,
+                &substitutions, span);
             return value_type;
         }
         self.diagnostics.push(Diagnostic::new(
@@ -12693,6 +12706,16 @@ impl TypeChecker {
         if !infer_type_parameters(template, instantiated, &mut substitutions) {
             return;
         }
+        self.check_substituted_bounds(bounds, subtype_bounds, &substitutions, span);
+    }
+
+    fn check_substituted_bounds(
+        &mut self,
+        bounds: Vec<CheckedTraitBound>,
+        subtype_bounds: Vec<CheckedSubtypeBound>,
+        substitutions: &HashMap<TypeParameterId, CheckedType>,
+        span: Span,
+    ) {
         for bound in bounds {
             let arguments = bound
                 .arguments
@@ -12839,8 +12862,8 @@ impl TypeChecker {
                 sized,
             )
         } else {
-            // Trait members retain their free-parameter templates until Stage 7.
-            // Explicit `_` arguments still infer from the caller's expected type.
+            // Member templates retain both trait and own parameter identities.
+            // Explicit `_` arguments infer from the caller's expected type.
             let declared = type_parameter_ids(&instantiated);
             let sized = sized_type_parameter_ids(&instantiated);
             self.instantiate_function_template(

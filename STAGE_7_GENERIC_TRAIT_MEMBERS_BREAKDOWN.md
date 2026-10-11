@@ -57,11 +57,12 @@ every existing input.
 
 ## Current state
 
-7a and 7b.1–7b.3 are implemented. Static dispatch, generic dictionary slots,
-and polymorphic member values pass the Stage 7 execution and differential
-fixtures. The language reference documents schemes, parameter order,
-conformance, and runtime dispatch; obsolete restrictions are removed. Final
-workspace, full differential, and existing-program IR gates are running.
+7a and 7b.1–7b.3 are implemented. Stage 7 fixtures pass both differential
+modes; checker regressions also cover phantom arguments, member bounds on
+completed associated types, and direct-call projection handling. Schemes,
+conformance, parameter order, and runtime dispatch are documented. The final
+workspace run, both full differential suites, and corpus IR comparison remain
+in progress; all 11 example IR comparisons pass.
 
 ## Decisions
 
