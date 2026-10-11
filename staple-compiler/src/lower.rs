@@ -2758,6 +2758,8 @@ pub(crate) struct LoweredFunction {
     /// The template's quantified effect parameters in scheme order. They
     /// carry no descriptors, so they stay out of the descriptor ABI order.
     pub scheme_effect_parameters: Vec<TypeParameterId>,
+    /// The scheme the template is checked against, when it has one.
+    pub scheme: Option<crate::CheckedScheme>,
     pub body_origin: Origin,
     pub body_syntax: SyntaxId,
     pub body: Option<BlockId>,
@@ -3708,6 +3710,10 @@ impl LoweredProgram {
                 requires_cell: capture_requires_cell(module, *symbol),
             })
             .collect();
+        let scheme = module
+            .scheme_of_function(function.id)
+            .or_else(|| binding_symbol.and_then(|symbol| module.scheme_of_symbol(symbol)))
+            .cloned();
         let scheme_type_parameters = module
             .scheme_of_function(function.id)
             .or_else(|| binding_symbol.and_then(|symbol| module.scheme_of_symbol(symbol)))
@@ -3757,6 +3763,7 @@ impl LoweredProgram {
             signature,
             scheme_type_parameters,
             scheme_effect_parameters,
+            scheme,
             bounds: module.bounds_of_function(function.id).to_vec(),
             declared_bounds: module.declared_bounds_of_function(function.id),
             own_declared_bounds: module.own_declared_bounds_of_function(function.id).to_vec(),

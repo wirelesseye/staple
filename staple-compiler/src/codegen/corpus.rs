@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 146] = [
+static CORPUS: [CorpusProgram; 148] = [
     expect_stdout(
         must_run(inline(
             "trait_dictionary_adapters",
@@ -2817,6 +2817,53 @@ let value = at (Ref (1, 2), (USize :: 5))
             "emission",
         ),
         "hello\nhello\n1 2.5 3 4.5 2\n",
+    )),
+    // Scheme lambdas nested in a polymorphic value's implementation, used at
+    // concrete types and at the enclosing run-time type. A use at instantiated
+    // types names that instantiation's closure, not the binding's polymorphic one.
+    must_run(expect_stdout(
+        inline(
+            "polymorphic_nested_scheme_calls",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "def outer: <T where Copy T> T -> (T, T, T) = t => {\n",
+                "    let inner: <U where Copy U> U -> T = u => t\n",
+                "    let echo: <U where Copy U> U -> U = u => u\n",
+                "    (inner 1, inner 2.5, echo t)\n",
+                "}\n",
+                "let stored: <T where Copy T> T -> (T, T, T) = outer\n",
+                "let (a, b, c) = stored 7\n",
+                "let (d, e, f) = stored 0.5\n",
+                "println \"${a} ${b} ${c} ${d} ${e} ${f}\"\n",
+                "let (g, h, i) = outer 3\n",
+                "println \"${g} ${h} ${i}\"\n",
+            ),
+            "emission",
+        ),
+        "7 7 7 0.5 0.5 0.5\n3 3 3\n",
+    )),
+    // Bounded scheme lambdas nested in a bounded implementation: their own
+    // bounds at concrete and run-time types, the enclosing bound through a
+    // capture, and both together.
+    must_run(expect_stdout(
+        inline(
+            "trait_dictionary_nested_lambdas",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "def outer: <T where Display T, Copy T> T -> String = t => {\n",
+                "    let both: <U where Display U, Copy U> U -> String = u => \"${ToString.to_string t}/${ToString.to_string u}\"\n",
+                "    let own: <U where Display U, Copy U> U -> String = u => ToString.to_string u\n",
+                "    let enclosing: <U where Copy U> U -> String = u => ToString.to_string t\n",
+                "    \"${both 1} ${both 2.5} ${both t} ${own t} ${own 3} ${enclosing 4} ${enclosing t}\"\n",
+                "}\n",
+                "let stored: <T where Display T, Copy T> T -> String = outer\n",
+                "println (stored 7)\n",
+                "println (stored 0.5)\n",
+                "println (outer 9)\n",
+            ),
+            "emission",
+        ),
+        "7/1 7/2.5 7/7 7 3 7 7\n0.5/1 0.5/2.5 0.5/0.5 0.5 3 0.5 0.5\n9/1 9/2.5 9/9 9 3 9 9\n",
     )),
     must_run(expect_stdout(
         inline(

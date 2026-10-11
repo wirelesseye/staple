@@ -1810,7 +1810,21 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 .map_err(compiler_diagnostic)?;
             return Ok(storage);
         }
-        if let Some(symbol) = self.callable_symbol(&callable)
+        // A use of a scheme lambda at instantiated types (the call site of
+        // `inner 1` for `let inner: <U> …`) names that instantiation's
+        // instance; the binding holds the polymorphic closure, whose entry has
+        // a different ABI. Build the instance's closure, as the concrete
+        // emitter does.
+        let instantiates_scheme = callable.scheme.is_none()
+            && match &callable.target {
+                LoweredCallableTarget::DirectFunction { function, .. } => self
+                    .view
+                    .function(*function)
+                    .is_some_and(|function| !function.scheme_type_parameters.is_empty()),
+                _ => false,
+            };
+        if !instantiates_scheme
+            && let Some(symbol) = self.callable_symbol(&callable)
             && let Some(binding) = environment
                 .bindings
                 .get(&symbol)

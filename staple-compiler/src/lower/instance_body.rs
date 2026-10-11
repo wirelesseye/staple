@@ -762,6 +762,7 @@ impl<'a> BodyCloner<'a> {
             .as_ref()
             .map(|coercion| self.coercion(coercion));
         self.body.body_moved_symbols = function.body_moved_symbols.clone();
+        self.route_runtime_scheme_instantiations();
         for (call_id, call) in self.body.calls.iter() {
             if let Some(super::LoweredBoundTarget::Instance(callee)) = self
                 .body
@@ -3118,6 +3119,105 @@ impl<'a> BodyCloner<'a> {
                 self.body
                     .bindings
                     .insert(site, LoweredBoundTarget::Route(original.target.category()));
+            }
+        }
+    }
+
+    /// A scheme lambda used at instantiated types binds the instance for
+    /// those types. When an instantiation mentions this body's run-time
+    /// parameters, that instance keeps the scheme's own parameters at run
+    /// time (Decision 2): it is the polymorphic entry, whose closure stores
+    /// only the enclosing dictionaries. The occurrence is then a polymorphic
+    /// value and the call through it a polymorphic call, which passes the
+    /// scheme's descriptors and dictionaries (B3), instead of a closure call
+    /// that would expect an instantiated closure.
+    fn route_runtime_scheme_instantiations(&mut self) {
+        let mut routed = Vec::new();
+        for (value_id, value) in self.body.callable_values.iter() {
+            if value.scheme.is_some() {
+                continue;
+            }
+            let LoweredCallableTarget::DirectFunction { function, .. } = &value.target else {
+                continue;
+            };
+            let Some(template) = self.program.functions.get(*function) else {
+                continue;
+            };
+            let Some(scheme) = &template.scheme else {
+                continue;
+            };
+            let Some(LoweredBoundTarget::Instance(instance)) = self
+                .body
+                .bindings
+                .get(&LoweredBindingSite::CallableValue(value_id))
+            else {
+                continue;
+            };
+            let keeps_scheme = self
+                .program
+                .instances
+                .get(*instance)
+                .and_then(|record| self.program.specializations.instance(record.ordinal))
+                .is_some_and(|key| {
+                    template
+                        .scheme_type_parameters
+                        .iter()
+                        .any(|parameter| key.runtime().contains(parameter))
+                });
+            if !keeps_scheme {
+                continue;
+            }
+            let scheme = match self.ty(&CheckedType::Forall(Box::new(scheme.clone()))) {
+                CheckedType::Forall(scheme) => *scheme,
+                _ => continue,
+            };
+            routed.push((value_id, scheme, template.scheme_type_parameters.clone()));
+        }
+        for (value_id, scheme, parameters) in routed {
+            let entries = match self.body.callable_values.get_mut(value_id) {
+                Some(value) => {
+                    value.scheme = Some(scheme.clone());
+                    value
+                        .substitutions
+                        .types
+                        .iter()
+                        .filter(|entry| parameters.contains(&entry.parameter))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                }
+                None => continue,
+            };
+            let calls = self
+                .body
+                .calls
+                .iter()
+                .filter_map(|(call_id, call)| match &call.target {
+                    LoweredCallableTarget::IndirectClosure { callee }
+                        if call.scheme.is_none()
+                            && matches!(
+                                self.body.expression(*callee).map(|expression| &expression.kind),
+                                Some(LoweredExpressionKind::CallableValue(id)) if *id == value_id
+                            ) =>
+                    {
+                        Some(call_id)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for call_id in calls {
+                if let Some(call) = self.body.calls.get_mut(call_id) {
+                    call.scheme = Some(scheme.clone());
+                    for entry in &entries {
+                        if !call
+                            .substitutions
+                            .types
+                            .iter()
+                            .any(|existing| existing.parameter == entry.parameter)
+                        {
+                            call.substitutions.types.push(entry.clone());
+                        }
+                    }
+                }
             }
         }
     }

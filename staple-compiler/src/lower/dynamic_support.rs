@@ -709,11 +709,14 @@ impl SupportWalker<'_> {
 
     /// A dynamic callee's dictionaries must be suppliable here: from this
     /// template's own, built from implementations, or as static ones when the
-    /// obligation is concrete.
+    /// obligation is concrete. `scheme_bounds` are the bounds of a
+    /// polymorphic value being built from the callee: its callers supply
+    /// them, so they are not obligations here.
     fn callee_bounds_supplied(
         &mut self,
         function: FunctionId,
         substitutions: &crate::CallSubstitutions,
+        scheme_bounds: &[crate::CheckedTraitBound],
     ) {
         let Some(callee) = self.program.functions.get(function) else {
             return;
@@ -729,9 +732,19 @@ impl SupportWalker<'_> {
             .relevant_parameters(function)
             .type_parameters()
             .collect::<BTreeSet<_>>();
+        let declared = callee
+            .declared_bounds
+            .iter()
+            .filter(|bound| {
+                !scheme_bounds
+                    .iter()
+                    .any(|own| crate::lower::trait_dictionaries::bounds_equivalent(own, bound))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let obligations = crate::lower::trait_dictionaries::runtime_obligations(
             &self.program.semantic_ids,
-            &callee.declared_bounds,
+            &declared,
             &Default::default(),
             &runtime,
         );
@@ -926,7 +939,14 @@ impl SupportWalker<'_> {
                         .is_some()
                 {
                     self.dependencies.insert(*function);
-                    self.callee_bounds_supplied(*function, &callable.substitutions);
+                    self.callee_bounds_supplied(
+                        *function,
+                        &callable.substitutions,
+                        callable
+                            .scheme
+                            .as_ref()
+                            .map_or(&[][..], |scheme| scheme.trait_bounds.as_slice()),
+                    );
                 }
                 if dynamic_shape && !dynamic_target {
                     self.reject(RejectionReason::CallableValue);
@@ -1137,7 +1157,7 @@ impl SupportWalker<'_> {
                         || relevant.effect_parameters().next().is_some();
                     if generic {
                         self.dependencies.insert(*function);
-                        self.callee_bounds_supplied(*function, &call.substitutions);
+                        self.callee_bounds_supplied(*function, &call.substitutions, &[]);
                     } else if contains_type_parameter(&CheckedType::Function(
                         call.function_type.clone(),
                     )) {
