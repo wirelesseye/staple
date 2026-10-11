@@ -68,11 +68,11 @@ every existing input.
 
 ## Current state
 
-S0 fixtures and baseline probes are recorded; the base release binary is
-preserved for IR comparison. 7a.1 resolves member parameters and default-body
-scope, accepts nested schemes, and records member schemes beside dispatch
-body templates. Declaration tests and `cargo check --workspace` pass.
-Conformance, use-site instantiation, lowering, and 7b remain.
+S0 fixtures and baseline probes are recorded. 7a.1 and 7a.2 resolve member
+schemes and default scopes, accept nested schemes, and check implementations
+with rigid member parameters and substituted bounds. Focused declaration and
+conformance tests pass. Fixtures use explicit moves for returned generic
+values. Uses, dispatch, lowering, and 7b remain.
 
 ## Decisions
 

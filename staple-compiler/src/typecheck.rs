@@ -3462,7 +3462,26 @@ impl TypeChecker {
                 let expected =
                     substitute_type(self.trait_method_types[method].clone(), &substitutions);
                 if let CheckedType::Function(function_type) = expected {
-                    self.impl_function_types.insert(function_id, function_type);
+                    self.impl_function_types.insert(function_id, function_type.clone());
+                    if let Type::Forall(_) = &member.annotation {
+                        let mut scheme = self.trait_member_schemes[method].clone();
+                        let explicit = resolved_trait.declaration.type_parameters.len()
+                            - resolved_trait.declaration.associated_types.len();
+                        scheme.parameters.drain(..explicit);
+                        scheme.trait_bounds.remove(0);
+                        scheme.trait_bound_names.remove(0);
+                        scheme.body = Box::new(CheckedType::Function(function_type));
+                        for bound in &mut scheme.trait_bounds {
+                            for argument in &mut bound.arguments {
+                                *argument = substitute_type(argument.clone(), &substitutions);
+                            }
+                        }
+                        for bound in &mut scheme.subtype_bounds {
+                            bound.supertype = substitute_type(bound.supertype.clone(), &substitutions);
+                        }
+                        self.function_declared_bounds.insert(function_id, scheme.trait_bounds.clone());
+                        self.function_schemes.insert(function_id, scheme);
+                    }
                 }
             }
             self.trait_implementations.push(CheckedTraitImplementation {
@@ -4777,7 +4796,7 @@ impl TypeChecker {
             if let Some(annotation) = &function.binding_annotation
                 && let CheckedType::Forall(scheme) = self.resolve_source_type(module, annotation)
             {
-                self.function_schemes.insert(function.id, *scheme);
+                self.function_schemes.entry(function.id).or_insert(*scheme);
             }
             let parameter_symbols = function_parameter_symbols(module, &function.pattern);
             let parameter_mutations = pattern_parameter_mutations(&function.pattern);

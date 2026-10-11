@@ -13781,3 +13781,12 @@ fn checks_independently_generic_trait_member_declarations() {
     TypeChecker::new().check(resolve("trait Apply T { apply: T -> (<A> move A -> A) -> T }\n"))
         .expect("nested member scheme should check");
 }
+
+#[test]
+fn checks_generic_trait_member_conformance() {
+    TypeChecker::new().check(resolve("trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\n"))
+        .expect("implementation must work for every member argument");
+    let diagnostics = TypeChecker::new().check(resolve("trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => 42 }\n"))
+        .expect_err_diagnostics("implementation cannot fix A to I32");
+    assert!(diagnostics.iter().any(|d| d.message.contains("expected") && d.message.contains("A")), "{diagnostics:?}");
+}
