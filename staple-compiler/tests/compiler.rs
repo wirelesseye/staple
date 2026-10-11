@@ -13212,13 +13212,8 @@ fn forall_placement_resolves_with_scoped_parameters() {
     ] {
         resolve_result(source).unwrap_or_else(|diagnostics| panic!("{source}: {diagnostics:?}"));
     }
-    let diagnostics = resolve_result("trait Test T { apply: <U> (T, U) -> U }\n")
-        .expect_err_diagnostics("trait member forall is unsupported");
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-    assert_eq!(
-        diagnostics[0].message,
-        "trait members cannot introduce their own compile-time parameters yet"
-    );
+    resolve_result("trait Test T { apply: <U> (T, U) -> U }\n")
+        .expect("trait member forall resolves");
 }
 
 #[test]
@@ -13789,4 +13784,19 @@ fn checks_generic_trait_member_conformance() {
     let diagnostics = TypeChecker::new().check(resolve("trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => 42 }\n"))
         .expect_err_diagnostics("implementation cannot fix A to I32");
     assert!(diagnostics.iter().any(|d| d.message.contains("expected") && d.message.contains("A")), "{diagnostics:?}");
+}
+
+#[test]
+fn infers_generic_trait_member_arguments_and_explicit_order() {
+    TypeChecker::new().check(resolve(include_str!("fixtures/stage7/static.sta")))
+        .expect("static generic member calls should check");
+    TypeChecker::new().check(resolve("trait Source T { type Element; read: T -> Element }\nimpl Source I32 { type Element = I32; read = x => x }\nlet x = Source.read.<I32> 1\n"))
+        .expect("associated parameters are omitted from explicit argument order");
+}
+
+#[test]
+fn rejects_polymorphic_recursion_through_generic_trait_dispatch() {
+    let diagnostics = TypeChecker::new().check(resolve("trait Grow T { grow: <A where Copy A> (T, A) -> () = (item, value) => Grow.grow (item, (value, value)) }\n"))
+        .expect_err_diagnostics("dispatch cannot recursively expand member arguments");
+    assert!(diagnostics.iter().any(|d| d.message.contains("polymorphic recursion")), "{diagnostics:?}");
 }

@@ -1688,6 +1688,8 @@ impl Collector<'_> {
         member_name: &str,
         annotation: &str,
     ) -> String {
+        let scheme = self.typed.scheme_of_trait_member(method).map(ToString::to_string);
+        let annotation = scheme.as_deref().unwrap_or(annotation);
         if let Some(resolved) = self
             .typed
             .resolved()

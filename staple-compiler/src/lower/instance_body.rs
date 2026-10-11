@@ -913,6 +913,7 @@ impl<'a> BodyCloner<'a> {
     fn dispatch(&self, dispatch: &CheckedTraitDispatch) -> CheckedTraitDispatch {
         CheckedTraitDispatch {
             method: dispatch.method,
+            member_arguments: dispatch.member_arguments.iter().map(|argument| self.ty(argument)).collect(),
             arguments: dispatch
                 .arguments
                 .iter()

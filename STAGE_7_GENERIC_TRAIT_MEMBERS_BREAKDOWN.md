@@ -68,11 +68,12 @@ every existing input.
 
 ## Current state
 
-S0 fixtures and baseline probes are recorded. 7a.1 and 7a.2 resolve member
-schemes and default scopes, accept nested schemes, and check implementations
-with rigid member parameters and substituted bounds. Focused declaration and
-conformance tests pass. Fixtures use explicit moves for returned generic
-values. Uses, dispatch, lowering, and 7b remain.
+7a.1–7a.3 implement declaration scopes, conformance, combined member schemes,
+call inference, explicit trait/member argument order (associated types omitted),
+member value checking, hover schemes, and recursion rejection. Seven focused
+generic-trait tests pass, including existing defaults. Static lowering and
+7b dictionary slots/member entries remain; the S0 fixtures are not yet enabled
+in the runnable corpus.
 
 ## Decisions
 

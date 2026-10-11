@@ -3,10 +3,10 @@ trait Visit T { visit: <A> (T, move A) -> A }
 impl Visit I32 { visit = (_, move value) => value }
 def relay: <T, A where Visit T> (T, move A) -> A = (item, move value) => Visit.visit (item, value)
 let stored = relay
-println (stored (1, "dynamic"))
+println "${stored (1, "dynamic")}"
 let member = Visit.visit
-println (member (1, 42))
+println "${member (1, 42)}"
 let text = ToString.to_string
-println (text True)
+println "${text (Bool :: True)}"
 def consume: (<T where ToString T> T -> String) -> String = f => f 7
-println (consume ToString.to_string)
+println "${consume ToString.to_string}"
