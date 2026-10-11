@@ -600,12 +600,15 @@ impl Collector<'_> {
                     self.named_with_docs(
                         &member.syntax,
                         &member.name,
-                        format!(
-                            "{}.{}: {}",
-                            declaration.name,
-                            member.name,
-                            member.annotation.syntax().text().trim()
-                        ),
+                        self.typed.resolved().traits().values()
+                            .find(|resolved| resolved.declaration.syntax.id == declaration.syntax.id)
+                            .and_then(|resolved| resolved.methods.iter().find(|method|
+                                self.typed.resolved().trait_method(**method)
+                                    .is_some_and(|resolved| resolved.name == member.name)))
+                            .map(|method| self.trait_member_signature(*method, &member.name,
+                                member.annotation.syntax().text().trim()))
+                            .unwrap_or_else(|| format!("{}.{}: {}", declaration.name, member.name,
+                                member.annotation.syntax().text().trim())),
                         member.docs.clone(),
                         module,
                     );
@@ -1355,6 +1358,10 @@ impl Collector<'_> {
         // never gets a `type_of_expression` entry even though the name it
         // refers to resolves fine. Fall back to the referenced symbol's own
         // declared type so hover still has something to show.
+        let method_syntax = match expression {
+            Expression::TypeApplication(application) => application.value.syntax().id,
+            _ => expression.syntax().id,
+        };
         let expression_type = self
             .typed
             .type_of_expression(expression.syntax().id)
@@ -1363,6 +1370,11 @@ impl Collector<'_> {
                 self.typed
                     .symbol_for(expression.syntax().id)
                     .and_then(|symbol| self.typed.declared_type_of_symbol(symbol))
+            })
+            .or_else(|| {
+                self.typed.resolved().trait_methods_for_expression(method_syntax)
+                    .first().and_then(|method| self.typed.scheme_of_trait_member(*method))
+                    .cloned().map(|scheme| CheckedType::Forall(Box::new(scheme)))
             });
         if let Some(value_type) = expression_type.as_ref() {
             let value_type = self.display_type(value_type);
@@ -1384,7 +1396,7 @@ impl Collector<'_> {
             let trait_member = self
                 .typed
                 .resolved()
-                .trait_methods_for_expression(expression.syntax().id)
+                .trait_methods_for_expression(method_syntax)
                 .first()
                 .and_then(|method| {
                     self.typed
@@ -1423,7 +1435,7 @@ impl Collector<'_> {
             let module = self.module_label(expression.syntax().id).or_else(|| {
                 self.typed
                     .resolved()
-                    .trait_methods_for_expression(expression.syntax().id)
+                    .trait_methods_for_expression(method_syntax)
                     .first()
                     .and_then(|method| self.typed.resolved().trait_for_method(*method))
                     .and_then(|trait_id| {
