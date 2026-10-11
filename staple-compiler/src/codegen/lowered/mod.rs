@@ -6133,6 +6133,23 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
                 if let Some(global) = self.storage.get(symbol).copied() {
                     return Ok(global.as_pointer_value());
                 }
+                // A plain `let` local is an SSA value. It cannot be assigned
+                // through a place, so a read-only place (the target of an
+                // index read) is a stack copy of it.
+                if let Some(value) = environment.locals.get(symbol).copied()
+                    && let Ok(value) = BasicValueEnum::try_from(value)
+                {
+                    let slot = self
+                        .backend
+                        .entry_builder()
+                        .build_alloca(value.get_type(), "local.place")
+                        .map_err(compiler_diagnostic)?;
+                    self.backend
+                        .builder
+                        .build_store(slot, value)
+                        .map_err(compiler_diagnostic)?;
+                    return Ok(slot);
+                }
                 Err(unsupported("place"))
             }
             crate::LoweredPlaceKind::CapturedCell { symbol } => {

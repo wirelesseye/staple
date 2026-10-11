@@ -153,7 +153,7 @@ pub fn codegen_corpus() -> &'static [CorpusProgram] {
     &CORPUS
 }
 
-static CORPUS: [CorpusProgram; 150] = [
+static CORPUS: [CorpusProgram; 151] = [
     expect_stdout(
         must_run(inline(
             "trait_dictionary_adapters",
@@ -2942,6 +2942,27 @@ let value = at (Ref (1, 2), (USize :: 5))
             "emission",
         ),
         "4\n5\n4\n2.5\n1.5\n2.5\nnested clone\n4\n2.5\n",
+    )),
+    // Index reads of a plain `let` local inside a function: the read-only place is
+    // a stack copy of the local's value.
+    must_run(expect_stdout(
+        inline(
+            "local_index_places",
+            concat!(
+                "use std.io.(IO, println)\n",
+                "use std.list.List\n",
+                "def run: () ->{IO} () = () => {\n",
+                "    let a: List I32 = List.of (4, 5, 6)\n",
+                "    let v = a[USize :: 1]\n",
+                "    println \"${v} ${a[USize :: 2]}\"\n",
+                "    let nested: List I32 = List.of (a[USize :: 0], 9)\n",
+                "    println \"${nested[USize :: 0]} ${nested[USize :: 1]}\"\n",
+                "}\n",
+                "run ()\n",
+            ),
+            "emission",
+        ),
+        "5 6\n4 9\n",
     )),
     must_run(expect_stdout(
         inline(
