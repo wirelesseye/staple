@@ -13846,14 +13846,22 @@ fn generic_trait_members_infer_skipped_own_arguments_and_keep_phantom_arguments(
     let declarations = "trait Visit T { visit: <A> (T, move A) -> A }\nimpl Visit I32 { visit = (_, move value) => value }\ntrait Read T { read: <A where Copy A> T -> T }\nimpl Read I32 { read = value => value }\n";
     let source = format!("{declarations}let answer = Visit.visit.<I32, _> (1, 42)\nlet phantom = Read.read.<I32, String> 1\n");
     lower(&type_check(&source));
+    lower(&type_check(&format!("{declarations}let member = Read.read\nlet valid = member.<I32, String> 1\n")));
     for use_site in ["let result = Read.read 1\n", "let result = Read.read.<I32, _> 1\n"] {
         let diagnostics = TypeChecker::new().check(resolve(&format!("{declarations}{use_site}")))
             .expect_err_diagnostics("phantom member parameters need explicit arguments");
         assert!(diagnostics.iter().any(|d| d.message.contains("could not infer all trait method arguments")), "{diagnostics:?}");
     }
-    let diagnostics = TypeChecker::new().check(resolve("trait Bound T {}\nimpl Bound I32 {}\ntrait Read T { read: <A where Bound A> T -> T }\nimpl Read I32 { read = value => value }\nlet invalid = Read.read.<I32, Bool> 1\n"))
-        .expect_err_diagnostics("explicit phantom arguments still discharge member bounds");
-    assert!(diagnostics.iter().any(|d| d.message.contains("trait bound")), "{diagnostics:?}");
+    let bounded = "trait Bound T {}\nimpl Bound I32 {}\ntrait Read T { read: <A where Bound A> T -> T }\nimpl Read I32 { read = value => value }\n";
+    for use_site in [
+        "let invalid = Read.read.<I32, Bool> 1\n",
+        "let member = Read.read\nlet invalid = member.<I32, Bool> 1\n",
+        "let member = Read.read\nlet invalid: I32 -> I32 = member.<I32, Bool>\n",
+    ] {
+        let diagnostics = TypeChecker::new().check(resolve(&format!("{bounded}{use_site}")))
+            .expect_err_diagnostics("explicit phantom arguments still discharge member bounds");
+        assert!(diagnostics.iter().any(|d| d.message.contains("trait bound")), "{diagnostics:?}");
+    }
 }
 
 #[test]

@@ -57,12 +57,12 @@ every existing input.
 
 ## Current state
 
-7a and 7b.1–7b.3 are implemented. Stage 7 fixtures pass both differential
-modes; checker regressions also cover phantom arguments, member bounds on
-completed associated types, and direct-call projection handling. Schemes,
-conformance, parameter order, and runtime dispatch are documented. The final
-workspace run, both full differential suites, and corpus IR comparison remain
-in progress; all 11 example IR comparisons pass.
+7a and 7b.1–7b.3 are implemented and documented. Checker regressions cover
+explicit phantom arguments and bounds on completed associated types, including
+stored member instantiation. Stage 7 execution/differential fixtures and the
+11 example IR comparisons pass. The corpus comparison matched 152 of 153
+existing inputs; the nested-lambda descriptor/dictionary offset difference is
+being corrected. Final suites remain in progress.
 
 ## Decisions
 

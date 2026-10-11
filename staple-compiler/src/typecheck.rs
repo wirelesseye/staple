@@ -12912,11 +12912,12 @@ impl TypeChecker {
             self.expression_schemes
                 .entry(application.syntax.id)
                 .or_insert_with(|| scheme.clone());
-            self.check_instantiated_bounds(
+            let mut bound_substitutions = substitutions.clone();
+            infer_type_parameters(&scheme.body, &instantiated, &mut bound_substitutions);
+            self.check_substituted_bounds(
                 scheme.trait_bounds.clone(),
                 scheme.subtype_bounds.clone(),
-                &scheme.body,
-                &instantiated,
+                &bound_substitutions,
                 application.syntax.span.clone(),
             );
             // Explicit `_` arguments are solved by the enclosing application,
