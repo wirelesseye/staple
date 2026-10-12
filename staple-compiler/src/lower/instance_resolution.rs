@@ -99,6 +99,33 @@ impl RelevantParameters {
     }
 }
 
+/// The name a diagnostic shows for a lowered function. Implementation members
+/// and trait defaults are mangled (`impl.<…>.member`, hex-encoded); they are
+/// shown by their member name.
+fn source_function_name(name: &str) -> String {
+    let decoded = name
+        .strip_prefix("operator.")
+        .filter(|encoded| encoded.len() % 2 == 0)
+        .and_then(|encoded| {
+            (0..encoded.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).ok())
+                .collect::<Option<Vec<_>>>()
+        })
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| name.to_owned());
+    if decoded.starts_with("impl.") || decoded.starts_with("trait.default.") {
+        decoded.rsplit('.').next().unwrap_or(&decoded).to_owned()
+    } else {
+        decoded
+    }
+}
+
+/// How deeply an instance's substituted types may nest before the instance is
+/// treated as runaway polymorphic recursion. Far above what written types
+/// reach (see `runaway_instance_diagnostic`).
+const MAX_INSTANCE_TYPE_DEPTH: usize = 16;
+
 #[cfg(test)]
 /// Every record family the parameter collector visits. The collector's
 /// exhaustive matches over the lowered enums are the compile-time half of the
@@ -2556,6 +2583,33 @@ impl LoweredProgram {
             relevant,
             evidence,
         })
+    }
+
+    /// Rejects an instance whose substituted types nest deeper than any
+    /// program writes. Direct polymorphic recursion is rejected by the
+    /// checker; recursion through trait dispatch or a helper function only
+    /// shows up here, as a chain of instances whose type arguments keep
+    /// growing, and would otherwise never finish.
+    pub(crate) fn runaway_instance_diagnostic(
+        &self,
+        resolved: &ResolvedInstanceRequest,
+        origin: &Origin,
+    ) -> Option<Diagnostic> {
+        if resolved.key.substitution_depth() <= MAX_INSTANCE_TYPE_DEPTH {
+            return None;
+        }
+        let function = resolved.key.function();
+        let name = self
+            .functions
+            .get(function)
+            .map(|function| source_function_name(&function.name))
+            .unwrap_or_else(|| format!("function {}", function.0));
+        Some(Diagnostic::new(
+            origin.span.clone(),
+            format!(
+                "polymorphic recursion is not supported: instantiating `{name}` here nests its type arguments more than {MAX_INSTANCE_TYPE_DEPTH} levels deep"
+            ),
+        ))
     }
 
     fn polymorphic_recursion_diagnostic(

@@ -1054,6 +1054,12 @@ impl<'a> WorklistBuilder<'a> {
         };
         match resolved {
             Ok(resolved) => {
+                if let Some(diagnostic) =
+                    self.program.runaway_instance_diagnostic(&resolved, origin)
+                {
+                    self.diagnostics.push(diagnostic);
+                    return None;
+                }
                 let request_root = owner.instance_request(kind, origin);
                 let (id, _) = self
                     .recorder

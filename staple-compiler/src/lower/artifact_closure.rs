@@ -810,6 +810,10 @@ impl LoweredProgram {
                     origin,
                     use_site,
                 } => {
+                    if let Some(diagnostic) = self.runaway_instance_diagnostic(&resolved, &origin) {
+                        diagnostics.push(diagnostic);
+                        continue;
+                    }
                     if matches!(owner, AppliedOwner::Artifact(_)) && use_site.is_some() {
                         diagnostics.push(Diagnostic::new(
                             origin.span.clone(),

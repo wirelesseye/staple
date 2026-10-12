@@ -13822,6 +13822,62 @@ fn rejects_polymorphic_recursion_through_generic_trait_dispatch() {
 }
 
 #[test]
+fn rejects_polymorphic_recursion_through_indirect_calls_in_lowering() {
+    // Each program keeps wrapping the member argument through a second
+    // function, which the checker's self-use rule cannot see. Lowering used to
+    // request ever deeper instances without end.
+    for source in [
+        concat!(
+            "type Wrap A = wrap A\n",
+            "trait Grow T {\n",
+            "    grow: <A> (T, USize, move A) -> USize\n",
+            "    shrink: <A> (T, USize, move A) -> USize = (item, n, move value) => match n == 0 { True => 0, False => Grow.grow (item, n - 1, Wrap value) }\n",
+            "}\n",
+            "impl Grow I32 { grow = (item, n, move value) => Grow.shrink (item, n, value) }\n",
+            "let total = Grow.grow (1, 3, 1)\n",
+        ),
+        concat!(
+            "type Wrap A = wrap A\n",
+            "trait Grow T { grow: <A> (T, USize, move A) -> USize }\n",
+            "def helper: <T, A where Grow T> (T, USize, move A) -> USize = (item, n, move value) => match n == 0 { True => 0, False => Grow.grow (item, n - 1, Wrap value) }\n",
+            "impl Grow I32 { grow = (item, n, move value) => helper (item, n, value) }\n",
+            "let total = Grow.grow (1, 3, 1)\n",
+        ),
+        concat!(
+            "type Wrap A = wrap A\n",
+            "def first: <A> (USize, move A) -> USize = (n, move value) => match n == 0 { True => 0, False => second (n - 1, Wrap value) }\n",
+            "def second: <A> (USize, move A) -> USize = (n, move value) => first (n, value)\n",
+            "let total = first (3, 1)\n",
+        ),
+    ] {
+        let module = type_check(source);
+        let diagnostics = Lowerer::new()
+            .lower(&module)
+            .expect_err_diagnostics("indirect polymorphic recursion should fail lowering");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .starts_with("polymorphic recursion is not supported: instantiating `")),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn lowers_dispatch_chains_that_end_at_a_deeper_type() {
+    // A chain that reaches a deeper type and stops there is not recursion.
+    let module = type_check(concat!(
+        "type Box T = wrap T\n",
+        "trait Step T { step: T -> I32 }\n",
+        "def run: <T where Step T> T -> I32 = value => Step.step value\n",
+        "impl Step I32 { step = value => run (Box value) }\n",
+        "impl Step (Box I32) { step = _ => 1 }\n",
+        "let total = run 1\n",
+    ));
+    lower(&module);
+}
+
+#[test]
 fn checks_polymorphic_trait_members_and_keeps_projection_restriction() {
     TypeChecker::new()
         .check(resolve(include_str!("fixtures/stage7/values.sta")))

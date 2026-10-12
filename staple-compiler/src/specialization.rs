@@ -165,6 +165,38 @@ pub(crate) enum CanonicalStateEffect {
 }
 
 impl CanonicalType {
+    /// The deepest nesting of type constructors in this type. Polymorphic
+    /// recursion that the checker cannot see (mutual recursion through trait
+    /// dispatch or helper functions) shows up as instance keys whose depth
+    /// grows without bound.
+    pub(crate) fn nesting_depth(&self) -> usize {
+        let deepest = |types: &mut dyn Iterator<Item = &CanonicalType>| {
+            types.map(CanonicalType::nesting_depth).max().unwrap_or(0)
+        };
+        1 + match self {
+            CanonicalType::Forall { body, .. } => body.nesting_depth(),
+            CanonicalType::Ref(inner)
+            | CanonicalType::Slice(inner)
+            | CanonicalType::Buffer(inner)
+            | CanonicalType::CPointer { pointee: inner } => inner.nesting_depth(),
+            CanonicalType::Array { element, count } => {
+                deepest(&mut [element.as_ref(), count.as_ref()].into_iter())
+            }
+            CanonicalType::Nominal { arguments, .. }
+            | CanonicalType::Sum {
+                alternatives: arguments,
+            } => deepest(&mut arguments.iter()),
+            CanonicalType::Product { elements, .. }
+            | CanonicalType::ParameterProduct { elements, .. } => {
+                deepest(&mut elements.iter().map(|element| &element.value_type))
+            }
+            CanonicalType::Function(function) => {
+                deepest(&mut [function.parameter.as_ref(), function.result.as_ref()].into_iter())
+            }
+            _ => 0,
+        }
+    }
+
     /// Converts a checked type into a concrete key, rejecting unresolved
     /// parameters and checker placeholders with a diagnostic at the
     /// requesting record's origin.
@@ -726,6 +758,19 @@ impl InstanceKey {
 
     pub(crate) fn substitutions(&self) -> &[InstanceSubstitution] {
         &self.substitutions
+    }
+
+    /// The deepest type substituted into this instance (see
+    /// [`CanonicalType::nesting_depth`]).
+    pub(crate) fn substitution_depth(&self) -> usize {
+        self.substitutions
+            .iter()
+            .map(|substitution| match substitution {
+                InstanceSubstitution::Type { value, .. } => value.nesting_depth(),
+                InstanceSubstitution::Effect { .. } => 0,
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     pub(crate) fn evidence(&self) -> Option<&CanonicalEvidence> {
