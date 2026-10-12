@@ -206,7 +206,7 @@ impl ProductExpression {
     }
 }
 
-/// An array literal `(value; count)` that repeats `value` `count` times.
+/// An array literal `(value ^ count)` that repeats `value` `count` times.
 ///
 /// `count` is a compile-time type, using the same grammar as an array type's
 /// length: a non-negative integer type literal, a type alias, or a compile-time

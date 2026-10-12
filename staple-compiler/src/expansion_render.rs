@@ -457,7 +457,7 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
         }
         Expression::RepeatedProduct(repeated) => {
             format!(
-                "({}; {})",
+                "({} ^ {})",
                 render_expr(program, &repeated.value),
                 repeated.count,
             )

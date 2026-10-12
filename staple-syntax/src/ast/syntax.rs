@@ -68,6 +68,7 @@ pub enum TokenKind {
     DoubleColon,
     Comma,
     Semicolon,
+    Caret,
     Dot,
     Equals,
     Arrow,

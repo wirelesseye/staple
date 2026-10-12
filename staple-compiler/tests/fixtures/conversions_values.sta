@@ -21,13 +21,13 @@ def run: () -> () = () => {
     require (Slice.length bytes == 6)
     let decoded: Ok String | InvalidUtf8 = TryConvert.try_convert bytes
     match decoded { Ok value => require (value == text), _ => panic "valid UTF-8 rejected", }
-    let invalid: Ref (U8; 2) = Ref (U8 :: 195, U8 :: 40)
+    let invalid: Ref (U8 ^ 2) = Ref (U8 :: 195, U8 :: 40)
     let invalid_bytes: Slice U8 = Convert.convert invalid
     let checked_bytes: Ok String | InvalidUtf8 = String.from_utf8 invalid_bytes
     match checked_bytes { InvalidUtf8 => (), _ => panic "String.from_utf8 accepted invalid bytes", }
     let invalid_result: Ok String | InvalidUtf8 = TryConvert.try_convert invalid_bytes
     match invalid_result { InvalidUtf8 => (), _ => panic "invalid UTF-8 accepted", }
-    let empty: Ref (U8; 0) = Ref ()
+    let empty: Ref (U8 ^ 0) = Ref ()
     let empty_bytes: Slice U8 = Convert.convert empty
     let empty_result: Ok String | InvalidUtf8 = TryConvert.try_convert empty_bytes
     match empty_result { Ok value => require (value == ""), _ => panic "empty UTF-8 rejected", }

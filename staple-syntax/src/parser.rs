@@ -2556,7 +2556,7 @@ impl Grammar {
             });
         }
         if self.at(TokenKind::LBracket) && !self.has_trivia_before_next_token() {
-            return Err(self.error("array types are written `(T; N)`, not `T[N]`"));
+            return Err(self.error("array types are written `(T ^ N)`, not `T[N]`"));
         }
         Ok(ty)
     }
@@ -2699,7 +2699,7 @@ impl Grammar {
                             && name.is_none()
                             && !mutable
                             && !moved
-                            && self.at(TokenKind::Semicolon)
+                            && self.at(TokenKind::Caret)
                         {
                             self.bump_token();
                             if self.at(TokenKind::RParen) {
@@ -3774,7 +3774,7 @@ impl Grammar {
     }
 
     /// Parses a parenthesized product expression with optional element names,
-    /// or a `(value; count)` repeated product.
+    /// or a `(value ^ count)` repeated product.
     fn parse_product_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LParen, "expected `(`")?;
@@ -3824,7 +3824,7 @@ impl Grammar {
                     && name.is_none()
                     && !designated
                     && !spread
-                    && self.at(TokenKind::Semicolon)
+                    && self.at(TokenKind::Caret)
                 {
                     self.bump_token();
                     let count = self.parse_type()?;

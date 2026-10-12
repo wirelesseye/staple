@@ -1363,7 +1363,7 @@ impl fmt::Display for CheckedType {
             Self::Slice(value) => format_type_application(formatter, "Slice", value),
             Self::Buffer(value) => format_type_application(formatter, "Buffer", value),
             Self::Array { element, count } => {
-                write!(formatter, "({element}; {count})")
+                write!(formatter, "({element} ^ {count})")
             }
             Self::CString => formatter.write_str("CString"),
             Self::COpaquePointer => formatter.write_str("COpaquePointer"),

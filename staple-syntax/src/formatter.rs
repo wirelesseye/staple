@@ -159,7 +159,8 @@ impl<'a> Formatter<'a> {
                     self.text(":");
                     self.space();
                 }
-                TokenKind::Operator
+                TokenKind::Caret
+                | TokenKind::Operator
                 | TokenKind::As
                 | TokenKind::DoubleColon
                 | TokenKind::Equals
@@ -358,6 +359,13 @@ fn needs_space(previous: Option<TokenKind>, current: TokenKind) -> bool {
 mod tests {
     use super::{format_source, format_token_stream};
     use crate::{TokenKind, lex};
+
+    #[test]
+    fn formats_repeated_elements() {
+        let formatted = format_source("let cells:(I32^3)=(0^3)\n").unwrap();
+        assert_eq!(formatted, "let cells: (I32 ^ 3) = (0 ^ 3)\n");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
 
     #[test]
     fn formats_conversion_syntax_and_import_aliases() {

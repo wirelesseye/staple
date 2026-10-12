@@ -6060,8 +6060,8 @@ mod tests {
     #[test]
     fn concrete_repetition_shape_corruption_is_rejected() {
         let module = checked_program(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
-            "let repeated: (I32; 3) = repeat 7 3\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         let baseline = crate::Lowerer::new()
             .lower(&module)
@@ -6359,8 +6359,8 @@ mod tests {
     #[test]
     fn repeated_product_counts_substitute_in_bodies() {
         let (_, mut program) = lower_with_worklist(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
-            "let repeated: (I32; 3) = repeat 7 3\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         materialize(&mut program);
         let mut found = 0;

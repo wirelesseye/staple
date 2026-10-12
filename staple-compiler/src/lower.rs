@@ -2054,7 +2054,7 @@ pub(crate) struct LoweredNamedSpreadMapping {
     pub slot: usize,
 }
 
-/// A repeated product `(value; count)`. The element is evaluated exactly once;
+/// A repeated product `(value ^ count)`. The element is evaluated exactly once;
 /// `collapsed` marks the fixed `count == 1` representation that is the element
 /// itself rather than a single-field product.
 #[derive(Debug, Clone)]
@@ -6789,7 +6789,7 @@ impl LoweredProgram {
         })
     }
 
-    /// Lowers `(value; count)`: the checked result type gives the repetition
+    /// Lowers `(value ^ count)`: the checked result type gives the repetition
     /// count and whether the single-element representation collapses.
     fn lower_repeated_product(
         &mut self,
@@ -20595,8 +20595,8 @@ mod tests {
     fn repeated_products_record_count_and_collapse() {
         let module = checked_program(concat!(
             "type Count = alias 3\n",
-            "let repeated: (I32; 3) = (9; Count)\n",
-            "let single: (I32; 1) = (9; 1)\n",
+            "let repeated: (I32 ^ 3) = (9 ^ Count)\n",
+            "let single: (I32 ^ 1) = (9 ^ 1)\n",
         ));
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
@@ -20629,8 +20629,8 @@ mod tests {
     #[test]
     fn generic_repeated_product_retains_symbolic_count() {
         let module = checked_program(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
-            "let repeated: (I32; 3) = repeat 7 3\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         let mut program = LoweredProgram::default();
         assert!(program.snapshot(&module).is_empty());
@@ -21281,10 +21281,10 @@ mod tests {
             "let temporary = (make_counter())[\"key\"]\n",
             "counter[\"key\"] = 1\n",
             "(make_counter())[\"key\"] = 1\n",
-            "let values: (I32; 2) = (10, 20)\n",
+            "let values: (I32 ^ 2) = (10, 20)\n",
             "let element = values[0]\n",
             "def slice_read: (Slice I32, USize) -> I32 = (values, position) => values[position]\n",
-            "def ref_read: (Ref (I32; 2), USize) -> I32 = (values, position) => values[position]\n",
+            "def ref_read: (Ref (I32 ^ 2), USize) -> I32 = (values, position) => values[position]\n",
         ));
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
@@ -21612,7 +21612,7 @@ mod tests {
             "let named: I32 = integer\n",
             "let product = (left: 1, right: 2)\n",
             "let left = product.left\n",
-            "let values: (I32; 2) = (1, 2)\n",
+            "let values: (I32 ^ 2) = (1, 2)\n",
             "let element = values[0]\n",
             "def logical = (flag: Bool) => flag && flag\n",
             "def looping = () => loop { break 1 }\n",
@@ -21622,7 +21622,7 @@ mod tests {
             "}\n",
             "def blocked = () => { let local: I32 = 1; local }\n",
             "let coerced: I8 = I8 :: 42\n",
-            "let repeated: (I32; 3) = (7; 3)\n",
+            "let repeated: (I32 ^ 3) = (7 ^ 3)\n",
             "let template: String = \"value=${integer}\"\n",
             "def callable = (value: I32) => value\n",
             "let applied = callable 1\n",
@@ -22513,7 +22513,7 @@ mod tests {
         let module = checked_program(concat!(
             "type Wrapper = wrap (value: I32)\n",
             "type Counter = wrap I32\n",
-            "def places = (mut direct: I32, mut pair: (I32, I32), mut wrapper: Wrapper, mut counter: Counter, mut values: (I32; 2)) => {\n",
+            "def places = (mut direct: I32, mut pair: (I32, I32), mut wrapper: Wrapper, mut counter: Counter, mut values: (I32 ^ 2)) => {\n",
             "  direct = 1\n",
             "  pair.0 = 2\n",
             "  wrapper.value = 3\n",
@@ -24895,8 +24895,8 @@ mod tests {
     #[test]
     fn polymorphic_support_checks_reject_at_the_construction_site() {
         let module = checked_program(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
-            "def outer: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => repeat value n\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "def outer: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => repeat value n\n",
             "let stored = outer\n",
         ));
         let mut program = LoweredProgram::default();
@@ -25544,7 +25544,7 @@ mod tests {
             "let signal count: I32 = 0\n",
             "let doubled: I32 = count + count\n",
             "count = 1\n",
-            "def places = (mut pair: (I32, I32), mut values: (I32; 2)) => {\n",
+            "def places = (mut pair: (I32, I32), mut values: (I32 ^ 2)) => {\n",
             "  pair.0 = 1\n",
             "  values[0] = 2\n",
             "}\n",

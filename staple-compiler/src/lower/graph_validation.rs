@@ -920,7 +920,7 @@ pub(crate) mod tests {
     #[test]
     fn graph_validator_checks_indexed_assignment_evidence() {
         let mut program = lower(concat!(
-            "def update: () -> () = () => { let mut values: (I32; 2) = (1, 2); values[0] = 3; () }\n",
+            "def update: () -> () = () => { let mut values: (I32 ^ 2) = (1, 2); values[0] = 3; () }\n",
             "let updated = update ()\n",
         ))
         .program;
@@ -1104,8 +1104,8 @@ pub(crate) mod tests {
     #[test]
     fn curried_layers_and_repeated_products_produce_one_concrete_body() {
         let lowered = lower(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
-            "let repeated: (I32; 3) = repeat 7 3\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         let program = &lowered.program;
         let (_, instance) = single_instance(program, "repeat");

@@ -3923,7 +3923,7 @@ mod tests {
             "let cstring = c_string \"c\"\n",
             "let product = (left: 1, right: 2)\n",
             "let left = product.left\n",
-            "let values: (I32; 2) = (1, 2)\n",
+            "let values: (I32 ^ 2) = (1, 2)\n",
             "let element = values[0]\n",
             "def logical = (flag: Bool) => flag && flag\n",
             "def looping = () => loop { break 1 }\n",
@@ -3934,10 +3934,10 @@ mod tests {
             "  other => 0,\n",
             "}\n",
             "def blocked = () => { let local: I32 = 1; local }\n",
-            "def repeat = () => { let repeated: (I32; 3) = (7; 3); repeated }\n",
+            "def repeat = () => { let repeated: (I32 ^ 3) = (7 ^ 3); repeated }\n",
             "def templated = () => { let rendered: String = \"value=${integer}\"; rendered }\n",
             "let coerced: I8 = I8 :: 42\n",
-            "let repeated: (I32; 3) = (7; 3)\n",
+            "let repeated: (I32 ^ 3) = (7 ^ 3)\n",
             "let template: String = \"value=${integer}\"\n",
             "let applied = callable 1\n",
             "let closure = callable\n",
@@ -5773,10 +5773,10 @@ mod tests {
             "type Phantom T = wrap ()\n",
             "def identity: <T where Copy T> T -> T = value => value\n",
             "def phantom_result: <T> () -> Phantom T = () => Phantom ()\n",
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
             "let applied: I32 = identity 1\n",
             "let hidden: Phantom I32 = phantom_result ()\n",
-            "let repeated: (I32; 3) = repeat 7 3\n",
+            "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         for name in ["identity", "phantom_result", "repeat"] {
             let (function, call) = direct_call(&program, name);
@@ -5906,8 +5906,8 @@ mod tests {
     #[test]
     fn repeated_product_counts_and_curried_layers_resolve() {
         let (_, program) = lower(concat!(
-            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
-            "let repeated: (I32; 3) = repeat 7 3\n",
+            "def repeat: <T, N where Copy T, Natural N> T -> N -> (T ^ N) = value => n => (value ^ N)\n",
+            "let repeated: (I32 ^ 3) = repeat 7 3\n",
         ));
         let (environment, relevant) = resolve_named_call(&program, "repeat");
         let mut parameters = relevant.type_parameters();

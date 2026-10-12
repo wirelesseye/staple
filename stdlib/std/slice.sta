@@ -15,14 +15,14 @@ pub type Slice T = wrap T
 extern "staple-intrinsic" {
     __slice_length: <T> Slice T -> USize
     __slice_get_ref: <T> (Slice T, USize) -> Ref T
-    __slice_from_ref: <T, N where Natural N> Ref (T; N) -> Slice T
+    __slice_from_ref: <T, N where Natural N> Ref (T ^ N) -> Slice T
 }
 
 companion<T> Slice T {
     /// Returns the number of elements in the slice.
     pub def length: Slice T -> USize = value => __slice_length value
     /// Makes a slice from a fixed reference to a homogeneous array.
-    pub def from_ref: <N where Natural N> Ref (T; N) -> Slice T = value => __slice_from_ref value
+    pub def from_ref: <N where Natural N> Ref (T ^ N) -> Slice T = value => __slice_from_ref value
     /// Borrows an element by position, or `None` if out of bounds.
     pub def get_ref: [Slice T, USize] -> Option (Ref T) = [slice, position] => {
         if (position < Slice.length slice) {
@@ -91,7 +91,7 @@ impl<T where Eq T> Eq (Slice T) {
     }
 }
 
-impl<T, N where Natural N> Convert (Ref (T; N)) (Slice T) {
+impl<T, N where Natural N> Convert (Ref (T ^ N)) (Slice T) {
     convert = move value => Slice.from_ref value
 }
 

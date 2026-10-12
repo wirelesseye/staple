@@ -4863,7 +4863,7 @@ mod tests {
     fn dynamic_repeated_products_align_components() {
         for count in [0_usize, 1, 3] {
             let source = format!(
-                "def repeat: <T where Copy T> T -> (T; {count}) = value => (value; {count})\nlet result = repeat 42\n"
+                "def repeat: <T where Copy T> T -> (T ^ {count}) = value => (value ^ {count})\nlet result = repeat 42\n"
             );
             let (text, name) = dynamic_test_module(&source, "repeat");
             let context = inkwell::context::Context::create();

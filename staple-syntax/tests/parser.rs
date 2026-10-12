@@ -347,9 +347,9 @@ fn lexes_only_the_fixed_operator_vocabulary() {
             (TokenKind::Operator, "|"),
             (TokenKind::Operator, "<"),
             (TokenKind::Operator, ">"),
-            (TokenKind::Unknown, "^"),
+            (TokenKind::Caret, "^"),
             (TokenKind::Star, "*"),
-            (TokenKind::Unknown, "^"),
+            (TokenKind::Caret, "^"),
             (TokenKind::Star, "*"),
             (TokenKind::Dot, "."),
             (TokenKind::Plus, "+"),
@@ -495,7 +495,7 @@ fn parses_string_literal_types_and_patterns_losslessly() {
 fn parses_number_literal_types_and_dependent_product_sizes_losslessly() {
     let source = concat!(
         "type Three = alias 3\n",
-        "type Vector T N where Natural N = alias (T; N)\n",
+        "type Vector T N where Natural N = alias (T ^ N)\n",
         "let values: Vector I32 Three = (1, 2, 3)\n",
     );
     let root = parse(source).expect("number literal types should parse");
@@ -509,10 +509,10 @@ fn parses_number_literal_types_and_dependent_product_sizes_losslessly() {
 #[test]
 fn parses_repeated_product_values_losslessly() {
     let source = concat!(
-        "let zeros = (0; 3)\n",
-        "let none = (unit; 0)\n",
-        "let one = (value; 1)\n",
-        "let named = (seed x; width)\n",
+        "let zeros = (0 ^ 3)\n",
+        "let none = (unit ^ 0)\n",
+        "let one = (value ^ 1)\n",
+        "let named = (seed x ^ width)\n",
     );
     let root = parse(source).expect("repeated product values should parse");
     assert_eq!(root.text(), source);
@@ -541,12 +541,15 @@ fn parses_repeated_product_values_losslessly() {
 
 #[test]
 fn rejects_malformed_repeated_products() {
-    assert!(parse("let bad = (a, b; 3)\n").is_err());
-    assert!(parse("let bad = (name: value; 3)\n").is_err());
-    assert!(parse("let bad = (...xs; 3)\n").is_err());
-    assert!(parse("let bad = (value; )\n").is_err());
-    assert!(parse("let bad = (value; 2; 3)\n").is_err());
-    assert!(parse("let bad = (value; count + 1)\n").is_err());
+    assert!(parse("let bad = (value; 3)\n").is_err());
+    assert!(parse("type Old = alias (I32; 3)\n").is_err());
+    assert!(parse("let good: (I32^3) = (0^3)\n").is_ok());
+    assert!(parse("let bad = (a, b ^ 3)\n").is_err());
+    assert!(parse("let bad = (name: value ^ 3)\n").is_err());
+    assert!(parse("let bad = (...xs ^ 3)\n").is_err());
+    assert!(parse("let bad = (value ^ )\n").is_err());
+    assert!(parse("let bad = (value ^ 2 ^ 3)\n").is_err());
+    assert!(parse("let bad = (value ^ count + 1)\n").is_err());
 }
 
 #[test]
@@ -2669,9 +2672,9 @@ fn parses_sum_types_and_propagating_patterns_losslessly() {
 #[test]
 fn parses_array_spread_and_variable_index_syntax() {
     let source = concat!(
-        "def fixed: Ref (I32; 3)\n",
+        "def fixed: Ref (I32 ^ 3)\n",
         "def slices: Slice I32\n",
-        "def mixed: (String, ...(I32; 3), ...(I32, I32))\n",
+        "def mixed: (String, ...(I32 ^ 3), ...(I32, I32))\n",
         "let expanded = (prefix: \"value\", ...mixed, suffix: 1)\n",
         "let value = slices[index].0\n",
     );
@@ -3202,7 +3205,7 @@ fn forall_parses_in_nested_type_positions_and_display_round_trips() {
         "def f: I32 -> (<T> T -> T)\n",
         "def f: (a: <T> T -> T, b: I32)\n",
         "def f: Box (<T> T -> T)\n",
-        "def f: ((<T> T -> T); 2)\n",
+        "def f: ((<T> T -> T) ^ 2)\n",
         "def f: (<T> T -> T) | I32\n",
     ] {
         let module = parse(source).unwrap_or_else(|e| panic!("{source}: {e:?}"));

@@ -303,6 +303,7 @@ fn single_character_kind(character: char) -> TokenKind {
         ':' => TokenKind::Colon,
         ',' => TokenKind::Comma,
         ';' => TokenKind::Semicolon,
+        '^' => TokenKind::Caret,
         '.' => TokenKind::Dot,
         '=' => TokenKind::Equals,
         '*' => TokenKind::Star,

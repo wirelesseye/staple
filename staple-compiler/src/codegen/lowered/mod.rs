@@ -3801,7 +3801,7 @@ impl<'program, 'context> LoweredEmitter<'program, 'context> {
             .as_any_value_enum())
     }
 
-    /// `(value; count)`. The emitter evaluates the element once
+    /// `(value ^ count)`. The emitter evaluates the element once
     /// and replicates it across the fixed arity, or returns it directly for
     /// the collapsed (arity one or symbolic) representation.
     fn emit_repeated_product(

@@ -138,7 +138,7 @@ impl fmt::Display for Type {
                     format_effect_set(&application.effects)
                 )
             }
-            Self::Array(array) => write!(formatter, "({}; {})", array.element, array.count),
+            Self::Array(array) => write!(formatter, "({} ^ {})", array.element, array.count),
             Self::Splice(splice) => {
                 write!(formatter, "${}", splice.name)?;
                 if splice.repeated {
@@ -347,11 +347,11 @@ pub struct TypeElement {
     pub moved: bool,
 }
 
-/// A homogeneous product type, also called an array type: `(element; count)`.
+/// A homogeneous product type, also called an array type: `(element ^ count)`.
 ///
 /// `count` is a compile-time type that must resolve to a non-negative integer
-/// singleton or a compile-time parameter bounded by `Natural`. `(T; 0)` and
-/// `(T; 1)` normalize to `()` and `T` respectively.
+/// singleton or a compile-time parameter bounded by `Natural`. `(T ^ 0)` and
+/// `(T ^ 1)` normalize to `()` and `T` respectively.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayType {
     pub syntax: Syntax,

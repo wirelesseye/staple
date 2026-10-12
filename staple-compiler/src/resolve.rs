@@ -5016,7 +5016,7 @@ impl NameResolver {
         self.resolve_type_with(ty, true);
     }
 
-    /// Resolves the count of a `(value; count)` repeated product, which must
+    /// Resolves the count of a `(value ^ count)` repeated product, which must
     /// denote a compile-time type. Resolving leniently first keeps a name that
     /// is a value from producing a generic unknown-type error; when the name
     /// is a known value, the diagnostic says a value cannot be a count.
